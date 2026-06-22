@@ -1,0 +1,35 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  build:
+    # Windows runner: the library references System.Drawing.Common (Windows-only)
+    # and builds warnings-as-errors, so CA1416 platform warnings would fail a
+    # non-Windows build. This mirrors the project's canonical build environment.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore Aspose.Pdf.Foss.sln
+
+      - name: Build
+        run: dotnet build Aspose.Pdf.Foss.sln -c Release --no-restore
+
+      - name: Test (in-tree xUnit)
+        run: dotnet test tests/Aspose.Pdf.Foss.Tests.csproj -c Release --no-build --logger "console;verbosity=minimal"

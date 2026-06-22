@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>12</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>Aspose.Pdf</RootNamespace>
+
+    <!-- Package / release metadata -->
+    <PackageId>Aspose.PDF.FOSS</PackageId>
+    <Version>26.6.0</Version>
+    <Product>Aspose.PDF FOSS for .NET</Product>
+    <Authors>Aspose</Authors>
+    <Company>Aspose Pty Ltd</Company>
+    <Copyright>Copyright (c) 2026 Aspose Pty Ltd</Copyright>
+    <Description>A free, open-source PDF library for .NET 8+: read, create, modify, and render PDF documents. Provides an Aspose.PDF-compatible API surface for common PDF scenarios. Some features are incomplete and the public API may change between releases.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>pdf;aspose;pdf-library;acroform;pdf-a;document;foss</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Packed into the NuGet package when/if `dotnet pack` is run; inert for plain builds. -->
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+<ItemGroup>
+    <InternalsVisibleTo Include="Aspose.Pdf.Foss.Tests" />
+  </ItemGroup>
+
+<ItemGroup>
+  <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+</ItemGroup>
+
+<ItemGroup>
+  <EmbeddedResource Include="Devices\CmykToRgbLut.bin" />
+</ItemGroup>
+
+  <!-- Force a full rebuild of this project on EVERY build, even when no source
+       has changed. Two layers can otherwise skip the build:
+         1) DisableFastUpToDateCheck stops Visual Studio short-circuiting via its
+            fast up-to-date check, so VS always invokes MSBuild on this project.
+         2) Deleting the intermediate assembly before CoreCompile defeats
+            MSBuild's own incremental compile, forcing the C# compiler to run.
+       Trade-off: every build recompiles this project, so builds/test runs are
+       slower. Remove this block to return to normal incremental builds. -->
+  <PropertyGroup>
+    <DisableFastUpToDateCheck>true</DisableFastUpToDateCheck>
+  </PropertyGroup>
+
+  <Target Name="ForceAlwaysRecompile" BeforeTargets="CoreCompile">
+    <Delete Files="@(IntermediateAssembly)" />
+  </Target>
+
+</Project>

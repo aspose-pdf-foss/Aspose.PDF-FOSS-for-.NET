@@ -1,0 +1,370 @@
+using System.Text;
+using Aspose.Pdf.Core;
+
+namespace Aspose.Pdf.Text;
+
+/// <summary>
+/// Embeds TrueType fonts into PDF documents for custom text rendering.
+/// Creates the font dictionary, font descriptor, and font file stream.
+/// </summary>
+public sealed class FontEmbedder
+{
+    private readonly Document _document;
+    private readonly TrueTypeParser _parser;
+    private readonly string _resourceName;
+
+    private FontEmbedder(Document document, TrueTypeParser parser, string resourceName)
+    {
+        _document = document;
+        _parser = parser;
+        _resourceName = resourceName;
+    }
+
+    /// <summary>The resource name to use in content streams (e.g., "F1").</summary>
+    public string ResourceName => _resourceName;
+
+    /// <summary>The PostScript name of the embedded font.</summary>
+    public string PostScriptName => _parser.PostScriptName;
+
+    /// <summary>
+    /// Embed a TrueType font from file bytes into a document.
+    /// Returns a FontEmbedder with the resource name for use in content streams.
+    /// </summary>
+    public static FontEmbedder Embed(Document document, byte[] ttfData, string resourceName = "F1",
+        string? subsetBaseName = null)
+    {
+        var parser = new TrueTypeParser(ttfData);
+        parser.Parse();
+
+        var embedder = new FontEmbedder(document, parser, resourceName);
+        if (subsetBaseName is not null)
+        {
+            // Embed the full program but present it under a subset-tagged
+            // BaseFont (e.g. "ABCDEF+CourierNew") so the font reads back as a
+            // subset. (True glyph subsetting is handled by EmbedSubset.)
+            embedder._isSubset = true;
+            embedder._originalPostScriptName = subsetBaseName;
+        }
+        embedder.CreateFontObjects();
+        return embedder;
+    }
+
+    /// <summary>
+    /// Embed a TrueType font from a file path.
+    /// </summary>
+    public static FontEmbedder EmbedFromFile(Document document, string path, string resourceName = "F1")
+    {
+        var data = File.ReadAllBytes(path);
+        return Embed(document, data, resourceName);
+    }
+
+    /// <summary>
+    /// Embed a subset of a TrueType font containing only the glyphs needed for the given text.
+    /// This produces significantly smaller PDF files compared to full embedding.
+    /// The subset font name is prefixed with a 6-letter tag per PDF spec §9.6.4.
+    /// </summary>
+    public static FontEmbedder EmbedSubset(Document document, byte[] ttfData, string text,
+        string resourceName = "F1")
+    {
+        var parser = new TrueTypeParser(ttfData);
+        parser.Parse();
+
+        // Collect unique character codes from the text
+        var charCodes = new HashSet<int>();
+        foreach (var c in text)
+            charCodes.Add(c);
+
+        var subsetter = new TrueTypeSubsetter(ttfData, parser);
+        var (subsetData, _) = subsetter.Subset(charCodes);
+
+        // Create a new parser for the subset font
+        var subsetParser = new TrueTypeParser(subsetData);
+        subsetParser.Parse();
+
+        var embedder = new FontEmbedder(document, subsetParser, resourceName);
+        embedder._isSubset = true;
+        embedder._originalPostScriptName = parser.PostScriptName;
+        embedder._charCodes = charCodes;
+        embedder.CreateFontObjects();
+        return embedder;
+    }
+
+    /// <summary>
+    /// Embed a subset of a TrueType font from a file path.
+    /// </summary>
+    public static FontEmbedder EmbedSubsetFromFile(Document document, string path, string text,
+        string resourceName = "F1")
+    {
+        var data = File.ReadAllBytes(path);
+        return EmbedSubset(document, data, text, resourceName);
+    }
+
+    /// <summary>
+    /// Add the font resource to a page's resource dictionary.
+    /// Call this for each page that uses the font.
+    /// </summary>
+    public void AddToPage(Page page) => AddToResources(page.Dict, page.Reader);
+
+    /// <summary>Add the font resource to any container dictionary that carries a
+    /// /Resources entry (a page dictionary OR a Form XObject stream dictionary).
+    /// Resolves indirect /Resources and /Font so the originals aren't replaced.</summary>
+    internal void AddToResources(PdfDictionary containerDict, Aspose.Pdf.IO.PdfReader reader)
+    {
+        var resources = containerDict.Get("Resources") as PdfDictionary
+            ?? reader.ResolveDict(containerDict.Get("Resources"));
+        if (resources is null)
+        {
+            resources = new PdfDictionary();
+            containerDict.Set("Resources", resources);
+        }
+
+        var fontDict = resources.Get("Font") as PdfDictionary
+            ?? reader.ResolveDict(resources.Get("Font"));
+        if (fontDict is null)
+        {
+            fontDict = new PdfDictionary();
+            resources.Set("Font", fontDict);
+        }
+
+        fontDict.Set(_resourceName, new PdfIndirectRef(_fontObjNum, 0));
+    }
+
+    private int _fontObjNum;
+    private bool _isSubset;
+    private string? _originalPostScriptName;
+    private HashSet<int>? _charCodes;
+
+    /// <summary>Rewrite an existing simple-font dictionary in place so it becomes an
+    /// embedded WinAnsi TrueType backed by <paramref name="ttfData"/>, presented under
+    /// <paramref name="baseFontName"/>. Used by PDF/A conversion to embed a font that was
+    /// referenced but not embedded, without changing the resource reference that points at
+    /// this dictionary.</summary>
+    internal static void EmbedIntoFontDict(Document document, byte[] ttfData,
+        PdfDictionary fontDict, string baseFontName,
+        Dictionary<string, (int objNum, string embedName)>? fontFileCache = null)
+    {
+        var parser = new TrueTypeParser(ttfData);
+        parser.Parse();
+        var scale = 1000.0 / parser.UnitsPerEm;
+
+        // Embedding the whole system TTF (often ~1 MB) for every referenced font bloats the
+        // output enormously — a PDF/A conversion of a small file can balloon to tens of MB.
+        // Reduce the font program to just the glyphs reachable through this dictionary's
+        // WinAnsi 32..255 range, which is all a simple TrueType font can address. When the
+        // subset is a proper reduction it is presented under a 6-letter subset tag per
+        // PDF 32000-1 §9.6.4. Falls back to the full program if subsetting can't apply
+        // (e.g. CFF-based or loca-less fonts).
+        var fontProgram = parser.FontData;
+        var embedName = baseFontName;
+        try
+        {
+            var winAnsiCodes = new HashSet<int>();
+            for (var b = 32; b <= 255; b++)
+                winAnsiCodes.Add(Cp1252.GetString(new[] { (byte)b })[0]);
+            var (subsetData, _) = new TrueTypeSubsetter(ttfData, parser).Subset(winAnsiCodes);
+            if (subsetData.Length > 0 && subsetData.Length < parser.FontData.Length)
+            {
+                fontProgram = subsetData;
+                embedName = GenerateSubsetTag() + "+" + baseFontName;
+            }
+        }
+        catch { /* keep the full program if subsetting throws */ }
+
+        // The same system face is typically referenced by many font dictionaries
+        // (e.g. dozens of "Arial"/"ArialMT" entries across a converted document). Embedding
+        // an identical program once and sharing the FontFile2 object keeps the output small.
+        int fontFileObjNum;
+        var cacheKey = fontFileCache is null
+            ? null
+            : Convert.ToHexString(Security.ShaDigest.Sha256(fontProgram));
+        if (cacheKey is not null && fontFileCache!.TryGetValue(cacheKey, out var cached))
+        {
+            fontFileObjNum = cached.objNum;
+            embedName = cached.embedName; // keep the subset tag consistent with the shared program
+        }
+        else
+        {
+            fontFileObjNum = document.AllocateObjectNumber();
+            var fontFileDict = new PdfDictionary();
+            fontFileDict.Set("Length1", new PdfInteger(fontProgram.Length));
+            document.AddNewObject(fontFileObjNum, new PdfStream(fontFileDict, fontProgram));
+            if (cacheKey is not null)
+                fontFileCache![cacheKey] = (fontFileObjNum, embedName);
+        }
+
+        var descriptor = new PdfDictionary();
+        descriptor.Set("Type", new PdfName("FontDescriptor"));
+        descriptor.Set("FontName", new PdfName(embedName));
+        descriptor.Set("Flags", new PdfInteger(parser.GetPdfFlags()));
+        descriptor.Set("ItalicAngle", new PdfReal(parser.ItalicAngle));
+        var bbox = parser.BBox;
+        var bboxArray = new PdfArray();
+        for (var i = 0; i < 4; i++) bboxArray.Add(new PdfInteger((int)(bbox[i] * scale)));
+        descriptor.Set("FontBBox", bboxArray);
+        descriptor.Set("Ascent", new PdfInteger((int)(parser.Ascent * scale)));
+        descriptor.Set("Descent", new PdfInteger((int)(parser.Descent * scale)));
+        descriptor.Set("CapHeight", new PdfInteger((int)(parser.CapHeight * scale)));
+        descriptor.Set("StemV", new PdfInteger(85));
+        descriptor.Set("FontFile2", new PdfIndirectRef(fontFileObjNum, 0));
+
+        var widths = new PdfArray();
+        for (var c = 32; c <= 255; c++)
+            widths.Add(new PdfInteger((int)(parser.GetCharWidth(c) * scale)));
+
+        // Drop any prior simple-font entries that no longer apply, then write the
+        // embedded-TrueType shape over the existing dictionary. The descriptor is held
+        // inline (direct) so an in-memory re-read of the font sees the FontFile2 entry
+        // without resolving a not-yet-written indirect object; the font program stream
+        // itself is indirect (it is serialised at save time).
+        fontDict.Remove("FontFile");
+        fontDict.Remove("FontFile3");
+        fontDict.Set("Type", new PdfName("Font"));
+        fontDict.Set("Subtype", new PdfName("TrueType"));
+        fontDict.Set("BaseFont", new PdfName(embedName));
+        fontDict.Set("Encoding", new PdfName("WinAnsiEncoding"));
+        fontDict.Set("FirstChar", new PdfInteger(32));
+        fontDict.Set("LastChar", new PdfInteger(255));
+        fontDict.Set("Widths", widths);
+        fontDict.Set("FontDescriptor", descriptor);
+    }
+
+    private void CreateFontObjects()
+    {
+        var scale = 1000.0 / _parser.UnitsPerEm;
+
+        // Generate subset tag per PDF spec §9.6.4 (e.g., "ABCDEF+FontName")
+        var fontName = _isSubset
+            ? GenerateSubsetTag() + "+" + (_originalPostScriptName ?? _parser.PostScriptName)
+            : _parser.PostScriptName;
+
+        // 1. Font file stream (FontFile2 — TrueType program)
+        var fontFileObjNum = _document.AllocateObjectNumber();
+        var fontFileDict = new PdfDictionary();
+        fontFileDict.Set("Length1", new PdfInteger(_parser.FontData.Length));
+        var fontFileStream = new PdfStream(fontFileDict, _parser.FontData);
+        _document.AddNewObject(fontFileObjNum, fontFileStream);
+
+        // 2. Font descriptor
+        var descriptorObjNum = _document.AllocateObjectNumber();
+        var descriptor = new PdfDictionary();
+        descriptor.Set("Type", new PdfName("FontDescriptor"));
+        descriptor.Set("FontName", new PdfName(fontName));
+        descriptor.Set("Flags", new PdfInteger(_parser.GetPdfFlags()));
+        descriptor.Set("ItalicAngle", new PdfReal(_parser.ItalicAngle));
+
+        var bbox = _parser.BBox;
+        var bboxArray = new PdfArray();
+        bboxArray.Add(new PdfInteger((int)(bbox[0] * scale)));
+        bboxArray.Add(new PdfInteger((int)(bbox[1] * scale)));
+        bboxArray.Add(new PdfInteger((int)(bbox[2] * scale)));
+        bboxArray.Add(new PdfInteger((int)(bbox[3] * scale)));
+        descriptor.Set("FontBBox", bboxArray);
+
+        descriptor.Set("Ascent", new PdfInteger((int)(_parser.Ascent * scale)));
+        descriptor.Set("Descent", new PdfInteger((int)(_parser.Descent * scale)));
+        descriptor.Set("CapHeight", new PdfInteger((int)(_parser.CapHeight * scale)));
+        descriptor.Set("StemV", new PdfInteger(EstimateStemV()));
+
+        descriptor.Set("FontFile2", new PdfIndirectRef(fontFileObjNum, 0));
+        _document.AddNewObject(descriptorObjNum, descriptor);
+
+        // 3. Build /Widths array (character codes 32-255 for simple TrueType font)
+        var firstChar = 32;
+        var lastChar = 255;
+        var widths = new PdfArray();
+        for (var c = firstChar; c <= lastChar; c++)
+        {
+            var w = _parser.GetCharWidth(c);
+            widths.Add(new PdfInteger((int)(w * scale)));
+        }
+
+        // 4. Font dictionary (TrueType simple font)
+        _fontObjNum = _document.AllocateObjectNumber();
+        var font = new PdfDictionary();
+        font.Set("Type", new PdfName("Font"));
+        font.Set("Subtype", new PdfName("TrueType"));
+        font.Set("BaseFont", new PdfName(fontName));
+        font.Set("Encoding", new PdfName("WinAnsiEncoding"));
+        font.Set("FirstChar", new PdfInteger(firstChar));
+        font.Set("LastChar", new PdfInteger(lastChar));
+        font.Set("Widths", widths);
+        font.Set("FontDescriptor", new PdfIndirectRef(descriptorObjNum, 0));
+
+        // 5. Add ToUnicode CMap for text extraction support
+        if (_isSubset && _charCodes is not null)
+        {
+            var toUnicodeData = BuildToUnicodeCMap(_charCodes);
+            var toUnicodeObjNum = _document.AllocateObjectNumber();
+            var toUnicodeStream = new PdfStream(new PdfDictionary(), toUnicodeData);
+            _document.AddNewObject(toUnicodeObjNum, toUnicodeStream);
+            font.Set("ToUnicode", new PdfIndirectRef(toUnicodeObjNum, 0));
+        }
+
+        _document.AddNewObject(_fontObjNum, font);
+    }
+
+    private static string GenerateSubsetTag()
+    {
+        // PDF spec requires a 6-letter uppercase tag
+        var chars = new char[6];
+        var random = Random.Shared;
+        for (var i = 0; i < 6; i++)
+            chars[i] = (char)('A' + random.Next(26));
+        return new string(chars);
+    }
+
+    private static byte[] BuildToUnicodeCMap(HashSet<int> charCodes)
+    {
+        var sb = new StringBuilder();
+        sb.Append("/CIDInit /ProcSet findresource begin\n");
+        sb.Append("12 dict begin\n");
+        sb.Append("begincmap\n");
+        sb.Append("/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n");
+        sb.Append("/CMapName /Adobe-Identity-UCS def\n");
+        sb.Append("/CMapType 2 def\n");
+        sb.Append("1 begincodespacerange\n");
+        sb.Append("<00> <FF>\n");
+        sb.Append("endcodespacerange\n");
+
+        var sorted = charCodes.Where(c => c >= 32 && c <= 255).OrderBy(c => c).ToList();
+        if (sorted.Count > 0)
+        {
+            // Write in groups of up to 100 (CMap spec limit)
+            for (var i = 0; i < sorted.Count; i += 100)
+            {
+                var count = Math.Min(100, sorted.Count - i);
+                sb.Append($"{count} beginbfchar\n");
+                for (var j = 0; j < count; j++)
+                {
+                    var c = sorted[i + j];
+                    sb.Append($"<{c:X2}> <{c:X4}>\n");
+                }
+                sb.Append("endbfchar\n");
+            }
+        }
+
+        sb.Append("endcmap\n");
+        sb.Append("CMapName currentdict /CMap defineresource pop\n");
+        sb.Append("end\n");
+        sb.Append("end\n");
+
+        return Encoding.ASCII.GetBytes(sb.ToString());
+    }
+
+    private int EstimateStemV()
+    {
+        // Approximate StemV from weight class (PDF spec doesn't define a formula)
+        return _parser.WeightClass switch
+        {
+            <= 100 => 40,
+            <= 200 => 50,
+            <= 300 => 60,
+            <= 400 => 70,  // Normal
+            <= 500 => 80,  // Medium
+            <= 600 => 100, // Semi-Bold
+            <= 700 => 120, // Bold
+            <= 800 => 140, // Extra-Bold
+            _ => 160,      // Black
+        };
+    }
+}
