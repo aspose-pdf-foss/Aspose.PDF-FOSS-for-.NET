@@ -591,12 +591,12 @@ public sealed class FormEditor : IDisposable
 
     private void ApplyFacade(Field field)
     {
-        // A custom font must be resolvable (a Standard-14 face or a system font found via
-        // FontRepository). Otherwise fail loudly — DecorateField
-        // throws ArgumentException rather than writing a /DA referencing a missing font.
-        if (!string.IsNullOrEmpty(Facade.CustomFont)
-            && !Text.Standard14Fonts.IsStandard14(Facade.CustomFont)
-            && Aspose.Pdf.Text.FontRepository.FindFont(Facade.CustomFont) is null)
+        // A custom font must be resolvable: a standard PDF /DA font abbreviation (Helv,
+        // ZaDb, Symb, …), a Standard-14 face, or a system font found via FontRepository.
+        // Otherwise fail loudly — DecorateField throws rather than writing a /DA referencing
+        // a missing font. (A field whose existing /DA names ZapfDingbats — the checkbox
+        // glyph font — must not trip this guard.)
+        if (!string.IsNullOrEmpty(Facade.CustomFont) && !IsLoadableFormFont(Facade.CustomFont!))
         {
             throw new ArgumentException("Could not load specified font : " + Facade.CustomFont);
         }
@@ -624,10 +624,79 @@ public sealed class FormEditor : IDisposable
             ApplyBorderStyle(field);
 
         // Re-emit a checkbox's on/off appearance from the facade (background, border,
-        // glyph colour and style) when the facade carries visible decoration.
+        // glyph colour and style) when the facade carries any visible decoration —
+        // a background/border/text colour, a border width, or an explicit button style.
         if (field.Type == Forms.FieldType.CheckBox &&
-            (Facade.BackgroundColor.A != 0 || Facade.BorderWidth > 0))
+            (Facade.BackgroundColor.A != 0 || Facade.BorderColor.A != 0 || Facade.TextColor.A != 0
+             || Facade.BorderWidth > 0 || Facade.ButtonStyle != FormFieldFacade.CheckBoxStyleUndefined))
             DecorateCheckBox(field);
+
+        // A text / choice field's facade border colour is recorded on /MK /BC and drawn
+        // into the widget appearance — the value text the appearance already carries is
+        // kept; a stroked rectangle at the facade width is appended so the decorated
+        // border renders (checkboxes regenerate their whole face above instead).
+        else if (field.Type is Forms.FieldType.Text or Forms.FieldType.Choice
+                 or Forms.FieldType.ComboBox or Forms.FieldType.ListBox
+                 && (Facade.BorderColor.A != 0 || Facade.BorderWidth > 0))
+            DecorateTextBorder(field);
+    }
+
+    /// <summary>Record the facade border colour on each of a non-button field's widgets
+    /// (/MK /BC) and append a stroked border rectangle to the widget's existing /AP /N so
+    /// the decorated border renders without disturbing the value text already drawn there.</summary>
+    private void DecorateTextBorder(Field field)
+    {
+        if (_document is null) return;
+        var color = Facade.BorderColor.A != 0 ? Facade.BorderColor : System.Drawing.Color.Black;
+        int bw = Facade.BorderWidth > 0 ? (int)Facade.BorderWidth : 1;
+        var widgets = new System.Collections.Generic.List<PdfDictionary>(field.AllKids());
+        if (widgets.Count == 0) widgets.Add(field.Dict);
+
+        foreach (var widget in widgets)
+        {
+            if (_document.Reader.Resolve(widget.Get("Rect")) is not PdfArray ra || ra.Count < 4) continue;
+            var rect = Rectangle.FromPdfArray(ra);
+            double w = rect.Width, h = rect.Height;
+            if (w <= 0 || h <= 0) continue;
+            WriteMk(widget, "BC", color);
+
+            double hbw = bw / 2.0;
+            var sb = new System.Text.StringBuilder();
+            sb.Append("\nq\n");
+            sb.Append($"{Col(color.R)} {Col(color.G)} {Col(color.B)} RG\n");
+            sb.Append($"{Num(bw)} w\n");
+            sb.Append($"{Num(hbw)} {Num(hbw)} {Num(w - bw)} {Num(h - bw)} re\n");
+            sb.Append("S\n");
+            sb.Append("Q\n");
+            var borderBytes = System.Text.Encoding.Latin1.GetBytes(sb.ToString());
+
+            var ap = _document.Reader.ResolveDict(widget.Get("AP"));
+            var n = ap is null ? null : _document.Reader.ResolveStream(ap.Get("N"));
+            if (n is not null)
+            {
+                var existing = _document.Reader.DecodeStream(n);
+                var combined = new byte[existing.Length + borderBytes.Length];
+                System.Array.Copy(existing, combined, existing.Length);
+                System.Array.Copy(borderBytes, 0, combined, existing.Length, borderBytes.Length);
+                n.ReplaceData(combined);
+                n.Dict.Remove("Filter");
+                n.Dict.Set("Length", new PdfInteger(combined.Length));
+            }
+            else
+            {
+                var apDict = new PdfDictionary();
+                apDict.Set("Type", new PdfName("XObject"));
+                apDict.Set("Subtype", new PdfName("Form"));
+                var bbox = new PdfArray();
+                bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(0));
+                bbox.Add(new PdfReal(w)); bbox.Add(new PdfReal(h));
+                apDict.Set("BBox", bbox);
+                apDict.Set("Length", new PdfInteger(borderBytes.Length));
+                var newAp = new PdfDictionary();
+                newAp.Set("N", new PdfStream(apDict, borderBytes));
+                widget.Set("AP", newAp);
+            }
+        }
     }
 
     /// <summary>Regenerate a checkbox's /AP /N and /AP /D appearances from the facade:
@@ -639,6 +708,12 @@ public sealed class FormEditor : IDisposable
         if (_document is null) return;
         var widgets = new System.Collections.Generic.List<PdfDictionary>(field.AllKids());
         if (widgets.Count == 0) widgets.Add(field.Dict);
+
+        // The "Cross" style and the undefined default both draw the stroked-X mark
+        // (matching Aspose.Pdf); the other styles draw a ZapfDingbats glyph.
+        int style = Facade.ButtonStyle == FormFieldFacade.CheckBoxStyleUndefined
+            ? FormFieldFacade.CheckBoxStyleCross : Facade.ButtonStyle;
+        int bw = Facade.BorderWidth > 0 ? (int)Facade.BorderWidth : 1;
 
         foreach (var widget in widgets)
         {
@@ -657,28 +732,44 @@ public sealed class FormEditor : IDisposable
             }
             else if (widget.GetName("AS") is { } asn && asn != "Off") onName = asn;
 
-            int bw = Facade.BorderWidth > 0 ? (int)Facade.BorderWidth : 1;
-            var glyph = CheckBoxGlyph(Facade.ButtonStyle);
+            // Resolve colours: an explicitly-set facade colour wins, otherwise an unset
+            // colour preserves the widget's existing /MK value (so e.g. setting only the
+            // border colour keeps the original background), otherwise a sensible default.
+            var bg = Facade.BackgroundColor.A != 0 ? Facade.BackgroundColor
+                : (ReadMkColor(widget, "BG") ?? System.Drawing.Color.White);
+            var border = Facade.BorderColor.A != 0 ? Facade.BorderColor
+                : (ReadMkColor(widget, "BC") ?? System.Drawing.Color.Black);
+            var text = Facade.TextColor.A != 0 ? Facade.TextColor : System.Drawing.Color.Black;
 
             var n = new PdfDictionary();
-            n.Set(onName, BuildCheckBoxFace(w, h, bw, glyph, withGlyph: true));
-            n.Set("Off", BuildCheckBoxFace(w, h, bw, glyph, withGlyph: false));
+            n.Set(onName, BuildCheckBoxFace(w, h, bw, style, bg, border, text, withMark: true));
+            n.Set("Off", BuildCheckBoxFace(w, h, bw, style, bg, border, text, withMark: false));
             var d = new PdfDictionary();
-            d.Set(onName, BuildCheckBoxFace(w, h, bw, glyph, withGlyph: true));
-            d.Set("Off", BuildCheckBoxFace(w, h, bw, glyph, withGlyph: false));
+            d.Set(onName, BuildCheckBoxFace(w, h, bw, style, bg, border, text, withMark: true));
+            d.Set("Off", BuildCheckBoxFace(w, h, bw, style, bg, border, text, withMark: false));
             var ap = new PdfDictionary();
             ap.Set("N", n);
             ap.Set("D", d);
             widget.Set("AP", ap);
+
+            // Record the decoration on /MK (/BG background, /BC border) and the widget
+            // /C (the glyph/text colour) so the loaded field surfaces them via
+            // Characteristics.Background/Border and Field.Color.
+            WriteMk(widget, "BG", bg);
+            WriteMk(widget, "BC", border);
+            WriteWidgetColor(widget, text);
         }
     }
 
-    private PdfStream BuildCheckBoxFace(double w, double h, int bw, string glyph, bool withGlyph)
+    /// <summary>Build a decorated-checkbox appearance face: a filled background, a
+    /// stroked border at the facade width, and (for the on state) the mark — a stroked
+    /// diagonal "X" for the Cross style, otherwise a ZapfDingbats glyph. The operator
+    /// order matches Aspose.Pdf's decorated-checkbox face.</summary>
+    private PdfStream BuildCheckBoxFace(double w, double h, int bw, int style,
+        System.Drawing.Color bg, System.Drawing.Color border, System.Drawing.Color text, bool withMark)
     {
-        var bg = Facade.BackgroundColor;
-        var border = Facade.BorderColor;
-        var text = Facade.TextColor;
         double hbw = bw / 2.0;
+        bool isCross = style == FormFieldFacade.CheckBoxStyleCross;
         var sb = new System.Text.StringBuilder();
         sb.Append("q\n");
         sb.Append($"{Col(bg.R)} {Col(bg.G)} {Col(bg.B)} rg\n");
@@ -691,18 +782,41 @@ public sealed class FormEditor : IDisposable
         sb.Append("s\n");
         sb.Append("Q\n");
         sb.Append("Q\n");
-        if (withGlyph)
+        if (withMark)
         {
             sb.Append($"{Num(bw)} {Num(bw)} {Num(w - 2 * bw)} {Num(h - 2 * bw)} re\n");
             sb.Append("W\n");
             sb.Append("n\n");
             sb.Append("q\n");
-            sb.Append($"{Col(text.R)} {Col(text.G)} {Col(text.B)} rg\n");
-            sb.Append("BT\n");
-            sb.Append($"{Num(w * 0.33)} {Num(h * 0.33)} Td\n");
-            sb.Append($"/ZaDb {Num(w / 2)} Tf\n");
-            sb.Append($"({glyph}) Tj\n");
-            sb.Append("ET\n");
+            if (isCross)
+            {
+                // Two stroked diagonals from (2bw,2bw)→(w-2bw,h-2bw) and (w-2bw,2bw)→(2bw,h-2bw).
+                double lo = 2 * bw, hix = w - 2 * bw, hiy = h - 2 * bw;
+                sb.Append($"{Col(text.R)} {Col(text.G)} {Col(text.B)} RG\n");
+                sb.Append($"{Num(lo)} {Num(lo)} m\n");
+                sb.Append($"{Num(hix)} {Num(hiy)} l\n");
+                sb.Append("S\n");
+                sb.Append($"{Num(hix)} {Num(lo)} m\n");
+                sb.Append($"{Num(lo)} {Num(hiy)} l\n");
+                sb.Append("S\n");
+            }
+            else
+            {
+                // ZapfDingbats glyph centred in the inner box. The glyph is written with
+                // the style value as its character code (the ZaDb /Encoding /Differences
+                // maps it to the proper dingbat); font size fills the inner box and the
+                // baseline offset centres a ~2/3-em glyph: Td = (w + 4·bw)/6.
+                double fontSize = w - 2 * bw;
+                double td = (w + 4 * bw) / 6.0;
+                sb.Append($"{Col(text.R)} {Col(text.G)} {Col(text.B)} rg\n");
+                sb.Append("BT\n");
+                sb.Append($"{Num(td)} {Num(td)} Td\n");
+                sb.Append($"/ZaDb {Num(fontSize)} Tf\n");
+                // Glyph keyed by the style value (the /Encoding /Differences maps it to the
+                // dingbat). Emit the raw byte so the round-tripped text length is 1.
+                sb.Append($"({(char)style}) Tj\n");
+                sb.Append("ET\n");
+            }
             sb.Append("Q\n");
         }
         var bytes = System.Text.Encoding.Latin1.GetBytes(sb.ToString());
@@ -718,6 +832,18 @@ public sealed class FormEditor : IDisposable
         zadb.Set("Type", new PdfName("Font"));
         zadb.Set("Subtype", new PdfName("Type1"));
         zadb.Set("BaseFont", new PdfName("ZapfDingbats"));
+        // Map the style char codes (1..6) to the corresponding ZapfDingbats glyph names
+        // so the mark renders even though it is keyed by the style value.
+        var enc = new PdfDictionary();
+        enc.Set("Type", new PdfName("Encoding"));
+        var diff = new PdfArray();
+        diff.Add(new PdfInteger(FormFieldFacade.CheckBoxStyleCheck)); diff.Add(new PdfName("a20"));
+        diff.Add(new PdfInteger(FormFieldFacade.CheckBoxStyleCircle)); diff.Add(new PdfName("a71"));
+        diff.Add(new PdfInteger(FormFieldFacade.CheckBoxStyleDiamond)); diff.Add(new PdfName("a73"));
+        diff.Add(new PdfInteger(FormFieldFacade.CheckBoxStyleSquare)); diff.Add(new PdfName("a72"));
+        diff.Add(new PdfInteger(FormFieldFacade.CheckBoxStyleStar)); diff.Add(new PdfName("a35"));
+        enc.Set("Differences", diff);
+        zadb.Set("Encoding", enc);
         var fonts = new PdfDictionary();
         fonts.Set("ZaDb", zadb);
         var resources = new PdfDictionary();
@@ -726,19 +852,57 @@ public sealed class FormEditor : IDisposable
         return new PdfStream(apDict, bytes);
     }
 
+    /// <summary>Read a /MK colour entry (/BG or /BC) as a System.Drawing.Color, or null
+    /// when absent/empty (a 0-length array = transparent/no colour).</summary>
+    private System.Drawing.Color? ReadMkColor(PdfDictionary widget, string key)
+    {
+        if (_document is null) return null;
+        var mk = _document.Reader.ResolveDict(widget.Get("MK"));
+        if (mk is null) return null;
+        if (_document.Reader.Resolve(mk.Get(key)) is not PdfArray arr || arr.Count == 0) return null;
+        double[] c = new double[arr.Count];
+        for (int i = 0; i < arr.Count; i++)
+            c[i] = arr[i] switch { PdfReal r => r.Value, PdfInteger n => n.Value, _ => 0.0 };
+        return c.Length switch
+        {
+            1 => GrayToColor(c[0]),
+            3 => System.Drawing.Color.FromArgb(To255(c[0]), To255(c[1]), To255(c[2])),
+            4 => CmykToColor(c[0], c[1], c[2], c[3]),
+            _ => (System.Drawing.Color?)null,
+        };
+    }
+
+    /// <summary>Write a /MK colour entry (/BG or /BC) as an RGB array.</summary>
+    private void WriteMk(PdfDictionary widget, string key, System.Drawing.Color color)
+    {
+        if (_document is null) return;
+        var mk = _document.Reader.ResolveDict(widget.Get("MK"));
+        if (mk is null) { mk = new PdfDictionary(); widget.Set("MK", mk); }
+        var arr = new PdfArray();
+        arr.Add(new PdfReal(color.R / 255.0));
+        arr.Add(new PdfReal(color.G / 255.0));
+        arr.Add(new PdfReal(color.B / 255.0));
+        mk.Set(key, arr);
+    }
+
+    /// <summary>Write the widget's /C (annotation colour) as an RGB array — DecorateField
+    /// records the glyph/text colour here so Field.Color surfaces it after a reload.</summary>
+    private static void WriteWidgetColor(PdfDictionary widget, System.Drawing.Color color)
+    {
+        var arr = new PdfArray();
+        arr.Add(new PdfReal(color.R / 255.0));
+        arr.Add(new PdfReal(color.G / 255.0));
+        arr.Add(new PdfReal(color.B / 255.0));
+        widget.Set("C", arr);
+    }
+
+    private static int To255(double v) => (int)System.Math.Round(System.Math.Clamp(v, 0, 1) * 255);
+    private static System.Drawing.Color GrayToColor(double g) { int v = To255(g); return System.Drawing.Color.FromArgb(v, v, v); }
+    private static System.Drawing.Color CmykToColor(double c, double m, double y, double k)
+        => System.Drawing.Color.FromArgb(To255((1 - c) * (1 - k)), To255((1 - m) * (1 - k)), To255((1 - y) * (1 - k)));
+
     private static string Col(byte b) => Num(b / 255.0);
     private static string Num(double v) => v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
-
-    /// <summary>ZapfDingbats glyph for the facade checkbox style (square is the test case).</summary>
-    private static string CheckBoxGlyph(int style) => style switch
-    {
-        FormFieldFacade.CheckBoxStyleSquare => "n",
-        FormFieldFacade.CheckBoxStyleCross => "8",
-        FormFieldFacade.CheckBoxStyleDiamond => "u",
-        FormFieldFacade.CheckBoxStyleCircle => "l",
-        FormFieldFacade.CheckBoxStyleStar => "H",
-        _ => "4",
-    };
 
     /// <summary>Write the facade's border style/width as a /BS dictionary on the
     /// field's widget annotations (kids, or the field dict itself when it is a
@@ -929,12 +1093,24 @@ public sealed class FormEditor : IDisposable
     public bool SetSubmitUrl(string fieldName, string url)
     {
         if (_document?.Form is null) return false;
+
+        // For an XFA form the reader-visible submit target lives in the XFA template
+        // <submit target> (what GetFieldTemplate exposes), so update it too — the
+        // AcroForm SubmitForm /F alone doesn't round-trip through the template.
+        bool xfaOk = _document.Form.SetXfaSubmitUrl(fieldName, url);
+
+        bool acroOk = false;
         var f = _document.Form.FindByName(fieldName);
-        if (f is null) return false;
-        var action = EnsureSubmitAction(f);
-        if (action is null) return false;
-        action.Set("F", new PdfString(System.Text.Encoding.UTF8.GetBytes(url)));
-        return true;
+        if (f is not null)
+        {
+            var action = EnsureSubmitAction(f);
+            if (action is not null)
+            {
+                action.Set("F", new PdfString(System.Text.Encoding.UTF8.GetBytes(url)));
+                acroOk = true;
+            }
+        }
+        return xfaOk || acroOk;
     }
 
     /// <summary>Convert a single-line text field into a multi-line one.</summary>

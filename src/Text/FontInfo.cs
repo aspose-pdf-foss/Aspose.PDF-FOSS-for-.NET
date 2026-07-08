@@ -91,11 +91,21 @@ public class FontInfo
             if (SynthesizedFontName is not null)
                 return SynthesizedFontName;
             var name = BaseFont;
-            // Strip subset prefix: "ABCDEF+ArialMT" → "ArialMT"
-            if (name.Length > 7 && name[6] == '+')
+            // A subset prefix ("AAAAAB+Arial,Bold") marks a real embedded/subsetted font
+            // (kept even after UnembedFonts): its style comma is part of the genuine name
+            // and is preserved verbatim once the prefix is stripped ("Arial,Bold"). A bare
+            // /BaseFont with no subset prefix is either a non-embedded reference or a
+            // FOSS-generated (stamp) name; there the style comma is a separators that is
+            // normalised away ("Arial,Bold" → "ArialBold", "Courier New,Bold Italic" →
+            // "CourierNewBoldItalic"). This discriminator lets a bare (stripped) name and a
+            // subset-prefixed (kept) name both round-trip consistently. Spaces are always
+            // removed (PDF names carry none).
+            bool hadSubsetPrefix = name.Length > 7 && name[6] == '+';
+            if (hadSubsetPrefix)
                 name = name[7..];
-            // Normalize comma-separated style: "Arial,Bold" → "ArialBold"
-            name = name.Replace(",", "");
+            if (!hadSubsetPrefix)
+                name = name.Replace(",", "");
+            name = name.Replace(" ", "");
             return name;
         }
     }
@@ -103,9 +113,81 @@ public class FontInfo
     /// <summary>
     /// Decoded font name as a human-readable display name. For most fonts this
     /// equals <see cref="FontName"/>; for CJK fonts whose BaseFont is hex- or
-    /// EUC-encoded, the bytes are decoded to their script-native characters.
+    /// EUC-encoded (e.g. "NEPBJB+#BC#D0#B7#A2#C5#E9", a Big5-encoded 標楷體),
+    /// the bytes are decoded to their script-native characters via the font's
+    /// legacy codepage. The subset prefix is kept verbatim.
     /// </summary>
-    public virtual string DecodedFontName => FontName;
+    public virtual string DecodedFontName
+    {
+        get
+        {
+            var name = BaseFont;
+            if (string.IsNullOrEmpty(name)) return FontName;
+            var hasHigh = false;
+            foreach (var c in name)
+                if (c > 0x7F) { hasHigh = true; break; }
+            if (!hasHigh) return FontName;
+
+            // Codepage: the Type0 /Encoding CMap name is authoritative (ETen-B5-H →
+            // Big5, GBK-EUC-H → GBK, …); fall back to the descendant CIDSystemInfo
+            // /Ordering when the encoding name doesn't identify one.
+            var cp = CidFontInfo.CodepageForCMapName(_fontDict.GetName("Encoding"));
+            if (cp == 0) cp = CodepageForOrdering();
+            if (cp == 0) return FontName;
+
+            // Keep a subset tag ("ABCDEF+") verbatim; decode the remainder's bytes.
+            var prefix = string.Empty;
+            var body = name;
+            if (name.Length > 7 && name[6] == '+')
+            {
+                prefix = name[..7];
+                body = name[7..];
+            }
+            var sb = new System.Text.StringBuilder(prefix);
+            for (var i = 0; i < body.Length; i++)
+            {
+                var c = body[i];
+                if (c <= 0x7F || i + 1 >= body.Length)
+                {
+                    sb.Append(c);
+                    continue;
+                }
+                var code = (c << 8) | (body[i + 1] & 0xFF);
+                if (CidFontInfo.LegacyLookup(cp, code) is int u)
+                {
+                    sb.Append(char.ConvertFromUtf32(u));
+                    i++;
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb.ToString();
+        }
+    }
+
+    /// <summary>Legacy codepage inferred from the descendant CIDFont's
+    /// /CIDSystemInfo /Ordering (Adobe-CNS1 → Big5, Adobe-GB1 → GBK, …).</summary>
+    private int CodepageForOrdering()
+    {
+        if (_reader is null) return 0;
+        var desc = _reader.Resolve(_fontDict.Get("DescendantFonts")) as PdfArray;
+        if (desc is null || desc.Count == 0) return 0;
+        var cidFont = _reader.ResolveDict(desc[0]);
+        var csi = cidFont is null ? null : _reader.ResolveDict(cidFont.Get("CIDSystemInfo"));
+        var orderingObj = csi?.Get("Ordering");
+        var ordering = orderingObj is PdfString os ? os.ToText()
+            : (orderingObj is PdfName on ? on.Value : null);
+        return ordering switch
+        {
+            "CNS1" => 950,
+            "GB1" => 936,
+            "Japan1" => 932,
+            "Korea1" or "KR" => 949,
+            _ => 0,
+        };
+    }
 
     /// <summary>
     /// Unique identifier combining resource name and base font.
@@ -124,7 +206,14 @@ public class FontInfo
     public bool IsEmbedded
     {
         get => _isEmbedded;
-        set { _isEmbedded = value; _isEmbeddedExplicit = true; }
+        set
+        {
+            _isEmbedded = value;
+            _isEmbeddedExplicit = true;
+            // A font that is not embedded cannot carry a subset — keep the two
+            // consistent unless the caller pins the subset flag separately later.
+            if (!value && !_isSubsetExplicit) _isSubset = false;
+        }
     }
     private bool _isEmbedded;
     private bool _isEmbeddedExplicit;
@@ -137,6 +226,14 @@ public class FontInfo
         if (!_isEmbeddedExplicit) _isEmbedded = value;
     }
 
+    /// <summary>Set the subset flag as a default that yields to an explicit caller
+    /// choice, without mangling <see cref="BaseFont"/> (unlike the <see cref="IsSubset"/>
+    /// setter). The subset prefix is applied later, at embed/save time.</summary>
+    internal void SetSubsetDefault(bool value)
+    {
+        if (!_isSubsetExplicit) _isSubset = value;
+    }
+
     /// <summary>
     /// Whether the font is a subset (name starts with XXXXXX+).
     /// Setting this modifies the BaseFont name in the underlying font dictionary.
@@ -146,26 +243,38 @@ public class FontInfo
         get => _isSubset;
         set
         {
-            if (_isSubset == value) return;
-            _isSubset = value;
+            _isSubsetExplicit = true;
             if (value)
             {
-                // Add subset prefix if not present
-                if (BaseFont.Length < 7 || BaseFont[6] != '+')
+                _fontDict.Remove("AsposeEmbedFull");
+                if (!_isSubset)
                 {
-                    var tag = new string(Enumerable.Range(0, 6).Select(_ => (char)('A' + Random.Shared.Next(26))).ToArray());
-                    _fontDict.Set("BaseFont", new PdfName($"{tag}+{BaseFont}"));
+                    _isSubset = true;
+                    // Add subset prefix if not present
+                    if (BaseFont.Length < 7 || BaseFont[6] != '+')
+                    {
+                        var tag = new string(Enumerable.Range(0, 6).Select(_ => (char)('A' + Random.Shared.Next(26))).ToArray());
+                        _fontDict.Set("BaseFont", new PdfName($"{tag}+{BaseFont}"));
+                    }
                 }
             }
             else
             {
+                _isSubset = false;
                 // Remove subset prefix
                 if (BaseFont.Length > 7 && BaseFont[6] == '+')
                     _fontDict.Set("BaseFont", new PdfName(BaseFont[7..]));
+                // Record the explicit "do not subset" intent so the save-time embed pass
+                // (EmbedNonEmbeddedFonts) embeds the full program instead of subsetting and
+                // adding a tag — which would make the reloaded font read as a subset again.
+                // Recorded even when already non-subset (a non-embedded face has no prefix
+                // yet still gets embedded on save). Transient: the embed pass removes it.
+                _fontDict.Set("AsposeEmbedFull", PdfBoolean.True);
             }
         }
     }
     private bool _isSubset;
+    private bool _isSubsetExplicit;
 
     /// <summary>Whether the font is italic.</summary>
     public bool IsItalic { get; }
@@ -231,6 +340,82 @@ public class FontInfo
     /// Measure the width of a string in points, given a font size.
     /// </summary>
     public double MeasureString(string text, double fontSize) => Metrics.MeasureString(text, fontSize);
+
+    private IGlyphOutlineSource? _outlineSource;
+    private bool _outlineSourceTried;
+
+    /// <summary>Glyph-outline source for this font — the program embedded in the PDF
+    /// font dictionary (/FontFile2, /FontFile3, /FontFile) when present, otherwise the
+    /// raw font data attached via <see cref="FontRepository"/> (FindFont / OpenFont).
+    /// Null when no outline program is reachable. Built lazily and cached.</summary>
+    private IGlyphOutlineSource? OutlineSource
+    {
+        get
+        {
+            if (_outlineSourceTried) return _outlineSource;
+            _outlineSourceTried = true;
+            try { _outlineSource = BuildOutlineSource(); }
+            catch { _outlineSource = null; }
+            return _outlineSource;
+        }
+    }
+
+    private IGlyphOutlineSource? BuildOutlineSource()
+    {
+        // A font assigned from FontRepository (system or stream-opened) carries its raw
+        // program directly; prefer it so a reassigned Font measures with its own glyphs.
+        var raw = SourceFontData?.TtfData;
+        if (raw is { Length: > 12 })
+        {
+            // 'OTTO' marks an OpenType container with CFF (not TrueType glyf) outlines.
+            var isOpenTypeCff = raw[0] == 0x4F && raw[1] == 0x54 && raw[2] == 0x54 && raw[3] == 0x4F;
+            return isOpenTypeCff ? CffGlyphSource.TryLoad(raw) : new GlyphOutlineParser(raw);
+        }
+
+        // Otherwise read the program embedded in the PDF font dictionary. Type0 fonts
+        // carry the descriptor on the descendant CIDFont.
+        if (_reader is null) return null;
+        var descriptor = _reader.ResolveDict(_fontDict.Get("FontDescriptor"));
+        if (descriptor is null && Subtype == "Type0"
+            && _reader.Resolve(_fontDict.Get("DescendantFonts")) is PdfArray df && df.Count > 0)
+            descriptor = _reader.ResolveDict(_reader.ResolveDict(df[0])?.Get("FontDescriptor"));
+        if (descriptor is null) return null;
+
+        if (_reader.ResolveStream(descriptor.Get("FontFile2")) is { } ff2)
+        {
+            var d = _reader.DecodeStream(ff2);
+            if (d.Length > 0) return new GlyphOutlineParser(d);
+        }
+        if (_reader.ResolveStream(descriptor.Get("FontFile3")) is { } ff3)
+        {
+            var d = _reader.DecodeStream(ff3);
+            if (d.Length > 0) return CffGlyphSource.TryLoad(d);
+        }
+        if (_reader.ResolveStream(descriptor.Get("FontFile")) is { } ff1)
+        {
+            var d = _reader.DecodeStream(ff1);
+            if (d.Length > 0)
+                return Type1GlyphSource.TryLoad(d,
+                    (int)ff1.Dict.GetInt("Length1"), (int)ff1.Dict.GetInt("Length2"));
+        }
+        return null;
+    }
+
+    /// <summary>Bounding-box height (yMax − yMin) of the glyph drawn for
+    /// <paramref name="c"/>, in the font program's native glyph-design units. Returns 0
+    /// when the font carries no glyph for the character (e.g. a subset that never used it)
+    /// or no outline program is reachable. The caller maps the value to text space as
+    /// <c>height × FontSize / 1000</c> (the PDF 1/1000 glyph-space convention).</summary>
+    internal double GlyphHeightUnits(char c)
+    {
+        var src = OutlineSource;
+        if (src is null) return 0;
+        if (!src.CMap.TryGetValue(c, out var gid) || gid <= 0) return 0;
+        var outline = src.GetOutline(gid);
+        if (outline is null) return 0;
+        var h = outline.YMax - outline.YMin;
+        return h > 0 ? h : 0;
+    }
 
     private HashSet<char>? _representable;
     private bool _coverageComputed;
@@ -316,7 +501,11 @@ public sealed class FontCollection : IEnumerable<Font>
 
     internal FontCollection(PdfDictionary pageDict, PdfReader reader)
     {
-        var resources = reader.ResolveDict(pageDict.Get("Resources"));
+        // /Resources is an inheritable page attribute: a page dict frequently carries no
+        // /Resources of its own and inherits the nearest ancestor's in the /Pages tree.
+        // Resolve the effective resources so fonts referenced by the page content (e.g.
+        // /FAAAAI Tf) are discoverable rather than reporting an empty collection.
+        var resources = ResolveEffectiveResources(pageDict, reader);
         if (resources is not null)
         {
             var fontDict = reader.ResolveDict(resources.Get("Font"));
@@ -335,6 +524,29 @@ public sealed class FontCollection : IEnumerable<Font>
                 }
             }
         }
+    }
+
+    /// <summary>Resolve a page's effective /Resources, walking the /Parent chain for the
+    /// inherited dictionary when the page itself declares none. Returns null when no page
+    /// or ancestor carries /Resources.</summary>
+    private static PdfDictionary? ResolveEffectiveResources(PdfDictionary pageDict, PdfReader reader)
+    {
+        var resources = reader.ResolveDict(pageDict.Get("Resources"));
+        if (resources is not null) return resources;
+
+        var parentObj = pageDict.Get("Parent");
+        var visited = new HashSet<int>();
+        while (parentObj is not null)
+        {
+            if (parentObj is PdfIndirectRef iref && !visited.Add(iref.ObjectNumber))
+                break;
+            var parent = reader.ResolveDict(parentObj);
+            if (parent is null) break;
+            var res = reader.ResolveDict(parent.Get("Resources"));
+            if (res is not null) return res;
+            parentObj = parent.Get("Parent");
+        }
+        return null;
     }
 
     /// <summary>Build a collection from a resource dictionary that carries /Font
@@ -429,7 +641,7 @@ public class Font : FontInfo
 
     public IFontOptions FontOptions { get; } = new FontOptionsImpl();
 
-    /// <summary>Lower-level PDF-font view of this Font. Aspose.PDF for .NET exposes
+    /// <summary>Lower-level PDF-font view of this Font. Aspose.Pdf exposes
     /// the engine's IPdfFont through here; FOSS returns a thin wrapper
     /// that surfaces just <c>BaseFontNameOnly</c>.</summary>
     public PdfFontView iPdfFont => new PdfFontView(this);
@@ -482,15 +694,17 @@ public interface IFontOptions
     bool NotifyAboutFontEmbeddingError { get; set; }
 }
 
-/// <summary>Thin engine-font view used by Aspose.PDF for .NET parity (Font.iPdfFont).
+/// <summary>Thin engine-font view used by Aspose.Pdf parity (Font.iPdfFont).
 /// Stripped down to the members the test corpus actually reads.</summary>
 public sealed class PdfFontView
 {
     private readonly Font _font;
     internal PdfFontView(Font font) { _font = font; }
 
-    /// <summary>The PDF /BaseFont name with no subset prefix or style suffix
-    /// (e.g. "Arial" rather than "ABCDEF+Arial-Bold").</summary>
+    /// <summary>The PDF /BaseFont name with the subset prefix removed but the full font name
+    /// (including any style suffix) preserved — e.g. "ABCDEF+TimesNewRomanPS-BoldMT" becomes
+    /// "TimesNewRomanPS-BoldMT" and "Helvetica-Bold" stays "Helvetica-Bold". The 6-letter
+    /// subset tag (per PDF §9.6.4) is the only part stripped.</summary>
     public string BaseFontNameOnly
     {
         get
@@ -498,8 +712,6 @@ public sealed class PdfFontView
             var bf = _font.BaseFont ?? string.Empty;
             var plus = bf.IndexOf('+');
             if (plus >= 0 && plus < bf.Length - 1) bf = bf.Substring(plus + 1);
-            var dash = bf.IndexOf('-');
-            if (dash > 0) bf = bf.Substring(0, dash);
             return bf;
         }
     }

@@ -7,7 +7,7 @@ namespace Aspose.Pdf.Devices;
 ///
 /// Background: PDF 32000 §6.2.4.2's algebraic CMYK→RGB formula
 /// <c>R = (1−C)(1−K)</c> is *spec-correct* but produces results that
-/// differ markedly from what GDI+ / Acrobat / Aspose.PDF for .NET
+/// differ markedly from what GDI+ / Acrobat / Aspose.Pdf
 /// emit when rasterising CMYK fills. Those products run CMYK through
 /// an ICC profile (typically a SWOP-style transform) — non-linear,
 /// per-channel, with explicit dot-gain compensation. The result is

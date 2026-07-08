@@ -24,10 +24,24 @@ public sealed class BorderInfo
     public double Width { get; set; } = 1;
     public Color Color { get; set; } = Color.Black;
 
-    public GraphInfo? Top { get; set; }
-    public GraphInfo? Bottom { get; set; }
-    public GraphInfo? Left { get; set; }
-    public GraphInfo? Right { get; set; }
+    // Per-side stroke styling. The public getters lazily materialise a GraphInfo that
+    // inherits this border's Width, so callers can write e.g. `border.Right.DashArray = ...`
+    // on a border that was created with only a width/colour (matching the generator,
+    // where these sides are never null). The Raw* accessors expose the backing field without
+    // forcing creation, so the renderer can tell an explicitly-styled side from a plain one.
+    private GraphInfo? _top, _bottom, _left, _right;
+
+    public GraphInfo Top { get => _top ??= NewSide(); set => _top = value; }
+    public GraphInfo Bottom { get => _bottom ??= NewSide(); set => _bottom = value; }
+    public GraphInfo Left { get => _left ??= NewSide(); set => _left = value; }
+    public GraphInfo Right { get => _right ??= NewSide(); set => _right = value; }
+
+    internal GraphInfo? RawTop => _top;
+    internal GraphInfo? RawBottom => _bottom;
+    internal GraphInfo? RawLeft => _left;
+    internal GraphInfo? RawRight => _right;
+
+    private GraphInfo NewSide() => new GraphInfo { LineWidth = (float)Width };
 
     public double RoundedBorderRadius { get; set; }
 

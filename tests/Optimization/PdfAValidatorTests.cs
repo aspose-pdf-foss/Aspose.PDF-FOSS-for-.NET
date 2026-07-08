@@ -11,6 +11,11 @@ public class PdfAValidatorTests
     /// </summary>
     private static byte[] BuildWithUnembeddedFont(string fontName = "ArialMT")
     {
+        // Content that actually SELECTS /F1 with a Tf — the validator only flags a
+        // non-embedded font that is used by a Tf in the page content (a font merely
+        // declared in /Resources is never flagged), so the stream must reference it.
+        var contentBytes = Encoding.ASCII.GetBytes("BT /F1 12 Tf (Hi) Tj ET");
+
         using var ms = new MemoryStream();
         void Write(string s) => ms.Write(Encoding.ASCII.GetBytes(s));
 
@@ -26,9 +31,14 @@ public class PdfAValidatorTests
         var fontOffset = ms.Position;
         Write($"5 0 obj\n<< /Type /Font /Subtype /TrueType /BaseFont /{fontName} /Encoding /WinAnsiEncoding >>\nendobj\n");
 
+        var contentOffset = ms.Position;
+        Write($"4 0 obj\n<< /Length {contentBytes.Length} >>\nstream\n");
+        ms.Write(contentBytes);
+        Write("\nendstream\nendobj\n");
+
         var pageOffset = ms.Position;
         Write("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
-              "/Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+              "/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
 
         var xrefOffset = ms.Position;
         Write("xref\n0 6\n");
@@ -36,7 +46,7 @@ public class PdfAValidatorTests
         Write($"{catalogOffset:D10} 00000 n \n");
         Write($"{pagesOffset:D10} 00000 n \n");
         Write($"{pageOffset:D10} 00000 n \n");
-        Write("0000000000 65535 f \n"); // obj 4 free
+        Write($"{contentOffset:D10} 00000 n \n");
         Write($"{fontOffset:D10} 00000 n \n");
         Write("trailer\n<< /Size 6 /Root 1 0 R /ID [<abc> <abc>] >>\nstartxref\n");
         Write($"{xrefOffset}\n%%EOF\n");
@@ -252,7 +262,7 @@ public class PdfAValidatorTests
         Write("\nendstream\nendobj\n");
 
         var catalogOffset = ms.Position;
-        Write("1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>\nendobj\n");
+        Write("1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R /OutputIntents [6 0 R] >>\nendobj\n");
 
         var pagesOffset = ms.Position;
         Write("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
@@ -261,19 +271,25 @@ public class PdfAValidatorTests
         var fontOffset = ms.Position;
         Write("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
 
+        // PDF/A output intent (/S /GTS_PDFA1) — required for PDF/A-1 conformance; the
+        // validator silently fails a pdfaid-claiming document that lacks it.
+        var outputIntentOffset = ms.Position;
+        Write("6 0 obj\n<< /Type /OutputIntent /S /GTS_PDFA1 /OutputConditionIdentifier (sRGB) >>\nendobj\n");
+
         var pageOffset = ms.Position;
         Write("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
               "/Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
 
         var xrefOffset = ms.Position;
-        Write("xref\n0 6\n");
+        Write("xref\n0 7\n");
         Write("0000000000 65535 f \n");
         Write($"{catalogOffset:D10} 00000 n \n");
         Write($"{pagesOffset:D10} 00000 n \n");
         Write($"{pageOffset:D10} 00000 n \n");
         Write($"{metaOffset:D10} 00000 n \n");
         Write($"{fontOffset:D10} 00000 n \n");
-        Write("trailer\n<< /Size 6 /Root 1 0 R /ID [<abc123> <abc123>] >>\nstartxref\n");
+        Write($"{outputIntentOffset:D10} 00000 n \n");
+        Write("trailer\n<< /Size 7 /Root 1 0 R /ID [<abc123> <abc123>] >>\nstartxref\n");
         Write($"{xrefOffset}\n%%EOF\n");
 
         return ms.ToArray();
@@ -577,8 +593,8 @@ public class PdfAValidatorTests
         Assert.False(result.IsValid);
         Assert.Contains(result.Violations, v => v.Rule == "MetadataPdfAId");
         Assert.Contains(result.Violations, v => v.Rule == "MetadataPdfAConformance");
-        Assert.Contains(result.Violations, v => v.Rule == "MetadataDcTitle");
-        Assert.Contains(result.Violations, v => v.Rule == "MetadataPdfProducer");
+        // dc:title and pdf:Producer are intentionally NOT validated: ISO 19005 requires
+        // neither, and demanding them produced false failures on conformant documents.
     }
 
     [Fact]

@@ -43,20 +43,26 @@ internal static class TextPaginator
     /// Use the <see cref="FontData"/> overload when an embedded font is
     /// available -- Standard-14 Helvetica widths are far narrower than most
     /// non-Latin TTFs, so the fallback under-counts line widths and produces
-    /// different break-points than Aspose.PDF for .NET does for the same content.</summary>
+    /// different break-points than Aspose.Pdf does for the same content.</summary>
     public static List<string> WrapToWidth(string text, string fontName, double fontSize, double maxWidth)
         => WrapToWidth(text, fontName, fontSize, maxWidth, fontData: null);
 
     /// <summary>
     /// Greedy word-wrap. When <paramref name="fontData"/> has TTF data, per-glyph
     /// advance widths come from the font's own hmtx so wrap break-points match
-    /// what Aspose.PDF for .NET produces for the same fragment. Without it,
+    /// what Aspose.Pdf produces for the same fragment. Without it,
     /// falls back to Standard-14 widths keyed by <paramref name="fontName"/>.
     /// </summary>
     public static List<string> WrapToWidth(string text, string fontName, double fontSize,
-        double maxWidth, FontData? fontData, double firstLineIndent = 0)
+        double maxWidth, FontData? fontData, double firstLineIndent = 0, double charSpacing = 0)
     {
-        var measurer = BuildMeasurer(fontName, fontSize, fontData);
+        var baseMeasurer = BuildMeasurer(fontName, fontSize, fontData);
+        // Character spacing (Tc) adds `charSpacing` after every glyph, so a run of
+        // N characters is that much wider — fold it into the measurer so wrap
+        // break-points account for it (matches Aspose.Pdf).
+        Func<string, double> measurer = charSpacing == 0
+            ? baseMeasurer
+            : s => baseMeasurer(s) + s.Length * charSpacing;
         var lines = new List<string>();
         // Normalise line endings so a \r\n file doesn't leave dangling \r in the output.
         var normalised = text.Replace("\r\n", "\n").Replace('\r', '\n');
@@ -81,7 +87,10 @@ internal static class TextPaginator
                 var effectiveMax = lines.Count == 0 ? maxWidth - firstLineIndent : maxWidth;
                 if (currentWidth + needed > effectiveMax && current.Length > 0)
                 {
-                    lines.Add(current.ToString());
+                    // The inter-word space that precedes the overflowing word stays at
+                    // the end of the finished line (matches Aspose.Pdf — the
+                    // wrapped line keeps its trailing space before the break).
+                    lines.Add(current.ToString() + " ");
                     current.Clear();
                     currentWidth = 0;
                     current.Append(word);

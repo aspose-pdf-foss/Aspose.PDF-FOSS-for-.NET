@@ -108,6 +108,14 @@ public class WatermarkArtifact : Artifact
         var builder = new ContentStreamBuilder();
         builder.SaveState();
 
+        // Compensate for the page's /Rotate. The position/alignment above is
+        // computed in visual (display) coordinates via page.Width/page.Height,
+        // which already account for rotation; this matrix maps those visual
+        // coordinates into the page's raw content space so the watermark lands
+        // at the intended visual location and reads upright (not rotated 90°/
+        // mirrored) on /Rotate 90/180/270 pages.
+        ApplyPageRotation(builder, page);
+
         // Apply opacity
         if (Opacity < 1.0)
         {
@@ -169,6 +177,40 @@ public class WatermarkArtifact : Artifact
         return new Rectangle(x, y, x + width, y + height);
     }
 
+    /// <summary>Prepend a matrix that maps visual (display) coordinates into the
+    /// page's raw content space, compensating for the page's /Rotate so a
+    /// watermark positioned via page.Width/page.Height appears at the intended
+    /// visual location and upright. Identity for an unrotated page.</summary>
+    internal static void ApplyPageRotation(ContentStreamBuilder builder, Page page)
+    {
+        var mb = page.MediaBox;
+        double wm = mb.Width, hm = mb.Height;
+        switch (page.Rotate)
+        {
+            case Aspose.Pdf.Rotation.on90: builder.SetMatrix(0, 1, -1, 0, wm, 0); break;
+            case Aspose.Pdf.Rotation.on180: builder.SetMatrix(-1, 0, 0, -1, wm, hm); break;
+            case Aspose.Pdf.Rotation.on270: builder.SetMatrix(0, -1, 1, 0, 0, hm); break;
+            default: break; // None / on360 — identity
+        }
+    }
+
+    /// <summary>The raw-content-space `cm` operands compensating for the page's
+    /// /Rotate, or null when no rotation. Used by the inline (string-built)
+    /// image-watermark path.</summary>
+    internal static string? PageRotationCm(Page page)
+    {
+        var mb = page.MediaBox;
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        string F(double v) => v.ToString("0.####", ci);
+        return page.Rotate switch
+        {
+            Aspose.Pdf.Rotation.on90 => $"0 1 -1 0 {F(mb.Width)} 0 cm",
+            Aspose.Pdf.Rotation.on180 => $"-1 0 0 -1 {F(mb.Width)} {F(mb.Height)} cm",
+            Aspose.Pdf.Rotation.on270 => $"0 -1 1 0 0 {F(mb.Height)} cm",
+            _ => null,
+        };
+    }
+
     /// <summary>Embed <see cref="Image"/> as an image XObject and place it inside an
     /// /Artifact marked-content block tagged /Subtype /Watermark, so it round-trips
     /// through <see cref="ArtifactCollection"/> as a watermark.</summary>
@@ -193,6 +235,10 @@ public class WatermarkArtifact : Artifact
 
         var sb = new System.Text.StringBuilder();
         sb.Append("q\n");
+        // Compensate for the page's /Rotate so the centred image lands at the
+        // intended visual location (placement above uses page.Width/page.Height,
+        // which are visual dimensions).
+        if (PageRotationCm(page) is { } rot) sb.Append(rot).Append('\n');
         if (Opacity < 1.0)
         {
             var gs = new ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity };
@@ -218,15 +264,105 @@ public class WatermarkArtifact : Artifact
         }
         // Register Helvetica and use the returned resource name. RegisterFont may
         // return a name other than "F1" when the page's existing resources already
-        // use that slot — in 41508.pdf the original page reserves /F1 for an
+        // use that slot — a page may reserve /F1 for an
         // embedded subset that lacks our watermark glyphs (g/p/q/y), so emitting
         // SetFont("F1", ...) into our content stream renders the text invisibly.
         var fontName = Table.RegisterFont(page);
 
-        var content = BuildContentStream(page, fontName);
+        var content = BuildTextWatermark(page, fontName);
         if (IsBackground)
             page.PrependContentStream(content);
         else
             page.AddContentStream(content);
     }
+
+    /// <summary>Emit the text watermark with its glyphs inside a Form XObject:
+    /// the page-level block is a clean <c>q … /Artifact «props» BDC /FrmN Do EMC Q</c>
+    /// and the text (colour + BT…ET) lives in the form. Keeping the drawing in a
+    /// form lets callers walk the page's Do operators and pull the watermark text
+    /// out of <c>Resources.Forms[name]</c>, mirroring the reference behaviour.</summary>
+    private byte[] BuildTextWatermark(Page page, string fontResourceName)
+    {
+        var renderText = Text;
+        if (!string.IsNullOrEmpty(renderText) && !string.IsNullOrEmpty(PageNumberReplacementString))
+            renderText = renderText.Replace(PageNumberReplacementString, page.Number.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (string.IsNullOrEmpty(renderText)) return [];
+
+        var pageWidth = page.Width;
+        var pageHeight = page.Height;
+        var fontSize = TextState?.FontSize ?? 12;
+
+        var charWidth = fontSize * 0.5; // approximate
+        var textWidth = renderText!.Length * charWidth;
+        var textHeight = (double)fontSize;
+
+        double x, y;
+        if (Position is { } pos) { x = pos.X; y = pos.Y; }
+        else
+        {
+            x = ArtifactHorizontalAlignment switch
+            {
+                HorizontalAlignment.Left => LeftMargin > 0 ? LeftMargin : 36,
+                HorizontalAlignment.Right => pageWidth - textWidth - (RightMargin > 0 ? RightMargin : 36),
+                _ => (pageWidth - textWidth) / 2,
+            };
+            y = ArtifactVerticalAlignment switch
+            {
+                VerticalAlignment.Top => pageHeight - fontSize - (TopMargin > 0 ? TopMargin : 36),
+                VerticalAlignment.Bottom => BottomMargin > 0 ? BottomMargin : 36,
+                _ => (pageHeight - textHeight) / 2,
+            };
+        }
+
+        var bbox = ComputeBBox(x, y, textWidth, textHeight);
+        Rectangle = bbox;
+
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        string F(double v) => v.ToString("0.####", ci);
+
+        // Form content: colour + text run at absolute page coordinates; the form's
+        // BBox spans the page so no placement matrix is needed on the page side.
+        var inner = new System.Text.StringBuilder();
+        var fg = TextState?.ForegroundColor;
+        inner.Append(fg is { } c
+            ? $"{F(c.R / 255.0)} {F(c.G / 255.0)} {F(c.B / 255.0)} rg\n"
+            : "0 0 0 rg\n");
+        inner.Append("BT\n");
+        inner.Append($"/{fontResourceName} {F(fontSize)} Tf\n");
+        if (Math.Abs(Rotation) > 0.1)
+        {
+            var rad = Rotation * Math.PI / 180;
+            var cos = Math.Cos(rad);
+            var sin = Math.Sin(rad);
+            var cx = pageWidth / 2;
+            var cy = pageHeight / 2;
+            inner.Append($"{F(cos)} {F(sin)} {F(-sin)} {F(cos)} " +
+                $"{F(x * cos - y * sin + cx * (1 - cos) + cy * sin)} " +
+                $"{F(x * sin + y * cos + cy * (1 - cos) - cx * sin)} Tm\n");
+        }
+        else
+        {
+            inner.Append($"{F(x)} {F(y)} Td\n");
+        }
+        inner.Append($"({EscapeTextLiteral(renderText)}) Tj\n");
+        inner.Append("ET\n");
+
+        var formName = page.AddStampForm(System.Text.Encoding.ASCII.GetBytes(inner.ToString()));
+
+        var sb = new System.Text.StringBuilder("q\n");
+        if (PageRotationCm(page) is { } rot) sb.Append(rot).Append('\n');
+        if (Opacity < 1.0)
+        {
+            var gs = new ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity };
+            sb.Append($"/{page.AddExtGState(gs)} gs\n");
+        }
+        var bboxStr = $"[{bbox.LLX.ToString("0.##", ci)} {bbox.LLY.ToString("0.##", ci)} {bbox.URX.ToString("0.##", ci)} {bbox.URY.ToString("0.##", ci)}]";
+        sb.Append($"/Artifact <</Type /{Type} /Subtype /{Subtype} /BBox {bboxStr}>> BDC\n");
+        sb.Append($"/{formName} Do\n");
+        sb.Append("EMC\nQ\n");
+        return System.Text.Encoding.ASCII.GetBytes(sb.ToString());
+    }
+
+    private static string EscapeTextLiteral(string s) =>
+        s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)").Replace("\r", "").Replace("\n", " ");
 }

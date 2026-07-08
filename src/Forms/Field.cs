@@ -20,6 +20,15 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
         _reader = reader;
     }
 
+    /// <summary>Detached ctor — a document-less field used as a configuration holder
+    /// (e.g. a generator <see cref="RadioButtonOptionField"/> before it is placed into a
+    /// real form). Backed by a fresh empty dict + the shared empty reader.</summary>
+    private protected Field() : base()
+    {
+        _dict = Dict;
+        _reader = InternalReader;
+    }
+
     /// <summary>Create a field bound to a document. The field is not yet attached to the document's form — use <see cref="Form.Add(Field)"/> after configuring.</summary>
     public Field(Document doc) : base(doc)
     {
@@ -82,7 +91,24 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
     /// Returns -1 when no owning page is found.</summary>
     private int ResolvePageIndexFor(PdfDictionary dict)
     {
+        // The widget annotation dicts this field is drawn by: the field dict
+        // itself (merged field+widget) plus any pure-widget /Kids (a field whose
+        // visual widget is a separate object). A /Kids entry that carries its own
+        // /T is a child *field*, not a widget of this field, so it is excluded —
+        // a non-terminal (group) field is not itself on any single page.
+        var widgets = new List<PdfDictionary> { dict };
+        if (_reader.Resolve(dict.Get("Kids")) is Core.PdfArray kids)
+            foreach (var kid in kids)
+                if (_reader.ResolveDict(kid) is { } kidDict && kidDict.Get("T") is null)
+                    widgets.Add(kidDict);
+
         var pageDict = _reader.ResolveDict(dict.Get("P"));
+        // A missing /P on the field: try each widget's /P, then walk /Parent up.
+        foreach (var w in widgets)
+        {
+            if (pageDict is not null) break;
+            pageDict = _reader.ResolveDict(w.Get("P"));
+        }
         if (pageDict is null)
         {
             var parent = _reader.ResolveDict(dict.Get("Parent"));
@@ -104,7 +130,8 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
             if (annots is null) continue;
             foreach (var item in annots)
             {
-                if (ReferenceEquals(_reader.ResolveDict(item), dict))
+                var annotDict = _reader.ResolveDict(item);
+                if (widgets.Any(w => ReferenceEquals(annotDict, w)))
                     return i;
             }
         }
@@ -246,6 +273,13 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
     {
         get
         {
+            // Auto-calculate: a field carrying an /AA/C calculate action reports its
+            // recomputed value (Acrobat auto-calculates on read). Only
+            // text/choice fields calculate; guard is cheap when no /AA is present.
+            if (_dict.Get("AA") is not null
+                && FieldCalculateScript.ComputeValue(_dict, _reader) is { } computed)
+                return computed;
+
             var v = _reader.Resolve(_dict.Get("V"));
             if (v is null or PdfNull)
             {
@@ -269,6 +303,50 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
         {
             SetValue(value);
         }
+    }
+
+    [System.ThreadStatic] private static bool _recalculating;
+
+    /// <summary>Recompute every field listed in the AcroForm /CO (calculation
+    /// order) whose /AA/C calculate action is a recognised built-in, persisting the
+    /// result into each field's /V and appearance. Mirrors Acrobat's "calculate"
+    /// event that fires whenever any field value changes. Re-entrancy guarded.</summary>
+    private protected void TriggerRecalculation()
+    {
+        if (_recalculating) return;
+        PdfDictionary? acroForm;
+        try { acroForm = _reader.ResolveDict(_reader.Catalog?.Get("AcroForm")); }
+        catch (System.InvalidOperationException) { return; }
+        if (acroForm is null) return;
+        if (_reader.Resolve(acroForm.Get("CO")) is not PdfArray co || co.Count == 0) return;
+
+        void MarkFieldTreeDirty(PdfDictionary fieldDict)
+        {
+            if (OwnerDocument is null) return;
+            var fn = OwnerDocument.FindObjectNumber(fieldDict);
+            if (fn >= 0) OwnerDocument.MarkDirty(fn, fieldDict);
+            if (_reader.Resolve(fieldDict.Get("Kids")) is PdfArray kids)
+                foreach (var k in kids)
+                    if (_reader.ResolveDict(k) is PdfDictionary kd)
+                    {
+                        var kn = k is PdfIndirectRef kr ? kr.ObjectNumber : OwnerDocument.FindObjectNumber(kd);
+                        if (kn >= 0) OwnerDocument.MarkDirty(kn, kd);
+                    }
+        }
+
+        _recalculating = true;
+        try
+        {
+            foreach (var entry in co)
+            {
+                if (_reader.ResolveDict(entry) is not PdfDictionary fieldDict) continue;
+                var computed = FieldCalculateScript.ComputeValue(fieldDict, _reader);
+                if (computed is null) continue;
+                new TextBoxField(fieldDict, _reader).ApplyCalculatedValue(computed);
+                MarkFieldTreeDirty(fieldDict);
+            }
+        }
+        finally { _recalculating = false; }
     }
 
     /// <summary>
@@ -327,7 +405,7 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
     {
         get
         {
-            int count = 0;
+            int count = HasMergedSelfWidget ? 1 : 0;
             foreach (var _ in AllKids()) count++;
             return count;
         }
@@ -355,15 +433,37 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
     /// </summary>
     public IEnumerator<Aspose.Pdf.Annotations.WidgetAnnotation> GetEnumerator()
     {
-        // Yield the typed child field (a Field is itself a WidgetAnnotation) with
-        // its Parent wired back to this group, so callers can cast to the concrete
-        // field type and walk the parent relationship.
-        foreach (var child in FieldKids())
+        // A merged single-widget leaf that has also grown extra visual widgets (multi-
+        // widget field via Form.AddFieldAppearance) keeps its own /Rect+/AP on the field
+        // dict — yield that as the first widget so all visual widgets are enumerated.
+        if (HasMergedSelfWidget)
+            yield return new Aspose.Pdf.Annotations.WidgetAnnotation(_dict, _reader);
+
+        // Walk every /Kids entry. A kid that is itself a field node (/T or /FT) is yielded
+        // as the typed child field with its Parent wired back; a pure widget kid (no /T) is
+        // yielded as a plain WidgetAnnotation so callers can read its per-widget appearance.
+        foreach (var kidDict in AllKids())
         {
-            child.Parent = this;
-            yield return child;
+            if (kidDict.ContainsKey("T") || kidDict.ContainsKey("FT"))
+            {
+                var child = Field.Create(kidDict, _reader);
+                child.OwnerDocument = OwnerDocument;
+                child.Parent = this;
+                yield return child;
+            }
+            else
+            {
+                yield return new Aspose.Pdf.Annotations.WidgetAnnotation(kidDict, _reader);
+            }
         }
     }
+
+    /// <summary>True when this field is a merged single-widget leaf (its own /Rect)
+    /// that has nonetheless grown extra widget kids — a multi-widget text field. The
+    /// field dict itself is then the first visual widget alongside the /Kids widgets.</summary>
+    internal bool HasMergedSelfWidget =>
+        _dict.ContainsKey("Rect") &&
+        _reader.Resolve(_dict.Get("Kids")) is PdfArray k && k.Count > 0;
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
@@ -461,7 +561,7 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
 
 
     /// <summary>The widget annotation flags (/F entry), e.g. Print / Hidden /
-    /// ReadOnly. Matches the Aspose.PDF for .NET <c>Field.Flags</c> surface (which exposes
+    /// ReadOnly. Matches the Aspose.Pdf <c>Field.Flags</c> surface (which exposes
     /// the annotation flags, not the field /Ff flags).</summary>
     public new Aspose.Pdf.Annotations.AnnotationFlags Flags
     {
@@ -605,6 +705,11 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
             // immediately (the font may be set after Form.Add); this re-points /DA
             // at the embedded resource. A no-op otherwise.
             Form.EmbedDefaultAppearanceFont(this);
+            // Drop any appearance generated with the previous /DA (e.g. built with
+            // the default /Helv during Form.Add) and rebuild it with the new
+            // font/size/colour.
+            Dict.Remove("AP");
+            GenerateAppearance();
         }
     }
 
@@ -617,7 +722,7 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
             if (arr is { Count: >= 4 }) return Rectangle.FromPdfArray(arr, _reader);
             // Field whose geometry lives on widget kids: return the bounding box (union)
             // of all descendant widget /Rects, so a multi-widget field reports its full
-            // extent (matches Aspose.PDF for .NET Field.Rect).
+            // extent (matches Aspose.Pdf Field.Rect).
             return UnionKidRect(_dict, 0);
         }
         set
@@ -635,6 +740,7 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
                 arr.Add(new PdfReal(value.URY));
                 _dict.Set("Rect", arr);
             }
+            OnRectChanged();
         }
     }
 
@@ -874,13 +980,63 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
         return 0;
     }
 
-    // ── Aspose.PDF for .NET shape additions ───────────────────────────────
+    // ── Aspose.Pdf shape additions ───────────────────────────────
 
-    /// <summary>1-based index of the widget annotation used by AcroForm rendering when the field has multiple widgets. Stored only.</summary>
-    public int AnnotationIndex { get; set; } = 1;
+    private int _annotationIndex = 1;
+
+    /// <summary>1-based tab position of this field's widget within its page's /Annots
+    /// array — the array order is the page tab order. Reading it returns the widget's
+    /// current position; setting it moves the widget to that slot, swapping it with the
+    /// widget that previously occupied the slot (matching Aspose.Pdf). Falls back
+    /// to a stored value when the field has no widget on a page.</summary>
+    public int AnnotationIndex
+    {
+        get
+        {
+            var (_, idx) = LocateWidgetInAnnots();
+            return idx > 0 ? idx : _annotationIndex;
+        }
+        set
+        {
+            _annotationIndex = value;
+            var (annots, idx) = LocateWidgetInAnnots();
+            if (annots is null || idx <= 0) return;
+            if (value < 1 || value > annots.Count || value == idx) return;
+            // Swap the widget into the requested tab slot; the widget previously there
+            // takes this field's old slot. Swap the raw array entries (indirect refs) so
+            // the new /Annots order persists on save.
+            var moved = annots[idx - 1];
+            var displaced = annots[value - 1];
+            annots.ReplaceAt(idx - 1, displaced);
+            annots.ReplaceAt(value - 1, moved);
+        }
+    }
+
+    /// <summary>Find the page /Annots array that holds this field's widget and the
+    /// widget's 1-based position in it. Considers the field's own dict (single-widget
+    /// leaf) and each /Kids widget. Returns (null, -1) when no widget is on a page.</summary>
+    private (Core.PdfArray? annots, int index) LocateWidgetInAnnots()
+    {
+        var candidates = new List<PdfDictionary> { _dict };
+        foreach (var kid in AllKids()) candidates.Add(kid);
+
+        var pages = new PageCollection(_reader);
+        for (var p = 1; p <= pages.Count; p++)
+        {
+            if (_reader.Resolve(pages[p].Dict.Get("Annots")) is not Core.PdfArray annots) continue;
+            for (var i = 0; i < annots.Count; i++)
+            {
+                var ad = _reader.ResolveDict(annots[i]);
+                if (ad is null) continue;
+                foreach (var cand in candidates)
+                    if (ReferenceEquals(ad, cand)) return (annots, i + 1);
+            }
+        }
+        return (null, -1);
+    }
 
     /// <summary>Global flag: when true, a field's value is auto-resized to fit its
-    /// widget rectangle. Static to match the Aspose.PDF for .NET surface (a process-wide default).
+    /// widget rectangle. Static to match the Aspose.Pdf surface (a process-wide default).
     /// Stored only.</summary>
     public static bool FitIntoRectangle { get; set; }
 
@@ -1026,7 +1182,10 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
     /// <summary>Flatten this field — turn its value into static page content. Currently no-op; per-field flattening is not implemented.</summary>
     public new void Flatten()
     {
-        // Per-field flatten not implemented; document-level Form.Flatten handles the bulk path.
+        // Flatten just this field: fold its widget appearance(s) into the owning page content and
+        // remove it from the AcroForm. Delegates to the form so the placement (§12.5.5) and FRM
+        // registration match the document/form flatten path.
+        OwnerDocument?.Form.FlattenField(this);
     }
 
     /// <summary>Enumerator typed to <see cref="Aspose.Pdf.Annotations.WidgetAnnotation"/>.</summary>
@@ -1127,6 +1286,12 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
     /// </summary>
     internal virtual void GenerateAppearance() { }
 
+    /// <summary>Build an /AP dictionary (with /N) rendering this field's current value
+    /// for an extra widget of the given size — used by multi-widget construction
+    /// (<see cref="Form.AddFieldAppearance"/>). The base implementation returns null
+    /// (no value appearance); value-bearing field types override it.</summary>
+    internal virtual PdfDictionary? BuildWidgetApDict(double w, double h) => null;
+
     /// <summary>Format a coordinate for a content stream, invariant culture.</summary>
     private protected static string FmtNum(double v) =>
         v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
@@ -1167,6 +1332,21 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
                 System.Globalization.CultureInfo.InvariantCulture, out var s);
             if (s > 0) fontSize = s;
         }
+    }
+
+    /// <summary>Extract the fill-colour operator (g/rg/k) from a /DA string,
+    /// or <paramref name="fallback"/> when none is present.</summary>
+    private protected static string ExtractDaColor(string da, string fallback = "0 g")
+    {
+        if (string.IsNullOrEmpty(da)) return fallback;
+        var p = da.Split(new[] { ' ', '\n', '\t', '\r' }, System.StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < p.Length; i++)
+        {
+            if (p[i] == "g" && i >= 1) return $"{p[i - 1]} g";
+            if (p[i] == "rg" && i >= 3) return $"{p[i - 3]} {p[i - 2]} {p[i - 1]} rg";
+            if (p[i] == "k" && i >= 4) return $"{p[i - 4]} {p[i - 3]} {p[i - 2]} {p[i - 1]} k";
+        }
+        return fallback;
     }
 
     /// <summary>Wrap a content string in a Form XObject appearance stream sized
@@ -1262,6 +1442,10 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
         font.Set("Type", new PdfName("Font"));
         font.Set("Subtype", new PdfName("Type1"));
         font.Set("BaseFont", new PdfName(baseFont));
+        // Tag the encoding so the WinAnsi-encoded appearance text (see the appearance
+        // content build) maps its 0x80-0x9F bytes to the right glyphs on both render and
+        // text-extraction, rather than the font's default StandardEncoding.
+        font.Set("Encoding", new PdfName("WinAnsiEncoding"));
         return font;
     }
 
@@ -1308,7 +1492,7 @@ public class Field : Aspose.Pdf.Annotations.WidgetAnnotation, IEnumerable<Aspose
         return sb.ToString();
     }
 
-    private string? MkColorOperator(PdfObject? entry, bool fill)
+    private protected string? MkColorOperator(PdfObject? entry, bool fill)
     {
         if (Reader.Resolve(entry) is not PdfArray arr) return null;
         var vals = new System.Collections.Generic.List<double>();
@@ -1365,7 +1549,7 @@ public class TextBoxField : Field
     {
         // A value that the field's built-in format action cannot accept (e.g. a
         // non-date string assigned to an AFDate-formatted field) is rejected,
-        // leaving the previous value in place — matching Aspose.PDF for .NET behaviour.
+        // leaving the previous value in place — matching Aspose.Pdf behaviour.
         if (!FieldFormatScript.IsValueValid(Dict, Reader, value ?? string.Empty))
             return;
         base.SetValue(value);
@@ -1378,6 +1562,60 @@ public class TextBoxField : Field
         // when the script isn't a recognised built-in.
         var displayValue = FieldFormatScript.Apply(Dict, Reader, value ?? "");
         RegenerateAppearance(displayValue);
+
+        // Multi-widget field: refresh each extra widget kid's /AP so every visual
+        // widget shows the updated value (a bare widget kid carries no /T or /FT).
+        foreach (var kid in AllKids())
+        {
+            if (kid.ContainsKey("T") || kid.ContainsKey("FT")) continue;
+            if (Reader.Resolve(kid.Get("Rect")) is not PdfArray kr || kr.Count < 4) continue;
+            var kidRect = Rectangle.FromPdfArray(kr);
+            var kidAp = BuildWidgetApDict(kidRect.Width, kidRect.Height, kid);
+            if (kidAp is not null) kid.Set("AP", kidAp);
+        }
+
+        // A value change fires the form's calculate event (Acrobat semantics).
+        TriggerRecalculation();
+    }
+
+    /// <summary>Persist a calculated result into this field's /V and refresh its
+    /// appearance (formatted through any /AA/F action), without re-entering the
+    /// calculation trigger. Used by the form recalculation pass.</summary>
+    internal void ApplyCalculatedValue(string rawValue)
+    {
+        base.SetValue(rawValue);
+        var displayValue = FieldFormatScript.Apply(Dict, Reader, rawValue);
+        RegenerateAppearance(displayValue);
+        foreach (var kid in AllKids())
+        {
+            if (kid.ContainsKey("T") || kid.ContainsKey("FT")) continue;
+            if (Reader.Resolve(kid.Get("Rect")) is not PdfArray kr || kr.Count < 4) continue;
+            var kidRect = Rectangle.FromPdfArray(kr);
+            var kidAp = BuildWidgetApDict(kidRect.Width, kidRect.Height, kid);
+            if (kidAp is not null) kid.Set("AP", kidAp);
+        }
+    }
+
+    /// <summary>When the widget rectangle changes, regenerate the /AP/N appearance so the
+    /// value re-lays-out inside the new box (matches Aspose.Pdf). Only fires when
+    /// the field already carries an appearance and a value — construction and empty fields
+    /// are left untouched.</summary>
+    internal override void OnRectChanged()
+    {
+        if (Dict.Get("AP") is not null)
+        {
+            var v = Value;
+            if (!string.IsNullOrEmpty(v))
+            {
+                var displayValue = FieldFormatScript.Apply(Dict, Reader, v!);
+                RegenerateAppearance(displayValue);
+            }
+        }
+
+        // Static-XFA form: mirror the new widget geometry into the XFA template and
+        // re-render the page's static form content at the new positions. Guarded so a
+        // malformed XFA packet can never break a plain AcroForm rectangle move.
+        try { OwnerDocument?.Form.SyncXfaWidgetGeometry(this); } catch { /* keep the /Rect change */ }
     }
 
     /// <summary>
@@ -1386,8 +1624,11 @@ public class TextBoxField : Field
     /// </summary>
     private void RegenerateAppearance(string text)
     {
-        // Parse DA for font name and size
-        var da = Dict.Get("DA") is PdfString daStr ? daStr.ToText() : "/Helv 12 Tf 0 g";
+        // Parse DA for font name and size. A field with no own /DA inherits it up the
+        // /Parent chain and finally from the AcroForm /DA — only if none is found at all
+        // do we fall back to a fixed Helvetica 12. (The inherited /DA commonly carries a
+        // size of 0, i.e. auto-size, which the fixed default would otherwise mask.)
+        var da = ResolveInheritedDa() ?? "/Helv 12 Tf 0 g";
         string fontName = "Helv";
         double fontSize = 12;
         var daParts = da.Split(' ', System.StringSplitOptions.RemoveEmptyEntries);
@@ -1411,15 +1652,47 @@ public class TextBoxField : Field
         }
         double w = urx - llx, h = ury - lly;
 
-        // /DA size 0 means auto-size: pick the largest size whose glyph run still
-        // fits the box width (~0.5em average advance) AND leaves a little vertical
-        // padding (Acrobat caps at ~0.83 of inner height for single-line text).
+        // /DA size 0 means auto-size: pick the largest size whose glyph run still fits.
         if (fontSize <= 0)
         {
-            var charCount = System.Math.Max(1, text.Length);
-            var widthCap = (w - 4) / (charCount * 0.5);
+            if (IsMultiline && text.Length > 0)
+            {
+                // Multiline auto-size: the value word-wraps inside the box, so the largest
+                // fitting size is the one whose wrapped lines each fit the inner width AND
+                // whose stacked line boxes fit the inner height.
+                fontSize = AutoFitMultilineSize(text, w, h, fontName);
+            }
+            else
+            {
+                // Single-line auto-size: the largest size whose run still fits the inner
+                // box, matching the standard viewer's variable-text fitting. Both axes carry
+                // a 3-unit inset. The width limit measures the run at its real per-glyph
+                // advances (DR /Widths → embedded hmtx → Core-14 AFM) with the small
+                // inter-glyph allowance the reference layout reserves; the height limit
+                // scales the inner height by a font factor that steps at 7pt (a metric
+                // detail reproduced so the fitted size lands on the reference value).
+                double textEm = 0;
+                foreach (char c in text) textEm += GetGlyphWidthEm(c, fontName);
+                if (textEm <= 0) textEm = System.Math.Max(1, text.Length) * 0.5;
+                var widthCap = (w - 3) / (textEm * 1.031);
+                var hInner = h - 3;
+                var heightCap = 0.82809 * hInner;
+                if (heightCap >= 7) heightCap = 0.811851 * hInner;
+                fontSize = System.Math.Max(4, System.Math.Min(widthCap, heightCap));
+            }
+        }
+        else if (TextBoxField.FitIntoRectangle && !IsMultiline && text.Length > 0)
+        {
+            // FitIntoRectangle: shrink the /DA size so the value fits the widget — measure
+            // the run at its real per-glyph advances (DR /Widths → embedded hmtx → system
+            // face) and cap to whichever of the inner width / height is binding. Never grow
+            // beyond the nominal /DA size.
+            double textEm = 0;
+            foreach (char c in text) textEm += GetGlyphWidthEm(c, fontName);
+            if (textEm <= 0) textEm = text.Length * 0.5;
+            var widthCap = (w - 4) / textEm;
             var heightCap = h * 0.83;
-            fontSize = System.Math.Max(4, System.Math.Min(widthCap, heightCap));
+            fontSize = System.Math.Max(4, System.Math.Min(fontSize, System.Math.Min(widthCap, heightCap)));
         }
 
         // Honour the global TextBoxField auto-fit clamps: when a
@@ -1429,44 +1702,71 @@ public class TextBoxField : Field
         if (TextBoxField.MinFontSize > 0) fontSize = System.Math.Max(fontSize, TextBoxField.MinFontSize);
         if (TextBoxField.MaxFontSize > 0) fontSize = System.Math.Min(fontSize, TextBoxField.MaxFontSize);
 
-        // Build the BT…ET body. Multiline fields lay the value out top-down,
-        // one line per visual line, with a fixed 1.2× line pitch; single-line
-        // fields vertical-centre the whole value on one baseline.
-        string textBody;
-        if (IsMultiline)
+        // Build the appearance content stream. Encode the text as Windows-1252 (WinAnsi)
+        // — the appearance font is declared with /WinAnsiEncoding — so "smart" code points
+        // (— • œ Ÿ … the 0x80-0x9F range) survive instead of being lost by Latin1, which
+        // can't represent them. WinAnsi agrees with Latin1 on ASCII and 0xA0-0xFF, so plain
+        // values are unaffected.
+        string content;
+        if (ForceCombs && MaxLen > 0 && !IsMultiline)
         {
-            var lines = text.Split('\n');
-            for (int li = 0; li < lines.Length; li++)
-                lines[li] = lines[li].TrimEnd('\r');
-
-            // Line pitch is 1.2× the font size (Acrobat default leading).
-            var lineHeight = fontSize * 1.2;
-            // First baseline measured from the top of the box: a full line box
-            // sits at the top, and the baseline lies the typographic descent
-            // above that line box's bottom edge. typoDescent is negative.
-            var typoDescentEm = ReadTypoDescentEm(fontName);
-            var firstY = h - lineHeight - typoDescentEm * fontSize;
-
-            var bt = new System.Text.StringBuilder();
-            bt.Append($"2 {Format(firstY)} Td\n");
-            for (int li = 0; li < lines.Length; li++)
-            {
-                if (li > 0) bt.Append($"0 {Format(-lineHeight)} Td\n");
-                var esc = lines[li].Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
-                bt.Append($"({esc}) Tj\n");
-            }
-            textBody = bt.ToString();
+            content = BuildCombAppearanceContent(text, w, h, fontName, fontSize);
         }
         else
         {
-            var escaped = text.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
-            textBody = $"2 {Format(h / 2 - fontSize * 0.3)} Td\n({escaped}) Tj\n";
-        }
+            // Multiline fields lay the value out top-down, one line per visual line, with a
+            // fixed 1.2× line pitch; single-line fields vertical-centre on one baseline.
+            string textBody;
+            if (IsMultiline)
+            {
+                // Word-wrap the value into the inner box width so long runs flow onto
+                // several visual lines (explicit '\n'/'\r' always breaks); each line is then
+                // trailing-trimmed (the run-end space before a break is dropped).
+                var lines = WrapMultilineText(text, fontName, fontSize, w - 4).ToArray();
+                for (int li = 0; li < lines.Length; li++)
+                    lines[li] = lines[li].TrimEnd();
 
-        // Build the appearance content stream
-        var content = $"/Tx BMC\nq\nBT\n/{fontName} {Format(fontSize)} Tf\n0 g\n" +
+                // Line pitch is 1.15× the font size — the leading Aspose.Pdf
+                // emits for multiline text-field appearances.
+                var lineHeight = fontSize * 1.15;
+                // First baseline measured from the top of the box: a full line box
+                // sits at the top, and the baseline lies the typographic descent
+                // above that line box's bottom edge. typoDescent is negative.
+                var typoDescentEm = ReadTypoDescentEm(fontName);
+                var firstY = h - lineHeight - typoDescentEm * fontSize;
+
+                var bt = new System.Text.StringBuilder();
+                bt.Append($"2 {Format(firstY)} Td\n");
+                for (int li = 0; li < lines.Length; li++)
+                {
+                    if (li > 0) bt.Append($"0 {Format(-lineHeight)} Td\n");
+                    var esc = lines[li].Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+                    bt.Append($"({esc}) Tj\n");
+                }
+                textBody = bt.ToString();
+            }
+            else
+            {
+                var escaped = text.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+                // Horizontal alignment from /Q (0=left, 1=centre, 2=right). Right/centre
+                // fields offset the baseline start by the measured run width.
+                double tx = 2;
+                int q = (int)Dict.GetInt("Q");
+                if (q is 1 or 2 && text.Length > 0)
+                {
+                    double textEm = 0;
+                    foreach (char c in text) textEm += GetGlyphWidthEm(c, fontName);
+                    double textWidth = textEm * fontSize;
+                    tx = q == 2 ? System.Math.Max(2, w - textWidth - 2)
+                               : System.Math.Max(2, (w - textWidth) / 2);
+                }
+                textBody = $"{Format(tx)} {Format(h / 2 - fontSize * 0.3)} Td\n({escaped}) Tj\n";
+            }
+
+            content = $"/Tx BMC\nq\nBT\n/{fontName} {Format(fontSize)} Tf\n{ExtractDaColor(da)}\n" +
                       textBody + "ET\nQ\nEMC\n";
-        var contentBytes = System.Text.Encoding.Latin1.GetBytes(content);
+        }
+        var contentBytes = Aspose.Pdf.Text.Cp1252.GetBytes(content);
 
         // Create the appearance stream
         var apStream = new PdfStream(new PdfDictionary(), contentBytes);
@@ -1512,6 +1812,386 @@ public class TextBoxField : Field
         Dict.Set("AP", newApDict);
     }
 
+    /// <summary>Resolve the field's effective /DA: its own, else the nearest /Parent that
+    /// carries one, else the AcroForm-level /DA. Returns null when no /DA exists anywhere
+    /// (the caller then applies a fixed default).</summary>
+    private string? ResolveInheritedDa()
+    {
+        if (Dict.Get("DA") is PdfString own) return own.ToText();
+        var node = Dict;
+        for (int guard = 0; guard < 32; guard++)
+        {
+            var parent = Reader.ResolveDict(node.Get("Parent"));
+            if (parent is null) break;
+            if (parent.Get("DA") is PdfString pda) return pda.ToText();
+            node = parent;
+        }
+        try
+        {
+            var acro = Reader.ResolveDict(Reader.Catalog.Get("AcroForm"));
+            if (acro?.Get("DA") is PdfString ada) return ada.ToText();
+        }
+        catch { /* no catalog/AcroForm — fall through */ }
+        return null;
+    }
+
+    /// <summary>Build the appearance content for a comb field (Ff bit 25): the value is
+    /// laid out one character per equal-width cell, matching Aspose.Pdf. The widget
+    /// is divided into <see cref="MaxLen"/> cells by vertical rules at full-width steps
+    /// (w/MaxLen); the glyphs are centred in inner cells stepped by (w-2)/MaxLen (the 1-unit
+    /// inset on each side). Each character is positioned with its own Td so the cell layout
+    /// is exact regardless of glyph widths.</summary>
+    private string BuildCombAppearanceContent(string text, double w, double h, string fontName, double fontSize)
+        => BuildCombAppearanceContent(text, w, h, fontName, fontSize, ResolveCombBorderRgb(Dict));
+
+    /// <summary>The widget's /MK /BC border colour as an RGB triple, or null when the field
+    /// has no border characteristic (then the comb appearance draws no border or dividers).</summary>
+    private double[]? ResolveCombBorderRgb(PdfDictionary? dict)
+    {
+        var mk = Reader.ResolveDict(dict?.Get("MK"));
+        if (mk is null || Reader.Resolve(mk.Get("BC")) is not PdfArray bc || bc.Count == 0) return null;
+        var c = new double[3];
+        for (int i = 0; i < 3; i++)
+        {
+            var v = i < bc.Count ? AsNumber(Reader.Resolve(bc[i])) : (i == 0 ? 0 : (double?)null);
+            c[i] = v ?? (bc.Count == 1 ? (AsNumber(Reader.Resolve(bc[0])) ?? 0) : 0);
+        }
+        return c;
+    }
+
+    /// <summary>Build a comb-field appearance (Ff bit 25): the value laid out one glyph per
+    /// equal-width cell, matching Aspose.Pdf's operator layout. A white background is
+    /// filled first; when <paramref name="borderRgb"/> is set the widget is stroked and divided
+    /// by vertical comb rules. Inside the /Tx marked content the box is re-filled, optionally
+    /// re-bordered, clipped to the inner rect, and each glyph is centred in its cell — the
+    /// inter-glyph Td is the inner cell width adjusted by half the advance difference of the two
+    /// glyphs it spans, so a centred glyph run reproduces the reference advances exactly (for an
+    /// equal-width run, e.g. digits, the adjustment is zero and the step is constant).</summary>
+    private string BuildCombAppearanceContent(string text, double w, double h, string fontName,
+        double fontSize, double[]? borderRgb)
+    {
+        int maxLen = MaxLen;
+        if (maxLen <= 0) maxLen = System.Math.Max(1, text.Length);
+        if (text.Length > maxLen) text = text.Substring(0, maxLen);
+
+        double dividerStep = w / maxLen;        // full-width cells → divider rules
+        double cellStep = (w - 2) / maxLen;     // inner cells (1-unit inset) → glyph stepping
+        double inset = 1;
+        bool bordered = borderRgb is not null;
+        string GrayOrRgb(string op) => borderRgb is null ? "" :
+            (borderRgb[0] == borderRgb[1] && borderRgb[1] == borderRgb[2]
+                ? $"{Format(borderRgb[0])} {op.ToUpperInvariant()[0]}"            // gray shortcut
+                : $"{Format(borderRgb[0])} {Format(borderRgb[1])} {Format(borderRgb[2])} {op}");
+
+        var sb = new System.Text.StringBuilder();
+        // White background fill (DeviceGray), full widget rect.
+        sb.Append("1 g\n");
+        sb.Append($"0 0 {Format(w)} {Format(h)} re\n");
+        sb.Append("f\n");
+        if (bordered)
+        {
+            // Outer border + comb divider rules (stroked, outside the marked content).
+            sb.Append($"{GrayOrRgb("G")}\n");
+            sb.Append($"0.5 0.5 {Format(w - 1)} {Format(h - 1)} re\n");
+            sb.Append("s\n");
+            for (int k = 1; k < maxLen; k++)
+            {
+                double x = k * dividerStep;
+                sb.Append($"{Format(x)} {Format(h - 1)} m\n");
+                sb.Append($"{Format(x)} 0.5 l\n");
+            }
+            sb.Append("s\n");
+        }
+
+        // Marked-content text: re-fill the box white, optionally re-border, clip to the inner
+        // box, then centre each glyph in its cell.
+        sb.Append("/Tx BMC\nq\nq\n");
+        sb.Append("1 1 1 rg\n");
+        sb.Append($"0 0 {Format(w)} {Format(h)} re\n");
+        sb.Append("f\n");
+        if (bordered)
+        {
+            sb.Append("q\n");
+            sb.Append($"{GrayOrRgb("RG")}\n");
+            sb.Append($"0.5 0.5 {Format(w - 1)} {Format(h - 1)} re\n");
+            sb.Append("1 w\n");
+            sb.Append("s\n");
+            sb.Append("Q\n");
+        }
+        sb.Append("Q\n");
+        sb.Append($"1 1 {Format(w - 2)} {Format(h - 2)} re\nW\nn\n");
+        sb.Append("BT\n");
+        sb.Append("0 0 0 rg\n");
+        sb.Append($"/{fontName} {Format(fontSize)} Tf\n");
+        double baselineY = h / 2 - fontSize * 0.3;
+        // Comb alignment (/Q): a right/centre-justified comb packs the value into the
+        // trailing cells, so the first glyph starts `startCell` cells in.
+        int startCell = 0;
+        int q = (int)Dict.GetInt("Q");
+        if (q == 2) startCell = System.Math.Max(0, maxLen - text.Length);
+        else if (q == 1) startCell = System.Math.Max(0, (maxLen - text.Length) / 2);
+
+        if (text.Length > 0)
+        {
+            double w0 = GetGlyphWidthEm(text[0], fontName) * fontSize;
+            // Baseline Td starts at the alignment column (0 for left); the following
+            // two Tds apply the fixed inset and the intra-cell centring offset. For a
+            // left comb startCell is 0, so this is byte-identical to the prior output.
+            sb.Append($"{Format(startCell * cellStep)} {Format(baselineY)} Td\n");
+            sb.Append($"{Format(inset)} 0 Td\n");
+            sb.Append($"{Format((cellStep - w0) / 2 - inset)} 0 Td\n");
+            sb.Append($"({EscapePdf(text[0].ToString())}) Tj\n");
+            // Subsequent glyphs: one inner-cell width plus the half-difference of the two
+            // glyphs' advances (centres each glyph in its own cell).
+            for (int k = 1; k < text.Length; k++)
+            {
+                double wPrev = GetGlyphWidthEm(text[k - 1], fontName) * fontSize;
+                double wCur = GetGlyphWidthEm(text[k], fontName) * fontSize;
+                sb.Append($"{Format(cellStep + (wPrev - wCur) / 2)} 0 Td\n");
+                sb.Append($"({EscapePdf(text[k].ToString())}) Tj\n");
+            }
+        }
+        else
+        {
+            sb.Append($"0 {Format(baselineY)} Td\n");
+        }
+        sb.Append("ET\nQ\nEMC\n");
+        return sb.ToString();
+    }
+
+    private static string EscapePdf(string s)
+        => s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+
+    /// <summary>Sum of per-glyph advances of <paramref name="run"/> as a fraction of the em.</summary>
+    private double MeasureRunEm(string run, string fontName)
+    {
+        double em = 0;
+        foreach (char c in run) em += GetGlyphWidthEm(c, fontName);
+        return em;
+    }
+
+    /// <summary>Greedy word-wrap of a multiline field value into lines no wider than
+    /// <paramref name="availWidth"/> at <paramref name="fontSize"/>. Explicit newlines always
+    /// break; a single word wider than the box is left on its own (overflowing) line.</summary>
+    private System.Collections.Generic.List<string> WrapMultilineText(
+        string text, string fontName, double fontSize, double availWidth)
+    {
+        var lines = new System.Collections.Generic.List<string>();
+        double spaceW = GetGlyphWidthEm(' ', fontName) * fontSize;
+        // Normalise every hard line break to '\n' first: a field value may separate lines
+        // with '\r' or '\r\n' (the PDF form convention, e.g. FillField) as well as '\n'.
+        var normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        foreach (var para in normalized.Split('\n'))
+        {
+            // A paragraph that already fits is kept verbatim — preserving its exact spacing
+            // (leading/inner spaces) — so only genuine overflow is re-flowed by word-wrap.
+            if (MeasureRunEm(para, fontName) * fontSize <= availWidth) { lines.Add(para); continue; }
+
+            var words = para.Split(' ');
+            var cur = new System.Text.StringBuilder();
+            double curW = 0;
+            foreach (var word in words)
+            {
+                double wordW = MeasureRunEm(word, fontName) * fontSize;
+                if (cur.Length == 0) { cur.Append(word); curW = wordW; }
+                else if (curW + spaceW + wordW <= availWidth) { cur.Append(' ').Append(word); curW += spaceW + wordW; }
+                else { lines.Add(cur.ToString()); cur.Clear(); cur.Append(word); curW = wordW; }
+            }
+            lines.Add(cur.ToString());
+        }
+        return lines;
+    }
+
+    /// <summary>Auto-size font for a multiline text field (matching Aspose.Pdf):
+    /// <c>Tf = min(cap, (h - inset) / (N · 1.14 · L))</c> where <c>N</c> is the number of
+    /// display lines after word-wrap, <c>L</c> is the font's line-height factor (the
+    /// FontBBox height ÷ 1000 read from the embedded AcroForm /DR descriptor when the font
+    /// is embedded, else a 1.20 default), and <c>cap</c> is 12 for a value with ≥ 2 hard
+    /// lines or the single-line ceiling 1525/128 (≈ 11.914) for a single hard line. Width
+    /// never caps the size directly — it only matters by forcing wraps that raise N.</summary>
+    private double AutoFitMultilineSize(string text, double w, double h, string fontName)
+    {
+        double availW = w - 4;
+        const double inset = 2;
+        double L = GetFontLineHeightEm(fontName);
+        double perLine = 1.14 * L;
+
+        // Hard-line count picks the cap; a single hard line uses the 1525/128 ceiling even
+        // when it soft-wraps onto several display lines.
+        int hardLines = 1;
+        var normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        foreach (var ch in normalized) if (ch == '\n') hardLines++;
+        double cap = hardLines >= 2 ? 12.0 : 1525.0 / 128.0;
+
+        // The display-line count N(s) grows as s grows (more soft-wraps), so N(s)·perLine·s
+        // is monotonic in s: search downward from the cap for the largest size whose wrapped
+        // lines still fit the inner height. For a value that never wraps (N = hard lines) this
+        // yields the closed form (h − inset)/(N·perLine); for a wrapping value it stops at the
+        // largest self-consistent size (a fixed-point iteration can converge to a non-maximal
+        // size, so a monotone search is used instead).
+        double budget = h - inset;
+        for (double s = cap; s >= 4; s -= 0.02)
+        {
+            int n = System.Math.Max(1, WrapMultilineText(text, fontName, s, availW).Count);
+            if (n * perLine * s <= budget)
+                return s;
+        }
+        return 4;
+    }
+
+    /// <summary>The font's line-height factor <c>L</c> (rendered line pitch ÷ font size): the
+    /// FontBBox height ÷ 1000 from the embedded /DR font descriptor when available, else a
+    /// 1.20 default (the value the reference uses for a freshly-named/system font).</summary>
+    private double GetFontLineHeightEm(string fontName)
+    {
+        if (GetFontBBoxHeightEmFromDR(fontName) is { } bbox && bbox > 0) return bbox;
+        return 1.20;
+    }
+
+    /// <summary>FontBBox height (yMax − yMin) ÷ 1000 read from the AcroForm
+    /// /DR/Font/&lt;name&gt;/FontDescriptor/FontBBox, or null when the named font has no
+    /// embedded descriptor (e.g. a fresh standard font not yet embedded).</summary>
+    private double? GetFontBBoxHeightEmFromDR(string fontName)
+    {
+        PdfDictionary? acro;
+        try { acro = Reader.ResolveDict(Reader.Catalog.Get("AcroForm")); }
+        catch { return null; }
+        var dr = acro is null ? null : Reader.ResolveDict(acro.Get("DR"));
+        var fonts = dr is null ? null : Reader.ResolveDict(dr.Get("Font"));
+        var font = fonts is null ? null : Reader.ResolveDict(fonts.Get(fontName));
+        var fd = font is null ? null : Reader.ResolveDict(font.Get("FontDescriptor"));
+        if (fd is null) return null;
+        if (Reader.Resolve(fd.Get("FontBBox")) is not PdfArray bbox || bbox.Count < 4) return null;
+        double y0 = ArrayNum(bbox[1]), y1 = ArrayNum(bbox[3]);
+        double hgt = (y1 - y0) / 1000.0;
+        return hgt > 0 ? hgt : null;
+    }
+
+    private static double ArrayNum(PdfObject o) => o switch
+    {
+        PdfReal r => r.Value,
+        PdfInteger n => n.Value,
+        _ => 0.0,
+    };
+
+    /// <summary>Advance width of a character as a fraction of the em, read from the field's
+    /// /DA font: first the PDF-level /Widths on the AcroForm /DR font dict (the authoritative
+    /// widths for the named comb font), then the embedded /DA font (hmtx), then the Core-14
+    /// AFM widths for a standard font name, then the named system face, else ~0.5.</summary>
+    private double GetGlyphWidthEm(char c, string fontName)
+    {
+        if (GetGlyphWidthFromDR(fontName, c) is { } drw) return drw;
+        var ttf = DefaultAppearance?.EmbeddedFont?.SourceFontData?.TtfData;
+        if (ttf is { Length: > 0 })
+        {
+            var (_, _, _, widths) = Aspose.Pdf.Text.FontRepository.ReadTtfMetrics(ttf);
+            if (c < 256 && widths[c] > 0) return widths[c] / 1000.0;
+        }
+        // Core-14 AFM widths (Helv/Helvetica/Arial, TiRo/Times, Cour/Courier, …) — the
+        // authoritative metrics for a non-embedded standard font named in /DA.
+        var std = Aspose.Pdf.Text.Standard14Fonts.GetWidth(NormalizeStdFontName(fontName), c);
+        if (std > 0) return std / 1000.0;
+        var resolved = Aspose.Pdf.Text.SystemFontResolver.Resolve(fontName);
+        if (resolved is { Length: > 0 })
+        {
+            var (_, _, _, widths) = Aspose.Pdf.Text.FontRepository.ReadTtfMetrics(resolved);
+            if (c < 256 && widths[c] > 0) return widths[c] / 1000.0;
+        }
+        return 0.5;
+    }
+
+    /// <summary>Map the abbreviated AcroForm /DA font names to their Core-14 base names so
+    /// the AFM width tables resolve (Helv→Helvetica, TiRo→Times-Roman, Cour→Courier, …).</summary>
+    private static string NormalizeStdFontName(string fontName) => fontName switch
+    {
+        "Helv" => "Helvetica",
+        "HeBO" => "Helvetica-BoldOblique",
+        "HeBo" => "Helvetica-Bold",
+        "HeOb" => "Helvetica-Oblique",
+        "TiRo" => "Times-Roman",
+        "TiBo" => "Times-Bold",
+        "TiIt" => "Times-Italic",
+        "TiBI" => "Times-BoldItalic",
+        "Cour" => "Courier",
+        _ => fontName,
+    };
+
+    /// <summary>Read a simple font's PDF /Widths entry for a character from the AcroForm
+    /// /DR /Font dictionary (the default-resources font named by /DA). Returns the advance
+    /// as an em fraction, or null when the font is absent / composite / has no usable entry.</summary>
+    private double? GetGlyphWidthFromDR(string fontName, char c)
+    {
+        PdfDictionary? acro;
+        try { acro = Reader.ResolveDict(Reader.Catalog.Get("AcroForm")); }
+        catch { return null; }
+        var dr = acro is null ? null : Reader.ResolveDict(acro.Get("DR"));
+        var fonts = dr is null ? null : Reader.ResolveDict(dr.Get("Font"));
+        var font = fonts is null ? null : Reader.ResolveDict(fonts.Get(fontName));
+        if (font is null) return null;
+        if (font.GetName("Subtype") == "Type0") return null; // composite widths not handled here
+        int first = (int)font.GetInt("FirstChar");
+        if (Reader.Resolve(font.Get("Widths")) is not PdfArray warr) return null;
+        int idx = c - first;
+        if (idx < 0 || idx >= warr.Count) return null;
+        double wv = warr[idx] switch { PdfReal r => r.Value, PdfInteger n => n.Value, _ => 0.0 };
+        return wv > 0 ? wv / 1000.0 : null;
+    }
+
+    /// <summary>The colour-set operator (<c>r g b rg</c> / <c>g g</c> / <c>c m y k k</c>) parsed
+    /// out of a /DA string, so the appearance paints the field's configured text colour rather
+    /// than always black. Falls back to <paramref name="fallback"/> when /DA carries no colour.</summary>
+    /// <summary>Build a value /AP dict for an extra widget rect of size w×h, rendering
+    /// the field's current single-line value (used by multi-widget construction).</summary>
+    internal override PdfDictionary? BuildWidgetApDict(double w, double h) => BuildWidgetApDict(w, h, null);
+
+    /// <summary>As <see cref="BuildWidgetApDict(double,double)"/> but driven by a specific
+    /// widget's own /DA (font, size and colour) when <paramref name="widgetDict"/> is supplied —
+    /// so a multi-widget field renders each widget in its configured appearance.</summary>
+    internal PdfDictionary? BuildWidgetApDict(double w, double h, PdfDictionary? widgetDict)
+    {
+        var text = FieldFormatScript.Apply(Dict, Reader, Value ?? string.Empty);
+
+        var daSrc = (widgetDict?.Get("DA") as PdfString) ?? (Dict.Get("DA") as PdfString);
+        var da = daSrc is not null ? daSrc.ToText() : "/Helv 12 Tf 0 g";
+        string fontName = "Helv";
+        double fontSize = 12;
+        var daParts = da.Split(' ', System.StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < daParts.Length; i++)
+            if (daParts[i] == "Tf" && i >= 2)
+            {
+                fontName = daParts[i - 2].TrimStart('/');
+                double.TryParse(daParts[i - 1], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out fontSize);
+            }
+        if (fontSize <= 0)
+            fontSize = System.Math.Max(4, System.Math.Min((w - 4) / (System.Math.Max(1, text.Length) * 0.5), h * 0.83));
+
+        string content;
+        if (ForceCombs && MaxLen > 0 && !IsMultiline)
+        {
+            // Comb widget: lay the value out one glyph per cell, taking the border colour
+            // from this widget's own /MK /BC (a per-widget characteristic).
+            content = BuildCombAppearanceContent(text, w, h, fontName, fontSize,
+                ResolveCombBorderRgb(widgetDict ?? Dict));
+        }
+        else
+        {
+            var escaped = text.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+            content = $"/Tx BMC\nq\nBT\n/{fontName} {Format(fontSize)} Tf\n{ExtractDaColor(da)}\n2 {Format(h / 2 - fontSize * 0.3)} Td\n({escaped}) Tj\nET\nQ\nEMC\n";
+        }
+        var apStream = new PdfStream(new PdfDictionary(), Aspose.Pdf.Text.Cp1252.GetBytes(content));
+        apStream.Dict.Set("Type", new PdfName("XObject"));
+        apStream.Dict.Set("Subtype", new PdfName("Form"));
+        var bbox = new PdfArray();
+        bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(w)); bbox.Add(new PdfReal(h));
+        apStream.Dict.Set("BBox", bbox);
+        apStream.Dict.Set("Resources", BuildTextAppearanceResources(fontName, null));
+
+        var apDict = new PdfDictionary();
+        apDict.Set("N", apStream);
+        return apDict;
+    }
+
     /// <summary>Build the appearance for the current value when none exists yet,
     /// so a freshly-added text field renders its (possibly empty) value box.</summary>
     internal override void GenerateAppearance()
@@ -1521,7 +2201,7 @@ public class TextBoxField : Field
         RegenerateAppearance(displayValue);
     }
 
-    private static string Format(double v) =>
+    private protected static string Format(double v) =>
         v.ToString("G", System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>Resolve the typographic descender (signed em ratio) used to place
@@ -1571,7 +2251,7 @@ public class TextBoxField : Field
 
     /// <summary>Multi-widget text field — first rectangle is used for the widget
     /// dictionary; additional rectangles are stored on /Kids for visual parity
-    /// with the Aspose.PDF for .NET multi-widget contract.</summary>
+    /// with the Aspose.Pdf multi-widget contract.</summary>
     public TextBoxField(Page page, Rectangle[] rects)
         : base(BuildTextFieldDict(rects is { Length: > 0 } ? rects[0] : new Rectangle(0, 0, 0, 0)),
                page.Reader)
@@ -1700,7 +2380,15 @@ public class TextBoxField : Field
     /// <summary>The text value stored in /V.</summary>
     public override string? Value
     {
-        get => Dict.Get("V") is PdfString s ? s.ToText() : null;
+        get
+        {
+            // Auto-calculate: a field with an /AA/C calculate action reports its
+            // recomputed value (Acrobat auto-calculates on read).
+            if (Dict.Get("AA") is not null
+                && FieldCalculateScript.ComputeValue(Dict, Reader) is { } computed)
+                return computed;
+            return Dict.Get("V") is PdfString s ? s.ToText() : null;
+        }
         set => SetValue(value);
     }
 
@@ -1717,7 +2405,7 @@ public class TextBoxField : Field
 /// <summary>
 /// A Tx form field that carries the rich-text flag (bit 26 of /Ff). Stores rich-text
 /// content via /RV and exposes <see cref="Value"/> as the plain-text representation
-/// from /V. Mirrors the public Aspose.PDF for .NET type.
+/// from /V. Mirrors the public Aspose.Pdf type.
 /// </summary>
 public sealed class RichTextBoxField : TextBoxField
 {
@@ -1730,11 +2418,161 @@ public sealed class RichTextBoxField : TextBoxField
         Dict.Set("Ff", new PdfInteger(FieldFlags | (1 << 25)));
     }
 
-    /// <summary>The rich-text representation of the field value (PDF /RV entry).</summary>
+    /// <summary>The rich-text representation of the field value (PDF /RV entry). Setting it also
+    /// derives the plain-text /V and regenerates the /AP: the XHTML runs (bold spans, <c>&lt;br/&gt;</c>
+    /// line breaks) are laid out with a font per style (regular vs bold) so the appearance shows the
+    /// styled text.</summary>
     public string? RichTextValue
     {
         get => Dict.Get("RV") is PdfString s ? s.ToText() : null;
-        set => Dict.Set("RV", value is null ? null! : new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+        set
+        {
+            Dict.Set("RV", value is null ? null! : new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            if (!string.IsNullOrEmpty(value)) ApplyRichText(value!);
+        }
+    }
+
+    /// <summary>One styled run of the rich text: a piece of literal text (with its bold flag)
+    /// or a hard line break.</summary>
+    private sealed class RtRun { public string Text = ""; public bool Bold; public bool Break; }
+
+    /// <summary>Parse the /RV XHTML, set the plain-text /V, and regenerate the /AP so the styled
+    /// runs render with a regular / bold font and honour <c>&lt;br/&gt;</c> breaks.</summary>
+    private void ApplyRichText(string rv)
+    {
+        var runs = new System.Collections.Generic.List<RtRun>();
+        string family = "Arial";
+        double size = 12;
+        try
+        {
+            // Tolerate HTML-style void tags (<br>, <hr>) that aren't well-formed XML by
+            // self-closing them before parsing — Acrobat/Aspose accept them in /RV.
+            var xml = System.Text.RegularExpressions.Regex.Replace(
+                rv, @"<(br|hr)(\s[^>/]*)?>", "<$1$2/>",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var xdoc = System.Xml.Linq.XDocument.Parse(xml);
+            System.Xml.Linq.XElement? p = null;
+            foreach (var e in xdoc.Descendants())
+                if (e.Name.LocalName == "p") { p = e; break; }
+            p ??= xdoc.Root;
+            if (p is not null)
+            {
+                var style = (string?)p.Attribute("style") ?? "";
+                var fm = System.Text.RegularExpressions.Regex.Match(style, @"font-family:\s*'?([^;']+)'?");
+                if (fm.Success) family = fm.Groups[1].Value.Trim();
+                var sm = System.Text.RegularExpressions.Regex.Match(style, @"font-size:\s*([\d.]+)\s*pt");
+                if (sm.Success) double.TryParse(sm.Groups[1].Value,
+                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out size);
+                WalkRichText(p, false, runs);
+            }
+        }
+        catch { return; } // malformed /RV — leave the field value/appearance untouched
+
+        var plain = new System.Text.StringBuilder();
+        foreach (var r in runs) plain.Append(r.Break ? "\n" : r.Text);
+        Dict.Set("V", new PdfString(System.Text.Encoding.UTF8.GetBytes(plain.ToString())));
+
+        RegenerateRichAppearance(runs, family, size <= 0 ? 12 : size);
+    }
+
+    /// <summary>Recursively collect styled text runs: a bold-weighted <c>&lt;span&gt;</c> marks its
+    /// content bold; <c>&lt;br/&gt;</c> is a line break; other decorations (e.g. underline) don't
+    /// change the font, so their text merges with the surrounding run.</summary>
+    private static void WalkRichText(System.Xml.Linq.XElement el, bool bold, System.Collections.Generic.List<RtRun> runs)
+    {
+        foreach (var node in el.Nodes())
+        {
+            if (node is System.Xml.Linq.XText t)
+                runs.Add(new RtRun { Text = t.Value, Bold = bold });
+            else if (node is System.Xml.Linq.XElement ce)
+            {
+                if (ce.Name.LocalName == "br") { runs.Add(new RtRun { Break = true }); continue; }
+                var childBold = bold
+                    || ((string?)ce.Attribute("style") ?? "").Replace(" ", "").Contains("font-weight:bold");
+                WalkRichText(ce, childBold, runs);
+            }
+        }
+    }
+
+    /// <summary>Build the /AP/N stream for a list of styled runs: a regular and a bold font resource
+    /// (only those actually used), one <c>Tf</c> per font change (so consecutive same-font runs merge
+    /// into a single fragment), and a negative-Y <c>Td</c> for each line break.</summary>
+    private void RegenerateRichAppearance(System.Collections.Generic.List<RtRun> runs, string family, double size)
+    {
+        var rectArr = Reader.Resolve(Dict.Get("Rect")) as PdfArray;
+        double w = 100, h = 20;
+        if (rectArr is { Count: >= 4 })
+        {
+            var r = Rectangle.FromPdfArray(rectArr);
+            w = r.URX - r.LLX; h = r.URY - r.LLY;
+        }
+
+        const string regRes = "FR", boldRes = "FB";
+        var lineHeight = size * 1.15;
+        var firstY = h - lineHeight + 0.207 * size;
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append("/Tx BMC\nq\nBT\n0 0 0 rg\n");
+        sb.Append($"2 {Format(firstY)} Td\n");
+        string? curFont = null;
+        bool usedReg = false, usedBold = false;
+        foreach (var run in runs)
+        {
+            if (run.Break) { sb.Append($"0 {Format(-lineHeight)} Td\n"); continue; }
+            if (run.Text.Length == 0) continue;
+            var res = run.Bold ? boldRes : regRes;
+            if (res != curFont) { sb.Append($"/{res} {Format(size)} Tf\n"); curFont = res; }
+            if (run.Bold) usedBold = true; else usedReg = true;
+            var esc = run.Text.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+            sb.Append($"({esc}) Tj\n");
+        }
+        sb.Append("ET\nQ\nEMC\n");
+
+        var apStream = new PdfStream(new PdfDictionary(), Aspose.Pdf.Text.Cp1252.GetBytes(sb.ToString()));
+        apStream.Dict.Set("Type", new PdfName("XObject"));
+        apStream.Dict.Set("Subtype", new PdfName("Form"));
+        var bbox = new PdfArray();
+        bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(w)); bbox.Add(new PdfReal(h));
+        apStream.Dict.Set("BBox", bbox);
+
+        var fonts = new PdfDictionary();
+        if (usedReg) fonts.Set(regRes, MakeRichFont(family));
+        // The styled variant's name carries a style comma ("Arial,Bold"). A BARE
+        // /BaseFont's comma is a separator that FontInfo.FontName normalises away
+        // ("ArialBold"), while a subset-tagged one is genuine and kept verbatim —
+        // readers must report the styled family exactly, so tag the styled variant
+        // (matches Aspose.Pdf, whose rich-text /AP reports "Arial,Bold").
+        if (usedBold) fonts.Set(boldRes, MakeRichFont(RichSubsetTag() + "+" + family + ",Bold"));
+        var res2 = new PdfDictionary();
+        res2.Set("Font", fonts);
+        apStream.Dict.Set("Resources", res2);
+
+        var newAp = new PdfDictionary();
+        newAp.Set("N", apStream);
+        Dict.Set("AP", newAp);
+    }
+
+    /// <summary>6-uppercase-letter subset tag (PDF 32000 §9.6.4) for the styled rich-text
+    /// appearance font.</summary>
+    private static string RichSubsetTag()
+    {
+        var random = new System.Random();
+        var chars = new char[6];
+        for (int i = 0; i < 6; i++)
+            chars[i] = (char)('A' + random.Next(26));
+        return new string(chars);
+    }
+
+    /// <summary>A Type1 appearance font whose /BaseFont is the given name verbatim (e.g. "Arial"
+    /// or "Arial,Bold") so a reader reports that exact family/style.</summary>
+    private static PdfDictionary MakeRichFont(string baseFont)
+    {
+        var f = new PdfDictionary();
+        f.Set("Type", new PdfName("Font"));
+        f.Set("Subtype", new PdfName("Type1"));
+        f.Set("BaseFont", new PdfName(baseFont));
+        f.Set("Encoding", new PdfName("WinAnsiEncoding"));
+        return f;
     }
 
     /// <summary>The formatted (rich-text) representation; alias for <see cref="RichTextValue"/>.</summary>
@@ -1751,8 +2589,37 @@ public sealed class RichTextBoxField : TextBoxField
         set => Dict.Set("V", new PdfString(System.Text.Encoding.UTF8.GetBytes(value ?? string.Empty)));
     }
 
-    /// <summary>CSS-style style string applied to the rich-text fragments. Stored only.</summary>
-    public string Style { get; set; } = string.Empty;
+    private string _style = string.Empty;
+
+    /// <summary>CSS-style style string applied to the rich-text fragments — e.g.
+    /// <c>font: 'Tahoma' bold 10pt</c>. Setting it updates the field's /DA (font family, size and
+    /// bold/italic style) so the generated appearance uses the requested font instead of the
+    /// default.</summary>
+    public string Style
+    {
+        get => _style;
+        set { _style = value ?? string.Empty; ApplyStyleToDefaultAppearance(_style); }
+    }
+
+    /// <summary>Parse a <c>font: 'Family' [bold] [italic] Npt</c> style and write the matching /DA
+    /// (font + size). The font family may contain spaces; it is resolved to a face name the
+    /// appearance generator can both render and re-resolve.</summary>
+    private void ApplyStyleToDefaultAppearance(string style)
+    {
+        if (string.IsNullOrEmpty(style)) return;
+        var m = System.Text.RegularExpressions.Regex.Match(style,
+            @"font\s*:\s*'([^']*)'(.*?)([\d.]+)\s*pt",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!m.Success) return;
+        var family = m.Groups[1].Value.Trim();
+        var modifiers = m.Groups[2].Value.ToLowerInvariant();
+        if (!double.TryParse(m.Groups[3].Value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var size) || size <= 0)
+            return;
+        _ = modifiers; // bold/italic affect glyph shape, not the asserted line geometry
+        DefaultAppearance = new Aspose.Pdf.Annotations.DefaultAppearance(family, (float)size,
+            System.Drawing.Color.Black);
+    }
 
     /// <summary>Text justification.</summary>
     public Aspose.Pdf.Annotations.Justification Justify { get; set; } = Aspose.Pdf.Annotations.Justification.Left;
@@ -1868,9 +2735,13 @@ public class CheckboxField : Field
         var sb = new System.Text.StringBuilder();
         // Wrap in q/Q so the drawing is graphics-state isolated; the trailing Q
         // is the final operator, with the glyph strokes just before it.
-        sb.Append("q ");
-        // White interior + black border box (a plain check box, not a grey button).
-        sb.Append($"1 w 1 1 1 rg 0 0 {Fmt(w)} {Fmt(h)} re f ");
+        sb.Append("q 1 w ");
+        // Interior fill only when the widget declares a background colour (/MK /BG);
+        // a checkbox with no background stays transparent (an explicit empty
+        // background must not paint a fill). The black border is always stroked.
+        var mkDict = Reader.ResolveDict(Dict.Get("MK"));
+        if (mkDict is not null && MkColorOperator(mkDict.Get("BG"), fill: true) is { } bgFill)
+            sb.Append($"{bgFill} 0 0 {Fmt(w)} {Fmt(h)} re f ");
         sb.Append($"0 0 0 RG 0 0 {Fmt(w)} {Fmt(h)} re S ");
         if (drawGlyph)
         {
@@ -1908,11 +2779,64 @@ public class CheckboxField : Field
         get => OnValue;
         set
         {
-            // Setter wires /AP/N/{value} as a clone of the existing /AP/N/{OnValue}
-            // entry; left as a stored-only no-op here because the FOSS appearance
-            // generator doesn't currently honour custom export values at write.
-            _ = value;
+            // Renaming the export value re-keys the widget's /AP/N (and /AP/D) on-state
+            // entry from the current on-value to the requested value, and updates /AS and
+            // /V where they referenced the old name, so the new export value survives save.
+            if (string.IsNullOrEmpty(value)) return;
+            var oldOn = OnValue;
+            if (value == oldOn) return;
+            if (HasWidgetKids)
+                foreach (var kid in AllKids()) RenameOnState(kid, oldOn, value);
+            else
+            {
+                RenameOnState(Dict, oldOn, value);
+                // A checkbox constructed without an /AP yet (export value set before the appearance
+                // is generated) has no on-state to rename — establish one so the value is recorded.
+                EnsureCheckboxOnState(Dict, value);
+            }
+            if (Dict.GetName("V") == oldOn) Dict.Set("V", new PdfName(value));
+            if (Dict.GetName("AS") == oldOn) Dict.Set("AS", new PdfName(value));
+            MarkCheckboxDirty();
         }
+    }
+
+    /// <summary>Re-key a widget's non-"Off" appearance state from <paramref name="oldOn"/>
+    /// to <paramref name="newOn"/> across /AP/N and /AP/D, and follow it in the widget /AS.</summary>
+    private bool RenameOnState(PdfDictionary widget, string oldOn, string newOn)
+    {
+        var ap = Reader.ResolveDict(widget.Get("AP"));
+        if (ap is null) return false;
+        bool renamed = false;
+        foreach (var apKey in new[] { "N", "D" })
+        {
+            if (Reader.Resolve(ap.Get(apKey)) is not PdfDictionary states) continue;
+            string? key = null;
+            foreach (var k in states.Keys) if (k != "Off") { key = k; break; }
+            if (key is null || key == newOn) continue;
+            var stream = states.Get(key);
+            if (stream is null) continue;
+            states.Remove(key);
+            states.Set(newOn, stream);
+            renamed = true;
+        }
+        if (widget.GetName("AS") is { } asName && asName != "Off")
+            widget.Set("AS", new PdfName(newOn));
+        return renamed;
+    }
+
+    /// <summary>Ensure <paramref name="widget"/> declares an /AP/N on-state named
+    /// <paramref name="onValue"/> (plus "Off") when it has no on-state yet. No-op when the widget
+    /// already carries some non-"Off" on-state (that case is handled by renaming).</summary>
+    private void EnsureCheckboxOnState(PdfDictionary widget, string onValue)
+    {
+        var ap = Reader.ResolveDict(widget.Get("AP"));
+        if (ap is null) { ap = new PdfDictionary(); widget.Set("AP", ap); }
+        var n = Reader.ResolveDict(ap.Get("N"));
+        if (n is null) { n = new PdfDictionary(); ap.Set("N", n); }
+        bool hasOn = false;
+        foreach (var k in n.Keys) if (k != "Off") { hasOn = true; break; }
+        if (!hasOn) n.Set(onValue, new PdfDictionary());
+        if (!n.ContainsKey("Off")) n.Set("Off", new PdfDictionary());
     }
 
     /// <summary>True when this checkbox is a grouped field with explicit widget
@@ -2005,6 +2929,24 @@ public class CheckboxField : Field
         get
         {
             var result = new System.Collections.Generic.List<string>();
+            // Grouped checkbox: aggregate "Off" plus each on-state. When the field dict is
+            // itself a visual widget (its own /Rect + /AP/N on-state) alongside the kid widgets,
+            // its on-state is an allowed state too — include it, not just the kids'.
+            if (HasWidgetKids)
+            {
+                result.Add("Off");
+                if (Dict.ContainsKey("Rect"))
+                {
+                    var selfOn = KidOnValue(Dict);
+                    if (selfOn is not null && !result.Contains(selfOn)) result.Add(selfOn);
+                }
+                foreach (var kid in AllKids())
+                {
+                    var ov = KidOnValue(kid);
+                    if (ov is not null && !result.Contains(ov)) result.Add(ov);
+                }
+                return result;
+            }
             var ap = Reader.ResolveDict(Dict.Get("AP"));
             var n = ap is null ? null : Reader.ResolveDict(ap.Get("N"));
             if (n is not null) foreach (var k in n.Keys) result.Add(k);
@@ -2063,14 +3005,63 @@ public class CheckboxField : Field
     /// state on this checkbox (used for grouped checkboxes
     /// that behave like radio buttons). Stored only; FOSS treats every
     /// checkbox as a single-state Yes/Off toggle.</summary>
-    public void AddOption(string optionName) { _ = optionName; }
+    public void AddOption(string optionName) => AddOption(optionName, new Rectangle(0, 0, 0, 0));
 
-    /// <summary>Append an option with an explicit widget rectangle.</summary>
-    public void AddOption(string optionName, Rectangle rect) { _ = optionName; _ = rect; }
+    /// <summary>Append an option with an explicit widget rectangle. Turns a single
+    /// checkbox into a grouped one (radio-style): the new option becomes a kid widget
+    /// carrying its own /AP/N {optionName, Off} state, so the value is selectable and
+    /// <see cref="AllowedStates"/> reports it.</summary>
+    public void AddOption(string optionName, Rectangle rect)
+    {
+        if (string.IsNullOrEmpty(optionName)) return;
+
+        var kid = new PdfDictionary();
+        kid.Set("Type", new PdfName("Annot"));
+        kid.Set("Subtype", new PdfName("Widget"));
+        kid.Set("Rect", MakeRectArray(rect));
+        kid.Set("AS", new PdfName("Off"));
+        kid.Set("F", new PdfInteger(4));
+        kid.Set("Parent", Dict);
+
+        var ap = new PdfDictionary();
+        if (rect.Width > 0 && rect.Height > 0)
+        {
+            // Draw a real check-glyph appearance for the option's on-state so the
+            // widget renders a visible box + check (matching a single checkbox).
+            ap.Set("N", BuildStateDict(optionName, rect.Width, rect.Height));
+            ap.Set("D", BuildStateDict(optionName, rect.Width, rect.Height));
+        }
+        else
+        {
+            var n = new PdfDictionary();
+            n.Set(optionName, new PdfDictionary());
+            n.Set("Off", new PdfDictionary());
+            ap.Set("N", n);
+        }
+        kid.Set("AP", ap);
+
+        var kids = Reader.Resolve(Dict.Get("Kids")) as PdfArray;
+        if (kids is null)
+        {
+            kids = new PdfArray();
+            Dict.Set("Kids", kids);
+        }
+        kids.Add(kid);
+        MarkCheckboxDirty();
+    }
 
     /// <summary>Append an option targeting the given <paramref name="page"/>
-    /// number plus widget rectangle.</summary>
-    public void AddOption(string optionName, int page, Rectangle rect) { _ = optionName; _ = page; _ = rect; }
+    /// number plus widget rectangle. The option's widget is placed on that page
+    /// (rather than the field's page) when the field is added to the form.</summary>
+    public void AddOption(string optionName, int page, Rectangle rect)
+    {
+        if (string.IsNullOrEmpty(optionName)) return;
+        AddOption(optionName, rect);
+        // Tag the just-added kid so Form placement routes it to `page`.
+        if (Reader.Resolve(Dict.Get("Kids")) is PdfArray kids && kids.Count > 0
+            && Reader.Resolve(kids[kids.Count - 1]) is PdfDictionary kid && page >= 1)
+            kid.Set("_PlacePage", new PdfInteger(page));
+    }
 
     /// <summary>Shallow clone of the field. Returns a new
     /// <see cref="CheckboxField"/> wrapping the same backing dictionary
@@ -2149,6 +3140,26 @@ public class CheckboxField : Field
         set => IsChecked = value;
     }
 
+    /// <summary>The last <b>arbitrary non-state</b> string assigned through the
+    /// public <see cref="Value"/> setter (e.g. <c>"1234"</c>), or null. An XFA
+    /// checkbox can legitimately carry such a value in the XFA datasets even though
+    /// the AcroForm appearance state normalises to "Off"; the static-XFA sync
+    /// (<c>Form.SyncAcroFormToXfa</c>) persists this verbatim. Recognised state
+    /// tokens ("Off", "0", an on-state, an on-alias) leave this null so the normal
+    /// FDF/XFDF import path (<see cref="NormalizeOnValue"/>) stays unaffected.</summary>
+    internal string? RawNonStateValue { get; private set; }
+
+    /// <summary>True when <paramref name="value"/> is neither empty, "Off", "0",
+    /// a declared on-state / kid on-value, nor an on-alias — i.e. a value the
+    /// checkbox appearance cannot represent but XFA still stores literally.</summary>
+    private bool IsArbitraryNonState(string? value)
+        => !string.IsNullOrEmpty(value)
+           && !value!.Equals("Off", StringComparison.OrdinalIgnoreCase)
+           && value != "0"
+           && !AllowedStates.Contains(value)
+           && !(HasWidgetKids && KidOnValues().Contains(value))
+           && !IsOnAlias(value);
+
     protected override void SetValue(string? value)
     {
         // For checkboxes, /V is a name (not a string), and its only legal values
@@ -2156,6 +3167,10 @@ public class CheckboxField : Field
         // on-values ("Yes"/"On"/…) to the real on-state so importing e.g. "Yes"
         // into a checkbox whose on-state is "Y" stores "Y" (parity).
         var name = NormalizeOnValue(value);
+        // Remember an arbitrary (non-state) assignment so a static XFA form can
+        // persist it into the datasets verbatim — the AcroForm appearance still
+        // normalises to "Off" below.
+        RawNonStateValue = IsArbitraryNonState(value) ? value : null;
         if (HasWidgetKids) { ApplyGroupedValue(name); return; }
         Dict.Set("V", new PdfName(name));
         Dict.Set("AS", new PdfName(name));
@@ -2163,7 +3178,7 @@ public class CheckboxField : Field
     }
 }
 
-public sealed class RadioButtonField : ChoiceField
+public class RadioButtonField : ChoiceField
 {
     internal RadioButtonField(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
@@ -2207,8 +3222,29 @@ public sealed class RadioButtonField : ChoiceField
     /// </summary>
     public void AddOption(string optionName, Rectangle rect)
     {
-        AddOption(optionName); // /Opt entry (inherited from ChoiceField)
+        base.AddOption(optionName); // /Opt entry (inherited from ChoiceField)
+        AddOptionKid(optionName, rect);
+    }
 
+    /// <summary>Add a radio option by name only; shadows the inherited ChoiceField
+    /// version so reflection surfaces it on this type. Besides the /Opt entry, this
+    /// also registers a kid widget whose /AP/N on-state is <paramref name="optionName"/>
+    /// so <see cref="Selected"/> / <see cref="Value"/> resolve the option (a radio
+    /// group's selection is carried by the kids' appearance states, not /Opt). When
+    /// no per-option rectangle is supplied the field's own /Rect is reused.</summary>
+    public new void AddOption(string optionName)
+    {
+        base.AddOption(optionName);
+        var rect = Reader.Resolve(Dict.Get("Rect")) is PdfArray ra && ra.Count >= 4
+            ? Rectangle.FromPdfArray(ra)
+            : new Rectangle(0, 0, 16, 16);
+        AddOptionKid(optionName, rect);
+    }
+
+    /// <summary>Build and register a radio kid widget annotation carrying
+    /// <paramref name="optionName"/> as its sole on-state (plus the universal "Off").</summary>
+    private void AddOptionKid(string optionName, Rectangle rect)
+    {
         var kid = new PdfDictionary();
         kid.Set("Type", new PdfName("Annot"));
         kid.Set("Subtype", new PdfName("Widget"));
@@ -2230,10 +3266,6 @@ public sealed class RadioButtonField : ChoiceField
         }
         kids.Add(kid);
     }
-
-    /// <summary>Add a radio option by name only (no widget rectangle yet); shadows
-    /// the inherited ChoiceField version so reflection surfaces it on this type.</summary>
-    public new void AddOption(string optionName) => base.AddOption(optionName);
 
     /// <summary>
     /// Add a configured <see cref="RadioButtonOptionField"/> as a kid widget of this
@@ -2494,12 +3526,12 @@ public sealed class RadioButtonField : ChoiceField
     }
 
     /// <summary>1-based page index of the field's first widget. Shadows the inherited
-    /// <see cref="Field.PageIndex"/> with a get-only Aspose.PDF for .NET shape signature.</summary>
+    /// <see cref="Field.PageIndex"/> with a get-only Aspose.Pdf shape signature.</summary>
     public new int PageIndex => base.PageIndex;
 
     /// <summary>The radio-button option collection. Shadows the inherited
     /// <see cref="ChoiceField.Options"/> so DeclaredOnly reflection surfaces the
-    /// Aspose.PDF for .NET shape return type directly on RadioButtonField.</summary>
+    /// Aspose.Pdf shape return type directly on RadioButtonField.</summary>
     public new OptionCollection Options => base.Options;
 
     /// <summary>
@@ -2550,58 +3582,75 @@ public sealed class RadioButtonField : ChoiceField
     {
         get
         {
-            var sel = SelectedValue;
-            if (sel is null) return -1;
+            var raw = base.Value;
+            if (string.IsNullOrEmpty(raw) || raw == "Off") return -1;
             var states = CollectKidStates();
+            if (IsOptIndexed(states, MaterializeOptions().Count)
+                && int.TryParse(raw, out var idx))
+                return idx + 1;
             for (int i = 0; i < states.Count; i++)
             {
-                if (states[i] == sel) return i + 1;
+                if (states[i] == raw) return i + 1;
             }
             return -1;
         }
         set
         {
             var states = CollectKidStates();
-            var optValue = value >= 1 && value <= states.Count ? states[value - 1] : "Off";
-            // The selection of a radio group is carried by the widget kids' /AS
-            // (the chosen kid shows its on-state, every other shows "Off") and the
-            // group /V (a name). Drive both so it renders and round-trips.
-            Dict.Set("V", new PdfName(optValue));
-            // Track each touched kid with its object number (taken from the /Kids
-            // indirect ref — robust, unlike a reference-equality xref scan).
-            var dirtyKids = new List<(int num, PdfDictionary dict)>();
-            if (Reader.Resolve(Dict.Get("Kids")) is PdfArray kids)
-            {
-                foreach (var kidRef in kids)
-                {
-                    if (Reader.ResolveDict(kidRef) is not PdfDictionary kid) continue;
-                    var on = RadioKidOnState(kid);
-                    kid.Set("AS", new PdfName(on is not null && on == optValue ? on : "Off"));
-                    var kn = kidRef is PdfIndirectRef kr ? kr.ObjectNumber
-                        : OwnerDocument?.FindObjectNumber(kid) ?? -1;
-                    dirtyKids.Add((kn, kid));
-                }
-            }
+            string optValue;
+            if (IsOptIndexed(states, MaterializeOptions().Count))
+                optValue = value >= 1 && value <= states.Count
+                    ? (value - 1).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : "Off";
             else
+                optValue = value >= 1 && value <= states.Count ? states[value - 1] : "Off";
+            ApplyRadioState(optValue);
+        }
+    }
+
+    /// <summary>Drive the group /V and every kid widget's /AS for the given
+    /// appearance-state name ("Off" clears the selection), marking the touched
+    /// objects dirty so an incremental save persists the change. The selection
+    /// of a radio group is carried by the widget kids' /AS (the chosen kid
+    /// shows its on-state, every other shows "Off") and the group /V (a name) —
+    /// drive both so it renders and round-trips.</summary>
+    private void ApplyRadioState(string optValue)
+    {
+        Dict.Set("V", new PdfName(optValue));
+        // Track each touched kid with its object number (taken from the /Kids
+        // indirect ref — robust, unlike a reference-equality xref scan).
+        var dirtyKids = new List<(int num, PdfDictionary dict)>();
+        if (Reader.Resolve(Dict.Get("Kids")) is PdfArray kids)
+        {
+            foreach (var kidRef in kids)
             {
-                Dict.Set("AS", new PdfName(optValue));
+                if (Reader.ResolveDict(kidRef) is not PdfDictionary kid) continue;
+                var on = RadioKidOnState(kid);
+                kid.Set("AS", new PdfName(on is not null && on == optValue ? on : "Off"));
+                var kn = kidRef is PdfIndirectRef kr ? kr.ObjectNumber
+                    : OwnerDocument?.FindObjectNumber(kid) ?? -1;
+                dirtyKids.Add((kn, kid));
             }
-            var parentRef = Dict.Get("Parent");
-            var parent = Reader.ResolveDict(parentRef);
-            parent?.Set("V", new PdfName(optValue));
-            // Mark the group (and kids/parent) dirty so an incremental save persists it.
-            if (OwnerDocument is not null)
+        }
+        else
+        {
+            Dict.Set("AS", new PdfName(optValue));
+        }
+        var parentRef = Dict.Get("Parent");
+        var parent = Reader.ResolveDict(parentRef);
+        parent?.Set("V", new PdfName(optValue));
+        // Mark the group (and kids/parent) dirty so an incremental save persists it.
+        if (OwnerDocument is not null)
+        {
+            var gnum = ObjectNumber > 0 ? ObjectNumber : OwnerDocument.FindObjectNumber(Dict);
+            if (gnum > 0) OwnerDocument.MarkDirty(gnum, Dict);
+            foreach (var (kn, kid) in dirtyKids)
+                if (kn > 0) OwnerDocument.MarkDirty(kn, kid);
+            if (parent is not null)
             {
-                var gnum = ObjectNumber > 0 ? ObjectNumber : OwnerDocument.FindObjectNumber(Dict);
-                if (gnum > 0) OwnerDocument.MarkDirty(gnum, Dict);
-                foreach (var (kn, kid) in dirtyKids)
-                    if (kn > 0) OwnerDocument.MarkDirty(kn, kid);
-                if (parent is not null)
-                {
-                    var pn = parentRef is PdfIndirectRef pr ? pr.ObjectNumber
-                        : OwnerDocument.FindObjectNumber(parent);
-                    if (pn > 0) OwnerDocument.MarkDirty(pn, parent);
-                }
+                var pn = parentRef is PdfIndirectRef pr ? pr.ObjectNumber
+                    : OwnerDocument.FindObjectNumber(parent);
+                if (pn > 0) OwnerDocument.MarkDirty(pn, parent);
             }
         }
     }
@@ -2617,36 +3666,57 @@ public sealed class RadioButtonField : ChoiceField
         return null;
     }
 
+    /// <summary>True when this is the /Opt-indexed radio model (PDF 32000
+    /// §12.7.4.2.3): the group carries an /Opt array of export values and every
+    /// kid widget's on-state is the decimal index of its /Opt entry. In that
+    /// model the public <see cref="Value"/> is the /Opt EXPORT value, while /V
+    /// and the kid appearance states hold the index string.</summary>
+    private bool IsOptIndexed(List<string> states, int optCount)
+    {
+        if (optCount == 0 || states.Count == 0) return false;
+        foreach (var s in states)
+            if (!int.TryParse(s, out var i) || i < 0 || i >= optCount) return false;
+        return true;
+    }
+
     /// <summary>
-    /// Override of <see cref="Field.Value"/>. Setting a value that does not
-    /// correspond to one of this field's /AP/N appearance states resolves to
-    /// "Off" — the canonical unselected sentinel for radio buttons.
+    /// Override of <see cref="Field.Value"/>. For an /Opt-indexed group the
+    /// value is the selected option's export value; otherwise it is the /AP/N
+    /// appearance-state name. Setting a value that resolves to no option lands
+    /// on "Off" — the canonical unselected sentinel for radio buttons.
     /// </summary>
     public override string? Value
     {
-        get => base.Value;
+        get
+        {
+            var raw = base.Value;
+            if (string.IsNullOrEmpty(raw) || raw == "Off") return raw;
+            var opts = MaterializeOptions();
+            if (IsOptIndexed(CollectKidStates(), opts.Count)
+                && int.TryParse(raw, out var idx) && idx >= 0 && idx < opts.Count)
+                return opts[idx].Value;
+            return raw;
+        }
         set
         {
-            if (value is not null && CollectKidStates().Contains(value))
+            var states = CollectKidStates();
+            string? state = value;
+            var opts = MaterializeOptions();
+            if (value is not null && IsOptIndexed(states, opts.Count))
             {
-                Dict.Set("V", new PdfName(value));
-                Dict.Set("AS", new PdfName(value));
-                var parent = Reader.ResolveDict(Dict.Get("Parent"));
-                if (parent is not null)
+                state = null;
+                for (int i = 0; i < opts.Count; i++)
                 {
-                    parent.Set("V", new PdfName(value));
+                    if (opts[i].Value == value)
+                    {
+                        state = i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        break;
+                    }
                 }
+                // Compatibility: accept a raw index-state name as well.
+                if (state is null && states.Contains(value)) state = value;
             }
-            else
-            {
-                Dict.Set("V", new PdfName("Off"));
-                Dict.Set("AS", new PdfName("Off"));
-                var parent = Reader.ResolveDict(Dict.Get("Parent"));
-                if (parent is not null)
-                {
-                    parent.Set("V", new PdfName("Off"));
-                }
-            }
+            ApplyRadioState(state is not null && states.Contains(state) ? state : "Off");
         }
     }
 
@@ -2744,6 +3814,10 @@ public class ChoiceField : Field
         if (Reader.ResolveDict(Dict.Get("AP")) is not null) return;
         if (!TryWidgetSize(out var w, out var h)) return;
         ParseDefaultAppearance(out var fontName, out var fontSize);
+        // Colour operator from the field /DA (falls back to black fill).
+        var daText = Reader.Resolve(Dict.Get("DA")) is PdfString daStr ? daStr.ToText() : "/Helv 12 Tf 0 g";
+        var colorOp = ExtractDaColor(daText);
+        if (string.IsNullOrWhiteSpace(colorOp)) colorOp = "0 g";
 
         var sb = new System.Text.StringBuilder();
         sb.Append("/Tx BMC q ");
@@ -2758,7 +3832,7 @@ public class ChoiceField : Field
             if (text.Length > 0)
             {
                 var escaped = EscapePdfText(text);
-                sb.Append($"BT /{fontName} {FmtNum(fontSize)} Tf 0 g " +
+                sb.Append($"BT /{fontName} {FmtNum(fontSize)} Tf {colorOp} " +
                           $"2 {FmtNum(h / 2 - fontSize * 0.3)} Td ({escaped}) Tj ET ");
             }
         }
@@ -2794,8 +3868,36 @@ public class ChoiceField : Field
         sb.Append("Q EMC");
 
         var ap = new PdfDictionary();
-        ap.Set("N", MakeApXObject(sb.ToString(), w, h, MakeStandardFontResources(fontName)));
+        ap.Set("N", MakeApXObject(sb.ToString(), w, h, BuildChoiceAppearanceResources(fontName)));
         Dict.Set("AP", ap);
+    }
+
+    /// <summary>Font resources for a choice-field appearance. When the /DA names an
+    /// embedded resource (the <c>C{n}_{m}</c> alias produced by
+    /// <see cref="Form.EmbedDefaultAppearanceFont"/>), reference that actual font
+    /// from the AcroForm /DR so the glyph program is present; otherwise synthesise a
+    /// Standard-14 entry under the name.</summary>
+    private PdfDictionary BuildChoiceAppearanceResources(string fontName)
+    {
+        if (fontName.Length > 1 && fontName[0] == 'C' && fontName.Contains('_'))
+        {
+            try
+            {
+                var acroForm = Reader.ResolveDict(Reader.Catalog.Get("AcroForm"));
+                var dr = acroForm is null ? null : Reader.ResolveDict(acroForm.Get("DR"));
+                var drFonts = dr is null ? null : Reader.ResolveDict(dr.Get("Font"));
+                if (drFonts is not null && drFonts.Get(fontName) is { } embedded)
+                {
+                    var fonts = new PdfDictionary();
+                    fonts.Set(fontName, embedded);
+                    var res = new PdfDictionary();
+                    res.Set("Font", fonts);
+                    return res;
+                }
+            }
+            catch (System.InvalidOperationException) { /* detached field */ }
+        }
+        return MakeStandardFontResources(fontName);
     }
 
     /// <summary>Read the /Opt entries as a flat list of display strings.
@@ -2847,7 +3949,7 @@ public class ChoiceField : Field
         }
     }
 
-    /// <summary>0-based selected-option indices (Aspose.PDF for .NET shape int[] sibling
+    /// <summary>0-based selected-option indices (Aspose.Pdf shape int[] sibling
     /// of <see cref="SelectedIndices"/>; setter rewrites /V from the matching
     /// options).</summary>
     public int[] SelectedItems
@@ -3456,6 +4558,11 @@ public class ButtonField : Field
                 mk.Remove("CA");
             else
                 mk.Set("CA", new PdfString(System.Text.Encoding.Latin1.GetBytes(value)));
+            // Drop any pre-existing /AP so the button face is rebuilt with the new
+            // caption (a loaded button carries a baked-in appearance that
+            // GenerateAppearance would otherwise leave untouched).
+            Dict.Remove("AP");
+            GenerateAppearance();
         }
     }
 
@@ -3467,6 +4574,24 @@ public class ButtonField : Field
         if (!TryWidgetSize(out var w, out var h)) return;
         ParseDefaultAppearance(out var fontName, out var fontSize);
 
+        // A non-solid border style (Beveled/Inset/Underline/Dashed) draws
+        // style-specific chrome matching Aspose.Pdf; the plain solid
+        // face keeps the simple rectangle stroke.
+        var borderStyle = GetBorderStyleValue();
+        string face = borderStyle is not Aspose.Pdf.Annotations.BorderStyle.Solid
+            ? BuildStyledButtonFace(w, h, borderStyle, fontName, fontSize)
+            : BuildSolidButtonFace(w, h, fontName, fontSize);
+
+        var ap = new PdfDictionary();
+        ap.Set("N", MakeApXObject(face, w, h, MakeStandardFontResources(fontName)));
+        // Push buttons carry a down (/D) appearance too; reuse the same face so
+        // callers reading States["D"] see the current caption.
+        ap.Set("D", MakeApXObject(face, w, h, MakeStandardFontResources(fontName)));
+        Dict.Set("AP", ap);
+    }
+
+    private string BuildSolidButtonFace(double w, double h, string fontName, double fontSize)
+    {
         var sb = new System.Text.StringBuilder();
         sb.Append("q ");
         var mk = BuildMkBackgroundAndBorder(w, h);
@@ -3476,23 +4601,102 @@ public class ButtonField : Field
                       $"0.5 0.5 0.5 RG 1 w 0.5 0.5 {FmtNum(w - 1)} {FmtNum(h - 1)} re S ");
         else
             sb.Append(mk);
-
-        var caption = NormalCaption ?? string.Empty;
-        if (caption.Length > 0)
-        {
-            var escaped = EscapePdfText(caption);
-            // Rough centring: average glyph advance ~0.5em.
-            var textW = caption.Length * fontSize * 0.5;
-            var tx = System.Math.Max(2, (w - textW) / 2);
-            var ty = h / 2 - fontSize * 0.35;
-            sb.Append($"BT /{fontName} {FmtNum(fontSize)} Tf 0 g {FmtNum(tx)} {FmtNum(ty)} Td ({escaped}) Tj ET ");
-        }
+        AppendButtonCaption(sb, w, h, fontName, fontSize, wrapColorInText: false);
         sb.Append("Q");
-
-        var ap = new PdfDictionary();
-        ap.Set("N", MakeApXObject(sb.ToString(), w, h, MakeStandardFontResources(fontName)));
-        Dict.Set("AP", ap);
+        return sb.ToString();
     }
+
+    // Border-style appearance geometry matches Aspose.Pdf: no q/Q wrapper,
+    // the MK background fill, then style-specific border drawing, then the caption.
+    // Bevel/Inset draw two chevron polygons (lit + shadowed edges) inset by the
+    // border width; Underline draws a single baseline rule; Dashed strokes the
+    // half-width-inset rectangle with a dash pattern.
+    private string BuildStyledButtonFace(double w, double h, Aspose.Pdf.Annotations.BorderStyle style,
+                                         string fontName, double fontSize)
+    {
+        double bw = GetBorderWidthValue();
+        if (bw <= 0) bw = 1;
+        // Colours come from the widget's appearance characteristics (the ButtonField
+        // Characteristics.Background / .Border the caller set), falling back to the
+        // /MK dict when a loaded field carries one instead.
+        var mk = Reader.ResolveDict(Dict.Get("MK"));
+        var chars = Characteristics;
+        var sb = new System.Text.StringBuilder();
+
+        // Background fill: characteristic background (opaque), else /MK /BG.
+        var bgColor = chars.Background;
+        if (bgColor.A != 0)
+            sb.Append($"{ColorFillOp(bgColor)} 0 0 {FmtNum(w)} {FmtNum(h)} re f ");
+        else if (mk is not null && MkColorOperator(mk.Get("BG"), fill: true) is { } bgMk)
+            sb.Append($"{bgMk} 0 0 {FmtNum(w)} {FmtNum(h)} re f ");
+
+        var bc = ColorStrokeOp(chars.Border);
+        double b2 = bw * 2;
+        var innerRect = $"{FmtNum(bw / 2)} {FmtNum(bw / 2)} {FmtNum(w - bw)} {FmtNum(h - bw)} re";
+
+        switch (style)
+        {
+            case Aspose.Pdf.Annotations.BorderStyle.Underline:
+                sb.Append($"{bc} {FmtNum(bw)} w 0 {FmtNum(bw / 2)} m {FmtNum(w)} {FmtNum(bw / 2)} l s ");
+                break;
+
+            case Aspose.Pdf.Annotations.BorderStyle.Dashed:
+                sb.Append($"{bc} {FmtNum(bw)} w [3] 0 d {innerRect} S ");
+                break;
+
+            case Aspose.Pdf.Annotations.BorderStyle.Beveled:
+            case Aspose.Pdf.Annotations.BorderStyle.Inset:
+            {
+                var (hi, shadow) = style == Aspose.Pdf.Annotations.BorderStyle.Beveled
+                    ? ("1 g", ScaleColorFill(bgColor.A != 0 ? bgColor : System.Drawing.Color.Gray, 216.0 / 255.0))
+                    : ("0.4980392157 0.4980392157 0.4980392157 rg", "0.8470588235 0.8470588235 0.8470588235 rg");
+                // Lit chevron (top-left edges).
+                sb.Append($"{hi} {FmtNum(bw)} {FmtNum(bw)} m {FmtNum(bw)} {FmtNum(h - bw)} l " +
+                          $"{FmtNum(w - bw)} {FmtNum(h - bw)} l {FmtNum(w - b2)} {FmtNum(h - b2)} l " +
+                          $"{FmtNum(b2)} {FmtNum(h - b2)} l {FmtNum(b2)} {FmtNum(b2)} l f ");
+                // Shadowed chevron (bottom-right edges).
+                sb.Append($"{shadow} {FmtNum(w - bw)} {FmtNum(h - bw)} m {FmtNum(w - bw)} {FmtNum(bw)} l " +
+                          $"{FmtNum(bw)} {FmtNum(bw)} l {FmtNum(b2)} {FmtNum(b2)} l {FmtNum(w - b2)} {FmtNum(b2)} l " +
+                          $"{FmtNum(w - b2)} {FmtNum(h - b2)} l f ");
+                // Beveled closes its stroke (s); Inset leaves it open (S).
+                var stroke = style == Aspose.Pdf.Annotations.BorderStyle.Beveled ? "s" : "S";
+                sb.Append($"{bc} {FmtNum(bw)} w {innerRect} {stroke} ");
+                break;
+            }
+        }
+
+        AppendButtonCaption(sb, w, h, fontName, fontSize, wrapColorInText: true);
+        return sb.ToString();
+    }
+
+    // Append the caption block. wrapColorInText emits the fill colour inside the
+    // text object (BT ... rg ... ET) to mirror Aspose.Pdf's styled-button
+    // stream; the solid path keeps its historical "0 g" placement.
+    private void AppendButtonCaption(System.Text.StringBuilder sb, double w, double h,
+                                     string fontName, double fontSize, bool wrapColorInText)
+    {
+        var caption = NormalCaption ?? string.Empty;
+        if (caption.Length == 0) return;
+        var escaped = EscapePdfText(caption);
+        // Rough centring: average glyph advance ~0.5em.
+        var textW = caption.Length * fontSize * 0.5;
+        var tx = System.Math.Max(2, (w - textW) / 2);
+        var ty = h / 2 - fontSize * 0.35;
+        if (wrapColorInText)
+            sb.Append($"BT 0 0 0 rg /{fontName} {FmtNum(fontSize)} Tf {FmtNum(tx)} {FmtNum(ty)} Td ({escaped}) Tj ET ");
+        else
+            sb.Append($"BT /{fontName} {FmtNum(fontSize)} Tf 0 g {FmtNum(tx)} {FmtNum(ty)} Td ({escaped}) Tj ET ");
+    }
+
+    private static string ColorFillOp(System.Drawing.Color c)
+        => $"{FmtNum(c.R / 255.0)} {FmtNum(c.G / 255.0)} {FmtNum(c.B / 255.0)} rg";
+
+    private static string ColorStrokeOp(System.Drawing.Color c)
+        => $"{FmtNum(c.R / 255.0)} {FmtNum(c.G / 255.0)} {FmtNum(c.B / 255.0)} RG";
+
+    // Darken a colour by a factor to derive the bevel-shadow tint.
+    private static string ScaleColorFill(System.Drawing.Color c, double factor)
+        => $"{FmtNum(c.R / 255.0 * factor)} {FmtNum(c.G / 255.0 * factor)} {FmtNum(c.B / 255.0 * factor)} rg";
 
     private PdfDictionary? GetMK(bool create)
     {
@@ -3701,7 +4905,11 @@ public class SignatureField : Field
         {
             var sigDict = Reader.ResolveDict(Dict.Get("V"));
             if (sigDict is null) return null;
-            return Forms.Signature.FromDict(sigDict, Reader, FullName);
+            var sig = Forms.Signature.FromDict(sigDict, Reader, FullName);
+            // Wire the source bytes so Signature.Verify() has the original stream
+            // to hash against (EnumerateSignatures does the same for the facade path).
+            sig._sourceDocumentBytes = Reader.RawData;
+            return sig;
         }
     }
 
@@ -3801,19 +5009,36 @@ public class SignatureField : Field
 
 /// <summary>One option of a <see cref="RadioButtonField"/>. Stored-only wrapper
 /// emitted via <see cref="RadioButtonField.Add(RadioButtonOptionField)"/>.</summary>
-public sealed class RadioButtonOptionField : BaseParagraph
+public sealed class RadioButtonOptionField : RadioButtonField
 {
-    public RadioButtonOptionField() { }
+    // RadioButtonOptionField IS a RadioButtonField (mirroring the public type hierarchy where
+    // an option derives from the field; the chain reaches BaseParagraph via Annotation, so
+    // an option still drops into a generator Paragraphs tree). Deriving from RadioButtonField
+    // — rather than Field — means Form.Fields can surface each expanded radio option AS a
+    // RadioButtonOptionField while the object still behaves like the RadioButtonField the
+    // XFA/value machinery expects. The option-specific properties below shadow (new) the
+    // inherited members so the stored-only generator semantics are unchanged.
+    public RadioButtonOptionField() : base(new PdfDictionary(), PdfReader.Empty) { }
 
-    public RadioButtonOptionField(Page page, Rectangle rect)
+    public RadioButtonOptionField(Page page, Rectangle rect) : base(new PdfDictionary(), PdfReader.Empty)
     {
         _ = page;
         PendingRect = rect;
     }
 
+    /// <summary>Wrap a parsed radio-option widget dict (a /Kids member of a /Btn radio
+    /// group). Used by <see cref="Form"/> when expanding a radio group so each option
+    /// surfaces on <c>Form.Fields</c> as a RadioButtonOptionField; KidDict/KidReader point
+    /// at the live widget so <see cref="Rect"/> reflects it.</summary>
+    internal RadioButtonOptionField(PdfDictionary dict, PdfReader reader) : base(dict, reader)
+    {
+        KidDict = dict;
+        KidReader = reader;
+    }
+
     /// <summary>Default-appearance settings (/DA) applied to the option's
     /// widget. Auto-initialized so callers can set TextColor/Font directly.</summary>
-    public DefaultAppearance DefaultAppearance { get; } = new DefaultAppearance();
+    public new DefaultAppearance DefaultAppearance { get; } = new DefaultAppearance();
 
     /// <summary>Caption text shown next to the radio glyph. Stored only.</summary>
     public Aspose.Pdf.Text.TextFragment? Caption { get; set; }
@@ -3822,21 +5047,21 @@ public sealed class RadioButtonOptionField : BaseParagraph
     public string? OptionName { get; set; }
 
     /// <summary>Visual style of the radio glyph. Stored only.</summary>
-    public BoxStyle Style { get; set; } = BoxStyle.Circle;
+    public new BoxStyle Style { get; set; } = BoxStyle.Circle;
 
     /// <summary>Width of the option's widget rectangle in points. Stored only.</summary>
-    public double Width { get; set; }
+    public new double Width { get; set; }
 
     /// <summary>Height of the option's widget rectangle in points. Stored only.</summary>
-    public double Height { get; set; }
+    public new double Height { get; set; }
 
     /// <summary>Border styling applied to the option's widget. Stored only.</summary>
-    public Border? Border { get; set; }
+    public new Border? Border { get; set; }
 
     /// <summary>Visual-characteristics dictionary (/MK) applied to the option's
     /// widget. Auto-initialized so callers can set
     /// <c>option.Characteristics.Border = Color.Black</c> on a fresh instance.</summary>
-    public Aspose.Pdf.Annotations.Characteristics Characteristics { get; } =
+    public new Aspose.Pdf.Annotations.Characteristics Characteristics { get; } =
         new Aspose.Pdf.Annotations.Characteristics();
 
     /// <summary>Pending widget rectangle, used by Add to size the kid annotation.</summary>
@@ -3858,7 +5083,7 @@ public sealed class RadioButtonOptionField : BaseParagraph
     /// field this reads the live kid annotation's /Rect (so it reflects later
     /// transforms, e.g. <c>PdfFileEditor.ResizeContents</c>); before that it returns
     /// the rectangle supplied to the constructor.</summary>
-    public Rectangle? Rect
+    public new Rectangle? Rect
     {
         get
         {

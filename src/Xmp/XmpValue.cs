@@ -33,7 +33,7 @@ public sealed class XmpValue
     public static implicit operator XmpValue(string value) => new XmpValue(value);
 
     /// <summary>Implicit promotions from the other scalar value types, matching
-    /// the Aspose.PDF for .NET XmpValue surface (<c>doc.Metadata[key] = DateTime.Now</c>).</summary>
+    /// the Aspose.Pdf XmpValue surface (<c>doc.Metadata[key] = DateTime.Now</c>).</summary>
     public static implicit operator XmpValue(DateTime value) => new XmpValue(value);
     public static implicit operator XmpValue(int value) => new XmpValue(value);
     public static implicit operator XmpValue(double value) => new XmpValue(value);

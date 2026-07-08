@@ -446,6 +446,6 @@ The following surface areas are intentionally not part of this library:
 
 - `Aspose.Pdf.AI`, `Aspose.Pdf.LowCode`, `Aspose.Pdf.Plugins`
 - DOCX / EPUB / XPS / PCL / LaTeX / DJVU / OFD / PostScript converters
-- 3D-content rendering (the `PDF3D*` types exist as containers but no 3D
-  content is written on save)
+- 3D-content rendering / save — `PDF3D*` annotations are read (artwork, views,
+  cross-sections) but no 3D content is written on save and the model is not displayed
 - Native printing — `PdfViewer.Print*` throws `PlatformNotSupportedException`

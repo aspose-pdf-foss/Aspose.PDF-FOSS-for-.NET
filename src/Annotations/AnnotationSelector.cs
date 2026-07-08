@@ -35,7 +35,7 @@ public class AnnotationSelector
         if (annotation is null) return;
         // When constructed with a template annotation, the selector acts as
         // a type filter: only annotations whose runtime class equals the
-        // template's class are admitted. This matches the Aspose.PDF for .NET
+        // template's class are admitted. This matches the Aspose.Pdf
         // expectation that a caller passing 'new LinkAnnotation(page, rect)'
         // as the template gets back ONLY LinkAnnotation instances
         // (the cast '(LinkAnnotation)anno' would otherwise crash when a
@@ -81,7 +81,7 @@ public class AnnotationSelector
 
 // ── Stub annotation types (pre-press marker annotations) ───────────────────
 //
-// These six types exist in the public Aspose.PDF for .NET API surface but the
+// These six types exist in the public Aspose.Pdf API surface but the
 // underlying PDF semantics are pre-press / printer-mark only -- the FOSS
 // HTML / image-output paths don't render them, so the stubs hold just the
 // bare ctor + visitor-Accept hookup needed to compile reflection-equivalent
@@ -258,7 +258,36 @@ public sealed partial class PDF3DAnnotation : Annotation
 
     public new AnnotationType AnnotationType => AnnotationType.PDF3D;
 
-    public PDF3DArtwork? Pdf3DArtwork { get; private set; }
+    private PDF3DArtwork? _artwork;
+    private bool _artworkResolved;
+
+    /// <summary>The 3D artwork behind this annotation. For an annotation read
+    /// from an existing document it is lazily reconstructed from the /3DD 3D
+    /// stream (content + views + per-view cross-sections) on first access.</summary>
+    public PDF3DArtwork? Pdf3DArtwork
+    {
+        get
+        {
+            if (_artwork is null && !_artworkResolved)
+            {
+                _artworkResolved = true;
+                _artwork = TryReadArtwork();
+            }
+            return _artwork;
+        }
+        private set { _artwork = value; _artworkResolved = true; }
+    }
+
+    /// <summary>Default (annotation-level) 3D view, taken from the artwork's
+    /// first view when present.</summary>
+    public PDF3DView? DefaultView
+    {
+        get
+        {
+            var va = Pdf3DArtwork?.ViewArray;
+            return va is { Count: > 0 } ? va[_defaultViewIndex + 1] : null;
+        }
+    }
 
     public PDF3DContent? Content
     {
@@ -290,6 +319,90 @@ public sealed partial class PDF3DAnnotation : Annotation
     }
 
     public void ClearImagePreview() => _imagePreview = System.Array.Empty<byte>();
+
+    // ── reading path: reconstruct the artwork from the /3DD 3D stream ────────
+    private PDF3DArtwork? TryReadArtwork()
+    {
+        var reader = InternalReader;
+        if (reader is null) return null;
+        if (reader.Resolve(Dict.Get("3DD")) is not PdfStream stream3d) return null;
+        var sdict = stream3d.Dict;
+        var doc = reader.OwnerDocument;
+
+        var content = new PDF3DContent();
+        string? ext = reader.Resolve(sdict.Get("Subtype")) is PdfName sub ? sub.Value?.ToUpperInvariant() : null;
+        byte[] bytes;
+        try { bytes = reader.DecodeStream(stream3d, stream3d.ObjectNumber, stream3d.Generation); }
+        catch { bytes = System.Array.Empty<byte>(); }
+        content.SetReadContent(bytes, ext);
+
+        var artwork = new PDF3DArtwork(doc!, content);
+
+        if (reader.Resolve(sdict.Get("VA")) is PdfArray va)
+        {
+            foreach (var vref in va)
+            {
+                if (reader.Resolve(vref) is not PdfDictionary vd) continue;
+                var camera = ReadMatrix(reader, vd.Get("C2W"));
+                double orbit = ReadNum(reader, vd.Get("CO"));
+                string name = reader.Resolve(vd.Get("XN")) is PdfString xn ? xn.ToText() : string.Empty;
+                var view = new PDF3DView(doc!, camera ?? new Matrix3D(), orbit, name);
+
+                if (reader.Resolve(vd.Get("SA")) is PdfArray sa)
+                {
+                    foreach (var cref in sa)
+                    {
+                        if (reader.Resolve(cref) is not PdfDictionary cd) continue;
+                        var cs = new PDF3DCrossSection(doc!);
+                        if (reader.Resolve(cd.Get("C")) is PdfArray cc && cc.Count >= 3)
+                            cs.Center = new Point3D(ReadNum(reader, cc[0]), ReadNum(reader, cc[1]), ReadNum(reader, cc[2]));
+                        if (reader.Resolve(cd.Get("O")) is PdfArray oo && oo.Count >= 3)
+                            cs.CuttingPlaneOrientation = new PDF3DCuttingPlaneOrientation(
+                                ReadNullNum(reader, oo[0]), ReadNullNum(reader, oo[1]), ReadNullNum(reader, oo[2]));
+                        cs.CuttingPlaneOpacity = ReadNum(reader, cd.Get("PO"));
+                        if (ReadColor(reader, cd.Get("PC")) is Color pc) cs.CuttingPlaneColor = pc;
+                        if (ReadColor(reader, cd.Get("IC")) is Color ic) cs.CuttingPlanesIntersectionColor = ic;
+                        if (reader.Resolve(cd.Get("IV")) is PdfBoolean iv) cs.Visibility = iv.Value;
+                        view.CrossSectionsArray.Add(cs);
+                    }
+                }
+                artwork.ViewArray.Add(view);
+            }
+        }
+        return artwork;
+    }
+
+    private static double ReadNum(PdfReader reader, PdfObject? obj) => reader.Resolve(obj) switch
+    {
+        PdfReal r => r.Value,
+        PdfInteger i => i.Value,
+        _ => 0,
+    };
+
+    private static double? ReadNullNum(PdfReader reader, PdfObject? obj) => reader.Resolve(obj) switch
+    {
+        PdfReal r => r.Value,
+        PdfInteger i => i.Value,
+        _ => null,
+    };
+
+    private static Matrix3D? ReadMatrix(PdfReader reader, PdfObject? obj)
+    {
+        if (reader.Resolve(obj) is not PdfArray a || a.Count < 12) return null;
+        var v = new double[12];
+        for (int i = 0; i < 12; i++) v[i] = ReadNum(reader, a[i]);
+        return new Matrix3D(v);
+    }
+
+    // A 3D colour is written as [/DeviceRGB r g b] (or a bare [r g b]); map to
+    // the FOSS Color (0–1 components rounded to 8-bit, matching the reference).
+    private static Color? ReadColor(PdfReader reader, PdfObject? obj)
+    {
+        if (reader.Resolve(obj) is not PdfArray a) return null;
+        int start = a.Count >= 4 && reader.Resolve(a[0]) is PdfName ? 1 : 0;
+        if (a.Count - start < 3) return null;
+        return Color.FromRgb(ReadNum(reader, a[start]), ReadNum(reader, a[start + 1]), ReadNum(reader, a[start + 2]));
+    }
 }
 
 public sealed partial class PageInformationAnnotation : Annotation
@@ -300,9 +413,32 @@ public sealed partial class PageInformationAnnotation : Annotation
     public PageInformationAnnotation(Page page, Rectangle rect) : base(page, rect)
     {
         Dict.Set("Subtype", new PdfName("PrinterMark"));
+        // Track this typed instance for save-time appearance generation: enumerating the
+        // page /Annots later re-resolves the dict to a generic /PrinterMark annotation.
+        page?.RegisterPageInfoAnnotation(this);
     }
 
     public new AnnotationType AnnotationType => AnnotationType.PageInformation;
+
+    /// <summary>Generate the page-information /AP /N appearance — the source file name and the
+    /// date printed along the bottom margin band when a stamp is flattened. Called at save
+    /// time, when the output file name is known.</summary>
+    internal void GenerateInfoAppearance(string fileName, DateTime date)
+    {
+        if (Rect is not { } r) return;
+        string text = $"{fileName}   {date.ToShortDateString()}";
+        string esc = text.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+        double fontSize = 8;
+        double height = Math.Abs(r.URY - r.LLY);
+        double tx = Math.Min(r.LLX, r.URX) + 2;
+        double ty = Math.Min(r.LLY, r.URY) + Math.Max(2.0, height / 2 - fontSize / 2);
+        string F(double v) => v.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
+        var content = System.Text.Encoding.ASCII.GetBytes(
+            $"BT /Helv {F(fontSize)} Tf {F(tx)} {F(ty)} Td ({esc}) Tj ET\n");
+        var bbox = new Rectangle(Math.Min(r.LLX, r.URX), Math.Min(r.LLY, r.URY),
+            Math.Max(r.LLX, r.URX), Math.Max(r.LLY, r.URY));
+        SetNormalAppearanceWithHelvetica(content, bbox);
+    }
 }
 
 public sealed partial class RegistrationMarkAnnotation : Annotation
@@ -339,6 +475,101 @@ public sealed partial class TrimMarkAnnotation : Annotation
 
     /// <summary>Which corner of the page this mark sits in. Stored only.</summary>
     public PrinterMarkCornerPosition Position { get; set; } = PrinterMarkCornerPosition.TopLeft;
+}
+
+/// <summary>The set of printer's-mark families <see cref="PrinterMarkAnnotation.AddPrinterMarks"/>
+/// generates on a page (PDF 32000 pre-press marks).</summary>
+[System.Flags]
+public enum PrinterMarksKind
+{
+    /// <summary>No marks.</summary>
+    None = 0,
+    /// <summary>Trim marks at the four trim-box corners.</summary>
+    TrimMarks = 1,
+    /// <summary>Bleed marks at the four bleed-box corners.</summary>
+    BleedMarks = 2,
+    /// <summary>Registration marks centred on the four page sides.</summary>
+    RegistrationMarks = 4,
+    /// <summary>One CMYK colour bar per process channel.</summary>
+    ColorBars = 8,
+    /// <summary>A page-information mark (file name + date).</summary>
+    PageInformation = 16,
+    /// <summary>Every mark family.</summary>
+    All = TrimMarks | BleedMarks | RegistrationMarks | ColorBars | PageInformation,
+}
+
+/// <summary>Aggregate printer's-mark generator. <see cref="AddPrinterMarks"/> adds the
+/// requested standard pre-press marks (trim, bleed, registration, colour bars and
+/// page information) to every page of a document.</summary>
+public sealed partial class PrinterMarkAnnotation : Annotation
+{
+    internal PrinterMarkAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
+
+    /// <summary>Always <see cref="AnnotationType.PrinterMark"/>.</summary>
+    public new AnnotationType AnnotationType => AnnotationType.PrinterMark;
+
+    /// <summary>Add the requested families of printer's marks to every page of
+    /// <paramref name="document"/>. Marks are positioned relative to each page's
+    /// trim box (falling back to the media box).</summary>
+    public static void AddPrinterMarks(Document document, PrinterMarksKind printerMarksKind)
+    {
+        if (document is null || printerMarksKind == PrinterMarksKind.None) return;
+        foreach (Page page in document.Pages)
+            AddPrinterMarks(page, printerMarksKind);
+    }
+
+    /// <summary>Add the requested families of printer's marks to a single page.</summary>
+    public static void AddPrinterMarks(Page page, PrinterMarksKind printerMarksKind)
+    {
+        if (page is null || printerMarksKind == PrinterMarksKind.None) return;
+
+        if (printerMarksKind.HasFlag(PrinterMarksKind.TrimMarks))
+        {
+            page.Annotations.Add(new TrimMarkAnnotation(page, PrinterMarkCornerPosition.TopLeft));
+            page.Annotations.Add(new TrimMarkAnnotation(page, PrinterMarkCornerPosition.TopRight));
+            page.Annotations.Add(new TrimMarkAnnotation(page, PrinterMarkCornerPosition.BottomLeft));
+            page.Annotations.Add(new TrimMarkAnnotation(page, PrinterMarkCornerPosition.BottomRight));
+        }
+
+        if (printerMarksKind.HasFlag(PrinterMarksKind.BleedMarks))
+        {
+            page.Annotations.Add(new BleedMarkAnnotation(page, PrinterMarkCornerPosition.TopLeft));
+            page.Annotations.Add(new BleedMarkAnnotation(page, PrinterMarkCornerPosition.TopRight));
+            page.Annotations.Add(new BleedMarkAnnotation(page, PrinterMarkCornerPosition.BottomLeft));
+            page.Annotations.Add(new BleedMarkAnnotation(page, PrinterMarkCornerPosition.BottomRight));
+        }
+
+        if (printerMarksKind.HasFlag(PrinterMarksKind.RegistrationMarks))
+        {
+            page.Annotations.Add(new RegistrationMarkAnnotation(page, PrinterMarkSidePosition.Top));
+            page.Annotations.Add(new RegistrationMarkAnnotation(page, PrinterMarkSidePosition.Bottom));
+            page.Annotations.Add(new RegistrationMarkAnnotation(page, PrinterMarkSidePosition.Left));
+            page.Annotations.Add(new RegistrationMarkAnnotation(page, PrinterMarkSidePosition.Right));
+        }
+
+        if (printerMarksKind.HasFlag(PrinterMarksKind.ColorBars))
+        {
+            var box = page.TrimBox ?? page.MediaBox;
+            var barW = System.Math.Max(8.0, (box.URX - box.LLX) / 16.0);
+            var barH = System.Math.Max(4.0, 8.0);
+            var y = System.Math.Max(box.LLY - barH - 2.0, 0.0);
+            var channels = new[] { ColorsOfCMYK.Cyan, ColorsOfCMYK.Magenta, ColorsOfCMYK.Yellow, ColorsOfCMYK.Black };
+            for (int i = 0; i < channels.Length; i++)
+            {
+                var x = box.LLX + i * (barW + 2.0);
+                page.Annotations.Add(new ColorBarAnnotation(page,
+                    new Rectangle(x, y, x + barW, y + barH), channels[i]));
+            }
+        }
+
+        if (printerMarksKind.HasFlag(PrinterMarksKind.PageInformation))
+        {
+            var box = page.TrimBox ?? page.MediaBox;
+            var media = page.MediaBox;
+            page.Annotations.Add(new PageInformationAnnotation(page,
+                new Rectangle(box.LLX, media.LLY, box.URX, box.LLY)));
+        }
+    }
 }
 
 // ── Accept overrides on the existing 22 concrete annotation types ──────────

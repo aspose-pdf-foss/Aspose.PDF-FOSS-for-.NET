@@ -44,7 +44,7 @@ public sealed class SoftwarePageRenderer : IPageRenderer
         // template renderer (GDI+) does the same and visual comparison is
         // sensitive to off-by-one pixel dimension.
         // Size the image to the crop box (clipped to the media box), not the media
-        // box: the reference renderer presents only the cropped region. Rotation
+        // box: GDI+ presents only the cropped region. Rotation
         // swaps the visible dimensions exactly as it does for the media box.
         var crop = EffectiveCropRect(page);
         var rot = ((page.RotateDegrees % 360) + 360) % 360;
@@ -275,7 +275,7 @@ public sealed class SoftwarePageRenderer : IPageRenderer
 
     /// <summary>
     /// Floor of <paramref name="v"/> that snaps to the nearest integer if within 1e-6.
-    /// GDI+ (the reference renderer) truncates page-size*DPI/72 to int, so we match
+    /// GDI+ truncates page-size*DPI/72 to int, so we match
     /// that behaviour. The snap guard prevents FP noise on exact-integer pages
     /// (e.g. 792pt * 150/72 = 1650.0000000002 in IEEE 754) from flooring to 1649.
     /// </summary>
@@ -291,7 +291,7 @@ public sealed class SoftwarePageRenderer : IPageRenderer
     /// clipped to the media box (PDF 32000 §14.11.2). When the page declares no crop
     /// box this equals the media box. Image-export devices size the canvas to this
     /// rectangle and offset content by its lower-left corner, so anything outside the
-    /// crop area falls off the canvas — matching the reference renderer, which presents
+    /// crop area falls off the canvas — matching GDI+, which presents
     /// only the cropped region.
     /// </summary>
     internal static Aspose.Pdf.Rectangle EffectiveCropRect(Page page)
@@ -1102,6 +1102,19 @@ public sealed class SoftwarePageRenderer : IPageRenderer
                             parser = new GlyphOutlineParser(systemTtf);
                     }
                 }
+
+                // Last resort: the BaseFont name matched no installed family (an obfuscated
+                // name like "HE108E", or a Multiple-Master Type1 with no embedded program).
+                // Substitute a Standard-14 face chosen from the FontDescriptor's flags/style
+                // so the text still renders — the simple font's /Encoding maps each code to a
+                // glyph name, which the substitute's cmap resolves. CID (Type0) fonts have
+                // their own CJK fallback, so this applies only to simple fonts.
+                if (parser is null && descriptor is not null && fontDict.GetName("Subtype") != "Type0")
+                {
+                    var sub = SystemFontResolver.ResolveDescriptorSubstitute(fontDict, descriptor, reader, out hScale);
+                    if (sub is not null)
+                        parser = new GlyphOutlineParser(sub);
+                }
             }
         }
         catch
@@ -1218,6 +1231,26 @@ public sealed class SoftwarePageRenderer : IPageRenderer
         return alpha;
     }
 
+    // Repair a soft mask's /DecodeParms /Colors to 1 (its true single-component value) when a
+    // predictor is active and the producer left it at the parent image's component count.
+    // Handles /DecodeParms as a single dict or a per-filter array. Idempotent.
+    private static void ForceSoftMaskPredictorColors(PdfObject? decodeParms, IO.PdfReader reader)
+    {
+        switch (reader.Resolve(decodeParms))
+        {
+            case PdfDictionary dp:
+                if (dp.GetInt("Predictor") > 1 && dp.GetInt("Colors", 1) != 1)
+                    dp.Set("Colors", new PdfInteger(1));
+                break;
+            case PdfArray arr:
+                foreach (var el in arr)
+                    if (reader.Resolve(el) is PdfDictionary edp
+                        && edp.GetInt("Predictor") > 1 && edp.GetInt("Colors", 1) != 1)
+                        edp.Set("Colors", new PdfInteger(1));
+                break;
+        }
+    }
+
     /// <summary>
     /// Decode an /SMask soft-mask image (PDF 32000 §11.6.5.3) into a flat byte[]
     /// of per-pixel alpha values (0=transparent, 255=opaque). The SMask is always
@@ -1236,6 +1269,16 @@ public sealed class SoftwarePageRenderer : IPageRenderer
         var w = (int)d.GetInt("Width");
         var h = (int)d.GetInt("Height");
         if (w <= 0 || h <= 0) return null;
+
+        // A soft mask is a single-component DeviceGray image (PDF 32000 §11.6.5.1). Some
+        // producers copy the parent image's /DecodeParms onto the mask verbatim, leaving
+        // /Colors at the parent's component count (e.g. 4 for a CMYK base image). A PNG/TIFF
+        // predictor unfiltered with the wrong /Colors uses the wrong per-row stride and
+        // yields fewer bytes than W*H, so the 8-bpc branch below rejects it, the mask is
+        // dropped, and the image composites fully opaque (occluding what should show through).
+        // Force the mask's own predictor /Colors to its true value of 1.
+        ForceSoftMaskPredictorColors(d.Get("DecodeParms"), reader);
+
         byte[] decoded;
         try { decoded = reader.DecodeStream(stream); }
         catch { return null; }
@@ -1302,7 +1345,7 @@ public sealed class SoftwarePageRenderer : IPageRenderer
 
         // PDF 32000 §11.6.5.3: soft-mask sample values are alpha (0=transparent,
         // max=opaque). A /Decode [1 0] entry reverses that mapping, which a layered
-        // scan (33126: a JPEG2000 "text colour" overlay gated by a 1-bpc JBIG2 mask
+        // scan (a JPEG2000 "text colour" overlay gated by a 1-bpc JBIG2 mask
         // marked /Decode [1 0]) relies on to confine the overlay to the glyph pixels
         // instead of flooding the page.
         if (GrayDecodeInverts(d))
@@ -1529,7 +1572,7 @@ public sealed class SoftwarePageRenderer : IPageRenderer
             BlitRGB(ctx, SeparationSamplesToRgb(decoded, imgW, imgH, bpc, BuildSeparationLut(csInfo, GrayDecodeInverts(dict))),
                 imgW, imgH, px, py, pw, ph, smask, smaskW, smaskH, state.FillAlpha, flipY, flipX);
         else if (bpc == 1)
-            BlitBilevel(ctx, decoded, imgW, imgH, px, py, pw, ph);
+            BlitBilevel(ctx, decoded, imgW, imgH, px, py, pw, ph, GrayDecodeInverts(dict));
         // No fallback — a solid gray rectangle over an unrecognised image is false content
         // for visual comparison. Leaving the area white (page background) is less damaging
         // than painting over real content in the template.
@@ -1585,7 +1628,7 @@ public sealed class SoftwarePageRenderer : IPageRenderer
         else if (cs == "DeviceGray" && bpc == 8 && decoded.Length >= imgW * imgH) rgb = GrayToRgbBuf(decoded, imgW, imgH);
         else if (cs == "DeviceGray" && (bpc == 2 || bpc == 4)) rgb = GrayToRgbBuf(UnpackGraySamples(decoded, imgW, imgH, bpc, GrayDecodeInverts(dict)), imgW, imgH);
         else if (csInfo.TintTransform is not null && bpc is 1 or 2 or 4 or 8) rgb = SeparationSamplesToRgb(decoded, imgW, imgH, bpc, BuildSeparationLut(csInfo, GrayDecodeInverts(dict)));
-        else if (bpc == 1) rgb = BilevelToRgbBuf(decoded, imgW, imgH);
+        else if (bpc == 1) rgb = BilevelToRgbBuf(decoded, imgW, imgH, GrayDecodeInverts(dict));
         else return null;
 
         if (rgb is null || rgb.Length < rw * rh * 3) return null;
@@ -1618,14 +1661,15 @@ public sealed class SoftwarePageRenderer : IPageRenderer
         return o;
     }
 
-    private static byte[] BilevelToRgbBuf(byte[] d, int w, int h)
+    private static byte[] BilevelToRgbBuf(byte[] d, int w, int h, bool invert = false)
     {
         var o = new byte[w * h * 3]; long rb = (w + 7) / 8;
+        var inv = invert ? 1 : 0;
         for (int y = 0; y < h; y++)
             for (int x = 0; x < w; x++)
             {
                 var bi = y * rb + (x >> 3);
-                byte v = (byte)(bi < d.Length ? (((d[(int)bi] >> (7 - (x & 7))) & 1) == 1 ? 255 : 0) : 255);
+                byte v = (byte)(bi < d.Length ? ((((d[(int)bi] >> (7 - (x & 7))) & 1) ^ inv) == 1 ? 255 : 0) : 255);
                 var k = (y * w + x) * 3; o[k] = o[k + 1] = o[k + 2] = v;
             }
         return o;
@@ -1750,7 +1794,7 @@ public sealed class SoftwarePageRenderer : IPageRenderer
         else if (cs == "DeviceGray" && bpc == 8 && decoded.Length >= imgW * imgH)
             BlitGray(ctx, decoded, imgW, imgH, px, py, pw, ph, null, 0, 0, state.FillAlpha);
         else if (bpc == 1)
-            BlitBilevel(ctx, decoded, imgW, imgH, px, py, pw, ph);
+            BlitBilevel(ctx, decoded, imgW, imgH, px, py, pw, ph, GrayDecodeInverts(dict));
     }
 
     /// <summary>True when a DeviceGray image's /Decode array reverses the default [0 1]
@@ -2992,7 +3036,7 @@ public sealed class SoftwarePageRenderer : IPageRenderer
         // means the pixel covering [0, 1) on the y-axis is probed at exactly y=0 —
         // which for a shading BBox of [0, …, max] with strict inequalities just barely
         // lands on the upper edge and gets excluded. Probing at +0.5 keeps the
-        // first/last rows inside their BBoxes, matching Adobe / Aspose.PDF for .NET
+        // first/last rows inside their BBoxes, matching Adobe / Aspose.Pdf
         // behaviour.
         for (var py = yStart; py < yEnd; py++)
         {
@@ -3660,9 +3704,10 @@ public sealed class SoftwarePageRenderer : IPageRenderer
                     edgeTable.AddCubicBezier(curX, curY, curX, curY, v2x, v2y, v3x, v3y);
                     curX = v3x; curY = v3y;
                     break;
-                case PathOp.CurveToY: // second control point = endpoint
+                case PathOp.CurveToY: // second control point = endpoint; the `y`
+                                      // operator stores its endpoint in X2/Y2
                     Transform(seg.X1, seg.Y1, out var y1x, out var y1y);
-                    Transform(seg.X3, seg.Y3, out var y3x, out var y3y);
+                    Transform(seg.X2, seg.Y2, out var y3x, out var y3y);
                     edgeTable.AddCubicBezier(curX, curY, y1x, y1y, y3x, y3y, y3x, y3y);
                     curX = y3x; curY = y3y;
                     break;
@@ -3762,9 +3807,10 @@ public sealed class SoftwarePageRenderer : IPageRenderer
                         sx = v3x; sy = v3y;
                         break;
                     case PathOp.CurveToY:
-                        // Second control point coincides with endpoint.
+                        // Second control point coincides with endpoint; the `y`
+                        // operator stores its endpoint in X2/Y2.
                         Transform(seg.X1, seg.Y1, out var y1x, out var y1y);
-                        Transform(seg.X3, seg.Y3, out var y3x, out var y3y);
+                        Transform(seg.X2, seg.Y2, out var y3x, out var y3y);
                         StrokeCubic(ctx, sx, sy, y1x, y1y, y3x, y3y, y3x, y3y, r, g, b, lw, clip);
                         sx = y3x; sy = y3y;
                         break;
@@ -3948,9 +3994,9 @@ public sealed class SoftwarePageRenderer : IPageRenderer
                     et.AddCubicBezier(curX, curY, curX, curY, v2x, v2y, v3x, v3y);
                     curX = v3x; curY = v3y;
                     break;
-                case PathOp.CurveToY:
+                case PathOp.CurveToY: // the `y` operator stores its endpoint in X2/Y2
                     Transform(seg.X1, seg.Y1, out var y1x, out var y1y);
-                    Transform(seg.X3, seg.Y3, out var y3x, out var y3y);
+                    Transform(seg.X2, seg.Y2, out var y3x, out var y3y);
                     et.AddCubicBezier(curX, curY, y1x, y1y, y3x, y3y, y3x, y3y);
                     curX = y3x; curY = y3y;
                     break;
@@ -4219,7 +4265,7 @@ public sealed class SoftwarePageRenderer : IPageRenderer
     }
 
     private static void BlitBilevel(RenderContext ctx, byte[] src, int srcW, int srcH,
-        int dstX, int dstY, int dstW, int dstH)
+        int dstX, int dstY, int dstW, int dstH, bool invert = false)
     {
         if (src.Length == 0 || srcW <= 0 || srcH <= 0) return;
         // Use long for the running offset — sy*rowBytes can overflow int for very
@@ -4241,13 +4287,14 @@ public sealed class SoftwarePageRenderer : IPageRenderer
 
                 var byteIdx = sy * rowBytes + sx / 8;
                 if (byteIdx < 0 || byteIdx >= src.Length) continue;
-                var bit = (src[byteIdx] >> (7 - (int)(sx & 7))) & 1;
+                var bit = ((src[byteIdx] >> (7 - (int)(sx & 7))) & 1) ^ (invert ? 1 : 0);
                 // Default /Decode [0 1] for 1bpc DeviceGray: bit=1 → 1 → white,
                 // bit=0 → 0 → black. (ImageMask uses the opposite convention but
                 // takes the DrawImageMask branch before reaching here.) Treating
-                // bit=1 as black inverts every B&W background image — 33702 was
-                // rendering a form-with-data PDF as light-text-on-black instead
-                // of dark-text-on-white.
+                // bit=1 as black inverts every B&W background image — that would
+                // render a form-with-data PDF as light-text-on-black instead
+                // of dark-text-on-white. A /Decode [1 0] entry (common on BlackIs1
+                // CCITT scans) reverses the mapping — that's `invert`.
                 var val = (byte)(bit == 1 ? 255 : 0);
                 SetPixel(ctx, dx, dy, val, val, val, 255);
             }

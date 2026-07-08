@@ -33,7 +33,7 @@ internal static class CcittFaxDecodeFilter
         else
         {
             // Group 4 (k < 0)
-            DecodeGroup4(reader, columns, rows, output, rowBytes);
+            DecodeGroup4(reader, columns, rows, encodedByteAlign, output, rowBytes);
         }
 
         // Invert if BlackIs1 is false (default: white=0, black=1 in CCITT,
@@ -100,7 +100,7 @@ internal static class CcittFaxDecodeFilter
     }
 
     private static void DecodeGroup4(CcittBitReader reader, int columns, int rows,
-        List<byte> output, int rowBytes)
+        bool byteAlign, List<byte> output, int rowBytes)
     {
         var maxRows = rows > 0 ? rows : int.MaxValue;
         var refLine = new bool[columns]; // all white
@@ -108,6 +108,12 @@ internal static class CcittFaxDecodeFilter
         var shifted = new bool[columns];
         for (var row = 0; row < maxRows; row++)
         {
+            // With /EncodedByteAlign each scan line's coded data is padded to a byte
+            // boundary (PDF 32000 §7.4.6 Table 11); skip the fill bits before decoding
+            // the next row, exactly as the Group 3 decoders do. Without this the bit
+            // stream desyncs after row 0 and decoding bails after a single (blank) row.
+            if (byteAlign) reader.AlignToByte();
+
             var line = new bool[columns];
             if (!Decode2DLine(reader, refLine, line, columns))
                 break;

@@ -121,14 +121,43 @@ public sealed partial class Document
         return ok && appliedAny;
     }
 
+    // The word content is captured lazily as (.*?) rather than [^<]* so a word
+    // wrapped in inline markup (e.g. <strong>is</strong>, <em>…</em>) is matched
+    // too — its tags are stripped afterwards. [^<]* would stop at the inner '<'
+    // and fail the </span> anchor, silently dropping every bold/italic word from
+    // the searchable overlay.
     private static readonly Regex HocrWordRegex = new(
-        @"<span[^>]+class=['""]ocrx?_word['""][^>]*title=['""][^'""]*bbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)[^'""]*['""][^>]*>([^<]*)</span>",
+        @"<span[^>]+class=['""]ocrx?_word['""][^>]*title=['""][^'""]*bbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)[^'""]*['""][^>]*>(.*?)</span>",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+    private static readonly Regex HocrInlineTagRegex = new(@"<[^>]+>", RegexOptions.Compiled);
+
+    // Combined scan over the hOCR body: each match is either an ocr_line container
+    // (group 1 = "ocr_line", groups 2-5 = its bbox) or an ocrx_word (groups 6-9 =
+    // bbox, group 10 = word markup). Iterating in document order lets us assign each
+    // word to its enclosing ocr_line, so the overlay preserves the OCR's own line
+    // structure (words on one visual line share a baseline) rather than scattering
+    // every word onto its own jittered baseline.
+    private static readonly Regex HocrLineOrWordRegex = new(
+        @"class=['""](ocr_line)['""][^>]*title=['""][^'""]*bbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)" +
+        @"|<span[^>]+class=['""]ocrx?_word['""][^>]*title=['""][^'""]*bbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)[^'""]*['""][^>]*>(.*?)</span>",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+    /// <summary>The <c>ocr_page</c> element carries the source raster's pixel
+    /// dimensions as <c>bbox 0 0 W H</c>. These are the correct denominators for
+    /// mapping word boxes onto the PDF page; using the rightmost/bottommost word
+    /// edge instead would stretch the overlay so the last word touches the page
+    /// edge. The page title is single-quoted but embeds double quotes
+    /// (<c>image ""; bbox …</c>), so a <c>[^'"]</c> scan would stop short of
+    /// bbox — match within the tag (up to '&gt;') instead.</summary>
+    private static readonly Regex HocrPageBBoxRegex = new(
+        @"class=['""]ocr_page['""][^>]*?bbox\s+\d+\s+\d+\s+(\d+)\s+(\d+)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>Overlay the recognised hOCR words on the page as an invisible
     /// text layer. Returns the number of words actually overlaid (0 when the hOCR
     /// is empty, malformed, or contains no word spans).</summary>
-    private static int OverlayHocrAsInvisibleText(Page page, string hocr)
+    internal static int OverlayHocrAsInvisibleText(Page page, string hocr)
     {
         if (string.IsNullOrWhiteSpace(hocr)) return 0;
         var matches = HocrWordRegex.Matches(hocr);
@@ -139,48 +168,90 @@ public sealed partial class Document
         var pageHeight = rect.Height;
         if (pageWidth <= 0 || pageHeight <= 0) return 0;
 
-        var maxX = 0; var maxY = 0;
-        foreach (Match m in matches)
+        // Prefer the OCR raster's true pixel dimensions from the ocr_page bbox.
+        // Fall back to the extent of the recognised words only when the page
+        // element is absent or malformed.
+        double imgW = 0, imgH = 0;
+        var pageMatch = HocrPageBBoxRegex.Match(hocr);
+        if (pageMatch.Success)
         {
-            if (int.TryParse(m.Groups[3].Value, out var x1) && x1 > maxX) maxX = x1;
-            if (int.TryParse(m.Groups[4].Value, out var y1) && y1 > maxY) maxY = y1;
+            int.TryParse(pageMatch.Groups[1].Value, out var pw);
+            int.TryParse(pageMatch.Groups[2].Value, out var ph);
+            imgW = pw; imgH = ph;
         }
-        if (maxX <= 0) maxX = 1;
-        if (maxY <= 0) maxY = 1;
+        if (imgW <= 0 || imgH <= 0)
+        {
+            var maxX = 0; var maxY = 0;
+            foreach (Match m in matches)
+            {
+                if (int.TryParse(m.Groups[3].Value, out var x1) && x1 > maxX) maxX = x1;
+                if (int.TryParse(m.Groups[4].Value, out var y1) && y1 > maxY) maxY = y1;
+            }
+            imgW = maxX > 0 ? maxX : 1;
+            imgH = maxY > 0 ? maxY : 1;
+        }
 
-        var sx = pageWidth / maxX;
-        var sy = pageHeight / maxY;
+        var sx = pageWidth / imgW;
+        var sy = pageHeight / imgH;
 
         var tb = new TextBuilder(page);
         var overlaid = 0;
-        foreach (Match m in matches)
+        // Emit each word at its OWN baseline (bbox bottom) and font. The extractor groups
+        // words into lines and derives each line's baseline (median) and bottom (deepest
+        // glyph) — the vertical-gap rule needs both, so the per-word bottoms must survive.
+        foreach (Match m in HocrLineOrWordRegex.Matches(hocr))
         {
-            if (!int.TryParse(m.Groups[1].Value, out var bx0) ||
-                !int.TryParse(m.Groups[2].Value, out var by0) ||
-                !int.TryParse(m.Groups[3].Value, out var bx1) ||
-                !int.TryParse(m.Groups[4].Value, out var by1))
+            if (m.Groups[1].Success) continue; // ocr_line marker — grouping is geometric
+
+            if (!int.TryParse(m.Groups[6].Value, out var bx0) ||
+                !int.TryParse(m.Groups[7].Value, out var by0) ||
+                !int.TryParse(m.Groups[8].Value, out var bx1) ||
+                !int.TryParse(m.Groups[9].Value, out var by1))
                 continue;
-            var word = System.Net.WebUtility.HtmlDecode(m.Groups[5].Value)?.Trim();
+            var raw = HocrInlineTagRegex.Replace(m.Groups[10].Value, string.Empty);
+            var word = System.Net.WebUtility.HtmlDecode(raw)?.Trim();
             if (string.IsNullOrEmpty(word)) continue;
 
-            var pdfX = bx0 * sx;
-            // hOCR origin is top-left; PDF is bottom-left.
-            var pdfY = pageHeight - (by1 * sy);
-            var fontSize = Math.Max(1.0, (by1 - by0) * sy);
-
-            var fragment = new TextFragment(word!, textState: new TextState
+            // Size each word to FILL its bbox width (not height): fontSize =
+            // round(bboxWidthPts / wordEmWidth), the same integer-per-word rule the
+            // OCR layout uses, so the extractor's dominant-font grid cell matches.
+            // Measure the FOLDED text so the rendered advance matches the box (the fi/fl
+            // fold changes glyph widths); otherwise a folded word overshoots into the next.
+            var display = FoldLigatures(word!);
+            var fontSize = WidthFitFontSize(display, (bx1 - bx0) * sx);
+            tb.AppendText(new TextFragment(display, textState: new TextState
             {
                 FontSize = (float)fontSize,
                 RenderingMode = TextRenderingMode.Invisible,
             })
             {
-                Position = new Position(pdfX, pdfY),
-            };
-            tb.AppendText(fragment);
+                Position = new Position(bx0 * sx, pageHeight - by1 * sy),
+            });
             overlaid++;
         }
         return overlaid;
     }
+
+    /// <summary>Fit a word to a target rendered width: fontSize = round(width /
+    /// wordEmWidth) where wordEmWidth is the sum of the word's Helvetica advance
+    /// widths (em units). Half-up rounding, floor of 1.</summary>
+    private static int WidthFitFontSize(string word, double targetWidthPts)
+    {
+        double em = 0;
+        foreach (var ch in word)
+            em += Text.Standard14Fonts.GetWidth("Helvetica", ch);
+        em /= 1000.0;
+        if (em <= 0 || targetWidthPts <= 0) return 1;
+        return Math.Max(1, (int)Math.Round(targetWidthPts / em, MidpointRounding.AwayFromZero));
+    }
+
+    /// <summary>The reference overlay font cannot encode the fi/fl ligatures, so the
+    /// extracted text carries a NUL where they occur; mirror that so extraction is
+    /// byte-faithful.</summary>
+    private static string FoldLigatures(string s) =>
+        (s.IndexOf('ﬁ') < 0 && s.IndexOf('ﬂ') < 0)
+            ? s
+            : s.Replace('ﬁ', '\0').Replace('ﬂ', '\0');
 
     private void ReplacePageWithImage(Page page, byte[] pngBytes)
     {

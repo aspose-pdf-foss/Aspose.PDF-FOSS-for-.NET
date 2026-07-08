@@ -80,8 +80,34 @@ public sealed class ImagePlacement
         Operator = op;
     }
 
-    /// <summary>Hide this image placement on the page. Stored only — no content-stream rewrite.</summary>
-    public void Hide() { }
+    /// <summary>Resource name of the drawn XObject, when discovered by the absorber.</summary>
+    internal string? XObjectName;
+
+    /// <summary>Ordinal of this placement among the page-level <c>Do</c> invocations
+    /// of <see cref="XObjectName"/> (0-based); -1 for placements drawn inside Form
+    /// XObjects, which page-level operator edits cannot address.</summary>
+    internal int PageLevelOrdinal = -1;
+
+    /// <summary>Hide this image placement by removing its <c>Do</c> invocation from
+    /// the page content. Placements nested inside Form XObjects are left untouched
+    /// (removing them would affect every use of the form).</summary>
+    public void Hide()
+    {
+        if (Page is null || XObjectName is null || PageLevelOrdinal < 0) return;
+        var ops = Page.Contents;
+        var matches = new List<int>();
+        for (int i = 1; i <= ops.Count; i++)
+        {
+            if (ops[i] is Aspose.Pdf.Operators.Do d && d.Name == XObjectName)
+                matches.Add(i);
+        }
+        if (matches.Count == 0) return;
+        // Earlier Hide() calls on same-named placements shift the surviving
+        // ordinals down; when ours is out of range, remove the last remaining
+        // occurrence so every placement still hides exactly one invocation.
+        var idx = PageLevelOrdinal < matches.Count ? matches[PageLevelOrdinal] : matches[^1];
+        ops.Delete(idx);
+    }
 
     /// <summary>Replace this image placement's content with <paramref name="image"/>. Stored only.</summary>
     public void Replace(Stream image)
@@ -94,7 +120,26 @@ public sealed class ImagePlacement
     {
         if (stream is null) throw new ArgumentNullException(nameof(stream));
         if (Image is null) return;
+        var turns = ClockwiseQuarterTurns();
+        if (turns != 0)
+        {
+            Image.SaveRotated(stream, turns);
+            return;
+        }
         Image.Save(stream);
+    }
+
+    /// <summary>
+    /// Number of 90° clockwise turns to apply when extracting the image so it keeps
+    /// the orientation it appears in on the displayed page. A page with a quarter-turn
+    /// <c>/Rotate</c> rotates its drawn content for display; an image drawn upright in
+    /// page space therefore appears rotated to a viewer, and an extraction should
+    /// reproduce that. Non-quarter rotations and pages without a /Rotate yield 0.
+    /// </summary>
+    private int ClockwiseQuarterTurns()
+    {
+        var degrees = ((Page?.RotateDegrees ?? 0) % 360 + 360) % 360;
+        return degrees % 90 == 0 ? degrees / 90 : 0;
     }
 
     /// <summary>Write the decoded image bytes to <paramref name="stream"/> as <paramref name="format"/>.</summary>
@@ -172,9 +217,12 @@ public sealed class ImagePlacementAbsorber
 
         // Parse each content stream with identity CTM as starting point
         var initialCtm = new double[] { 1, 0, 0, 1, 0, 0 };
+        // Track how many page-level Do invocations of each XObject name were seen,
+        // so each placement can locate its own operator later (Hide()).
+        var pageLevelSeen = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var streamBytes in contentStreams)
         {
-            ParseContentStream(streamBytes, resources, reader, page, initialCtm, depth: 0);
+            ParseContentStream(streamBytes, resources, reader, page, initialCtm, depth: 0, pageLevelSeen);
         }
     }
 
@@ -195,7 +243,7 @@ public sealed class ImagePlacementAbsorber
     /// When a Form XObject is encountered, recursively parse its content stream.
     /// </summary>
     private void ParseContentStream(byte[] streamBytes, PdfDictionary? resources, PdfReader reader,
-        Page page, double[] parentCtm, int depth)
+        Page page, double[] parentCtm, int depth, Dictionary<string, int>? pageLevelSeen = null)
     {
         if (depth > 10) return; // Guard against infinite recursion
 
@@ -233,7 +281,7 @@ public sealed class ImagePlacementAbsorber
                 var localCtm = state.Ctm;
                 var ctm = MultiplyMatrices(localCtm, parentCtm);
 
-                AddImagePlacement(ctm, xobjStream, page, xobjName, reader);
+                AddImagePlacement(ctm, xobjStream, page, xobjName, reader, depth == 0 ? pageLevelSeen : null);
             }
             else if (subtype == "Form")
             {
@@ -262,12 +310,24 @@ public sealed class ImagePlacementAbsorber
             }
         };
 
+        // Inline images (BI/ID/EI) are placements too. The parser hands over the
+        // image dictionary (keys already expanded to full names) and the raw,
+        // still-encoded payload; wrap them in a synthetic PdfStream so the
+        // placement carries a decodable XImage like an XObject placement does.
+        parser.OnInlineImage += (dict, data) =>
+        {
+            if (dict.Get("Subtype") is not PdfName)
+                dict.Set("Subtype", new PdfName("Image"));
+            var ctm = MultiplyMatrices(parser.State.Ctm, parentCtm);
+            AddImagePlacement(ctm, new PdfStream(dict, data), page, null, reader);
+        };
+
         var extGStates = BuildExtGStates(resources, reader);
         parser.Parse(streamBytes, extGStates: extGStates);
     }
 
     private void AddImagePlacement(double[] ctm, PdfStream xobjStream, Page page,
-        string? xobjName = null, PdfReader? reader = null)
+        string? xobjName = null, PdfReader? reader = null, Dictionary<string, int>? pageLevelSeen = null)
     {
         // The image occupies a 1x1 unit square transformed by the CTM.
         var displayWidth = Math.Sqrt(ctm[0] * ctm[0] + ctm[1] * ctm[1]);
@@ -300,7 +360,17 @@ public sealed class ImagePlacementAbsorber
         XImage? image = (reader is not null)
             ? new XImage(xobjName ?? "", xobjStream, reader)
             : null;
-        ImagePlacements.Add(new ImagePlacement(rect, new Resolution(resX, resY), page, matrix, image));
+        var placement = new ImagePlacement(rect, new Resolution(resX, resY), page, matrix, image)
+        {
+            XObjectName = xobjName,
+        };
+        if (pageLevelSeen is not null && xobjName is not null)
+        {
+            pageLevelSeen.TryGetValue(xobjName, out var ord);
+            pageLevelSeen[xobjName] = ord + 1;
+            placement.PageLevelOrdinal = ord;
+        }
+        ImagePlacements.Add(placement);
     }
 
     private static double Num(PdfObject obj) => obj switch

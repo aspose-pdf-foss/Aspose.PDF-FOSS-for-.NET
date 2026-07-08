@@ -11,16 +11,33 @@ namespace Aspose.Pdf.Forms;
 /// <summary>
 /// Represents the interactive form (AcroForm) of a PDF document.
 /// </summary>
-public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
+public sealed class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>
 {
     private readonly List<Field> _fields;
 
+    // Non-terminal (group/parent) field dicts surfaced into _fields by
+    // CollectGroupFields so FindByName can resolve a group by its full name. They are
+    // NOT terminal fields, so the public Fields array (and its leaf count) excludes
+    // them — matching Aspose.Pdf, whose Form.Fields returns terminal fields only.
+    private readonly HashSet<PdfDictionary> _groupFieldDicts = new();
+
     /// <summary>
     /// Returns the form fields as a snapshot array. Mirrors the
-    /// Aspose.PDF for .NET public signature (`Field[] Fields`), so callers
-    /// can use .Length and array indexing.
+    /// Aspose.Pdf public signature (`Field[] Fields`), so callers
+    /// can use .Length and array indexing. Only terminal fields are returned;
+    /// intermediate group nodes (kept in <c>_fields</c> for name lookup) are excluded.
     /// </summary>
-    public Field[] Fields => _fields.ToArray();
+    public Field[] Fields
+    {
+        get
+        {
+            if (_groupFieldDicts.Count == 0) return _fields.ToArray();
+            var terminals = new List<Field>(_fields.Count);
+            foreach (var f in _fields)
+                if (!_groupFieldDicts.Contains(f.Dict)) terminals.Add(f);
+            return terminals.ToArray();
+        }
+    }
 
     private static Aspose.Pdf.Annotations.WidgetAnnotation Widgetize(Field f)
         => f;
@@ -67,7 +84,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         {
             var expandedGroups = new HashSet<PdfDictionary>();
             CollectFields(fieldsArray, reader, _fields, expandedGroups);
-            CollectGroupFields(reader, _fields, expandedGroups);
+            CollectGroupFields(reader, _fields, expandedGroups, _groupFieldDicts);
         }
         // Surface the AcroForm default resources (/DR) so callers can read its fonts.
         var dr = reader.ResolveDict(acroForm.Get("DR"));
@@ -144,7 +161,41 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         }
     }
 
-    public int Count => _fields.Count;
+    /// <summary>
+    /// Number of ROOT form fields — the entries of the AcroForm <c>/Fields</c> array
+    /// (fields whose field-<c>/Parent</c> is null). A container/subform field (e.g. an
+    /// XFA subform tree) or a radio-button group counts as a SINGLE field here; its
+    /// descendants are not walked. This is a different view from <see cref="Fields"/>,
+    /// which flattens the tree to terminal fields (and splits a radio group into its
+    /// option fields). Falls back to the flattened count for forms with no AcroForm
+    /// <c>/Fields</c> array (e.g. reconstructed from page widgets).
+    /// </summary>
+    public int Count
+    {
+        get
+        {
+            var reader = _reader ?? OwnerDocument?.Reader;
+            if (reader is not null)
+            {
+                // Use the AcroForm this Form represents; fall back to the live catalog
+                // AcroForm only when ours carries no /Fields (e.g. an initially-empty form
+                // whose AcroForm was created later by Add()).
+                var fieldsArray = _acroForm is not null
+                    ? reader.Resolve(_acroForm.Get("Fields")) as PdfArray
+                    : null;
+                fieldsArray ??= reader.Resolve(
+                    reader.ResolveDict(reader.Catalog?.Get("AcroForm"))?.Get("Fields")) as PdfArray;
+                if (fieldsArray is not null)
+                {
+                    var n = 0;
+                    foreach (var item in fieldsArray)
+                        if (reader.ResolveDict(item) is not null) n++;
+                    return n;
+                }
+            }
+            return _fields.Count;
+        }
+    }
     /// <summary>Get the widget annotation for the form field at the 1-based index.</summary>
     public Aspose.Pdf.Annotations.WidgetAnnotation this[int index] => Widgetize(_fields[index - 1]);
 
@@ -231,21 +282,13 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         // Add field dict to AcroForm /Fields
         fieldsArray.Add(field.Dict);
 
-        // A field added without a partial name (/T) is auto-named "field_N" so it
-        // stays addressable by FindByName. /NM (Annotation.Name) is the annotation
-        // identifier, not the field name, so it does not make a field findable.
-        if (string.IsNullOrEmpty(field.PartialName))
-        {
-            var maxN = 0;
-            foreach (var item in fieldsArray)
-            {
-                var t = (reader.ResolveDict(item)?.Get("T") as PdfString)?.ToText();
-                if (t is not null && t.StartsWith("field_", StringComparison.Ordinal)
-                    && int.TryParse(t.AsSpan(6), out var n) && n > maxN)
-                    maxN = n;
-            }
-            field.PartialName = "field_" + (maxN + 1);
-        }
+        // Disambiguate the field's name against the fields already on the form. An
+        // unnamed field is auto-named off the "field_" base; a name that collides
+        // with an existing field is suffixed. Checkboxes/radios that share a base
+        // name form a group suffixed "#0","#1",… (0-based, the first bare member is
+        // retroactively renamed to "#0"); every other collision (text fields, or a
+        // button colliding with a non-button) appends a 1-based numeric suffix.
+        field.PartialName = DisambiguateFieldName(field, fieldsArray, reader);
 
         // Set NeedAppearances so viewers generate appearances
         acroForm.Set("NeedAppearances", PdfBoolean.True);
@@ -270,6 +313,10 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         // Add to internal fields list
         _fields.Add(field);
 
+        // Back-reference the owner so the field's own operations (e.g. Sign)
+        // can reach the document.
+        if (OwnerDocument is not null) field.OwnerDocument = OwnerDocument;
+
         // Mark AcroForm and page dicts dirty so that incremental save persists the
         // /Fields and /Annots mutations. Without this, a document opened from a
         // writable stream takes the incremental path and drops the new field.
@@ -291,6 +338,72 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         }
     }
 
+    /// <summary>Compute the disambiguated /T name for a field being added, against the
+    /// names already present in <paramref name="fieldsArray"/> (the field's own dict is
+    /// skipped). Reproduces the reference numbering: an unnamed field is based on
+    /// "field_"; checkboxes/radios sharing a base form a "#N" group (0-based, the bare
+    /// first member is retroactively renamed to "#N0"); all other collisions append a
+    /// 1-based decimal. Returns the name to assign; performs the retroactive rename as a
+    /// side effect when a button group forms.</summary>
+    private string DisambiguateFieldName(Field field, PdfArray fieldsArray, PdfReader reader)
+    {
+        var empty = string.IsNullOrEmpty(field.PartialName);
+        var baseName = empty ? "field_" : field.PartialName!;
+        var isButton = field is CheckboxField || field is RadioButtonField;
+
+        // Existing top-level names (excluding the field being added) with their dicts
+        // and a button flag (a /FT of /Btn, inherited where absent on the kid).
+        var names = new List<(string name, bool isButton, PdfDictionary dict)>();
+        foreach (var item in fieldsArray)
+        {
+            var d = reader.ResolveDict(item);
+            if (d is null || ReferenceEquals(d, field.Dict)) continue;
+            if ((d.Get("T") as PdfString)?.ToText() is not { } t) continue;
+            var ft = d.GetName("FT");
+            names.Add((t, ft == "Btn", d));
+        }
+
+        var indexed = new Regex("^" + Regex.Escape(baseName) + @"#\d+$");
+        bool Taken(string n) { foreach (var e in names) if (e.name == n) return true; return false; }
+        bool HasButtonGroup() { foreach (var e in names) if (e.isButton && (e.name == baseName || indexed.IsMatch(e.name))) return true; return false; }
+        bool BaseInUse() { if (Taken(baseName)) return true; foreach (var e in names) if (indexed.IsMatch(e.name)) return true; return false; }
+        int CountIndexed() { var c = 0; foreach (var e in names) if (indexed.IsMatch(e.name)) c++; return c; }
+        var baseHasIndexSuffix = Regex.IsMatch(baseName, @"#\d+$");
+
+        if (isButton && (HasButtonGroup() || empty))
+        {
+            // Checkbox/radio "#N" group. Retroactively rename a bare same-base button
+            // (one with no "#N" tail of its own) to "<base>#0" so the whole group is
+            // suffixed; a base that already carries a "#N" tail is left as-is.
+            var didRename = false;
+            if (!baseHasIndexSuffix)
+            {
+                foreach (var e in names)
+                {
+                    if (e.isButton && e.name == baseName)
+                    {
+                        e.dict.Set("T", new PdfString(Encoding.Latin1.GetBytes(baseName + "#0")));
+                        var num = OwnerDocument?.FindObjectNumber(e.dict) ?? -1;
+                        if (num > 0) OwnerDocument!.MarkDirty(num, e.dict);
+                        didRename = true;
+                        break;
+                    }
+                }
+            }
+            // Index = existing "#N" members, plus the one we just renamed to "#0"
+            // (the in-memory name list still reflects its pre-rename name).
+            return baseName + "#" + (CountIndexed() + (didRename ? 1 : 0));
+        }
+
+        // Bare name when there is no collision at all (named fields only).
+        if (!empty && !BaseInUse()) return baseName;
+
+        // Numeric (1-based) append for every other collision.
+        var k = 1;
+        while (Taken(baseName + k)) k++;
+        return baseName + k;
+    }
+
     /// <summary>Add a field's widget annotation(s) to the 1-based target page's
     /// /Annots array. Uses the owning document's page collection — a freshly-built
     /// PageCollection(reader) doesn't see pages added via Document.Pages.Add() on a
@@ -301,15 +414,31 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     {
         var pages = OwnerDocument?.Pages ?? new PageCollection(reader);
         if (pageIndex < 1 || pageIndex > pages.Count) return;
-        var page = pages[pageIndex];
-        var annots = page.Dict.Get("Annots") as PdfArray;
-        if (annots is null)
+
+        PdfArray AnnotsFor(int idx)
         {
-            annots = new PdfArray();
-            page.Dict.Set("Annots", annots);
+            var pd = pages[idx].Dict;
+            if (pd.Get("Annots") is PdfArray a) return a;
+            var na = new PdfArray();
+            pd.Set("Annots", na);
+            return na;
         }
+
         foreach (var widget in CollectWidgetDicts(fieldDict, reader))
-            annots.Add(widget);
+        {
+            // A widget may carry a per-option page hint (CheckboxField.AddOption with
+            // an explicit page); route it there, otherwise use the field's page.
+            int target = pageIndex;
+            if (reader.Resolve(widget.Get("_PlacePage")) is PdfInteger pp
+                && pp.Value >= 1 && pp.Value <= pages.Count)
+            {
+                target = (int)pp.Value;
+                widget.Remove("_PlacePage");
+            }
+            AnnotsFor(target).Add(widget);
+            var pageObjNum = OwnerDocument?.FindObjectNumber(pages[target].Dict) ?? -1;
+            if (pageObjNum > 0) OwnerDocument!.MarkDirty(pageObjNum, pages[target].Dict);
+        }
     }
 
     /// <summary>The widget annotation dictionaries that a field contributes to a
@@ -322,6 +451,11 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         var widgets = new System.Collections.Generic.List<PdfDictionary>();
         if (reader.Resolve(fieldDict.Get("Kids")) is PdfArray kids && kids.Count > 0)
         {
+            // A field that carries its own /Rect alongside /Kids is a merged self-widget
+            // (multi-widget text field): the field dict is itself the first visual widget,
+            // so it must be placed in /Annots too — not just the kids.
+            if (reader.Resolve(fieldDict.Get("Rect")) is PdfArray)
+                widgets.Add(fieldDict);
             foreach (var k in kids)
                 if (reader.Resolve(k) is PdfDictionary kid &&
                     reader.Resolve(kid.Get("Rect")) is PdfArray)
@@ -391,7 +525,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             && da.FontResourceName.Contains('_') && fontDict.ContainsKey(da.FontResourceName))
             return;
 
-        // Composite fonts are named C{n}_0 (matching the Aspose.PDF for .NET convention).
+        // Composite fonts are named C{n}_0 (matching the Aspose.Pdf convention).
         var n = 0;
         foreach (var key in fontDict.Keys)
             if (key.Length > 1 && key[0] == 'C' && key.Contains('_')) n++;
@@ -401,9 +535,12 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         da.FontResourceName = resName;
 
         var c = da.TextColor;
+        // Colour components: whole values as integers ("1"/"0"), fractions at full precision
+        // (128/255 -> "0.5019607843") like the reference, not a fixed 3-decimal rounding.
+        static string Cc(double v) => v.ToString("0.##########", System.Globalization.CultureInfo.InvariantCulture);
         var daStr = string.Format(System.Globalization.CultureInfo.InvariantCulture,
-            "/{0} {1:G} Tf {2:F3} {3:F3} {4:F3} rg",
-            resName, da.FontSize, c.R / 255.0, c.G / 255.0, c.B / 255.0);
+            "/{0} {1:G} Tf {2} {3} {4} rg",
+            resName, da.FontSize, Cc(c.R / 255.0), Cc(c.G / 255.0), Cc(c.B / 255.0));
         field.Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(daStr)));
     }
 
@@ -553,6 +690,9 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     /// </summary>
     public Field? FindByName(string fullName)
     {
+        // A null/empty request (e.g. GetFieldType on a non-field annotation whose FullName
+        // is null) matches no field — return null rather than dereferencing it downstream.
+        if (string.IsNullOrEmpty(fullName)) return null;
         // 1. Named radio group reconstruction. A radio group is read back as its
         // individual option widgets (each /Parent → the group dict); when the group
         // itself is named, surface it as one RadioButtonField so callers can look it
@@ -685,7 +825,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             }
             if (unique is not null) return unique;
 
-            // 7. Last-segment fallback for non-bracket inputs (Aspose.PDF for .NET behaviour)
+            // 7. Last-segment fallback for non-bracket inputs (Aspose.Pdf behaviour)
             var lastDot2 = fullName.LastIndexOf('.');
             var leaf = lastDot2 >= 0 ? fullName.Substring(lastDot2 + 1) : fullName;
             Field? leafMatch = null;
@@ -712,7 +852,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     /// </summary>
     private static string StripAnonymousContainers(string dottedName)
     {
-        if (dottedName.IndexOf('#') < 0) return dottedName;
+        if (string.IsNullOrEmpty(dottedName) || dottedName.IndexOf('#') < 0) return dottedName;
         var parts = dottedName.Split('.');
         var kept = new List<string>(parts.Length);
         foreach (var p in parts)
@@ -720,6 +860,51 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
                 kept.Add(p);
         return string.Join(".", kept);
     }
+
+    /// <summary>
+    /// Split an XFA SOM (Scripting Object Model) path into its segments on the
+    /// <b>unescaped</b> '.' separators, un-escaping any <c>\.</c> inside a segment
+    /// back to a literal '.'. XFA field (and AcroForm /T) names may legitimately
+    /// contain a '.' — e.g. a leaf named <c>SRC.C_ACTION</c> — which the SOM syntax
+    /// writes escaped as <c>SRC\.C_ACTION</c>. A naive <c>Split('.')</c> would split
+    /// such a leaf into two bogus segments. For backward compatibility (and speed) a
+    /// path with no backslash falls straight through to <c>Split('.')</c>.
+    /// </summary>
+    internal static string[] SplitSomPath(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return path is null ? Array.Empty<string>() : new[] { path };
+        if (path.IndexOf('\\') < 0) return path.Split('.');
+        var segs = new List<string>();
+        var sb = new StringBuilder();
+        for (int i = 0; i < path.Length; i++)
+        {
+            char c = path[i];
+            if (c == '\\' && i + 1 < path.Length && path[i + 1] == '.')
+            {
+                sb.Append('.');
+                i++; // consume the escaped dot
+            }
+            else if (c == '.')
+            {
+                segs.Add(sb.ToString());
+                sb.Clear();
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        segs.Add(sb.ToString());
+        return segs.ToArray();
+    }
+
+    /// <summary>Escape a single SOM path segment (a leaf/subform name) so that a
+    /// literal '.' inside it round-trips as <c>\.</c> when the segment is joined
+    /// into a dotted SOM path. Mirrors <see cref="SplitSomPath"/>.</summary>
+    internal static string EscapeSomSegment(string segment)
+        => string.IsNullOrEmpty(segment) || segment.IndexOf('.') < 0
+            ? segment
+            : segment.Replace(".", "\\.");
 
     private Dictionary<string, string>? _xfaPathMap;
 
@@ -768,9 +953,10 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
                 {
                     // Count same-named siblings at this level to determine index
                     int idx = CountPrecedingSiblings(child, localName, nameAttr);
+                    var escName = EscapeSomSegment(nameAttr);
                     var currentPath = parentPath.Length > 0
-                        ? $"{parentPath}.{nameAttr}[{idx}]"
-                        : $"{nameAttr}[{idx}]";
+                        ? $"{parentPath}.{escName}[{idx}]"
+                        : $"{escName}[{idx}]";
                     WalkXfaTemplate(child, currentPath, map);
                 }
                 else
@@ -784,13 +970,15 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
                 if (nameAttr is not null)
                 {
                     int idx = CountPrecedingSiblings(child, localName, nameAttr);
+                    var escName = EscapeSomSegment(nameAttr);
                     var fieldPath = parentPath.Length > 0
-                        ? $"{parentPath}.{nameAttr}[{idx}]"
-                        : $"{nameAttr}[{idx}]";
+                        ? $"{parentPath}.{escName}[{idx}]"
+                        : $"{escName}[{idx}]";
 
-                    // Map XFA path -> AcroForm field name (partial name)
+                    // Map XFA path -> AcroForm field name (partial name). The value is
+                    // matched against Field.FullName, which the AcroForm side escapes too.
                     if (!map.ContainsKey(fieldPath))
-                        map[fieldPath] = nameAttr;
+                        map[fieldPath] = escName;
                 }
 
                 // exclGroup can contain fields (radio buttons)
@@ -907,6 +1095,363 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         }
     }
 
+    /// <summary>Write <paramref name="url"/> into the XFA template's
+    /// <c>&lt;submit target&gt;</c> for the named button field and persist it back
+    /// into the /XFA template stream. Returns false when the form has no XFA
+    /// template, the field/submit node can't be located, or the write fails.
+    /// Mirrors the AcroForm SubmitForm /F update so both stay in sync.</summary>
+    internal bool SetXfaSubmitUrl(string fieldName, string url)
+    {
+        var xml = GetXfaTemplateXml();
+        if (xml is null) return false;
+        XmlDocument doc = new();
+        try { doc.LoadXml(xml); } catch { return false; }
+        if (doc.DocumentElement is null) return false;
+
+        // Locate the field's template node by walking the leaf-name segments
+        // (template nodes are named by leaf name only, no dotted path / [n] index).
+        XmlNode current = doc.DocumentElement;
+        foreach (var rawSeg in SplitSomPath(fieldName))
+        {
+            var seg = System.Text.RegularExpressions.Regex.Replace(rawSeg, @"\[\d+\]$", "");
+            var next = FindNamedTemplateNode(current, seg);
+            if (next is null) return false;
+            current = next;
+        }
+        if (ReferenceEquals(current, doc.DocumentElement)) return false;
+
+        // The <submit> element (xfa-template ns) is a descendant of the field node,
+        // typically <field><event><submit target="…"/></event></field>.
+        if (current.SelectSingleNode(".//*[local-name()='submit']") is not XmlElement submit)
+            return false;
+
+        submit.SetAttribute("target", url);
+        SetXfaTemplateXml(doc.OuterXml);
+        return true;
+    }
+
+    /// <summary>Return the XFA template XML from either a named "template" array part or,
+    /// when the form's /XFA is a single-stream XDP (no named parts), the <c>&lt;template&gt;</c>
+    /// element extracted from that XDP. <see cref="GetXfaTemplateXml"/> only handles the
+    /// array form and returns null for a single-stream XDP.</summary>
+    internal string? GetXfaTemplateXmlResolved()
+    {
+        var direct = GetXfaTemplateXml();
+        if (direct is not null) return direct;
+        var reader = _reader ?? OwnerDocument?.Reader;
+        if (reader is null) return null;
+        var acroForm = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
+        if (acroForm is null) return null;
+        if (reader.Resolve(acroForm.Get("XFA")) is not PdfStream single) return null;
+        try
+        {
+            var xdp = StripBom(Encoding.UTF8.GetString(reader.DecodeStream(single)));
+            var d = new XmlDocument();
+            d.LoadXml(xdp);
+            // Select the genuine xfa-template packet by namespace — NOT the config's
+            // <common><template><base>. element (a different, xci namespace).
+            var t = d.DocumentElement?.SelectSingleNode(
+                "//*[local-name()='template' and contains(namespace-uri(),'xfa-template')]");
+            return (t as XmlElement)?.OuterXml;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Strictly resolve a dotted SOM path against the XFA template — follow the
+    /// container hierarchy segment by segment, skipping only anonymous (unnamed) subform
+    /// wrappers, WITHOUT the lenient "any descendant with the leaf name" fallback that
+    /// <see cref="FindXfaTemplateNode"/> applies. Returns true only when every segment
+    /// resolves and the final node is a fillable field. Robust where the template-field
+    /// enumeration is incomplete (some templates enumerate to zero fields).</summary>
+    internal bool XfaTemplateFieldExists(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+        var xml = GetXfaTemplateXmlResolved();
+        if (xml is null) return false;
+        XmlDocument doc = new();
+        try { doc.LoadXml(xml); } catch { return false; }
+        if (doc.DocumentElement is null) return false;
+        var node = ResolveXfaTemplateStrict(doc.DocumentElement, SplitSomPath(path), 0);
+        return node is XmlElement el && (el.LocalName == "field" || el.LocalName == "exclGroup");
+    }
+
+    private static XmlNode? ResolveXfaTemplateStrict(XmlNode current, string[] parts, int idx)
+    {
+        if (idx >= parts.Length) return current;
+        var seg = parts[idx];
+        int occ = 0;
+        var br = seg.IndexOf('[');
+        var name = seg;
+        if (br >= 0)
+        {
+            name = seg[..br];
+            int.TryParse(seg[(br + 1)..seg.IndexOf(']')], out occ);
+        }
+        bool byLocal = name.StartsWith('#');
+        var matchName = byLocal ? name[1..] : name;
+
+        // Phase 1: a direct child matching this segment's @name (or #local-name).
+        int count = 0;
+        foreach (XmlNode child in current.ChildNodes)
+        {
+            if (child.NodeType != XmlNodeType.Element) continue;
+            bool matches = byLocal
+                ? child.LocalName == matchName && child.Attributes?["name"] is null
+                : child.Attributes?["name"]?.Value == matchName;
+            if (!matches) continue;
+            if (count == occ)
+            {
+                var r = ResolveXfaTemplateStrict(child, parts, idx + 1);
+                if (r is not null) return r;
+            }
+            count++;
+        }
+        // Phase 2: descend transparently through containers the SOM data path collapses —
+        // anonymous unnamed subforms, the always-structural pageSet/pageArea, AND named
+        // subforms that don't bind data (bind match="none", e.g. a layout "page" subform
+        // that hosts the real data subforms beneath it).
+        foreach (XmlNode child in current.ChildNodes)
+        {
+            if (child.NodeType != XmlNodeType.Element) continue;
+            bool structural = child.LocalName is "pageArea" or "pageSet";
+            bool named = !structural && child.Attributes?["name"] is not null;
+            if (named && !HasBindNone(child)) continue;
+            if (child.LocalName is "subform" or "subformSet" or "area" or "pageSet" or "pageArea")
+            {
+                var r = ResolveXfaTemplateStrict(child, parts, idx);
+                if (r is not null) return r;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Mark every XFA template field read-only (<c>access="readOnly"</c>) and persist
+    /// it back into the /XFA template stream. Used by <c>Facades.Form.FlattenAllFields</c> to
+    /// lock a dynamic XFA form's fields (which have no AcroForm widgets to flatten).</summary>
+    internal void SetXfaFieldsReadOnly()
+    {
+        var xml = GetXfaTemplateXml();
+        if (xml is null) return;
+        XmlDocument doc = new();
+        try { doc.LoadXml(xml); } catch { return; }
+        if (doc.DocumentElement is null) return;
+        var fields = doc.DocumentElement.SelectNodes(".//*[local-name()='field']");
+        if (fields is null || fields.Count == 0) return;
+        bool changed = false;
+        foreach (XmlNode f in fields)
+            if (f is XmlElement el) { el.SetAttribute("access", "readOnly"); changed = true; }
+        if (changed) SetXfaTemplateXml(doc.DocumentElement.OuterXml);
+    }
+
+    /// <summary>First descendant (child-first) element whose @name equals
+    /// <paramref name="name"/>, skipping anonymous wrapper subforms between levels.</summary>
+    private static XmlNode? FindNamedTemplateNode(XmlNode parent, string name)
+    {
+        foreach (XmlNode child in parent.ChildNodes)
+            if (child is XmlElement el && el.GetAttribute("name") == name) return el;
+        foreach (XmlNode child in parent.ChildNodes)
+        {
+            if (child is not XmlElement) continue;
+            var found = FindNamedTemplateNode(child, name);
+            if (found is not null) return found;
+        }
+        return null;
+    }
+
+    /// <summary>Walk the XFA template hierarchy along a dotted SOM path
+    /// ("formulaire1[0].#subform[0].FIELD[0]"). Named segments descend via
+    /// <see cref="FindNamedTemplateNode"/> (which skips anonymous wrapper subforms);
+    /// anonymous class segments ("#subform[1]") resolve to the nth direct child of that
+    /// XFA class. Returns null when a segment fails to resolve or the path never leaves
+    /// the root.</summary>
+    internal static XmlNode? WalkTemplateBySomPath(XmlNode templateRoot, string somPath)
+    {
+        XmlNode current = templateRoot;
+        foreach (var rawSeg in SplitSomPath(somPath))
+        {
+            var m = Regex.Match(rawSeg, @"^(.*?)(?:\[(\d+)\])?$");
+            var seg = m.Groups[1].Value;
+            var idx = m.Groups[2].Success ? int.Parse(m.Groups[2].Value) : 0;
+            var next = seg.StartsWith('#')
+                ? FindClassTemplateNode(current, seg[1..], idx)
+                : FindNamedTemplateNode(current, seg);
+            if (next is null) return null;
+            current = next;
+        }
+        return ReferenceEquals(current, templateRoot) ? null : current;
+    }
+
+    /// <summary>Resolve an anonymous SOM class segment ("#subform") to the
+    /// <paramref name="index"/>th direct child of that XFA class carrying no name of
+    /// its own, falling back to any direct child of the class.</summary>
+    private static XmlNode? FindClassTemplateNode(XmlNode parent, string className, int index)
+    {
+        int seen = 0;
+        foreach (XmlNode child in parent.ChildNodes)
+            if (child is XmlElement el && el.LocalName == className
+                && el.GetAttribute("name").Length == 0 && seen++ == index)
+                return el;
+        seen = 0;
+        foreach (XmlNode child in parent.ChildNodes)
+            if (child is XmlElement el && el.LocalName == className && seen++ == index)
+                return el;
+        return null;
+    }
+
+    /// <summary>Mirror a moved widget's rectangle back into the static-XFA template —
+    /// x/y/w/h rewritten in "px" (1px = 1pt), with the caption reserve and the
+    /// contentArea origin folded out and the field's own insets ignored — then replace
+    /// the page's content with a fresh render of its fields (border + caption) so the
+    /// page shows the form at the new geometry. Matches Aspose.Pdf, which keeps
+    /// the template and the designer-baked static render in sync when AcroForm field
+    /// geometry changes on an XFA form. No-op for non-XFA documents and for fields
+    /// without a template node.</summary>
+    internal void SyncXfaWidgetGeometry(Field field)
+    {
+        if (!IsXfa || _reader is null) return;
+        var fullName = field.FullName;
+        if (string.IsNullOrEmpty(fullName)) return;
+        if (_reader.Resolve(field.Dict.Get("Rect")) is not PdfArray ra || ra.Count < 4) return;
+        var rect = Rectangle.FromPdfArray(ra, _reader);
+        if (rect is null) return;
+
+        var xml = GetXfaTemplateXml();
+        if (xml is null) return;
+        XmlDocument tdoc = new();
+        try { tdoc.LoadXml(xml); } catch { return; }
+        if (tdoc.DocumentElement is null) return;
+        if (WalkTemplateBySomPath(tdoc.DocumentElement, fullName!) is not XmlElement fieldEl
+            || fieldEl.LocalName != "field") return;
+
+        var doc = OwnerDocument;
+        var pageIndex = field.PageIndex;
+        if (doc is null || pageIndex < 1 || pageIndex > doc.Pages.Count) return;
+        var page = doc.Pages[pageIndex];
+        double pageH = page.Rect.Height;
+
+        var (reserve, placement) = GetCaptionReserve(fieldEl);
+        var (caX, caY) = GetContentAreaOrigin(tdoc.DocumentElement);
+
+        double x = rect.LLX - caX, y = pageH - rect.URY - caY;
+        double w = rect.Width, h = rect.Height;
+        switch (placement)
+        {
+            case "right": case "inline": w += reserve; break;
+            case "top": y -= reserve; h += reserve; break;
+            case "bottom": h += reserve; break;
+            default: x -= reserve; w += reserve; break; // left — the XFA default
+        }
+        fieldEl.SetAttribute("x", PxAttr(x));
+        fieldEl.SetAttribute("y", PxAttr(y));
+        fieldEl.SetAttribute("w", PxAttr(w));
+        fieldEl.SetAttribute("h", PxAttr(h));
+        SetXfaTemplateXml(tdoc.DocumentElement.OuterXml);
+
+        RegenerateXfaStaticPageContent(page, tdoc.DocumentElement);
+    }
+
+    /// <summary>Replace the page's content with a fresh static render of the XFA form
+    /// fields on it — one stroked border rectangle per widget plus its caption text at
+    /// the caption-reserve position — dropping the original designer-baked render, which
+    /// still draws the fields at their pre-move positions.</summary>
+    private void RegenerateXfaStaticPageContent(Page page, XmlElement templateRoot)
+    {
+        if (_reader is null) return;
+        var sb = new StringBuilder();
+        string? fontRes = null;
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        string F(double v) => System.Math.Round(v, 3).ToString("0.###", ci);
+
+        foreach (var f in Fields)
+        {
+            if (f.PageIndex != page.Number) continue;
+            if (_reader.Resolve(f.Dict.Get("Rect")) is not PdfArray ra || ra.Count < 4) continue;
+            var r = Rectangle.FromPdfArray(ra, _reader);
+            if (r is null) continue;
+
+            double bw = 1;
+            if (_reader.ResolveDict(f.Dict.Get("BS")) is { } bs
+                && _reader.Resolve(bs.Get("W")) is { } wObj)
+                bw = wObj switch { PdfInteger i => i.Value, PdfReal d => d.Value, _ => 1 };
+
+            sb.Append("q\n0 G\n").Append(F(bw)).Append(" w\n")
+              .Append(F(r.LLX)).Append(' ').Append(F(r.LLY)).Append(' ')
+              .Append(F(r.Width)).Append(' ').Append(F(r.Height)).Append(" re\nS\nQ\n");
+
+            var tplNode = f.FullName is { Length: > 0 } fn
+                ? WalkTemplateBySomPath(templateRoot, fn) as XmlElement
+                : null;
+            var caption = tplNode is null ? null : GetCaptionText(tplNode);
+            if (string.IsNullOrEmpty(caption)) continue;
+
+            var (reserve, placement) = GetCaptionReserve(tplNode!);
+            double fs = 10;
+            double capX = placement switch
+            {
+                "right" or "inline" => r.URX,
+                "top" or "bottom" => r.LLX,
+                _ => r.LLX - reserve,
+            };
+            double capY = (r.LLY + r.URY) / 2 - fs / 2;
+            fontRes ??= Annotations.RedactionAnnotation.RegisterOverlayFont(page);
+            var esc = caption!.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+            sb.Append("BT\n0 g\n/").Append(fontRes).Append(' ').Append(F(fs)).Append(" Tf\n")
+              .Append(F(capX)).Append(' ').Append(F(capY)).Append(" Td\n(")
+              .Append(esc).Append(") Tj\nET\n");
+        }
+
+        if (sb.Length == 0) return;
+        page.SetContentStream(Encoding.Latin1.GetBytes(sb.ToString()));
+        page.ResetContentsCache();
+    }
+
+    private static string PxAttr(double v) =>
+        System.Math.Round(v, 3).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "px";
+
+    /// <summary>Caption reserve (in points) and placement for an XFA template field node.</summary>
+    private static (double reserve, string placement) GetCaptionReserve(XmlElement fieldEl)
+    {
+        foreach (XmlNode ch in fieldEl.ChildNodes)
+            if (ch is XmlElement el && el.LocalName == "caption")
+                return (XfaMeasureToPt(el.GetAttribute("reserve")) ?? 0,
+                        el.GetAttribute("placement") is { Length: > 0 } p ? p : "left");
+        return (0, "left");
+    }
+
+    /// <summary>The caption's literal text (caption/value/text) for an XFA template field node.</summary>
+    private static string? GetCaptionText(XmlElement fieldEl)
+    {
+        foreach (XmlNode ch in fieldEl.ChildNodes)
+            if (ch is XmlElement { LocalName: "caption" } cap)
+                return cap.SelectSingleNode(".//*[local-name()='text']")?.InnerText;
+        return null;
+    }
+
+    /// <summary>Origin (in points) of the first contentArea in the template — the offset
+    /// between template coordinates and page coordinates on a static XFA form.</summary>
+    private static (double x, double y) GetContentAreaOrigin(XmlElement templateRoot)
+    {
+        if (templateRoot.SelectSingleNode(".//*[local-name()='contentArea']") is XmlElement ca)
+            return (XfaMeasureToPt(ca.GetAttribute("x")) ?? 0, XfaMeasureToPt(ca.GetAttribute("y")) ?? 0);
+        return (0, 0);
+    }
+
+    /// <summary>Parse an XFA measurement ("25mm", "0.25in", "10pt", "12px", bare number)
+    /// to points; XFA "px" is treated as 1pt, matching the Aspose.Pdf write-back
+    /// unit.</summary>
+    internal static double? XfaMeasureToPt(string? v)
+    {
+        if (string.IsNullOrWhiteSpace(v)) return null;
+        v = v.Trim();
+        foreach (var (u, f) in new[] { ("mm", 72.0 / 25.4), ("cm", 720.0 / 25.4), ("in", 72.0), ("pt", 1.0), ("px", 1.0) })
+            if (v.EndsWith(u, StringComparison.Ordinal)
+                && double.TryParse(v[..^u.Length], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var d))
+                return d * f;
+        return double.TryParse(v, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var raw) ? raw : null;
+    }
+
     /// <summary>Settings for <see cref="Document.Flatten(FlattenSettings)"/>.</summary>
     public sealed class FlattenSettings
     {
@@ -934,12 +1479,84 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     {
         var flatReader = ResolvedReader;
         if (flatReader is null || !IsXfa) return;
-        // Remove XFA key from AcroForm — this converts XFA to standard AcroForm
         var catalog = flatReader.Catalog;
         var acroForm = flatReader.ResolveDict(catalog.Get("AcroForm"));
-        if (acroForm is not null)
+        if (acroForm is null) return;
+
+        // A dynamic XFA form carries its fields only in the XFA template — the AcroForm
+        // has no widget fields. When flattening it to a standard AcroForm, materialise one
+        // flat field per template field so the fields survive as findable AcroForm fields
+        // (/T = the full dotted SOM path, matching GetXfaFieldNames). A static XFA form
+        // already owns AcroForm widget fields, so leave those untouched (no duplication).
+        var existing = flatReader.Resolve(acroForm.Get("Fields")) as PdfArray;
+        bool hasWidgets = existing is not null && existing.Count > 0;
+        if (!hasWidgets)
         {
-            acroForm.Remove("XFA");
+            GenerateFlatAcroFieldsFromXfaTemplate(flatReader, acroForm);
+            RenderDynamicXfa();     // paint the form onto real pages (replaces the XFA fallback page)
+        }
+
+        // Remove XFA key from AcroForm — this converts XFA to standard AcroForm
+        acroForm.Remove("XFA");
+        MarkAcroFormDirty();
+    }
+
+    /// <summary>Materialise a flat AcroForm field for each RENDERED XFA field (only used when
+    /// flattening a dynamic XFA form that has no AcroForm widgets). The rendered set is resolved
+    /// by <see cref="Xfa.XfaFormEngine"/>, which walks the subform tree AND the master pages
+    /// (pageSet/pageArea) and applies the template-decidable selection rules (static presence,
+    /// barcode ui). Each field is a top-level /Fields entry whose /T is the entire dotted SOM
+    /// path (so FullName == PartialName and FindByName resolves it), with /FT derived from the
+    /// field's XFA &lt;ui&gt; control. Positions (/Rect) are not emitted — that needs the XFA
+    /// layout engine and is not required to make the fields findable.</summary>
+    /// <summary>Paint the dynamic-XFA form's content onto fresh PDF pages so a raster render shows
+    /// the form rather than the XFA fallback page. Tolerant: a failure leaves pages untouched.</summary>
+    private void RenderDynamicXfa()
+    {
+        var doc = OwnerDocument;
+        if (doc is null) return;
+        var xml = GetXfaTemplateXmlResolved() ?? GetXfaTemplateXml();
+        if (string.IsNullOrEmpty(xml)) return;
+        try
+        {
+            var tdoc = new XmlDocument();
+            tdoc.LoadXml(xml);
+            if (tdoc.DocumentElement is { } root)
+                Xfa.XfaRenderer.Render(doc, root, GetXfaFieldValue);
+        }
+        catch { }
+    }
+
+    private void GenerateFlatAcroFieldsFromXfaTemplate(PdfReader reader, PdfDictionary acroForm)
+    {
+        var doc = OwnerDocument;
+        if (doc is null) return;
+        var engine = Xfa.XfaFormEngine.TryCreate(GetXfaTemplateXmlResolved() ?? GetXfaTemplateXml());
+        if (engine is null) return;
+        // Give the engine the XFA data-binding resolver so its scripts can read field rawValues.
+        // The engine must never break a flatten — fall back to no generated fields on any failure.
+        List<Xfa.XfaFlatField> fields;
+        try { fields = engine.BuildRenderedFields(GetXfaFieldValue); }
+        catch { return; }
+        if (fields.Count == 0) return;
+
+        var fieldsArr = reader.Resolve(acroForm.Get("Fields")) as PdfArray;
+        if (fieldsArr is null) { fieldsArr = new PdfArray(); acroForm.Set("Fields", fieldsArr); }
+
+        foreach (var f in fields)
+        {
+            var fld = new PdfDictionary();
+            fld.Set("T", new PdfString(Encoding.UTF8.GetBytes(f.Path)));
+            fld.Set("FT", new PdfName(f.Ft));
+            if (f.Ff != 0) fld.Set("Ff", new PdfInteger((int)f.Ff));
+            // Carry the field's bound datasets value onto the flat field's /V so the flattened
+            // dynamic-XFA form keeps its data values (Field.Value). Text and
+            // choice fields take a text /V; leave value-less and button/signature fields untouched.
+            if (!string.IsNullOrEmpty(f.Value) && (f.Ft == "Tx" || f.Ft == "Ch"))
+                fld.Set("V", new PdfString(Encoding.UTF8.GetBytes(f.Value)));
+            int num = doc.AllocateObjectNumber();
+            doc.AddNewObject(num, fld, registerOverlay: true);
+            fieldsArr.Add(new PdfIndirectRef(num, 0));
         }
     }
 
@@ -1024,7 +1641,8 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             var localName = child.LocalName;
             var index = counts.TryGetValue(localName, out var c) ? c : 0;
             counts[localName] = index + 1;
-            var path = prefix.Length == 0 ? $"{localName}[{index}]" : $"{prefix}.{localName}[{index}]";
+            var escName = EscapeSomSegment(localName);
+            var path = prefix.Length == 0 ? $"{escName}[{index}]" : $"{prefix}.{escName}[{index}]";
 
             var hasElementChild = false;
             foreach (XmlNode grand in child.ChildNodes)
@@ -1044,7 +1662,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     {
         var templateXml = GetXfaTemplateXml();
         if (string.IsNullOrEmpty(templateXml)) return false;
-        var leaf = path.Split('.')[^1];
+        var leaf = SplitSomPath(path)[^1];
         var match = Regex.Match(leaf, @"^(.+)\[\d+\]$");
         var name = match.Success ? match.Groups[1].Value : leaf;
         try
@@ -1071,9 +1689,10 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
                 if (nameAttr is not null)
                 {
                     int idx = CountPrecedingSiblings(child, localName, nameAttr);
+                    var escName = EscapeSomSegment(nameAttr);
                     var currentPath = parentPath.Length > 0
-                        ? $"{parentPath}.{nameAttr}[{idx}]"
-                        : $"{nameAttr}[{idx}]";
+                        ? $"{parentPath}.{escName}[{idx}]"
+                        : $"{escName}[{idx}]";
                     CollectXfaFieldNames(child, currentPath, names);
                 }
                 else
@@ -1084,9 +1703,10 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
                 if (nameAttr is not null)
                 {
                     int idx = CountPrecedingSiblings(child, localName, nameAttr);
+                    var escName = EscapeSomSegment(nameAttr);
                     var fieldPath = parentPath.Length > 0
-                        ? $"{parentPath}.{nameAttr}[{idx}]"
-                        : $"{nameAttr}[{idx}]";
+                        ? $"{parentPath}.{escName}[{idx}]"
+                        : $"{escName}[{idx}]";
                     names.Add(fieldPath);
                 }
                 // Don't recurse into exclGroup — the group itself is the field,
@@ -1309,7 +1929,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     /// </summary>
     private static XmlNode? FindXfaTemplateNode(XmlNode root, string path, int startSegment)
     {
-        var parts = path.Split('.');
+        var parts = SplitSomPath(path);
         return FindXfaTemplateNodeRecursive(root, parts, startSegment);
     }
 
@@ -1425,7 +2045,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             templateDoc.LoadXml(templateXml);
             if (templateDoc.DocumentElement is null) return result;
 
-            var parts = path.Split('.');
+            var parts = SplitSomPath(path);
             if (parts.Length < 2) return result;
 
             // Walk the template by path segments to find the field node
@@ -1476,6 +2096,66 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         catch { /* template resolution failed — return original result */ }
 
         return result;
+    }
+
+    /// <summary>Resolve a SOM (template) field path to the corresponding XFA *datasets* path using
+    /// the template's bind rules — honour a leaf <c>&lt;bind match="dataRef" ref="$.xxx"/&gt;</c> and
+    /// skip presentation-only subforms (<c>&lt;bind match="none"/&gt;</c>). Returns the resolved
+    /// dotted data path, or null when the template can't be walked or the path is unchanged. This
+    /// mirrors the SOM→data mapping <see cref="GetXfaFieldValue"/> applies on READ; the WRITE path
+    /// (<see cref="SetXfaFieldValues"/>) reuses it so a value lands on the same datasets node reading
+    /// returns (e.g. a <c>filerName</c> field bound to a <c>&lt;sarx:FilerName&gt;</c> data node).</summary>
+    private string? ResolveSomToDataPath(string path)
+    {
+        try
+        {
+            var templateXml = GetXfaTemplateXml();
+            if (templateXml is null) return null;
+            var templateDoc = new XmlDocument();
+            templateDoc.LoadXml(templateXml);
+            if (templateDoc.DocumentElement is null) return null;
+
+            var parts = SplitSomPath(path);
+            if (parts.Length < 2) return null;
+
+            // The template's name attributes are UN-indexed (name="FilerNameSub"), while SOM parts
+            // carry an occurrence index (FilerNameSub[0]); strip it for the template walk.
+            static string Bare(string p)
+            {
+                var m = Regex.Match(p, @"^(.+)\[(\d+)\]$");
+                return m.Success ? m.Groups[1].Value : p;
+            }
+
+            XmlNode? templateNode = templateDoc.DocumentElement;
+            for (int i = 0; i < parts.Length && templateNode is not null; i++)
+                templateNode = FindTemplateChild(templateNode, Bare(parts[i]));
+            if (templateNode is null) return null;
+
+            var bindNode = FindBindElement(templateNode);
+            string? bindRef = null;
+            if (bindNode is not null)
+            {
+                var matchAttr = bindNode.Attributes?["match"];
+                var refAttr = bindNode.Attributes?["ref"];
+                if (matchAttr?.Value == "dataRef" && refAttr?.Value is { } r && r.StartsWith("$."))
+                    bindRef = r.Substring(2); // may itself be multi-segment, e.g. "FilingInstitutionInformation.FilerName"
+            }
+
+            var dataPathParts = new List<string>();
+            for (int i = 0; i < parts.Length - 1; i++)
+            {
+                XmlNode? checkNode = templateDoc.DocumentElement;
+                for (int j = 0; j <= i && checkNode is not null; j++)
+                    checkNode = FindTemplateChild(checkNode, Bare(parts[j]));
+                if (checkNode is not null && HasBindNone(checkNode)) continue; // presentation-only subform: not in data
+                dataPathParts.Add(parts[i]);
+            }
+            dataPathParts.Add(bindRef ?? parts[^1]);
+
+            var resolvedPath = string.Join(".", dataPathParts);
+            return resolvedPath != path ? resolvedPath : null;
+        }
+        catch { return null; }
     }
 
     /// <summary>Find a subform or field child by name in an XFA template node.</summary>
@@ -1653,6 +2333,60 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         }
     }
 
+    /// <summary>Ensure the /XFA array carries a "datasets" part, creating an empty
+    /// <c>&lt;xfa:datasets&gt;&lt;xfa:data/&gt;&lt;/xfa:datasets&gt;</c> stream and wiring it into the
+    /// array (before any "postamble") when absent. Marks the AcroForm dict dirty so the
+    /// added array entry + stream are re-serialised on save. Returns the datasets stream,
+    /// or null when the form's XFA is not an array (single-stream is handled elsewhere).</summary>
+    private PdfStream? EnsureXfaDatasetsStreamInArray()
+    {
+        var rdr = ResolvedReader;
+        if (rdr is null) return null;
+        var acroForm = rdr.ResolveDict(rdr.Catalog.Get("AcroForm"));
+        if (acroForm is null) return null;
+        if (rdr.Resolve(acroForm.Get("XFA")) is not PdfArray xfaArray) return null;
+
+        for (int i = 0; i + 1 < xfaArray.Count; i += 2)
+            if (xfaArray[i] is PdfString s && Encoding.Latin1.GetString(s.Value) == "datasets"
+                && rdr.Resolve(xfaArray[i + 1]) is PdfStream existing)
+                return existing;
+
+        const string xfaNs = "http://www.xfa.org/schema/xfa-data/1.0/";
+        var doc = new XmlDocument();
+        var dsEl = doc.CreateElement("xfa", "datasets", xfaNs);
+        doc.AppendChild(dsEl);
+        dsEl.AppendChild(doc.CreateElement("xfa", "data", xfaNs));
+        using var ms = new MemoryStream();
+        SaveXmlNoBom(doc, ms);
+        var bytes = ms.ToArray();
+        var newStream = new PdfStream(new PdfDictionary(), bytes);
+        newStream.Dict.Set("Length", new PdfInteger(bytes.Length));
+
+        int insertIdx = xfaArray.Count;
+        for (int i = 0; i < xfaArray.Count - 1; i += 2)
+            if (xfaArray[i] is PdfString s && Encoding.Latin1.GetString(s.Value) == "postamble")
+            { insertIdx = i; break; }
+        xfaArray.Insert(insertIdx, new PdfString(Encoding.Latin1.GetBytes("datasets")));
+        xfaArray.Insert(insertIdx + 1, newStream);
+
+        // The array lives on the AcroForm dict — mark it dirty so the new "datasets"
+        // entry (and its inline stream) are written out.
+        MarkAcroFormDirty();
+        return newStream;
+    }
+
+    /// <summary>Mark the catalog's /AcroForm object dirty so an in-place edit of its
+    /// /XFA array (a newly-added datasets part) is re-serialised on save.</summary>
+    private void MarkAcroFormDirty()
+    {
+        var rdr = ResolvedReader;
+        if (OwnerDocument is null || rdr is null) return;
+        if (rdr.Catalog.Get("AcroForm") is not PdfIndirectRef acroRef) return;
+        var acroDict = rdr.ResolveDict(acroRef);
+        if (acroDict is not null)
+            OwnerDocument.MarkDirty(acroRef.ObjectNumber, acroDict);
+    }
+
     /// <summary>
     /// Import data from an imported XML document into a target data node.
     /// Unwraps xfa:data and xfa:datasets wrappers so we don't double-nest
@@ -1677,16 +2411,45 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         {
             foreach (XmlNode child in root.ChildNodes)
             {
-                var imported = targetDoc.ImportNode(child, true);
-                targetDataNode.AppendChild(imported);
+                var imported = ImportNodeStripNamespaces(targetDoc, child);
+                if (imported is not null) targetDataNode.AppendChild(imported);
             }
         }
         else
         {
             // Not a wrapper — import the element directly
-            var imported = targetDoc.ImportNode(root, true);
-            targetDataNode.AppendChild(imported);
+            var imported = ImportNodeStripNamespaces(targetDoc, root);
+            if (imported is not null) targetDataNode.AppendChild(imported);
         }
+    }
+
+    /// <summary>Deep-copy an imported data node into <paramref name="targetDoc"/> with all
+    /// namespaces stripped (element + attribute local names only, xmlns declarations dropped),
+    /// preserving attributes, text and CDATA. The XFA data model ($data) is namespace-less, so
+    /// foreign source XML (e.g. an <c>efile:</c>-namespaced e-file wrapper) must land as
+    /// namespace-less nodes for the form's SOM/XPath to resolve them.</summary>
+    private static XmlNode? ImportNodeStripNamespaces(XmlDocument targetDoc, XmlNode src)
+    {
+        switch (src.NodeType)
+        {
+            case XmlNodeType.Text: return targetDoc.CreateTextNode(src.Value ?? "");
+            case XmlNodeType.CDATA: return targetDoc.CreateCDataSection(src.Value ?? "");
+            case XmlNodeType.Element: break;
+            default: return null; // drop comments / PIs / whitespace-only handled by children walk
+        }
+        var el = targetDoc.CreateElement(src.LocalName);
+        if (src.Attributes is not null)
+            foreach (XmlAttribute a in src.Attributes)
+            {
+                if (a.Prefix == "xmlns" || a.LocalName == "xmlns") continue; // drop ns declarations
+                el.SetAttribute(a.LocalName, a.Value);
+            }
+        foreach (XmlNode c in src.ChildNodes)
+        {
+            var ic = ImportNodeStripNamespaces(targetDoc, c);
+            if (ic is not null) el.AppendChild(ic);
+        }
+        return el;
     }
 
     /// <summary>
@@ -1700,11 +2463,34 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     /// the datasets (and <see cref="XFA"/>[field]) stay in sync with values set
     /// through the typed field API. Called automatically before save. Dynamic XFA
     /// forms (whose data is driven by the template) are left untouched.</summary>
+    /// <summary>Snapshot the current XFA datasets as a full-path → value map, for
+    /// checkbox on/off-token preservation during <see cref="SyncAcroFormToXfa"/>.</summary>
+    private Dictionary<string, string> BuildDatasetsValueMap()
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var kv in GetXfaDatasetsFields()) map[kv.Key] = kv.Value;
+        return map;
+    }
+
+    /// <summary>Push every XFA datasets leaf value into its matching AcroForm field
+    /// (static XFA forms only) so the widget representation reflects data that was
+    /// replaced wholesale in the datasets (e.g. by <c>ImportXml</c>). Without this the
+    /// AcroForm fields keep their old values and the save-time
+    /// <see cref="SyncAcroFormToXfa"/> would push those stale values back over the
+    /// freshly-imported datasets (notably clobbering checkbox "1"/"0" with "Off").</summary>
+    internal void SyncXfaToAcroForm()
+    {
+        if (Type != FormType.Static) return;
+        foreach (var kv in GetXfaDatasetsFields())
+            ApplyXfaValueToAcroField(kv.Key, kv.Value);
+    }
+
     internal void SyncAcroFormToXfa()
     {
         if (Type != FormType.Static) return;
         var pairs = new List<KeyValuePair<string, string>>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
+        Dictionary<string, string>? existingDs = null;
         foreach (var field in _fields)
         {
             // Only terminal value-bearing fields map to a datasets leaf. Subform /
@@ -1716,6 +2502,26 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             switch (field)
             {
                 case CheckboxField cb:
+                    // An arbitrary non-state value assigned to an XFA checkbox
+                    // (e.g. Field.Value = "1234") is stored VERBATIM in the datasets,
+                    // even though the AcroForm appearance normalised it to "Off".
+                    if (cb.RawNonStateValue is string rawCb)
+                    {
+                        val = rawCb;
+                        break;
+                    }
+                    // Preserve the datasets' own on/off token (XFA forms conventionally
+                    // bind "1"/"0") when the checkbox state already agrees with it — only
+                    // overwrite on a genuine state change. Otherwise the AcroForm off
+                    // export-name ("Off") would clobber an imported "0".
+                    var cbName = field.FullName;
+                    existingDs ??= BuildDatasetsValueMap();
+                    if (cbName is not null && existingDs.TryGetValue(cbName, out var curVal))
+                    {
+                        bool curOn = !(string.IsNullOrEmpty(curVal) || curVal == "0"
+                            || curVal.Equals("Off", StringComparison.OrdinalIgnoreCase));
+                        if (curOn == cb.Checked) continue; // datasets token already matches → keep it
+                    }
                     val = cb.Value;
                     break;
                 case ChoiceField ch:
@@ -1761,7 +2567,11 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
                 }
                 break;
             case TextBoxField tb:
-                tb.Value = value;
+                // Honour the field's /MaxLen: an imported value longer than the
+                // field allows is truncated to fit (as a viewer would on entry).
+                tb.Value = tb.MaxLen > 0 && value is not null && value.Length > tb.MaxLen
+                    ? value.Substring(0, tb.MaxLen)
+                    : value;
                 break;
         }
     }
@@ -1788,6 +2598,14 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
                 }
             }
         }
+        if (xml is null || stream is null)
+        {
+            // XFA is an array with no "datasets" part (a template-only dynamic form):
+            // create an empty datasets packet and wire it into the /XFA array so the
+            // value has somewhere to persist.
+            stream = EnsureXfaDatasetsStreamInArray();
+            if (stream is not null) xml = Encoding.UTF8.GetString(stream.RawData);
+        }
         if (xml is null || stream is null) return;
 
         try
@@ -1798,7 +2616,15 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             var changed = false;
             foreach (var pair in values)
             {
-                var node = FindXfaNode(doc, pair.Key) ?? CreateXfaNodePath(doc, pair.Key);
+                // Prefer the field's own SOM path; if that names no existing datasets node, fall
+                // back to the template-resolved data path (honours a <bind match="dataRef"> + skips
+                // bind="none" subforms — the SAME mapping the read path uses) BEFORE creating a new
+                // node, so a bound field (e.g. filerName → <sarx:FilerName>) lands on the node the
+                // reader returns rather than spawning a stray sibling.
+                var node = FindXfaNode(doc, pair.Key);
+                if (node is null && ResolveSomToDataPath(pair.Key) is { } resolved)
+                    node = FindXfaNode(doc, resolved);
+                node ??= CreateXfaNodePath(doc, pair.Key);
                 if (node is null) continue;
                 node.InnerText = pair.Value;
                 changed = true;
@@ -1815,6 +2641,50 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             MarkXfaStreamDirty(stream);
         }
         catch { }
+    }
+
+    /// <summary>Write a base64 image into the XFA datasets node for
+    /// <paramref name="path"/> and tag it with the given <paramref name="contentType"/>
+    /// (e.g. <c>image/jpg</c>) — how XFA image fields carry their picture. Returns
+    /// false when there is no datasets packet or the node can't be resolved.</summary>
+    public bool SetXfaFieldImage(string path, string base64, string contentType)
+    {
+        var (stream, xml) = GetXfaPart("datasets");
+        if (xml is null || stream is null)
+        {
+            // Fallback: XFA might be a single stream (not an array with named parts)
+            var reader = ResolvedReader;
+            if (reader is not null)
+            {
+                var acroForm = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
+                if (acroForm is not null && reader.Resolve(acroForm.Get("XFA")) is PdfStream singleStream)
+                {
+                    xml = Encoding.UTF8.GetString(reader.DecodeStream(singleStream));
+                    stream = singleStream;
+                }
+            }
+        }
+        if (xml is null || stream is null) return false;
+
+        try
+        {
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+            if ((FindXfaNode(doc, path) ?? CreateXfaNodePath(doc, path)) is not XmlElement el)
+                return false;
+            el.InnerText = base64;
+            el.SetAttribute("contentType", contentType);
+
+            using var ms = new MemoryStream();
+            SaveXmlNoBom(doc, ms);
+            var newData = ms.ToArray();
+            stream.ReplaceData(newData);
+            stream.Dict.Set("Length", new PdfInteger(newData.Length));
+            stream.Dict.Remove("Filter");
+            MarkXfaStreamDirty(stream);
+            return true;
+        }
+        catch { return false; }
     }
 
     /// <summary>
@@ -1845,7 +2715,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
 
     private static XmlNode? FindXfaNode(XmlDocument doc, string path)
     {
-        var parts = path.Split('.');
+        var parts = SplitSomPath(path);
         XmlNode? current = doc.DocumentElement;
 
         // First descend into the xfa:data element if present.
@@ -1905,7 +2775,14 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
                 var name = match.Groups[1].Value;
                 var idx = int.Parse(match.Groups[2].Value);
                 var nodes = FindChildrenByLocalName(current, name);
-                current = idx < nodes.Count ? nodes[idx] : null;
+                // XFA occurrence binding: when the template repeats a field name
+                // (Season[0], Season[1]) but the datasets carries fewer data nodes, the
+                // surplus instances bind to the existing (often single) node rather than
+                // resolving to nothing. Fall back to the last available node when the
+                // requested index is out of range. An in-range index is unchanged, so
+                // fields that DO carry one node per instance still resolve distinctly.
+                if (idx < nodes.Count) current = nodes[idx];
+                else current = nodes.Count > 0 ? nodes[nodes.Count - 1] : null;
             }
             else
             {
@@ -1926,8 +2803,12 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             var leafName = idxMatch.Success ? idxMatch.Groups[1].Value : lastPart;
             var leafIdx = idxMatch.Success ? int.Parse(idxMatch.Groups[2].Value) : 0;
             var allMatches = root.SelectNodes($".//*[local-name()='{leafName}']");
-            if (allMatches is not null && allMatches.Count > leafIdx)
-                return allMatches[leafIdx];
+            if (allMatches is not null && allMatches.Count > 0)
+                // XFA occurrence binding (see the strict walk above): a repeated template
+                // instance whose datasets has fewer data nodes binds to the existing node
+                // rather than resolving to nothing, so clamp an out-of-range index to the
+                // last available match. An in-range index resolves distinctly as before.
+                return allMatches[leafIdx < allMatches.Count ? leafIdx : allMatches.Count - 1];
         }
 
         return null;
@@ -1975,7 +2856,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         if (dataNode is null) return null;
         current = dataNode;
 
-        var parts = path.Split('.');
+        var parts = SplitSomPath(path);
         foreach (var part in parts)
         {
             var match = Regex.Match(part, @"^(.+)\[(\d+)\]$");
@@ -2043,7 +2924,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
 
     /// <summary>XFA accessor exposing the underlying XML packets (template,
     /// datasets, …). Returns <c>null</c> when the form has no XFA part —
-    /// mirrors the Aspose.PDF for .NET behaviour so callers can branch on
+    /// mirrors the Aspose.Pdf behaviour so callers can branch on
     /// <c>Form.XFA is null</c>.
     /// </summary>
     public XFA? XFA => IsXfa ? (_xfa ??= new XFA(this)) : null;
@@ -2093,12 +2974,22 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
 
     /// <summary>Internal entry point that honours <paramref name="settings"/>.
     /// When settings.UpdateAppearances is true (or the flag is unspecified —
-    /// Aspose.PDF for .NET treats Flatten() as always refreshing appearances
+    /// Aspose.Pdf treats Flatten() as always refreshing appearances
     /// from the current field values) each field's /AP/N is rebuilt from its
     /// current /V before the page's widgets are folded into the page content.
     /// Without this, a flatten of a PDF whose fields were programmatically
     /// re-valued shows the original (stale) appearance.</summary>
     internal void Flatten(Document document, FlattenSettings? settings)
+        => Flatten(document, settings, frmStartIndex: 0, flattenNonWidgets: false);
+
+    /// <summary>Flatten honouring <paramref name="settings"/>. <paramref name="frmStartIndex"/>
+    /// bases the flattened-field FRM{n} numbering (0 for document/form flatten, 1 for the facade
+    /// FlattenAllFields). <paramref name="flattenNonWidgets"/> also folds non-widget annotations
+    /// (e.g. FreeText) into the page content so their FRM index lines up with /Annots — the facade
+    /// FlattenAllFields does this; document/form flatten leaves them for the annotation path.
+    /// Matches Aspose.Pdf.</summary>
+    internal void Flatten(Document document, FlattenSettings? settings, int frmStartIndex,
+        bool flattenNonWidgets)
     {
         // 1. Force each field's appearance to reflect the current value.
         //    The per-type GenerateAppearance short-circuits when /AP is present,
@@ -2140,11 +3031,18 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         var hideButtons = settings is { HideButtons: true };
         foreach (var page in document.Pages)
         {
-            FlattenFieldsOnPage(page, hideButtons);
+            FlattenFieldsOnPage(page, hideButtons, frmStartIndex, flattenNonWidgets);
         }
 
         // Remove AcroForm from catalog
         document.Catalog.Remove("AcroForm");
+
+        // Empty the /Fields array on the (now-detached) AcroForm dict too: Count reads the
+        // AcroForm's /Fields (this Form's cached _acroForm, or the catalog's) before falling
+        // back to _fields, so without this a flattened form still reports its old field count.
+        foreach (var af in new[] { acroForm, _acroForm })
+            if (af is not null && af.ContainsKey("Fields"))
+                af.Set("Fields", new PdfArray());
 
         // Clear cached field list so Count reflects the flattened state
         _fields.Clear();
@@ -2164,8 +3062,37 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     /// dict when its second wrapper is processed.</summary>
     private static void RegenerateAppearanceForFlatten(Field field)
     {
+        var oldAp = field.Dict.Get("AP");
+        // Preserve an existing appearance that carries a non-identity /Matrix (e.g. a field on a
+        // /Rotate page): the per-type generator re-emits appearances axis-aligned, which would drop
+        // the /Matrix and mis-place the flattened form (and can split the value's words). The
+        // existing /AP already reflects the value, so keep it verbatim.
+        if (HasNonIdentityAppearanceMatrix(field, oldAp)) return;
+        // Drop and re-emit so the appearance reflects the current value. If the per-type
+        // generator can't produce a new /AP (e.g. an Off checkbox / button it doesn't
+        // synthesise), keep the original so flatten can still render it.
         field.Dict.Remove("AP");
         field.GenerateAppearance();
+        if (field.Dict.Get("AP") is null && oldAp is not null)
+            field.Dict.Set("AP", oldAp);
+    }
+
+    /// <summary>True when the field's /AP /N appearance carries a /Matrix that isn't the identity
+    /// (a rotated/skewed/scaled appearance, e.g. a widget on a /Rotate page).</summary>
+    private static bool HasNonIdentityAppearanceMatrix(Field field, PdfObject? apObj)
+    {
+        var reader = field.Reader;
+        var ap = reader.ResolveDict(apObj);
+        if (ap is null) return false;
+        var n = reader.Resolve(ap.Get("N"));
+        var ns = n as PdfStream;
+        if (ns is null && n is PdfDictionary states)
+            foreach (var k in states.Keys) { ns = reader.ResolveStream(states.Get(k)); if (ns is not null) break; }
+        if (ns is null || reader.Resolve(ns.Dict.Get("Matrix")) is not PdfArray)
+            return false;
+        var m = ReadAppearanceMatrix(ns.Dict, reader);
+        return System.Math.Abs(m[0] - 1) > 1e-6 || System.Math.Abs(m[3] - 1) > 1e-6
+            || System.Math.Abs(m[1]) > 1e-6 || System.Math.Abs(m[2]) > 1e-6;
     }
 
     /// <summary>Copy every font entry from the AcroForm /DR /Font dict into the
@@ -2544,7 +3471,8 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         return ft == "Btn" && (ff & (1L << 16)) != 0;
     }
 
-    private void FlattenFieldsOnPage(Page page, bool hideButtons = false)
+    private void FlattenFieldsOnPage(Page page, bool hideButtons = false, int frmStartIndex = 0,
+        bool flattenNonWidgets = false)
     {
         var reader = page.Reader;
         var annotsObj = reader.Resolve(page.Dict.Get("Annots")) as PdfArray;
@@ -2552,7 +3480,10 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
 
         var remaining = new PdfArray();
         var appendContent = new System.IO.MemoryStream();
-
+        // Flattened field appearances are registered as FRM{n} in /Annots order so a caller can
+        // look each one up by position. The base index is path-dependent (matches Aspose.PDF for
+        // .NET): the document/form flatten numbers from FRM0, the facade FlattenAllFields from FRM1.
+        int frmCounter = frmStartIndex;
         foreach (var annotRef in annotsObj)
         {
             var annotDict = reader.ResolveDict(annotRef);
@@ -2568,7 +3499,11 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             bool isWidget = subtype == "Widget"
                 || (subtype is null && (annotDict.ContainsKey("FT") || annotDict.ContainsKey("T")
                     || annotDict.ContainsKey("Parent")));
-            if (!isWidget)
+            // Form-field flatten (document/form) folds only widgets into the page content and
+            // leaves other annotation types (markup, line, link, …) for their own annotation
+            // path. FlattenAllFields (flattenNonWidgets) instead flattens every annotation with
+            // an appearance so the FRM{n} index lines up with the page /Annots order.
+            if (!isWidget && !flattenNonWidgets)
             {
                 remaining.Add(annotRef);
                 continue;
@@ -2577,87 +3512,21 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             // HideButtons: drop push-button widgets entirely (neither rendered
             // into page content nor kept as an annotation) so the flattened
             // output shows no buttons.
-            if (hideButtons && IsPushButtonWidget(annotDict, reader))
+            if (isWidget && hideButtons && IsPushButtonWidget(annotDict, reader))
                 continue;
 
-            // Try to get the appearance stream
-            var apDict = reader.ResolveDict(annotDict.Get("AP"));
-            if (apDict is null)
+            // Build the content fragment that folds this widget's appearance into the page
+            // (registering it as FRM{n}). Null when the widget has no usable appearance — a
+            // widget is then dropped (orphan field), a non-widget kept in /Annots.
+            var fragment = BuildWidgetFlattenFragment(page.Dict, annotDict, reader, $"FRM{frmCounter}");
+            if (fragment is null)
             {
-                // No appearance — widget won't be visible, but still remove it
-                // so it doesn't persist as a form field after flatten.
+                if (!isWidget) remaining.Add(annotRef);
                 continue;
             }
-
-            // Get the normal appearance (/N)
-            var nObj = apDict.Get("N");
-            PdfStream? appearanceStream = null;
-
-            // /N can be a stream directly, or a dict of named states (checkbox: /Yes, /Off)
-            var nResolved = reader.Resolve(nObj);
-            if (nResolved is PdfStream ns)
-            {
-                appearanceStream = ns;
-            }
-            else if (nResolved is PdfDictionary stateDict)
-            {
-                // Pick the current state from /AS
-                var asName = annotDict.GetName("AS");
-                if (asName is not null)
-                {
-                    var stateStream = reader.ResolveStream(stateDict.Get(asName));
-                    appearanceStream = stateStream;
-                }
-                // Fallback: try first non-Off state
-                if (appearanceStream is null)
-                {
-                    foreach (var key in stateDict.Keys)
-                    {
-                        if (key == "Off") continue;
-                        appearanceStream = reader.ResolveStream(stateDict.Get(key));
-                        if (appearanceStream is not null) break;
-                    }
-                }
-            }
-
-            if (appearanceStream is null) continue;
-
-            // Get the widget rectangle for positioning
-            var rectArr = reader.Resolve(annotDict.Get("Rect")) as PdfArray;
-            if (rectArr is null || rectArr.Count < 4) continue;
-
-            var rect = Rectangle.FromPdfArray(rectArr);
-            var streamData = reader.DecodeStream(appearanceStream);
-
-            // Get the BBox from the appearance stream
-            var bboxArr = reader.Resolve(appearanceStream.Dict.Get("BBox")) as PdfArray;
-            double bboxW = rect.Width, bboxH = rect.Height;
-            double bboxX = 0, bboxY = 0;
-            if (bboxArr is { Count: >= 4 })
-            {
-                var bbox = Rectangle.FromPdfArray(bboxArr);
-                bboxW = bbox.Width;
-                bboxH = bbox.Height;
-                bboxX = bbox.LLX;
-                bboxY = bbox.LLY;
-            }
-
-            // Build transformation: scale appearance to fit widget rect and translate
-            var sx = bboxW > 0 ? rect.Width / bboxW : 1.0;
-            var sy = bboxH > 0 ? rect.Height / bboxH : 1.0;
-            var tx = rect.LLX - bboxX * sx;
-            var ty = rect.LLY - bboxY * sy;
-
-            // Register the appearance stream as an XForm in the page's XObject
-            // resources and emit a Do operator (matches .NET behavior — XForms
-            // remain accessible via page.Resources.Forms after flatten).
-            var xformName = RegisterAppearanceAsXForm(page.Dict, appearanceStream, reader);
-
-            // Wrap in q/Q with transformation matrix + Do
+            frmCounter++;
             var writer = new System.IO.StreamWriter(appendContent, System.Text.Encoding.ASCII, leaveOpen: true);
-            writer.Write($"q {Format(sx)} 0 0 {Format(sy)} {Format(tx)} {Format(ty)} cm\n");
-            writer.Write($"/{xformName} Do\n");
-            writer.Write("Q\n");
+            writer.Write(fragment);
             writer.Flush();
         }
 
@@ -2676,14 +3545,172 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         {
             var existingData = page.GetContentStreamBytes() ?? [];
 
-            var combined = new byte[existingData.Length + 1 + appendContent.Length];
-            existingData.CopyTo(combined, 0);
-            if (existingData.Length > 0)
-                combined[existingData.Length] = (byte)'\n';
-            appendContent.ToArray().CopyTo(combined, existingData.Length + (existingData.Length > 0 ? 1 : 0));
+            // Bracket the original page content in a balanced q … Q before appending the
+            // flattened field fragments. A page content stream may leave the CTM in a
+            // non-default state — e.g. a leading global "0.12 0 0 0.12 0 0 cm" scale that
+            // is never wrapped in q/Q (some form authoring tools draw the whole page in an
+            // 8.33× coordinate space) — so appending fragments raw would draw every widget
+            // appearance through that leftover transform (scaled + shoved into a page
+            // corner). The outer q/Q restores the base CTM so each "q … cm /FRMn Do Q"
+            // fragment is placed at its true /Rect. Harmless when the page content is
+            // already clean (a no-op save/restore around it).
+            byte[] pre = existingData.Length > 0 ? Encoding.ASCII.GetBytes("q\n") : [];
+            byte[] mid = existingData.Length > 0 ? Encoding.ASCII.GetBytes("\nQ\n") : [];
+            var frag = appendContent.ToArray();
+
+            var combined = new byte[pre.Length + existingData.Length + mid.Length + frag.Length];
+            int off = 0;
+            pre.CopyTo(combined, off); off += pre.Length;
+            existingData.CopyTo(combined, off); off += existingData.Length;
+            mid.CopyTo(combined, off); off += mid.Length;
+            frag.CopyTo(combined, off);
 
             page.SetContentStream(combined);
         }
+    }
+
+    /// <summary>Build the page-content fragment that folds a widget annotation's /AP /N appearance
+    /// into the page, registering it as the XForm <paramref name="frmName"/>. Resolves the current
+    /// state for a multi-state (/AS) appearance, places the appearance per PDF 32000-1 §12.5.5
+    /// (transform /BBox by /Matrix → axis-aligned bounds → map onto /Rect, leaving the form's own
+    /// /Matrix on the XObject), and returns the <c>q … cm /FRMn Do Q</c> string. Null when there
+    /// is no usable appearance or rectangle.</summary>
+    private static string? BuildWidgetFlattenFragment(
+        PdfDictionary pageDict, PdfDictionary annotDict, PdfReader reader, string frmName)
+    {
+        var apDict = reader.ResolveDict(annotDict.Get("AP"));
+        if (apDict is null) return null;
+        var nResolved = reader.Resolve(apDict.Get("N"));
+        var appearanceStream = nResolved as PdfStream;
+        if (appearanceStream is null && nResolved is PdfDictionary stateDict)
+        {
+            var asName = annotDict.GetName("AS");
+            // A widget explicitly in the Off state with no Off appearance of its own (e.g. an
+            // unselected radio/checkbox kid whose /AP/N holds only its on-state) draws nothing —
+            // skip it. Falling back to its on-state would render an unselected kid as selected.
+            if (asName == "Off" && reader.ResolveStream(stateDict.Get("Off")) is null)
+                return null;
+            if (asName is not null) appearanceStream = reader.ResolveStream(stateDict.Get(asName));
+            // Fallback: first non-Off state, then any state.
+            if (appearanceStream is null)
+                foreach (var key in stateDict.Keys)
+                {
+                    if (key == "Off") continue;
+                    appearanceStream = reader.ResolveStream(stateDict.Get(key));
+                    if (appearanceStream is not null) break;
+                }
+            if (appearanceStream is null)
+                foreach (var key in stateDict.Keys)
+                {
+                    appearanceStream = reader.ResolveStream(stateDict.Get(key));
+                    if (appearanceStream is not null) break;
+                }
+        }
+        if (appearanceStream is null) return null;
+
+        if (reader.Resolve(annotDict.Get("Rect")) is not PdfArray rectArr || rectArr.Count < 4)
+            return null;
+        var rect = Rectangle.FromPdfArray(rectArr);
+
+        double tllx = 0, tlly = 0, tw = rect.Width, th = rect.Height;
+        if (reader.Resolve(appearanceStream.Dict.Get("BBox")) is PdfArray bboxArr && bboxArr.Count >= 4)
+        {
+            var bbox = Rectangle.FromPdfArray(bboxArr);
+            double[] m = ReadAppearanceMatrix(appearanceStream.Dict, reader);
+            double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
+            foreach (var (px, py) in new[] { (bbox.LLX, bbox.LLY), (bbox.URX, bbox.LLY), (bbox.URX, bbox.URY), (bbox.LLX, bbox.URY) })
+            {
+                double qx = m[0] * px + m[2] * py + m[4];
+                double qy = m[1] * px + m[3] * py + m[5];
+                if (qx < minX) minX = qx; if (qx > maxX) maxX = qx;
+                if (qy < minY) minY = qy; if (qy > maxY) maxY = qy;
+            }
+            tllx = minX; tlly = minY; tw = maxX - minX; th = maxY - minY;
+        }
+
+        var sx = tw > 0 ? rect.Width / tw : 1.0;
+        var sy = th > 0 ? rect.Height / th : 1.0;
+        var tx = rect.LLX - tllx * sx;
+        var ty = rect.LLY - tlly * sy;
+        var xformName = RegisterAppearanceAsXForm(pageDict, appearanceStream, reader, frmName);
+        return $"q {Format(sx)} 0 0 {Format(sy)} {Format(tx)} {Format(ty)} cm\n/{xformName} Do\nQ\n";
+    }
+
+    /// <summary>Flatten a single field: fold each of its widget annotations into the owning page's
+    /// content (as an FRM XObject placed at the widget /Rect), remove those widgets from the page
+    /// /Annots, and drop the field from the AcroForm. Used by <see cref="Field.Flatten()"/>.</summary>
+    internal void FlattenField(Field field)
+    {
+        var reader = _reader ?? OwnerDocument?.Reader;
+        var doc = OwnerDocument;
+        if (reader is null || doc is null) return;
+
+        // The widget dicts this field contributes: a merged single-widget field is its own dict;
+        // otherwise each kid widget.
+        var widgets = new List<PdfDictionary>();
+        if (field.Dict.ContainsKey("Rect")) widgets.Add(field.Dict);
+        foreach (var kid in field.AllKids())
+            if (kid.ContainsKey("Rect") && !ReferenceEquals(kid, field.Dict)) widgets.Add(kid);
+        if (widgets.Count == 0) return;
+
+        // Refresh the appearance unless it carries a non-identity /Matrix (see
+        // RegenerateAppearanceForFlatten).
+        RegenerateAppearanceForFlatten(field);
+
+        foreach (var page in doc.Pages)
+        {
+            if (reader.Resolve(page.Dict.Get("Annots")) is not PdfArray annots) continue;
+            var append = new System.IO.MemoryStream();
+            var remaining = new PdfArray();
+            int frm = NextFreeFrmIndex(page.Dict, reader);
+            var writer = new System.IO.StreamWriter(append, System.Text.Encoding.ASCII, leaveOpen: true);
+            bool changed = false;
+            foreach (var annotRef in annots)
+            {
+                var annotDict = reader.ResolveDict(annotRef);
+                if (annotDict is not null && widgets.Exists(w => ReferenceEquals(w, annotDict)))
+                {
+                    var frag = BuildWidgetFlattenFragment(page.Dict, annotDict, reader, $"FRM{frm}");
+                    if (frag is not null) { writer.Write(frag); frm++; changed = true; continue; }
+                }
+                remaining.Add(annotRef);
+            }
+            writer.Flush();
+            if (!changed) continue;
+            if (remaining.Count > 0) page.Dict.Set("Annots", remaining); else page.Dict.Remove("Annots");
+            if (append.Length > 0)
+            {
+                var existing = page.GetContentStreamBytes() ?? [];
+                var combined = new byte[existing.Length + (existing.Length > 0 ? 1 : 0) + append.Length];
+                existing.CopyTo(combined, 0);
+                if (existing.Length > 0) combined[existing.Length] = (byte)'\n';
+                append.ToArray().CopyTo(combined, existing.Length + (existing.Length > 0 ? 1 : 0));
+                page.SetContentStream(combined);
+            }
+        }
+
+        // Drop the field from the AcroForm /Fields and the cached list.
+        var acro = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
+        if (reader.Resolve(acro?.Get("Fields")) is PdfArray fields)
+        {
+            var kept = new PdfArray();
+            foreach (var fr in fields)
+                if (!ReferenceEquals(reader.ResolveDict(fr), field.Dict)) kept.Add(fr);
+            acro!.Set("Fields", kept);
+        }
+        _fields.Remove(field);
+    }
+
+    /// <summary>The next unused FRM{n} index in the page's XObject resources (so a single-field
+    /// flatten doesn't collide with already-registered forms).</summary>
+    private static int NextFreeFrmIndex(PdfDictionary pageDict, PdfReader reader)
+    {
+        var res = reader.ResolveDict(pageDict.Get("Resources"));
+        var xobj = res is null ? null : reader.ResolveDict(res.Get("XObject"));
+        int n = 0;
+        if (xobj is not null)
+            while (xobj.ContainsKey("FRM" + n)) n++;
+        return n;
     }
 
     /// <summary>
@@ -2691,8 +3718,19 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     /// Returns the assigned name (e.g., "FRM0", "FRM1"). Shared with annotation
     /// flatten (Annotation.Flatten) so both code paths use the same naming.
     /// </summary>
+    /// <summary>Read an appearance stream's /Matrix entry as [a b c d e f], defaulting to the
+    /// identity matrix when absent or malformed.</summary>
+    private static double[] ReadAppearanceMatrix(PdfDictionary apDict, PdfReader reader)
+    {
+        var m = new double[] { 1, 0, 0, 1, 0, 0 };
+        if (reader.Resolve(apDict.Get("Matrix")) is PdfArray arr && arr.Count >= 6)
+            for (int i = 0; i < 6; i++)
+                m[i] = arr[i] switch { PdfReal r => r.Value, PdfInteger n => n.Value, _ => m[i] };
+        return m;
+    }
+
     internal static string RegisterAppearanceAsXForm(
-        PdfDictionary pageDict, PdfStream appearanceStream, PdfReader reader)
+        PdfDictionary pageDict, PdfStream appearanceStream, PdfReader reader, string? preferredName = null)
     {
         var resources = reader.ResolveDict(pageDict.Get("Resources"));
         if (resources is null)
@@ -2708,14 +3746,22 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             resources.Set("XObject", xobjects);
         }
 
-        // Generate a unique name: FRM0, FRM1, .
-        int idx = 0;
+        // Use the caller's preferred name when free (field flatten assigns 1-based FRM{n}
+        // in /Annots order); otherwise generate a unique FRM0, FRM1, … (annotation flatten).
         string name;
-        do
+        if (!string.IsNullOrEmpty(preferredName) && !xobjects.ContainsKey(preferredName!))
         {
-            name = $"FRM{idx}";
-            idx++;
-        } while (xobjects.ContainsKey(name));
+            name = preferredName!;
+        }
+        else
+        {
+            int idx = 0;
+            do
+            {
+                name = $"FRM{idx}";
+                idx++;
+            } while (xobjects.ContainsKey(name));
+        }
 
         // Ensure the appearance stream has /Type /XObject and /Subtype /Form
         appearanceStream.Dict.Set("Type", new PdfName("XObject"));
@@ -2770,6 +3816,26 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     }
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    // ICollection<WidgetAnnotation> — a read-only view over the form's fields (mutation goes
+    // through Add(Field)/Remove/Flatten, not this interface). Lets callers pass the form where
+    // an ICollection<WidgetAnnotation> is expected (e.g. a bulk field-fill helper).
+    bool ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.IsReadOnly => true;
+    void ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.Add(Aspose.Pdf.Annotations.WidgetAnnotation item)
+        => throw new NotSupportedException("Add fields via Form.Add(Field).");
+    void ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.Clear()
+        => throw new NotSupportedException("Clear the form via Flatten or field removal.");
+    bool ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.Contains(Aspose.Pdf.Annotations.WidgetAnnotation item)
+    {
+        foreach (var w in this) if (ReferenceEquals(w, item)) return true;
+        return false;
+    }
+    void ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.CopyTo(Aspose.Pdf.Annotations.WidgetAnnotation[] array, int arrayIndex)
+    {
+        foreach (var w in this) array[arrayIndex++] = w;
+    }
+    bool ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.Remove(Aspose.Pdf.Annotations.WidgetAnnotation item)
+        => throw new NotSupportedException("Remove fields via Flatten or field removal.");
 
     private static int GetObjectNumber(PdfObject item)
     {
@@ -2844,7 +3910,15 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
                     {
                         var kidDict = reader.ResolveDict(kid);
                         if (kidDict is not null)
-                            result.Add(CreateFieldWithObjNum(kidDict, reader, GetObjectNumber(kid)));
+                        {
+                            // Surface each radio option as a RadioButtonOptionField (carrying its
+                            // own /Rect and /MK characteristics) — the option type the public API
+                            // expects on Form.Fields. The parent group is still surfaced as a
+                            // RadioButtonField by CollectGroupFields / FindByName.
+                            var opt = new RadioButtonOptionField(kidDict, reader)
+                            { ObjectNumber = GetObjectNumber(kid) };
+                            result.Add(opt);
+                        }
                     }
                 }
                 else
@@ -2863,7 +3937,8 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     /// non-terminal (group) fields sitting in their /Parent ancestry, so callers
     /// can find a group by its full name and enumerate its child fields. Group
     /// dicts are de-duplicated when several terminals share the same parent.</summary>
-    private static void CollectGroupFields(PdfReader reader, List<Field> fields, HashSet<PdfDictionary> exclude)
+    private static void CollectGroupFields(PdfReader reader, List<Field> fields,
+        HashSet<PdfDictionary> exclude, HashSet<PdfDictionary> groupDicts)
     {
         var seen = new HashSet<PdfDictionary>();
         foreach (var f in fields) seen.Add(f.Dict);
@@ -2879,7 +3954,10 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
             while (parent is not null)
             {
                 if (parent.ContainsKey("T") && seen.Add(parent))
+                {
                     groups.Add(Field.Create(parent, reader));
+                    groupDicts.Add(parent);
+                }
                 parent = reader.ResolveDict(parent.Get("Parent"));
             }
         }
@@ -2901,7 +3979,7 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
         return true;
     }
 
-    // ── Aspose.PDF for .NET shape additions ───────────────────────────────
+    // ── Aspose.Pdf shape additions ───────────────────────────────
 
     /// <summary>How widgets dependent on signature appearance are rendered when the form is converted.</summary>
     public enum SignDependentElementsRenderingModes
@@ -3090,11 +4168,41 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     public void AddFieldAppearance(Field field, int pageNumber, Rectangle rect)
     {
         if (field is null) return;
-        _ = pageNumber; _ = rect;
-        // The widget would be added to the page Annots array and the field's Kids;
-        // this minimal implementation records intent on the field dict but does
-        // not yet write the appearance stream or annotation array entry.
-        field.Dict.Set("__appendedAppearance", new PdfInteger(pageNumber));
+        var doc = OwnerDocument;
+        var reader = _reader ?? doc?.Reader;
+        if (doc is null || reader is null) return;
+
+        // Build an extra widget for this field: its own /Rect on the target page and an
+        // /AP/N rendering the field value. The field keeps its own /Rect+/AP (the first
+        // visual widget) and grows a /Kids array of additional widgets.
+        var kid = new PdfDictionary();
+        kid.Set("Type", new PdfName("Annot"));
+        kid.Set("Subtype", new PdfName("Widget"));
+        kid.Set("Rect", Field.MakeRectArray(rect));
+        kid.Set("F", new PdfInteger(4));
+        kid.Set("Parent", field.Dict);
+        var ap = field.BuildWidgetApDict(rect.Width, rect.Height);
+        if (ap is not null) kid.Set("AP", ap);
+
+        var kids = reader.Resolve(field.Dict.Get("Kids")) as PdfArray;
+        if (kids is null)
+        {
+            kids = new PdfArray();
+            field.Dict.Set("Kids", kids);
+        }
+        kids.Add(kid);
+
+        if (pageNumber >= 1 && pageNumber <= doc.Pages.Count)
+        {
+            var page = doc.Pages[pageNumber];
+            var annots = reader.Resolve(page.Dict.Get("Annots")) as PdfArray;
+            if (annots is null)
+            {
+                annots = new PdfArray();
+                page.Dict.Set("Annots", annots);
+            }
+            annots.Add(kid);
+        }
     }
 
     /// <summary>Replace the XFA datasets from the given XmlDocument.</summary>
@@ -3137,6 +4245,24 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     {
         if (field is null) return;
         _fields.Remove(field);
+
+        // Keep the AcroForm /Fields array in sync with the cached field list — Count reads
+        // /Fields, so a cache-only removal left the deleted field still counted (and saved).
+        // Rebuild /Fields from the surviving top-level fields (the deleted one is already gone
+        // from _fields), preserving each field's original /Fields item where it is still present.
+        var reader = _reader ?? OwnerDocument?.Reader;
+        var af = _acroForm ?? (reader is not null ? reader.ResolveDict(reader.Catalog?.Get("AcroForm")) : null);
+        if (reader is not null && af is not null && reader.Resolve(af.Get("Fields")) is PdfArray fields)
+        {
+            var survivors = new System.Collections.Generic.HashSet<PdfDictionary>(
+                System.Collections.Generic.ReferenceEqualityComparer.Instance);
+            foreach (var f in _fields) survivors.Add(f.Dict);
+            var kept = new PdfArray();
+            foreach (var item in fields)
+                if (reader.ResolveDict(item) is { } d && survivors.Contains(d))
+                    kept.Add(item);
+            af.Set("Fields", kept);
+        }
     }
 
     /// <summary>Serialize the form's fields to JSON via the supplied stream.</summary>
@@ -3594,7 +4720,63 @@ public sealed class Form : IEnumerable<Aspose.Pdf.Annotations.WidgetAnnotation>
     public void RemoveFieldAppearance(Field field, int appearanceIndex)
     {
         if (field is null) return;
-        field.Dict.Remove($"__appearance{appearanceIndex}");
+        var reader = _reader ?? OwnerDocument?.Reader;
+        if (reader is null) return;
+
+        // The field's visual widgets, 1-based in /Kids order: the field's own merged widget first
+        // (when it has one), then each /Kids entry. appearanceIndex must be in [1..Count].
+        int count = field.Count;
+        if (appearanceIndex < 1 || appearanceIndex > count)
+            throw new IndexOutOfRangeException(
+                $"childIndex should be in the range [1..{count}] where n equals to the field count");
+
+        var widgets = new System.Collections.Generic.List<PdfDictionary>();
+        if (field.HasMergedSelfWidget) widgets.Add(field.Dict);
+        var kids = reader.Resolve(field.Dict.Get("Kids")) as PdfArray;
+        if (kids is not null)
+            foreach (var k in kids)
+                if (reader.Resolve(k) is PdfDictionary kd) widgets.Add(kd);
+
+        var target = widgets[appearanceIndex - 1];
+        widgets.RemoveAt(appearanceIndex - 1);
+        if (!ReferenceEquals(target, field.Dict)) DetachAnnotFromPages(target, reader);
+
+        if (widgets.Count <= 1)
+        {
+            // Removal leaves a single widget: collapse back to a merged leaf so Count returns to 0.
+            // The survivor's appearance lives on the field dict; drop the now-empty /Kids array.
+            if (widgets.Count == 1 && !ReferenceEquals(widgets[0], field.Dict))
+            {
+                var survivor = widgets[0];
+                foreach (var key in new[] { "AP", "Rect", "AS", "MK", "F", "DA" })
+                    if (survivor.Get(key) is { } v) field.Dict.Set(key, v);
+                DetachAnnotFromPages(survivor, reader);
+            }
+            field.Dict.Remove("Kids");
+            return;
+        }
+
+        // Two or more widgets remain. If the field's own merged widget was the one removed, strip its
+        // widget keys so the field dict becomes a pure parent; keep the survivors in /Kids.
+        if (ReferenceEquals(target, field.Dict))
+            foreach (var key in new[] { "Rect", "AP", "AS", "MK" }) field.Dict.Remove(key);
+        var newKids = new PdfArray();
+        foreach (var w in widgets)
+            if (!ReferenceEquals(w, field.Dict)) newKids.Add(w);
+        field.Dict.Set("Kids", newKids);
+    }
+
+    /// <summary>Remove a widget-annotation dictionary from every page's /Annots array.</summary>
+    private void DetachAnnotFromPages(PdfDictionary widget, PdfReader reader)
+    {
+        var doc = OwnerDocument;
+        if (doc is null) return;
+        for (int p = 1; p <= doc.Pages.Count; p++)
+        {
+            if (reader.Resolve(doc.Pages[p].Dict.Get("Annots")) is not PdfArray annots) continue;
+            for (int i = annots.Count - 1; i >= 0; i--)
+                if (ReferenceEquals(reader.Resolve(annots[i]), widget)) annots.RemoveAt(i);
+        }
     }
 }
 
@@ -3744,7 +4926,7 @@ public sealed class XfaAccessor
 
     private XmlNode? WalkTemplateByPath(XmlNode root, string path)
     {
-        var parts = path.Split('.');
+        var parts = Form.SplitSomPath(path);
         XmlNode? current = root;
         foreach (var part in parts)
         {
@@ -3775,7 +4957,7 @@ public sealed class XfaAccessor
 
     private XmlNode? WalkDatasetsByPath(XmlNode root, string path)
     {
-        var parts = path.Split('.');
+        var parts = Form.SplitSomPath(path);
         XmlNode? current = root;
         foreach (var part in parts)
         {

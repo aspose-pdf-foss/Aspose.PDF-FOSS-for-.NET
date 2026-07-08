@@ -13,7 +13,57 @@ public class GraphicElement
 
     internal virtual GraphicElement Clone(XFormPlacement xFormPlacement) => this;
 
+    /// <summary>Emit the PDF content-stream operators that reproduce this element
+    /// in page space. The default element draws nothing.</summary>
+    internal virtual string ToContent() => string.Empty;
+
     protected virtual void GetInitialPoint(out double x, out double y) { x = 0; y = 0; }
+}
+
+/// <summary>A single painted sub-path extracted from a content stream: its
+/// construction operators (in their original user-space coordinates), the CTM in
+/// effect when it was drawn, and the painting operator that closed it. The public
+/// <see cref="Rectangle"/> is the path's bounding box transformed into page space,
+/// so it is stable across an extract → <see cref="Page.AddGraphics"/> → re-extract
+/// round-trip (the same operators are re-emitted under the same CTM).</summary>
+public sealed class SubPath : GraphicElement
+{
+    private readonly Aspose.Pdf.Matrix _ctm;
+    private readonly System.Collections.Generic.List<Aspose.Pdf.Operator> _construction;
+    private readonly Aspose.Pdf.Operator _paint;
+    private readonly Rectangle _rectangle;
+
+    internal SubPath(Aspose.Pdf.Matrix ctm,
+        System.Collections.Generic.List<Aspose.Pdf.Operator> construction,
+        Aspose.Pdf.Operator paint, Rectangle rectangle)
+    {
+        _ctm = ctm;
+        _construction = construction;
+        _paint = paint;
+        _rectangle = rectangle;
+    }
+
+    public override Rectangle Rectangle => _rectangle;
+
+    internal override GraphicElement Clone(XFormPlacement xFormPlacement) => this;
+
+    internal override string ToContent()
+    {
+        var sb = new System.Text.StringBuilder();
+        // Re-apply the original CTM, then replay the path operators verbatim so the
+        // re-extracted bounding box is identical. Wrapped in q/Q to isolate the CTM.
+        sb.Append("q ");
+        sb.Append(new Operators.ConcatenateMatrix(_ctm).ToPdf());
+        sb.Append('\n');
+        foreach (var op in _construction)
+        {
+            sb.Append(op.ToPdf());
+            sb.Append('\n');
+        }
+        sb.Append(_paint.ToPdf());
+        sb.Append("\nQ\n");
+        return sb.ToString();
+    }
 }
 
 /// <summary>Mutable collection of <see cref="GraphicElement"/> entries.

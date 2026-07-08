@@ -381,8 +381,11 @@ public class SvgDeviceTests
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("Line1", svg);
         Assert.Contains("Line2", svg);
-        // Line2 should be at y=686 (700 - 14)
-        Assert.Contains("y=\"686\"", svg);
+        // T* moves the line down by the leading (700 - 14 = 686). Text runs are
+        // placed by their text matrix as matrix(a,b,-c,-d,e,f) (the y-column is
+        // negated to cancel the page flip), so Line2's moved-down baseline shows
+        // up as the f-translation of its run, not a legacy y="686" attribute.
+        Assert.Contains("matrix(1,0,0,-1,100,686)", svg);
     }
 
     [Fact]

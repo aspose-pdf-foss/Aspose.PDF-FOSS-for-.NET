@@ -87,7 +87,7 @@ public sealed class Stamp
 
     /// <summary>
     /// Bind raw image bytes as the stamp's logo (image stamp). FOSS-only
-    /// extension — Aspose.PDF for .NET only exposes <see cref="BindImage(Stream)"/>
+    /// extension — Aspose.Pdf only exposes <see cref="BindImage(Stream)"/>
     /// and <see cref="BindImage(string)"/>.
     /// </summary>
     public void BindImage(byte[] imageData)

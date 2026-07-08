@@ -293,7 +293,12 @@ internal sealed class TextStateModifier
                                         operands[^1].startPos, operands[^1].endPos,
                                         text, color, (fillR, fillG, fillB));
                                     if (split is not null) return split;
-                                    return InjectColorBefore(streamBytes, operands[^1].startPos, color);
+                                    // Whole-run recolour: wrap the show operator with the new
+                                    // fill colour AND a trailing restore to the colour that was
+                                    // active before it, so the recolour doesn't leak onto the
+                                    // subsequent text (endPos is just past the show keyword).
+                                    return InjectColorAround(streamBytes, operands[^1].startPos,
+                                        endPos, color, (fillR, fillG, fillB));
                                 }
                             }
                             break;
@@ -305,7 +310,8 @@ internal sealed class TextStateModifier
                             {
                                 var decoded = DecodeTextString(tjText.Value, currentToUnicode);
                                 if (decoded.Contains(text))
-                                    return InjectColorBefore(streamBytes, operands[^1].startPos, color);
+                                    return InjectColorAround(streamBytes, operands[^1].startPos,
+                                        endPos, color, (fillR, fillG, fillB));
                             }
                             break;
                     }
@@ -390,19 +396,38 @@ internal sealed class TextStateModifier
         return result;
     }
 
-    private static byte[] InjectColorBefore(byte[] original, int insertPos, Color color)
+    /// <summary>
+    /// Wrap a text-showing operator with a fill-colour change and a matching restore:
+    /// inject `R G B rg` immediately before the show operand (at <paramref name="rgInsertPos"/>)
+    /// and restore the previously-active fill colour immediately after the show keyword (at
+    /// <paramref name="restorePos"/>). Without the restore the recolour leaks onto every
+    /// subsequent glyph in the same BT block. The restore is emitted as `v g` (SetGray) when
+    /// the prior fill was a gray (r==g==b) — matching how producers write a default-black
+    /// reset — otherwise as `r g b rg`.
+    /// </summary>
+    private static byte[] InjectColorAround(byte[] original, int rgInsertPos, int restorePos,
+        Color color, (double r, double g, double b) restore)
     {
         // Leading space separates the injected rg from the preceding token
         // (e.g. "Tc" runs straight into "1.000" without it, which the lexer
         // mis-parses as one keyword "Tc1.000"); trailing space separates the
         // rg from the following PdfString '(' delimiter.
-        var rg = string.Format(CultureInfo.InvariantCulture, " {0:F3} {1:F3} {2:F3} rg ",
+        var before = string.Format(CultureInfo.InvariantCulture, " {0:F3} {1:F3} {2:F3} rg ",
             color.R / 255.0, color.G / 255.0, color.B / 255.0);
-        var rgBytes = Encoding.ASCII.GetBytes(rg);
-        var result = new byte[original.Length + rgBytes.Length];
-        Array.Copy(original, 0, result, 0, insertPos);
-        Array.Copy(rgBytes, 0, result, insertPos, rgBytes.Length);
-        Array.Copy(original, insertPos, result, insertPos + rgBytes.Length, original.Length - insertPos);
+        string after = (restore.r == restore.g && restore.g == restore.b)
+            ? string.Format(CultureInfo.InvariantCulture, " {0:F3} g ", restore.r)
+            : string.Format(CultureInfo.InvariantCulture, " {0:F3} {1:F3} {2:F3} rg ",
+                restore.r, restore.g, restore.b);
+        var beforeBytes = Encoding.ASCII.GetBytes(before);
+        var afterBytes = Encoding.ASCII.GetBytes(after);
+
+        var result = new byte[original.Length + beforeBytes.Length + afterBytes.Length];
+        int pos = 0;
+        Array.Copy(original, 0, result, pos, rgInsertPos); pos += rgInsertPos;
+        Array.Copy(beforeBytes, 0, result, pos, beforeBytes.Length); pos += beforeBytes.Length;
+        Array.Copy(original, rgInsertPos, result, pos, restorePos - rgInsertPos); pos += restorePos - rgInsertPos;
+        Array.Copy(afterBytes, 0, result, pos, afterBytes.Length); pos += afterBytes.Length;
+        Array.Copy(original, restorePos, result, pos, original.Length - restorePos);
         return result;
     }
 
@@ -410,13 +435,13 @@ internal sealed class TextStateModifier
     /// Change the font size of the Tf operator that immediately precedes the first
     /// occurrence of <paramref name="text"/> in the page's content stream(s).
     /// </summary>
-    public void ModifyFontSize(Page page, string text, double oldSize, double newSize)
+    public void ModifyFontSize(Page page, string text, double oldSize, double newSize, bool allowCollateral = true)
     {
         var reader = page.Reader;
         if (reader is null) return;
 
         // First try Form XObjects (text is often inside XObjects, not page content directly)
-        if (ModifyInFormXObjects(page.Dict, reader, text, oldSize, newSize))
+        if (ModifyInFormXObjects(page.Dict, reader, text, oldSize, newSize, allowCollateral))
             return;
 
         // Then try the page's own content stream
@@ -424,7 +449,7 @@ internal sealed class TextStateModifier
         if (contentStreams.Count == 0) return;
 
         var combined = CombineStreams(contentStreams);
-        var modified = ModifyFontSizeInStream(combined, text, oldSize, newSize, page.Dict, reader);
+        var modified = ModifyFontSizeInStream(combined, text, oldSize, newSize, page.Dict, reader, allowCollateral);
         if (modified is not null)
         {
             page.SetContentStream(modified);
@@ -432,7 +457,7 @@ internal sealed class TextStateModifier
     }
 
     private bool ModifyInFormXObjects(PdfDictionary dict, PdfReader reader,
-        string text, double oldSize, double newSize)
+        string text, double oldSize, double newSize, bool allowCollateral)
     {
         var resources = reader.ResolveDict(dict.Get("Resources"));
         if (resources is null) return false;
@@ -446,7 +471,7 @@ internal sealed class TextStateModifier
             if (xobjStream.Dict.GetName("Subtype") != "Form") continue;
 
             var streamData = reader.DecodeStream(xobjStream);
-            var modified = ModifyFontSizeInStream(streamData, text, oldSize, newSize, xobjStream.Dict, reader);
+            var modified = ModifyFontSizeInStream(streamData, text, oldSize, newSize, xobjStream.Dict, reader, allowCollateral);
             if (modified is not null)
             {
                 xobjStream.Dict.Remove("Filter");
@@ -457,14 +482,14 @@ internal sealed class TextStateModifier
             }
 
             // Recurse into nested Form XObjects
-            if (ModifyInFormXObjects(xobjStream.Dict, reader, text, oldSize, newSize))
+            if (ModifyInFormXObjects(xobjStream.Dict, reader, text, oldSize, newSize, allowCollateral))
                 return true;
         }
         return false;
     }
 
     private byte[]? ModifyFontSizeInStream(byte[] streamBytes, string text, double oldSize,
-        double newSize, PdfDictionary pageDict, PdfReader reader)
+        double newSize, PdfDictionary pageDict, PdfReader reader, bool allowCollateral)
     {
         var fonts = TextAbsorber.ResolveFonts(pageDict, reader);
         var lexer = new PdfLexer(streamBytes);
@@ -477,6 +502,11 @@ internal sealed class TextStateModifier
         double tmScaleY = 1; // text matrix vertical scale factor
         string? currentFontName = null;
         Dictionary<int, string>? currentToUnicode = null;
+        // Every text show with the Tf that governs it. A fragment's phrase is
+        // often split over several consecutive shows, each re-issuing its own
+        // Tf (accented glyphs, kerned words), so the match must run over the
+        // concatenated show text and then patch EVERY Tf covering the match.
+        var shows = new List<(string decoded, int tfStart, int tfEnd, double effSize)>();
 
         while (true)
         {
@@ -586,15 +616,8 @@ internal sealed class TextStateModifier
                             if (operands.Count >= 1 && operands[^1].obj is PdfString textStr)
                             {
                                 var decoded = DecodeTextString(textStr.Value, currentToUnicode);
-                                var effectiveSize = lastTfSize * tmScaleY;
-                                if (decoded.Contains(text) &&
-                                    Math.Abs(effectiveSize - oldSize) < 0.5 &&
-                                    lastTfSizeStart >= 0)
-                                {
-                                    // Scale the Tf size proportionally
-                                    var actualNewTfSize = newSize / tmScaleY;
-                                    return PatchFontSize(streamBytes, lastTfSizeStart, lastTfSizeEnd, actualNewTfSize);
-                                }
+                                if (decoded.Length > 0 && lastTfSizeStart >= 0)
+                                    shows.Add((decoded, lastTfSizeStart, lastTfSizeEnd, lastTfSize * tmScaleY));
                             }
                             break;
 
@@ -603,14 +626,8 @@ internal sealed class TextStateModifier
                             if (operands.Count >= 1 && operands[^1].obj is PdfString tjText)
                             {
                                 var decoded = DecodeTextString(tjText.Value, currentToUnicode);
-                                var effectiveSizeTj = lastTfSize * tmScaleY;
-                                if (decoded.Contains(text) &&
-                                    Math.Abs(effectiveSizeTj - oldSize) < 0.5 &&
-                                    lastTfSizeStart >= 0)
-                                {
-                                    var actualNewTfSizeTj = newSize / tmScaleY;
-                                    return PatchFontSize(streamBytes, lastTfSizeStart, lastTfSizeEnd, actualNewTfSizeTj);
-                                }
+                                if (decoded.Length > 0 && lastTfSizeStart >= 0)
+                                    shows.Add((decoded, lastTfSizeStart, lastTfSizeEnd, lastTfSize * tmScaleY));
                             }
                             break;
                     }
@@ -623,7 +640,68 @@ internal sealed class TextStateModifier
             }
         }
         done:
-        return null; // text not found
+        // Match the phrase over the concatenated show text, then patch every
+        // Tf site (with the expected old size) that governs a show overlapping
+        // the first match. Single-show matches reduce to one patch; phrases
+        // split across shows/Tf re-issues patch each covering Tf once.
+        if (shows.Count == 0) return null;
+        var concat = new StringBuilder();
+        var spans = new (int start, int end)[shows.Count];
+        for (var si = 0; si < shows.Count; si++)
+        {
+            spans[si] = (concat.Length, concat.Length + shows[si].decoded.Length);
+            concat.Append(shows[si].decoded);
+        }
+        // Walk occurrences until one is drawn at the expected old size — the
+        // same text can appear elsewhere at other sizes (the caller resizes a
+        // specific absorbed fragment, identified by its size).
+        var concatStr = concat.ToString();
+        var patches = new SortedDictionary<int, (int end, double newTf)>();
+        for (var idx = concatStr.IndexOf(text, StringComparison.Ordinal); idx >= 0;
+             idx = concatStr.IndexOf(text, idx + 1, StringComparison.Ordinal))
+        {
+            var matchEnd = idx + text.Length;
+            var sizeMatched = false;
+            var collateral = false;
+            for (var si = 0; si < shows.Count; si++)
+            {
+                if (spans[si].end <= idx || spans[si].start >= matchEnd) continue;
+                var s = shows[si];
+                if (Math.Abs(s.effSize - oldSize) >= 0.5) continue;
+                sizeMatched = true;
+                // A Tf may be shared with shows OUTSIDE the match (e.g. the
+                // whole paragraph under one Tf): patching it would resize
+                // unrelated text. Resize only when every show governed by the
+                // candidate Tf lies inside the match — otherwise leave the
+                // stream untouched (all-or-nothing, no collateral).
+                for (var sj = 0; allowCollateral == false && sj < shows.Count; sj++)
+                {
+                    if (shows[sj].tfStart != s.tfStart) continue;
+                    if (spans[sj].start < idx || spans[sj].end > matchEnd) { collateral = true; break; }
+                }
+                if (collateral) break;
+                // newSize is the desired effective size; recover the raw Tf value
+                // through the same Tm scale that produced this show's effective size.
+                var tmScale = s.effSize / Math.Max(0.0001, RawTfFor(streamBytes, s));
+                patches[s.tfStart] = (s.tfEnd, newSize / Math.Max(0.0001, tmScale));
+            }
+            if (sizeMatched && !collateral && patches.Count > 0) break;
+            patches.Clear();
+        }
+        if (patches.Count == 0) return null;
+
+        var result = streamBytes;
+        foreach (var kv in patches.Reverse())
+            result = PatchFontSize(result, kv.Key, kv.Value.end, kv.Value.newTf);
+        return result;
+    }
+
+    /// <summary>Parse the raw numeric Tf size at the recorded operand span.</summary>
+    private static double RawTfFor(byte[] streamBytes, (string decoded, int tfStart, int tfEnd, double effSize) show)
+    {
+        var s = Encoding.ASCII.GetString(streamBytes, show.tfStart,
+            Math.Max(0, show.tfEnd - show.tfStart)).Trim();
+        return double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) && v != 0 ? v : show.effSize;
     }
 
     private static byte[] PatchFontSize(byte[] original, int sizeStart, int sizeEnd, double newSize)
@@ -659,18 +737,25 @@ internal sealed class TextStateModifier
     {
         var reader = page.Reader;
         if (reader is null) return;
-        var ttf = newFont?.SourceFontData?.TtfData;
-        if (ttf is null || ttf.Length == 0) return;   // only fonts carrying a program
         var doc = reader.OwnerDocument;
-        if (doc is null) return;
+        if (doc is null || newFont is null) return;
 
-        // PDF /BaseFont names carry no spaces or style separators
-        // ("Courier New" + Bold|Italic -> "CourierNewBoldItalic"), which is also what
-        // the read-back path strips back to for FontName.
-        var baseName = (newFont!.FontName ?? "Font").Replace(" ", "").Replace("-", "");
+        // A Standard-14 font is referenced by name only (no embedded program); any
+        // other real font needs a TrueType program to embed. Bail only when we have
+        // neither.
+        var isCore = Standard14Fonts.IsCoreName(newFont.BaseFont)
+            || Standard14Fonts.IsCoreName(newFont.FontName);
+        var ttf = newFont.SourceFontData?.TtfData;
+        if (!isCore && (ttf is null || ttf.Length == 0)) return;
+
+        // Standard-14 base names are written verbatim (e.g. "Times-Roman"); embedded
+        // fonts drop spaces/style separators from their /BaseFont name.
+        var baseName = isCore
+            ? (newFont.FontName ?? "Helvetica")
+            : (newFont.FontName ?? "Font").Replace(" ", "").Replace("-", "");
 
         // Text frequently lives inside a Form XObject (e.g. `q /Fm0 Do Q`).
-        if (ModifyFontInFormXObjects(page.Dict, reader, doc, text, ttf, baseName))
+        if (ModifyFontInFormXObjects(page.Dict, reader, doc, text, isCore, ttf, baseName))
             return;
 
         var contentStreams = GetContentStreams(page, reader);
@@ -679,13 +764,16 @@ internal sealed class TextStateModifier
         var range = FindTfNameRange(combined, text, page.Dict, reader);
         if (range is null) return;
 
-        var resName = UniqueFontResName(page.Dict, reader);
-        FontEmbedder.Embed(doc, ttf, resName, baseName).AddToResources(page.Dict, reader);
-        page.SetContentStream(PatchName(combined, range.Value.start, range.Value.end, resName));
+        var origName = ExtractResName(combined, range.Value.start, range.Value.end);
+        var resName = RegisterFontResource(page.Dict, reader, doc, isCore, ttf, baseName);
+        var modified = PatchName(combined, range.Value.start, range.Value.end, resName);
+        if (origName is not null)
+            modified = RepointRedundantTfs(modified, origName, resName);
+        page.SetContentStream(modified);
     }
 
     private bool ModifyFontInFormXObjects(PdfDictionary dict, PdfReader reader,
-        Document doc, string text, byte[] ttf, string baseFontName)
+        Document doc, string text, bool isCore, byte[]? ttf, string baseFontName)
     {
         var resources = reader.ResolveDict(dict.Get("Resources"));
         if (resources is null) return false;
@@ -702,9 +790,15 @@ internal sealed class TextStateModifier
             var range = FindTfNameRange(streamData, text, xobjStream.Dict, reader);
             if (range is not null)
             {
-                var resName = UniqueFontResName(xobjStream.Dict, reader);
-                FontEmbedder.Embed(doc, ttf, resName, baseFontName).AddToResources(xobjStream.Dict, reader);
+                var origName = ExtractResName(streamData, range.Value.start, range.Value.end);
+                var resName = RegisterFontResource(xobjStream.Dict, reader, doc, isCore, ttf, baseFontName);
                 var modified = PatchName(streamData, range.Value.start, range.Value.end, resName);
+                // A run's font is often re-selected by a redundant `/F Tf` that shows no
+                // text (immediately overridden). Repoint those to the replacement too, so
+                // the original font is left fully unreferenced and prunes cleanly instead
+                // of surviving as a dangling /Tf.
+                if (origName is not null)
+                    modified = RepointRedundantTfs(modified, origName, resName);
                 xobjStream.Dict.Remove("Filter");
                 xobjStream.Dict.Remove("DecodeParms");
                 xobjStream.Dict.Set("Length", new PdfInteger(modified.Length));
@@ -712,10 +806,65 @@ internal sealed class TextStateModifier
                 return true;
             }
 
-            if (ModifyFontInFormXObjects(xobjStream.Dict, reader, doc, text, ttf, baseFontName))
+            if (ModifyFontInFormXObjects(xobjStream.Dict, reader, doc, text, isCore, ttf, baseFontName))
                 return true;
         }
         return false;
+    }
+
+    /// <summary>Register the replacement font as a resource on <paramref name="container"/>
+    /// (a page or Form XObject dict) and return its new resource name. A Standard-14 font
+    /// becomes a plain Type1 dictionary (no descriptor / font file); any other font is
+    /// embedded as a WinAnsi TrueType via <see cref="FontEmbedder"/>.</summary>
+    private string RegisterFontResource(PdfDictionary container, Aspose.Pdf.IO.PdfReader reader,
+        Document doc, bool isCore, byte[]? ttf, string baseName)
+    {
+        // Consolidate: use a deterministic resource key per replacement font so that
+        // replacing every run of a page with the same font reuses ONE /Font entry
+        // instead of adding a duplicate per run. Keyed off the font's base name (the
+        // resource-dict keys are always readable, unlike a just-allocated font object's
+        // /BaseFont, which the reader can't yet resolve back).
+        var resName = "AsRp" + SanitizeResName(baseName);
+        if (FontResKeyExists(container, reader, resName)) return resName;
+        if (isCore)
+        {
+            var objNum = doc.AllocateObjectNumber();
+            var font = new PdfDictionary();
+            font.Set("Type", new PdfName("Font"));
+            font.Set("Subtype", new PdfName("Type1"));
+            font.Set("BaseFont", new PdfName(baseName));
+            font.Set("Encoding", new PdfName("WinAnsiEncoding"));
+            doc.AddNewObject(objNum, font);
+            AddFontRefToResources(container, reader, resName, objNum);
+        }
+        else
+        {
+            FontEmbedder.Embed(doc, ttf!, resName, baseName).AddToResources(container, reader);
+        }
+        return resName;
+    }
+
+    /// <summary>Point <paramref name="container"/>'s /Resources/Font/<paramref name="resName"/>
+    /// at the indirect font object <paramref name="objNum"/>, creating the resource
+    /// sub-dictionaries as needed (mirrors <see cref="FontEmbedder.AddToResources"/>).</summary>
+    private static void AddFontRefToResources(PdfDictionary container, Aspose.Pdf.IO.PdfReader reader,
+        string resName, int objNum)
+    {
+        var resources = container.Get("Resources") as PdfDictionary
+            ?? reader.ResolveDict(container.Get("Resources"));
+        if (resources is null)
+        {
+            resources = new PdfDictionary();
+            container.Set("Resources", resources);
+        }
+        var fontDict = resources.Get("Font") as PdfDictionary
+            ?? reader.ResolveDict(resources.Get("Font"));
+        if (fontDict is null)
+        {
+            fontDict = new PdfDictionary();
+            resources.Set("Font", fontDict);
+        }
+        fontDict.Set(resName, new PdfIndirectRef(objNum, 0));
     }
 
     /// <summary>Walk a content stream and return the byte range of the font-name
@@ -837,21 +986,117 @@ internal sealed class TextStateModifier
         return null;
     }
 
-    /// <summary>Pick a /Font resource key not already present in the container's
-    /// resolved /Resources/Font dictionary.</summary>
-    private static string UniqueFontResName(PdfDictionary containerDict, PdfReader reader)
+    /// <summary>Read the resource name (without the leading '/') from a Tf name
+    /// operand span, or null if it isn't a name token.</summary>
+    private static string? ExtractResName(byte[] data, int start, int end)
+    {
+        while (start < end && (data[start] == ' ' || data[start] == '\t'
+            || data[start] == '\r' || data[start] == '\n')) start++;
+        if (start >= end || data[start] != (byte)'/') return null;
+        return Encoding.ASCII.GetString(data, start + 1, end - start - 1).Trim();
+    }
+
+    /// <summary>Repoint every `/<paramref name="origName"/> … Tf` that selects a font but
+    /// shows no text before the next Tf (a redundant selection) to
+    /// <paramref name="newResName"/>. Runs that DO show text are left untouched — only the
+    /// no-op selections are rewritten, so this never changes visible text.</summary>
+    private byte[] RepointRedundantTfs(byte[] data, string origName, string newResName)
+    {
+        var lexer = new PdfLexer(data);
+        var operands = new List<(int start, int end, byte[]? str)>();
+        var patches = new List<(int start, int end)>(); // name spans to repoint
+        int pendingNameStart = -1, pendingNameEnd = -1; string? pendingFontName = null;
+        bool sawGlyphs = false; bool haveOpenTf = false;
+
+        while (true)
+        {
+            var startPos = (int)lexer.Position;
+            var token = lexer.NextToken();
+            if (token.Kind == TokenKind.Eof) break;
+            var endPos = (int)lexer.Position;
+            switch (token.Kind)
+            {
+                case TokenKind.Name:
+                case TokenKind.Integer:
+                case TokenKind.Real:
+                    operands.Add((startPos, endPos, null));
+                    break;
+                case TokenKind.LiteralString:
+                case TokenKind.HexString:
+                    if (token.BytesValue is { Length: > 0 }) sawGlyphs = true;
+                    operands.Add((startPos, endPos, token.BytesValue));
+                    break;
+                case TokenKind.ArrayStart:
+                    while (true)
+                    {
+                        var t = lexer.NextToken();
+                        if (t.Kind == TokenKind.Eof) goto finish;
+                        if (t.Kind == TokenKind.ArrayEnd) break;
+                        if ((t.Kind == TokenKind.LiteralString || t.Kind == TokenKind.HexString)
+                            && t.BytesValue is { Length: > 0 }) sawGlyphs = true;
+                    }
+                    operands.Clear();
+                    break;
+                case TokenKind.Keyword:
+                    var op = token.StringValue!;
+                    if (op == "Tf")
+                    {
+                        // Close out the previous Tf: if it selected origName and showed no
+                        // glyphs, it was redundant — repoint it.
+                        if (haveOpenTf && pendingFontName == origName && !sawGlyphs)
+                            patches.Add((pendingNameStart, pendingNameEnd));
+                        // Open this Tf.
+                        if (operands.Count >= 1)
+                        {
+                            var nameOp = operands[0];
+                            pendingNameStart = nameOp.start; pendingNameEnd = nameOp.end;
+                            pendingFontName = ExtractResName(data, nameOp.start, nameOp.end);
+                            haveOpenTf = true;
+                        }
+                        sawGlyphs = false;
+                    }
+                    else if (op == "ET")
+                    {
+                        if (haveOpenTf && pendingFontName == origName && !sawGlyphs)
+                            patches.Add((pendingNameStart, pendingNameEnd));
+                        haveOpenTf = false; sawGlyphs = false;
+                    }
+                    operands.Clear();
+                    break;
+                default:
+                    operands.Clear();
+                    break;
+            }
+        }
+        finish:
+        if (patches.Count == 0) return data;
+
+        // Apply right-to-left so earlier offsets stay valid.
+        patches.Sort((a, b) => b.start.CompareTo(a.start));
+        foreach (var (s, e) in patches)
+            data = PatchName(data, s, e, newResName);
+        return data;
+    }
+
+    /// <summary>Whether the container's /Resources/Font already has an entry named
+    /// <paramref name="resName"/> (checked by key, which is always readable).</summary>
+    private static bool FontResKeyExists(PdfDictionary containerDict, PdfReader reader, string resName)
     {
         var resources = containerDict.Get("Resources") as PdfDictionary
             ?? reader.ResolveDict(containerDict.Get("Resources"));
         var fontDict = resources is null ? null
             : (resources.Get("Font") as PdfDictionary ?? reader.ResolveDict(resources.Get("Font")));
-        var existing = new HashSet<string>();
-        if (fontDict is not null)
-            foreach (var k in fontDict.Keys) existing.Add(k);
-        var n = 0;
-        string name;
-        do { name = "AsF" + n++; } while (existing.Contains(name));
-        return name;
+        return fontDict is not null && fontDict.ContainsKey(resName);
+    }
+
+    /// <summary>Reduce a font base name to a PDF-name-safe token for use as a
+    /// resource key (letters and digits only).</summary>
+    private static string SanitizeResName(string baseName)
+    {
+        var sb = new System.Text.StringBuilder(baseName.Length);
+        foreach (var c in baseName)
+            if (char.IsLetterOrDigit(c)) sb.Append(c);
+        return sb.Length > 0 ? sb.ToString() : "Font";
     }
 
     private static byte[] PatchName(byte[] original, int nameStart, int nameEnd, string resName)

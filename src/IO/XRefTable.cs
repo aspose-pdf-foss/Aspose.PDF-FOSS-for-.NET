@@ -12,6 +12,11 @@ internal sealed class XRefTable
     public PdfDictionary Trailer => _trailer ?? throw new InvalidOperationException("No trailer found");
     public IReadOnlyDictionary<int, XRefEntry> Entries => _entries;
 
+    /// <summary>True when any node of the cross-reference chain (primary,
+    /// /Prev, or hybrid /XRefStm) was a cross-reference STREAM (/Type /XRef).
+    /// PDF/A-1 prohibits xref streams, so validation reports this.</summary>
+    public bool UsedXrefStream { get; private set; }
+
     /// <summary>
     /// Object numbers of the source file's cross-reference infrastructure: the cross-reference
     /// stream objects (/Type /XRef) and the object-stream containers (/Type /ObjStm) that hold
@@ -328,6 +333,8 @@ internal sealed class XRefTable
         var indirectObj = parser.ParseIndirectObject();
         if (indirectObj.Value is not PdfStream stream)
             throw new InvalidOperationException($"Expected xref stream at offset {offset}");
+
+        UsedXrefStream = true;
 
         // Remember this xref stream's own object number so the writer can skip it on save
         // (the cross-reference stream is always regenerated, never carried over).

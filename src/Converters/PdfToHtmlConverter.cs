@@ -14,16 +14,23 @@ namespace Aspose.Pdf.Converters;
 public sealed class PdfToHtmlConverter
 {
     /// <summary>
+    /// Minimum text rise (Ts, text-space units) treated as a genuine
+    /// superscript/subscript rather than a hinting-level baseline tweak.
+    /// </summary>
+    private const double RiseThreshold = 0.25;
+
+    /// <summary>
     /// Convert all pages to a single HTML document.
     /// </summary>
     public string SaveAsHtml(Document doc)
     {
         var sb = new StringBuilder();
         sb.AppendLine("<!DOCTYPE html>");
-        sb.AppendLine("<html><head><meta charset=\"utf-8\">");
+        sb.AppendLine("<html><head><meta charset=\"utf-8\" />");
         sb.AppendLine("<style>");
         sb.AppendLine("  .pdf-page { position: relative; margin: 10px auto; border: 1px solid #ccc; overflow: hidden; }");
         sb.AppendLine("  .pdf-text { position: absolute; white-space: pre; }");
+        sb.AppendLine("  .pdf-text sup, .pdf-text sub { font-size: inherit; vertical-align: baseline; }");
         sb.AppendLine("  .pdf-image { position: absolute; }");
         sb.AppendLine("  .pdf-link { position: absolute; }");
         sb.AppendLine("  .pdf-svg { position: absolute; top: 0; left: 0; }");
@@ -69,6 +76,59 @@ public sealed class PdfToHtmlConverter
     {
         var html = SaveAsHtml(doc);
         output.Write(Encoding.UTF8.GetBytes(html));
+    }
+
+    /// <summary>
+    /// Render each page to a raster PNG and emit it as a full-page background image
+    /// (base64 data URI). Implements
+    /// <see cref="Aspose.Pdf.HtmlSaveOptions.RasterImagesSavingModes.AsEmbeddedPartsOfPngPageBackground"/>:
+    /// the whole page is rasterised into one image rather than embedding the source
+    /// images individually, where the page graphics are
+    /// flattened into a single page-background PNG.
+    /// </summary>
+    public void SaveAsHtmlWithPngBackground(Document doc, Stream output, int dpi = 150)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("<!DOCTYPE html>");
+        sb.AppendLine("<html><head><meta charset=\"utf-8\" />");
+        sb.AppendLine("<style>");
+        sb.AppendLine("  .pdf-page { position: relative; margin: 10px auto; border: 1px solid #ccc; overflow: hidden; }");
+        sb.AppendLine("  .pdf-page-bg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }");
+        // The page graphics live in the background PNG; the text is overlaid as
+        // transparent, selectable spans on top so the HTML carries the real text
+        // (searchable / copy-pasteable) rather than only a flat raster.
+        sb.AppendLine("  .pdf-text { position: absolute; white-space: pre; color: transparent; }");
+        sb.AppendLine("  .pdf-text sup, .pdf-text sub { font-size: inherit; vertical-align: baseline; }");
+        sb.AppendLine("</style></head><body>");
+
+        var device = new Aspose.Pdf.Devices.PngDevice(new Aspose.Pdf.Devices.Resolution(dpi));
+        for (var i = 1; i <= doc.PageCount; i++)
+        {
+            var page = doc.Pages[i];
+            string b64;
+            using (var ms = new System.IO.MemoryStream())
+            {
+                device.Process(page, ms);
+                b64 = System.Convert.ToBase64String(ms.ToArray());
+            }
+            sb.AppendLine($"<div class=\"pdf-page\" data-page=\"{i}\" " +
+                $"style=\"width:{F(page.Width)}pt;height:{F(page.Height)}pt;\">");
+            sb.AppendLine($"<img class=\"pdf-page-bg\" src=\"data:image/png;base64,{b64}\" alt=\"page {i}\" />");
+
+            // Overlay the page's text as positioned spans (text-only: the PNG already
+            // carries every visual, so paths and images are suppressed here).
+            var reader = page.Reader;
+            var fonts = ResolveFonts(page.Dict, reader);
+            var imageXObjects = ResolveImageXObjects(page.Dict, reader);
+            foreach (var stream in GetContentStreams(page.Dict, reader))
+                RenderContentToHtml(stream, fonts, imageXObjects, reader, sb,
+                    page.Height, page.Width, textOnly: true);
+
+            sb.AppendLine("</div>");
+        }
+
+        sb.AppendLine("</body></html>");
+        output.Write(Encoding.UTF8.GetBytes(sb.ToString()));
     }
 
     private static string RenderPage(Page page, int pageNumber)
@@ -141,7 +201,8 @@ public sealed class PdfToHtmlConverter
         Dictionary<string, FontInfo> fonts,
         Dictionary<string, ImageXObject> imageXObjects,
         PdfReader reader,
-        StringBuilder sb, double pageHeight, double pageWidth)
+        StringBuilder sb, double pageHeight, double pageWidth,
+        bool textOnly = false)
     {
         var lexer = new PdfLexer(streamBytes);
         var operands = new List<PdfObject>();
@@ -149,6 +210,7 @@ public sealed class PdfToHtmlConverter
         // Text state
         double tx = 0, ty = 0;
         double fontSize = 12;
+        double rise = 0; // Ts — raised (superscript) / lowered (subscript) baseline
         string fontFamily = "sans-serif";
         string fontWeight = "normal";
         string fontStyle = "normal";
@@ -162,6 +224,59 @@ public sealed class PdfToHtmlConverter
         // Path state
         var pathState = new PathState();
         var svgPaths = new StringBuilder();
+
+        // Line-grouping buffer (text-only overlay): consecutive text shows on the
+        // same baseline are accumulated into a single span — separately-positioned
+        // words (one Tj each) would otherwise become one span per word, so a phrase
+        // spanning several shows could never be matched as contiguous text. Matches
+        // the expected glyph/word grouping.
+        var groupText = new StringBuilder();
+        bool groupActive = false;
+        double groupX = 0, groupY = 0, groupFontSize = 12, groupRise = 0;
+        string groupFamily = "sans-serif", groupWeight = "normal", groupStyle = "normal";
+        double groupR = 0, groupG = 0, groupB = 0;
+
+        void FlushGroup()
+        {
+            if (groupActive && groupText.Length > 0)
+                EmitSpan(sb, groupText.ToString(), groupX, groupY, groupFontSize,
+                    groupFamily, groupWeight, groupStyle, groupR, groupG, groupB, pageHeight,
+                    groupRise);
+            groupText.Clear();
+            groupActive = false;
+        }
+
+        // Show one decoded run at the current text position. In text-only mode it is
+        // merged into the current line group (a space joins adjacent shows that don't
+        // already supply their own whitespace); otherwise it is emitted immediately.
+        void ShowRun(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            if (!textOnly)
+            {
+                EmitSpan(sb, text, tx, ty, fontSize, fontFamily,
+                    fontWeight, fontStyle, r, g, b, pageHeight, rise);
+                return;
+            }
+            bool sameLine = groupActive && rise == groupRise &&
+                Math.Abs(ty - groupY) <= Math.Max(1.0, groupFontSize * 0.3);
+            if (sameLine)
+            {
+                var existing = groupText.Length > 0 ? groupText[groupText.Length - 1] : ' ';
+                if (!char.IsWhiteSpace(existing) && !char.IsWhiteSpace(text[0]))
+                    groupText.Append(' ');
+                groupText.Append(text);
+            }
+            else
+            {
+                FlushGroup();
+                groupActive = true;
+                groupX = tx; groupY = ty; groupFontSize = fontSize; groupRise = rise;
+                groupFamily = fontFamily; groupWeight = fontWeight; groupStyle = fontStyle;
+                groupR = r; groupG = g; groupB = b;
+                groupText.Append(text);
+            }
+        }
 
         while (true)
         {
@@ -234,6 +349,10 @@ public sealed class PdfToHtmlConverter
                             ty -= fontSize * 1.2; // Approximate leading
                             tx = 0;
                             break;
+                        case "Ts":
+                            if (operands.Count >= 1)
+                                rise = Num(operands[0]);
+                            break;
 
                         // ── Color ──
                         case "rg":
@@ -278,8 +397,7 @@ public sealed class PdfToHtmlConverter
                             if (operands.Count >= 1 && operands[0] is PdfString s)
                             {
                                 var text = DecodeString(s, currentFontKey, fonts);
-                                EmitSpan(sb, text, tx, ty, fontSize, fontFamily,
-                                    fontWeight, fontStyle, r, g, b, pageHeight);
+                                ShowRun(text);
                             }
                             break;
                         case "TJ":
@@ -296,10 +414,7 @@ public sealed class PdfToHtmlConverter
                                         tjText.Append(' ');
                                 }
                                 if (tjText.Length > 0)
-                                {
-                                    EmitSpan(sb, tjText.ToString(), tx, ty, fontSize,
-                                        fontFamily, fontWeight, fontStyle, r, g, b, pageHeight);
-                                }
+                                    ShowRun(tjText.ToString());
                             }
                             break;
                         case "'":
@@ -308,14 +423,13 @@ public sealed class PdfToHtmlConverter
                             if (operands.Count >= 1 && operands[0] is PdfString qs)
                             {
                                 var text = DecodeString(qs, currentFontKey, fonts);
-                                EmitSpan(sb, text, tx, ty, fontSize, fontFamily,
-                                    fontWeight, fontStyle, r, g, b, pageHeight);
+                                ShowRun(text);
                             }
                             break;
 
                         // ── Image XObject (Do operator) ──
                         case "Do":
-                            if (operands.Count >= 1 && operands[0] is PdfName xobjName)
+                            if (!textOnly && operands.Count >= 1 && operands[0] is PdfName xobjName)
                             {
                                 if (imageXObjects.TryGetValue(xobjName.Value, out var img))
                                 {
@@ -434,8 +548,11 @@ public sealed class PdfToHtmlConverter
             }
         }
 
+        // Flush any trailing grouped line.
+        FlushGroup();
+
         // Emit collected SVG paths as a single overlay
-        if (svgPaths.Length > 0)
+        if (!textOnly && svgPaths.Length > 0)
         {
             sb.AppendLine($"<svg class=\"pdf-svg\" width=\"{F(pageWidth)}pt\" height=\"{F(pageHeight)}pt\" " +
                 $"viewBox=\"0 0 {F(pageWidth)} {F(pageHeight)}\" xmlns=\"http://www.w3.org/2000/svg\">");
@@ -587,16 +704,24 @@ public sealed class PdfToHtmlConverter
     private static void EmitSpan(StringBuilder sb, string text,
         double x, double y, double fontSize, string fontFamily,
         string fontWeight, string fontStyle,
-        double r, double g, double b, double pageHeight)
+        double r, double g, double b, double pageHeight, double rise = 0)
     {
         if (string.IsNullOrEmpty(text)) return;
 
-        // Convert PDF coordinates (bottom-left origin) to CSS (top-left origin)
-        var cssTop = pageHeight - y - fontSize;
+        // Convert PDF coordinates (bottom-left origin) to CSS (top-left origin).
+        // A text rise (Ts) shifts the baseline: positive raises, negative lowers.
+        var cssTop = pageHeight - y - rise - fontSize;
         var cssLeft = x;
 
         var color = $"rgb({(int)(r * 255)},{(int)(g * 255)},{(int)(b * 255)})";
         var escaped = EscapeHtml(text);
+
+        // A non-trivial text rise marks a superscript/subscript run — carry the
+        // semantics into the markup. The rise is already baked into `top` and the
+        // reduced font size is explicit, so the stylesheet neutralises the browser's
+        // default sup/sub shrink-and-shift.
+        if (rise > RiseThreshold) escaped = $"<sup>{escaped}</sup>";
+        else if (rise < -RiseThreshold) escaped = $"<sub>{escaped}</sub>";
 
         sb.Append($"<span class=\"pdf-text\" style=\"left:{F(cssLeft)}pt;top:{F(cssTop)}pt;");
         sb.Append($"font-size:{F(fontSize)}pt;font-family:{fontFamily};");
@@ -627,7 +752,7 @@ public sealed class PdfToHtmlConverter
     /// Some PDFs map the inter-word space glyph to a C0 control character
     /// (most commonly a horizontal tab, U+0009) in their ToUnicode CMap.
     /// For displayed text these are word separators, so fold them to a normal
-    /// space — matching the text content produced by the Aspose.PDF for .NET converter.
+    /// space — matching the text content produced by the Aspose.Pdf converter.
     /// </summary>
     private static string NormalizeWhitespace(string text)
     {

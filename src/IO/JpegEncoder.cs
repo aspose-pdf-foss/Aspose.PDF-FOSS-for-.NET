@@ -1,3 +1,5 @@
+using System.Linq;
+
 namespace Aspose.Pdf.IO;
 
 /// <summary>
@@ -61,6 +63,28 @@ internal static class JpegEncoderImpl
         // DC predictors
         private int _dcY, _dcCb, _dcCr;
 
+        // Optimized-Huffman two-pass state. Pass 1 tallies how often each Huffman symbol
+        // occurs (per DC/AC × luma/chroma table); tables optimal for THIS image are then
+        // built and used to emit the scan in pass 2. Custom tables typically shave a few
+        // percent over the standard example tables.
+        private bool _gathering;
+        private readonly int[] _dcLumFreq = new int[257];
+        private readonly int[] _acLumFreq = new int[257];
+        private readonly int[] _dcChrFreq = new int[257];
+        private readonly int[] _acChrFreq = new int[257];
+
+        // Active encoding tables (bits/vals + derived code/size), set from the optimized
+        // tables before pass 2. Default to the standard tables so a first-pass failure or a
+        // single-block image still produces a valid stream.
+        private byte[] _dcLumBits = DcLumBits, _dcLumVals = DcLumVals;
+        private byte[] _dcChrBits = DcChrBits, _dcChrVals = DcChrVals;
+        private byte[] _acLumBits = AcLumBits, _acLumVals = AcLumVals;
+        private byte[] _acChrBits = AcChrBits, _acChrVals = AcChrVals;
+        private int[] _dcLumCo = DcLumEhufco, _dcLumSi = DcLumEhufsi;
+        private int[] _dcChrCo = DcChrEhufco, _dcChrSi = DcChrEhufsi;
+        private int[] _acLumCo = AcLumEhufco, _acLumSi = AcLumEhufsi;
+        private int[] _acChrCo = AcChrEhufco, _acChrSi = AcChrEhufsi;
+
         public JpegWriter(Stream output, int width, int height, int quality, PixelGetter getter, int xDpi, int yDpi)
         {
             _out = output;
@@ -77,19 +101,43 @@ internal static class JpegEncoderImpl
 
         public void Write()
         {
+            // Pass 1: run the whole image counting Huffman symbols (no bytes emitted), then
+            // build tables optimal for this image and install them for pass 2.
+            _gathering = true;
+            _dcY = _dcCb = _dcCr = 0;
+            WriteImageData();
+            _gathering = false;
+            BuildOptimizedTables();
+
+            _dcY = _dcCb = _dcCr = 0;
             WriteSOI();
             WriteAPP0();
             WriteDQT(0, _lumQt);
             WriteDQT(1, _chrQt);
             WriteSOF0();
-            WriteDHT(0, 0, DcLumBits, DcLumVals);   // DC luminance
-            WriteDHT(0, 1, DcChrBits, DcChrVals);   // DC chrominance
-            WriteDHT(1, 0, AcLumBits, AcLumVals);   // AC luminance
-            WriteDHT(1, 1, AcChrBits, AcChrVals);   // AC chrominance
+            WriteDHT(0, 0, _dcLumBits, _dcLumVals);   // DC luminance
+            WriteDHT(0, 1, _dcChrBits, _dcChrVals);   // DC chrominance
+            WriteDHT(1, 0, _acLumBits, _acLumVals);   // AC luminance
+            WriteDHT(1, 1, _acChrBits, _acChrVals);   // AC chrominance
             WriteSOS();
             WriteImageData();
             FlushBits();
             WriteEOI();
+        }
+
+        /// <summary>Build Huffman tables optimal for this image from the pass-1 frequencies
+        /// and derive their encoding (code/size) tables. Any table with no symbols (e.g. a
+        /// solid-colour image) keeps the standard table so the derived codes stay valid.</summary>
+        private void BuildOptimizedTables()
+        {
+            if (_dcLumFreq.Any(f => f > 0)) (_dcLumBits, _dcLumVals) = BuildOptimalTable(_dcLumFreq);
+            if (_acLumFreq.Any(f => f > 0)) (_acLumBits, _acLumVals) = BuildOptimalTable(_acLumFreq);
+            if (_dcChrFreq.Any(f => f > 0)) (_dcChrBits, _dcChrVals) = BuildOptimalTable(_dcChrFreq);
+            if (_acChrFreq.Any(f => f > 0)) (_acChrBits, _acChrVals) = BuildOptimalTable(_acChrFreq);
+            (_dcLumCo, _dcLumSi) = BuildHuffEnc(_dcLumBits, _dcLumVals, 16);
+            (_dcChrCo, _dcChrSi) = BuildHuffEnc(_dcChrBits, _dcChrVals, 16);
+            (_acLumCo, _acLumSi) = BuildHuffEnc(_acLumBits, _acLumVals, 256);
+            (_acChrCo, _acChrSi) = BuildHuffEnc(_acChrBits, _acChrVals, 256);
         }
 
         private void WriteSOI()
@@ -141,8 +189,12 @@ internal static class JpegEncoderImpl
             Write16(_width);
             _out.WriteByte(3); // components
 
-            // Y: id=1, sampling 1x1, quant table 0
-            _out.WriteByte(1); _out.WriteByte(0x11); _out.WriteByte(0);
+            // 4:2:0 chroma subsampling: luminance sampled 2x2 per MCU, chrominance 1x1
+            // (one Cb/Cr block averaged from each 16x16 luma area). Halving the chroma
+            // resolution shrinks the file ~30-40% at a visually negligible cost — matching
+            // what mainstream JPEG encoders emit and what a re-encode must beat to be smaller.
+            // Y: id=1, sampling 2x2, quant table 0
+            _out.WriteByte(1); _out.WriteByte(0x22); _out.WriteByte(0);
             // Cb: id=2, sampling 1x1, quant table 1
             _out.WriteByte(2); _out.WriteByte(0x11); _out.WriteByte(1);
             // Cr: id=3, sampling 1x1, quant table 1
@@ -177,48 +229,73 @@ internal static class JpegEncoderImpl
         {
             var block = new int[64];
 
-            for (var by = 0; by < _height; by += 8)
+            // 4:2:0 minimum coded unit: 16x16 pixels → four 8x8 Y blocks, one 8x8 Cb, one 8x8 Cr.
+            for (var my = 0; my < _height; my += 16)
             {
-                for (var bx = 0; bx < _width; bx += 8)
+                for (var mx = 0; mx < _width; mx += 16)
                 {
-                    // Extract Y, Cb, Cr blocks
-                    ExtractBlock(bx, by, 0, block); // Y
-                    _dcY = EncodeBlock(block, _lumQt, _dcY, DcLumEhufco, DcLumEhufsi, AcLumEhufco, AcLumEhufsi);
+                    // Four luminance blocks in raster order (top-left, top-right, bottom-left, bottom-right).
+                    for (var yb = 0; yb < 2; yb++)
+                        for (var xb = 0; xb < 2; xb++)
+                        {
+                            ExtractLumaBlock(mx + xb * 8, my + yb * 8, block);
+                            _dcY = EncodeBlock(block, _lumQt, _dcY, _dcLumCo, _dcLumSi, _acLumCo, _acLumSi, _dcLumFreq, _acLumFreq);
+                        }
 
-                    ExtractBlock(bx, by, 1, block); // Cb
-                    _dcCb = EncodeBlock(block, _chrQt, _dcCb, DcChrEhufco, DcChrEhufsi, AcChrEhufco, AcChrEhufsi);
+                    // One chroma block per MCU, each sample averaged over its 2x2 luma footprint.
+                    ExtractChromaBlock(mx, my, chroma: 1, block);
+                    _dcCb = EncodeBlock(block, _chrQt, _dcCb, _dcChrCo, _dcChrSi, _acChrCo, _acChrSi, _dcChrFreq, _acChrFreq);
 
-                    ExtractBlock(bx, by, 2, block); // Cr
-                    _dcCr = EncodeBlock(block, _chrQt, _dcCr, DcChrEhufco, DcChrEhufsi, AcChrEhufco, AcChrEhufsi);
+                    ExtractChromaBlock(mx, my, chroma: 2, block);
+                    _dcCr = EncodeBlock(block, _chrQt, _dcCr, _dcChrCo, _dcChrSi, _acChrCo, _acChrSi, _dcChrFreq, _acChrFreq);
                 }
             }
         }
 
-        private void ExtractBlock(int bx, int by, int component, int[] block)
+        /// <summary>Fill an 8x8 luminance block (level-shifted by -128) from the pixels at
+        /// (bx,by); coordinates past the image edge clamp to the last row/column.</summary>
+        private void ExtractLumaBlock(int bx, int by, int[] block)
         {
             for (var y = 0; y < 8; y++)
             {
-                var py = by + y;
-                if (py >= _height) py = _height - 1;
+                var py = Math.Min(by + y, _height - 1);
                 for (var x = 0; x < 8; x++)
                 {
-                    var px = bx + x;
-                    if (px >= _width) px = _width - 1;
+                    var px = Math.Min(bx + x, _width - 1);
                     _getPixel(px, py, out var r, out var g, out var b);
+                    block[y * 8 + x] = (int)Math.Round(0.299 * r + 0.587 * g + 0.114 * b - 128);
+                }
+            }
+        }
 
-                    var val = component switch
-                    {
-                        0 => 0.299 * r + 0.587 * g + 0.114 * b - 128,       // Y
-                        1 => -0.168736 * r - 0.331264 * g + 0.5 * b,         // Cb
-                        _ => 0.5 * r - 0.418688 * g - 0.081312 * b,          // Cr
-                    };
-                    block[y * 8 + x] = (int)Math.Round(val);
+        /// <summary>Fill an 8x8 chroma block (<paramref name="chroma"/> 1 = Cb, 2 = Cr) for the
+        /// 16x16 MCU at (mx,my): each output sample is the average Cb/Cr of its 2x2 pixel group,
+        /// implementing 4:2:0 subsampling. Edge coordinates clamp to the image bounds.</summary>
+        private void ExtractChromaBlock(int mx, int my, int chroma, int[] block)
+        {
+            for (var y = 0; y < 8; y++)
+            {
+                for (var x = 0; x < 8; x++)
+                {
+                    double sum = 0;
+                    for (var dy = 0; dy < 2; dy++)
+                        for (var dx = 0; dx < 2; dx++)
+                        {
+                            var px = Math.Min(mx + x * 2 + dx, _width - 1);
+                            var py = Math.Min(my + y * 2 + dy, _height - 1);
+                            _getPixel(px, py, out var r, out var g, out var b);
+                            sum += chroma == 1
+                                ? -0.168736 * r - 0.331264 * g + 0.5 * b        // Cb
+                                :  0.5 * r - 0.418688 * g - 0.081312 * b;       // Cr
+                        }
+                    block[y * 8 + x] = (int)Math.Round(sum / 4.0);
                 }
             }
         }
 
         private int EncodeBlock(int[] block, int[] qt, int dcPred,
-            int[] dcEhufco, int[] dcEhufsi, int[] acEhufco, int[] acEhufsi)
+            int[] dcEhufco, int[] dcEhufsi, int[] acEhufco, int[] acEhufsi,
+            int[] dcFreq, int[] acFreq)
         {
             // Forward DCT
             FDCT(block);
@@ -247,8 +324,8 @@ internal static class JpegEncoderImpl
             diff = diff > 2047 ? 2047 : (diff < -2047 ? -2047 : diff);
             dc = dcPred + diff;
             var cat = Category(diff);
-            WriteBits(dcEhufco[cat], dcEhufsi[cat]);
-            if (cat > 0)
+            EmitSymbol(cat, dcEhufco, dcEhufsi, dcFreq);
+            if (cat > 0 && !_gathering)
                 WriteBits(EncodeDiff(diff, cat), cat);
 
             // Encode AC
@@ -262,19 +339,29 @@ internal static class JpegEncoderImpl
                 }
                 while (zeroRun >= 16)
                 {
-                    WriteBits(acEhufco[0xF0], acEhufsi[0xF0]); // ZRL
+                    EmitSymbol(0xF0, acEhufco, acEhufsi, acFreq); // ZRL
                     zeroRun -= 16;
                 }
                 var acCat = Category(qblock[i]);
                 var rs = (zeroRun << 4) | acCat;
-                WriteBits(acEhufco[rs], acEhufsi[rs]);
-                WriteBits(EncodeDiff(qblock[i], acCat), acCat);
+                EmitSymbol(rs, acEhufco, acEhufsi, acFreq);
+                if (!_gathering)
+                    WriteBits(EncodeDiff(qblock[i], acCat), acCat);
                 zeroRun = 0;
             }
             if (zeroRun > 0)
-                WriteBits(acEhufco[0], acEhufsi[0]); // EOB
+                EmitSymbol(0, acEhufco, acEhufsi, acFreq); // EOB
 
             return dc;
+        }
+
+        /// <summary>Pass 1 (gathering): tally the Huffman symbol's frequency. Pass 2: emit its
+        /// Huffman code. The raw amplitude bits that follow a symbol are not Huffman-coded, so
+        /// they never affect the frequencies — only the symbols do.</summary>
+        private void EmitSymbol(int sym, int[] ehufco, int[] ehufsi, int[] freq)
+        {
+            if (_gathering) freq[sym]++;
+            else WriteBits(ehufco[sym], ehufsi[sym]);
         }
 
         private static void FDCT(int[] block)
@@ -499,6 +586,75 @@ internal static class JpegEncoderImpl
             (DcChrEhufco, DcChrEhufsi) = BuildHuffEnc(DcChrBits, DcChrVals, 16);
             (AcLumEhufco, AcLumEhufsi) = BuildHuffEnc(AcLumBits, AcLumVals, 256);
             (AcChrEhufco, AcChrEhufsi) = BuildHuffEnc(AcChrBits, AcChrVals, 256);
+        }
+
+        /// <summary>Build a Huffman table (bits-per-length counts + symbol list) optimal for the
+        /// given symbol frequencies, following the procedure in JPEG/T.81 Annex K.2 (the same
+        /// algorithm libjpeg uses for -optimize). A reserved symbol guarantees no all-ones code,
+        /// and code lengths are clamped to the 16-bit maximum the format allows.</summary>
+        private static (byte[] bits, byte[] vals) BuildOptimalTable(int[] freqIn)
+        {
+            // freq[256] is a reserved symbol that never appears in the output but keeps the
+            // longest code from being all-ones (a JPEG requirement).
+            var freq = new long[257];
+            for (var i = 0; i < 256; i++) freq[i] = freqIn[i];
+            freq[256] = 1;
+
+            var codesize = new int[257];
+            var others = new int[257];
+            for (var i = 0; i < 257; i++) others[i] = -1;
+
+            // Repeatedly merge the two least-frequent symbols/chains (Annex K.2 Figure K.1).
+            while (true)
+            {
+                var c1 = -1; long v = long.MaxValue;
+                for (var i = 0; i < 257; i++) if (freq[i] != 0 && freq[i] <= v) { v = freq[i]; c1 = i; }
+                var c2 = -1; v = long.MaxValue;
+                for (var i = 0; i < 257; i++) if (freq[i] != 0 && freq[i] <= v && i != c1) { v = freq[i]; c2 = i; }
+                if (c2 < 0) break; // only one symbol left with nonzero frequency
+
+                freq[c1] += freq[c2];
+                freq[c2] = 0;
+                codesize[c1]++;
+                while (others[c1] >= 0) { c1 = others[c1]; codesize[c1]++; }
+                others[c1] = c2;
+                codesize[c2]++;
+                while (others[c2] >= 0) { c2 = others[c2]; codesize[c2]++; }
+            }
+
+            // Count how many codes are of each length (Figure K.2).
+            var bits = new int[33];
+            for (var i = 0; i < 257; i++) if (codesize[i] > 0) bits[codesize[i]]++;
+
+            // Enforce the 16-bit maximum code length (Figure K.3).
+            for (var i = 32; i > 16; i--)
+            {
+                while (bits[i] > 0)
+                {
+                    var j = i - 2;
+                    while (bits[j] == 0) j--;
+                    bits[i] -= 2;
+                    bits[i - 1] += 1;
+                    bits[j + 1] += 2;
+                    bits[j] -= 1;
+                }
+            }
+
+            // Remove the reserved symbol's code (the longest one).
+            var k = 16;
+            while (bits[k] == 0) k--;
+            bits[k]--;
+
+            var outBits = new byte[16];
+            for (var i = 0; i < 16; i++) outBits[i] = (byte)bits[i + 1];
+
+            // Symbols ordered by ascending code length (Annex K.2), excluding the reserved 256.
+            var vals = new List<byte>();
+            for (var len = 1; len <= 32; len++)
+                for (var sym = 0; sym < 256; sym++)
+                    if (codesize[sym] == len) vals.Add((byte)sym);
+
+            return (outBits, vals.ToArray());
         }
 
         private static (int[] codes, int[] sizes) BuildHuffEnc(byte[] bits, byte[] vals, int maxSym)

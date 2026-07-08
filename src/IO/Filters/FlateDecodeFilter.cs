@@ -32,6 +32,59 @@ internal static class FlateDecodeFilter
         return decompressed;
     }
 
+    /// <summary>Inflate only the leading <paramref name="maxBytes"/> of the stream so a
+    /// caller that needs just a header (e.g. a security content-sniff) doesn't fully
+    /// materialise a multi-hundred-MB payload. A stream carrying a predictor is decoded
+    /// fully then sliced, since a predictor must reconstruct whole rows in order.</summary>
+    internal static byte[] DecodePrefix(byte[] data, PdfDictionary? parms, int maxBytes)
+    {
+        if (maxBytes <= 0 || data.Length == 0) return System.Array.Empty<byte>();
+
+        if (parms is not null && parms.GetInt("Predictor", 1) > 1)
+        {
+            var full = Decode(data, parms);
+            return full.Length <= maxBytes ? full : full[..maxBytes];
+        }
+
+        // Stream-inflate and stop once maxBytes are produced. Try the same wrapper
+        // variants Inflate's BCL fallback uses (zlib, raw, raw+2-byte skip).
+        foreach (var (useZlib, offset) in new[] { (true, 0), (false, 0), (false, 2) })
+        {
+            if (offset >= data.Length) continue;
+            if (TryInflatePrefix(data, useZlib, offset, maxBytes, out var prefix) && prefix.Length > 0)
+                return prefix;
+        }
+
+        // Last resort: full inflate then slice.
+        var all = Inflate(data);
+        return all.Length <= maxBytes ? all : all[..maxBytes];
+    }
+
+    private static bool TryInflatePrefix(byte[] data, bool useZlib, int offset, int maxBytes, out byte[] result)
+    {
+        var output = new MemoryStream();
+        try
+        {
+            using var input = new MemoryStream(data, offset, data.Length - offset);
+            using var decompressor = useZlib
+                ? (Stream)new ZLibStream(input, CompressionMode.Decompress)
+                : new DeflateStream(input, CompressionMode.Decompress);
+            var buf = new byte[Math.Min(4096, maxBytes)];
+            while (output.Length < maxBytes)
+            {
+                int n;
+                try { n = decompressor.Read(buf, 0, buf.Length); }
+                catch { break; }
+                if (n == 0) break;
+                output.Write(buf, 0, (int)Math.Min(n, maxBytes - output.Length));
+            }
+        }
+        catch { /* partial output already captured */ }
+
+        result = output.ToArray();
+        return result.Length > 0;
+    }
+
     private static byte[] Inflate(byte[] data)
     {
         if (data.Length == 0) return data;
@@ -87,7 +140,8 @@ internal static class FlateDecodeFilter
         return result.Length > 0;
     }
 
-    private static byte[] RemovePredictor(byte[] data, int predictor, int columns, int colors, int bpc)
+    // Shared with LzwDecodeFilter: both filters carry the same /Predictor DecodeParms.
+    internal static byte[] RemovePredictor(byte[] data, int predictor, int columns, int colors, int bpc)
     {
         if (predictor == 2)
             return RemoveTiffPredictor(data, columns, colors, bpc);

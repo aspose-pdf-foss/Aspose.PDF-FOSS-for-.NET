@@ -254,6 +254,85 @@ public sealed class PdfAnnotationEditor : IDisposable
 
         sb.Append($"{F(rect.LLX)} {F(rect.LLY)} {F(rect.Width)} {F(rect.Height)} re f Q");
         AppendContentStream(page, Encoding.Latin1.GetBytes(sb.ToString()));
+
+        // Redaction removes form-field widgets covered by the area (they are no longer
+        // visible/usable), pruning them from the page /Annots and the AcroForm /Fields.
+        RemoveWidgetsInArea(doc, page, rect);
+    }
+
+    /// <summary>Remove every Widget annotation whose /Rect intersects <paramref name="area"/>
+    /// from the page and, for those that are (or become) empty form fields, from the
+    /// AcroForm /Fields tree — mirroring how Aspose.Pdf drops fields under a redaction.</summary>
+    private static void RemoveWidgetsInArea(Document doc, Page page, Rectangle area)
+    {
+        var reader = page.Reader;
+        if (reader.Resolve(page.Dict.Get("Annots")) is not PdfArray annots) return;
+
+        static double Num(PdfObject? o) => o switch
+        {
+            PdfReal r => r.Value, PdfInteger i => i.Value, _ => 0.0,
+        };
+
+        var removeWidgets = new HashSet<PdfDictionary>();
+        foreach (var item in annots)
+        {
+            var ad = reader.ResolveDict(item);
+            if (ad is null || ad.GetName("Subtype") != "Widget") continue;
+            if (reader.Resolve(ad.Get("Rect")) is not PdfArray r || r.Count < 4) continue;
+            double llx = Num(r[0]), lly = Num(r[1]), urx = Num(r[2]), ury = Num(r[3]);
+            if (System.Math.Min(urx, area.URX) > System.Math.Max(llx, area.LLX)
+                && System.Math.Min(ury, area.URY) > System.Math.Max(lly, area.LLY))
+                removeWidgets.Add(ad);
+        }
+        if (removeWidgets.Count == 0) return;
+
+        RebuildArrayExcluding(page.Dict, "Annots", annots, removeWidgets, reader);
+        var pageNum = doc.FindObjectNumber(page.Dict);
+        if (pageNum > 0) doc.MarkDirty(pageNum, page.Dict);
+
+        var acro = reader.ResolveDict(reader.Catalog?.Get("AcroForm"));
+        var fields = acro is null ? null : reader.Resolve(acro.Get("Fields")) as PdfArray;
+        if (fields is null || acro is null) return;
+
+        var removeFields = new HashSet<PdfDictionary>();
+        foreach (var w in removeWidgets)
+        {
+            var parent = reader.ResolveDict(w.Get("Parent"));
+            if (parent is null)
+            {
+                // Merged-leaf field: the widget dict is itself the /Fields entry.
+                removeFields.Add(w);
+                continue;
+            }
+            // Detach the widget from its field's /Kids; drop the field if it is left empty.
+            if (reader.Resolve(parent.Get("Kids")) is PdfArray pkids)
+            {
+                RebuildArrayExcluding(parent, "Kids", pkids, removeWidgets, reader);
+                if ((reader.Resolve(parent.Get("Kids")) as PdfArray)?.Count == 0)
+                    removeFields.Add(parent);
+                var pn = doc.FindObjectNumber(parent);
+                if (pn > 0) doc.MarkDirty(pn, parent);
+            }
+        }
+        if (removeFields.Count > 0)
+        {
+            RebuildArrayExcluding(acro, "Fields", fields, removeFields, reader);
+            var acroNum = doc.FindObjectNumber(acro);
+            if (acroNum > 0) doc.MarkDirty(acroNum, acro);
+        }
+    }
+
+    private static void RebuildArrayExcluding(PdfDictionary owner, string key,
+        PdfArray arr, HashSet<PdfDictionary> exclude, IO.PdfReader reader)
+    {
+        var kept = new PdfArray();
+        foreach (var item in arr)
+        {
+            var d = reader.ResolveDict(item);
+            if (d is not null && exclude.Contains(d)) continue;
+            kept.Add(item);
+        }
+        owner.Set(key, kept);
     }
 
     /// <summary>
@@ -393,7 +472,12 @@ public sealed class PdfAnnotationEditor : IDisposable
         {
             Indent = true,
             Encoding = new UTF8Encoding(false),
-            OmitXmlDeclaration = false
+            OmitXmlDeclaration = false,
+            // Entitize carriage returns (&#xD;) instead of the default Replace, which
+            // rewrites a lone \r in text as \r\n. XML parsers leave character references
+            // unchanged, so an annotation's /Contents survives the export/import round-trip
+            // byte-for-byte (a bare \r stays a bare \r).
+            NewLineHandling = NewLineHandling.Entitize,
         };
 
         using var writer = XmlWriter.Create(xmlOutputStream, settings);
@@ -630,6 +714,14 @@ public sealed class PdfAnnotationEditor : IDisposable
                 dict.Set("IC", ic);
             }
         }
+
+        // Redaction overlay text (/OverlayText, /Repeat)
+        var overlayAttr = node.Attributes?["overlay-text"];
+        if (overlayAttr is not null)
+            dict.Set("OverlayText", MakePdfTextString(overlayAttr.Value));
+        var repeatAttr = node.Attributes?["repeat"];
+        if (repeatAttr is not null)
+            dict.Set("Repeat", repeatAttr.Value is "yes" or "true" ? PdfBoolean.True : PdfBoolean.False);
 
         // Contents (child element or attribute)
         var contentsNode = node.SelectSingleNode("contents") ?? node.SelectSingleNode("*[local-name()='contents']");
@@ -980,6 +1072,23 @@ public sealed class PdfAnnotationEditor : IDisposable
             dict.Set("InkList", inkList);
         }
 
+        // Stamp image appearance: an XFDF <imagedata> child carries the rubber
+        // stamp's actual picture as a base64 data: URI (e.g. a scanned/scripted
+        // "Guest" signature stamp). Decode it and build the /AP /N image
+        // appearance so the stamp renders its real image instead of the fallback
+        // icon banner (e.g. the "Draft" box synthesised from /Name).
+        if (subtype == "Stamp")
+        {
+            var imgNode = node.SelectSingleNode("imagedata")
+                ?? node.SelectSingleNode("*[local-name()='imagedata']");
+            var imgBytes = DecodeDataUriBase64(imgNode?.InnerText);
+            if (imgBytes is { Length: > 0 })
+            {
+                var stamp = new Aspose.Pdf.Annotations.StampAnnotation(dict, doc.Reader);
+                stamp.Image = new MemoryStream(imgBytes);
+            }
+        }
+
         // Append the main annotation first so it precedes its popup in /Annots
         // (round-trip consumers index the markup annotation at position 1).
         AppendAnnotationDict(page, dict);
@@ -1108,6 +1217,16 @@ public sealed class PdfAnnotationEditor : IDisposable
             double ir = GetDouble(ica[0]), ig = GetDouble(ica[1]), ib = GetDouble(ica[2]);
             writer.WriteAttributeString("interior-color",
                 $"#{(int)Math.Round(ir * 255):X2}{(int)Math.Round(ig * 255):X2}{(int)Math.Round(ib * 255):X2}");
+        }
+
+        // Redaction overlay text (/OverlayText, /Repeat — redact annotations)
+        if (annot.AnnotationType == AnnotationType.Redact)
+        {
+            var otObj = reader is not null ? reader.Resolve(annot.Dict.Get("OverlayText")) : annot.Dict.Get("OverlayText");
+            if (otObj is PdfString otStr)
+                writer.WriteAttributeString("overlay-text", otStr.ToText());
+            if (annot.Dict.Get("Repeat") is PdfBoolean repB && repB.Value)
+                writer.WriteAttributeString("repeat", "yes");
         }
 
         // Width / style / dashes (/BS — may be an indirect reference)
@@ -1476,18 +1595,17 @@ public sealed class PdfAnnotationEditor : IDisposable
 
     private static void AppendAnnotationDict(Page page, PdfDictionary annotDict)
     {
-        var existing = page.Dict.Get("Annots");
-        PdfArray annotArray;
-        if (existing is PdfArray arr)
-        {
-            annotArray = arr;
-        }
-        else
-        {
-            annotArray = new PdfArray();
-            page.Dict.Set("Annots", annotArray);
-        }
+        // Resolve /Annots — on many documents it is an INDIRECT reference to the
+        // array, not an inline array. Without resolving, the existing annotations
+        // (e.g. a page's own markup) would be mistaken for "none" and overwritten.
+        // Rebuild as a direct array (existing items + the new one) so the page dict
+        // is marked dirty and the full list — originals included — is written on save.
+        var existing = page.Reader.Resolve(page.Dict.Get("Annots")) as PdfArray;
+        var annotArray = new PdfArray();
+        if (existing is not null)
+            foreach (var item in existing) annotArray.Add(item);
         annotArray.Add(annotDict);
+        page.Dict.Set("Annots", annotArray);
     }
 
     private static void AppendContentStream(Page page, byte[] streamData)
@@ -1610,6 +1728,22 @@ public sealed class PdfAnnotationEditor : IDisposable
         int g = Convert.ToInt32(hex.Substring(2, 2), 16);
         int b = Convert.ToInt32(hex.Substring(4, 2), 16);
         return [r / 255.0, g / 255.0, b / 255.0];
+    }
+
+    /// <summary>Decode an XFDF <c>&lt;imagedata&gt;</c> payload — a base64 string
+    /// optionally prefixed by a <c>data:image/...;base64,</c> URI header (and possibly
+    /// wrapped in whitespace) — into raw image bytes. Returns null on empty/invalid input.</summary>
+    private static byte[]? DecodeDataUriBase64(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var s = text.Trim();
+        var comma = s.IndexOf(',');
+        if (s.StartsWith("data:", StringComparison.OrdinalIgnoreCase) && comma >= 0)
+            s = s[(comma + 1)..];
+        // Strip any interior whitespace the XML pretty-printer may have inserted.
+        s = new string(s.Where(c => !char.IsWhiteSpace(c)).ToArray());
+        try { return Convert.FromBase64String(s); }
+        catch { return null; }
     }
 
     private static void SetRealAttr(PdfDictionary dict, XmlNode node, string attr, string key)

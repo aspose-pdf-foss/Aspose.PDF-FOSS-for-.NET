@@ -51,7 +51,7 @@ public sealed class HeaderFooter
     /// <see cref="Margin"/>/<see cref="HorizontalAlignment"/> plus shallow-copied
     /// references to every entry in <see cref="Paragraphs"/>. Same-content-on-every-page
     /// usage requires this; otherwise cloned headers/footers would render blank.
-    /// Returns <see cref="object"/> to match the Aspose.PDF for .NET reflection shape.
+    /// Returns <see cref="object"/> to match the Aspose.Pdf reflection shape.
     /// </summary>
     public object Clone()
     {
@@ -106,18 +106,37 @@ public sealed class HeaderFooter
     /// <see cref="Page.Header"/> / <see cref="Page.Footer"/>. Substitutes '#' in
     /// <see cref="Text"/> with the 1-based page number, then emits the text or
     /// paragraph content at the top (header) or bottom (footer) margin.</summary>
-    internal void RenderToPage(Page page, bool isHeader, int pageNumber)
+    internal void RenderToPage(Page page, bool isHeader, int pageNumber, Document? document = null)
     {
         var text = Text.Replace("#", pageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        StampText(page, text, isHeader);
+        text = ApplyLabelMacros(text, document, pageNumber);
+        StampText(page, text, isHeader, document, pageNumber);
     }
 
-    private void StampText(Page page, string textContent, bool isHeader)
+    /// <summary>Resolve the page-label macros <c>$p</c> (this page's label) and
+    /// <c>$P</c> (the last-page label of this page's label range — the section
+    /// total) against the document's /PageLabels. No-op when no document is
+    /// supplied. On a document with no labels these degrade to the page number
+    /// and the total page count respectively.</summary>
+    private static string ApplyLabelMacros(string text, Document? document, int pageNumber)
+    {
+        if (document is null || string.IsNullOrEmpty(text)) return text;
+        if (!text.Contains("$p") && !text.Contains("$P")) return text;
+        var idx0 = pageNumber - 1;
+        var labels = document.PageLabels;
+        var pageCount = document.Pages.Count;
+        return text
+            .Replace("$P", labels.GetRangeLastLabel(idx0, pageCount))
+            .Replace("$p", labels.FormatLabel(idx0));
+    }
+
+    private void StampText(Page page, string textContent, bool isHeader,
+        Document? document = null, int pageNumber = 0)
     {
         // If we have Paragraphs, render them instead of plain text
         if (Paragraphs.Count > 0)
         {
-            StampParagraphs(page, isHeader);
+            StampParagraphs(page, isHeader, document, pageNumber);
             return;
         }
 
@@ -156,7 +175,8 @@ public sealed class HeaderFooter
         page.AddContentStream(builder.Build());
     }
 
-    private void StampParagraphs(Page page, bool isHeader)
+    private void StampParagraphs(Page page, bool isHeader,
+        Document? document = null, int pageNumber = 0)
     {
         var pageHeight = page.Height;
         var fontSize = TextState.FontSize > 0 ? TextState.FontSize : 10;
@@ -164,6 +184,10 @@ public sealed class HeaderFooter
             ? pageHeight - Margin.Top - fontSize
             : Margin.Bottom + fontSize;
         var x = Margin.Left;
+        // Baseline and end-X of the last rendered text paragraph, so a following
+        // TextFragment with IsInLineParagraph continues on the SAME line directly
+        // after it (the reference renders such fragments inline, with no gap).
+        double lastTextY = double.NaN, lastTextEndX = double.NaN;
 
         // Surface every LocalHyperlink / WebHyperlink nested in this header
         // or footer's Paragraphs tree as a LinkAnnotation on the page. The
@@ -205,7 +229,21 @@ public sealed class HeaderFooter
                 if (imgData is null || imgData.Length == 0) continue;
 
                 var imgW = img.FixWidth > 0 ? img.FixWidth : page.Width - Margin.Left - Margin.Right;
-                var imgH = img.FixHeight > 0 ? img.FixHeight : imgW;
+                double imgH;
+                if (img.FixHeight > 0)
+                    imgH = img.FixHeight;
+                else
+                {
+                    // No explicit height: preserve the image's aspect ratio rather than
+                    // defaulting to a square (a wide footer bar would otherwise render as a
+                    // huge block covering the page).
+                    try
+                    {
+                        var probe = new ImageStamp(new System.IO.MemoryStream(imgData));
+                        imgH = probe.PixelWidth > 0 ? imgW * probe.PixelHeight / (double)probe.PixelWidth : imgW;
+                    }
+                    catch { imgH = imgW; }
+                }
                 Rectangle rect;
                 if (isHeader)
                 {
@@ -282,29 +320,128 @@ public sealed class HeaderFooter
 
             if (para is TextFragment tf)
             {
-                text = tf.Text ?? "";
+                text = ApplyLabelMacros(tf.Text ?? "", document, pageNumber);
                 if (tf.TextState.FontName is not null) fn = tf.TextState.FontName;
                 if (tf.TextState.FontSize > 0) fs = tf.TextState.FontSize;
             }
             else if (para is HtmlFragment htmlFrag)
             {
-                text = HtmlFragment.StripHtmlTags(htmlFrag.HtmlContent ?? "");
+                var hc = htmlFrag.HtmlContent ?? "";
+                // An HTML <table> in a header/footer fragment renders as real columns
+                // (rows × cells) rather than the flat tag-stripped text stack: build a
+                // generator Table and lay it out bottom-aligned to the footer band.
+                if (Converters.HtmlToPdfConverter.ContainsTable(hc))
+                {
+                    var htmlTbl = Converters.HtmlToPdfConverter.BuildTableFromHtml(hc);
+                    if (htmlTbl is not null)
+                    {
+                        // On a /Rotate page the footer content is drawn through a visual→raw
+                        // matrix (the table is laid out in the page's rotation-adjusted VISUAL
+                        // space, then mapped into raw content space so it appears upright).
+                        var rotCm = VisualToRawRotationCm(page);
+
+                        // The generator centres a table in `page.Width - 2*FlowLeftOffset`; a
+                        // left-aligned footer table at Margin.Left would shrink to half width
+                        // (over-wrapping its cells). For the rotated path, lay the table out
+                        // one-sided (start at a small offset so the usable width ≈ the band
+                        // from the left margin to the right edge) and translate it to Margin.Left
+                        // in the visual frame; the unrotated path keeps the original placement.
+                        double flo = x, translateX = 0;
+                        if (rotCm is not null)
+                        {
+                            var desiredUsable = Math.Max(50.0, page.Width - x - 36);
+                            flo = (page.Width - desiredUsable) / 2;
+                            translateX = x - flo;
+                        }
+                        htmlTbl.FlowLeftOffset = flo;
+
+                        // First pass measures the single-page height (from the page top so the
+                        // table doesn't trip the page-break logic); then render so the table's
+                        // bottom sits at the footer's bottom margin. A far-below bottom margin
+                        // keeps the whole table on this page (no spill slice the footer drops).
+                        htmlTbl.BuildMultiPage(page, page.Height, 0);
+                        var startY = isHeader ? y : Margin.Bottom + htmlTbl.LastRenderedHeight;
+                        var contents = htmlTbl.BuildMultiPage(page, startY, -page.Height);
+
+                        if (rotCm is null)
+                        {
+                            if (contents.Count > 0) page.AddContentStream(contents[0]);
+                            if (htmlTbl.LastGraphDraws.Count > 0)
+                                foreach (var gc in htmlTbl.LastGraphDraws[0])
+                                    page.AddContentStream(gc);
+                        }
+                        else
+                        {
+                            var wrap = new System.Text.StringBuilder("q\n").Append(rotCm).Append('\n');
+                            if (Math.Abs(translateX) > 0.001)
+                                wrap.Append("1 0 0 1 ")
+                                    .Append(translateX.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture))
+                                    .Append(" 0 cm\n");
+                            if (contents.Count > 0)
+                                wrap.Append(System.Text.Encoding.ASCII.GetString(contents[0])).Append('\n');
+                            if (htmlTbl.LastGraphDraws.Count > 0)
+                                foreach (var gc in htmlTbl.LastGraphDraws[0])
+                                    wrap.Append(System.Text.Encoding.ASCII.GetString(gc)).Append('\n');
+                            wrap.Append("Q\n");
+                            page.AddContentStream(System.Text.Encoding.ASCII.GetBytes(wrap.ToString()));
+                        }
+                        y = startY - htmlTbl.LastRenderedHeight;
+                    }
+                    continue;
+                }
+                text = HtmlFragment.StripHtmlTags(hc);
             }
 
             if (string.IsNullOrWhiteSpace(text)) continue;
+
+            // Inline paragraph: continue on the previous text line right after its
+            // last glyph instead of starting a new line.
+            bool inline = para is TextFragment inlineTf && inlineTf.IsInLineParagraph
+                && !double.IsNaN(lastTextY);
+            var drawX = inline ? lastTextEndX : x;
+            var drawY = inline ? lastTextY : y;
 
             var fontRes = EnsureFontResource(page, fn);
             var builder = new ContentStreamBuilder();
             builder.SaveState();
             builder.BeginText()
                 .SetFont(fontRes, fs)
-                .MoveTextPosition(x, y)
+                .MoveTextPosition(drawX, drawY)
                 .ShowText(text!)
                 .EndText()
                 .RestoreState();
             page.AddContentStream(builder.Build());
-            y -= fs * 1.2;
+
+            double textW;
+            try
+            {
+                var mw = FontRepository.FindFont(fn)?.MeasureString(text!, fs) ?? 0;
+                textW = mw > 0 ? mw : EstimateWidth(text, fs);
+            }
+            catch { textW = EstimateWidth(text, fs); }
+            lastTextY = drawY;
+            lastTextEndX = drawX + textW;
+            if (!inline) y -= fs * 1.2;
         }
+    }
+
+    /// <summary>A `cm` operator mapping the page's VISUAL (rotation-adjusted) space — where
+    /// header/footer content is laid out using <c>page.Width</c>/<c>page.Height</c> — into raw
+    /// page-content space, so content drawn for a <c>/Rotate 90/180/270</c> page appears upright
+    /// at its laid-out position. Returns null for an unrotated page (Wm/Hm = raw MediaBox dims;
+    /// same mapping the watermark-on-rotated-page path uses).</summary>
+    private static string? VisualToRawRotationCm(Page page)
+    {
+        var mb = page.MediaBox;
+        var wm = mb.Width.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+        var hm = mb.Height.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+        return page.Rotate switch
+        {
+            Rotation.on90 => $"0 1 -1 0 {wm} 0 cm",
+            Rotation.on180 => $"-1 0 0 -1 {wm} {hm} cm",
+            Rotation.on270 => $"0 -1 1 0 0 {hm} cm",
+            _ => null,
+        };
     }
 
     /// <summary>Walk a HeaderFooter's Paragraphs tree (descending into Tables/
@@ -398,11 +535,14 @@ public sealed class HeaderFooter
             }
         }
 
-        // Find a unique resource name
-        var name = "F1";
+        // Find a unique resource name in the header/footer's own "HF" namespace so it
+        // never collides with the body's F1..Fn fonts on a shared (overflow) page —
+        // otherwise the footer could claim e.g. /F2 and the body text drawn with /F2
+        // would render in the footer's face (wrong glyph metrics).
+        var name = "HF1";
         var counter = 1;
         while (fontDict.ContainsKey(name))
-            name = $"F{++counter}";
+            name = $"HF{++counter}";
 
         // Create the font dictionary
         var font = new PdfDictionary();

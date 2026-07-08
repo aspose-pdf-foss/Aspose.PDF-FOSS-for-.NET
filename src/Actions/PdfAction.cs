@@ -93,6 +93,7 @@ public class PdfAction : IAppointment
             "JavaScript" => new JavascriptAction(dict, reader),
             "SubmitForm" => new SubmitFormAction(dict, reader),
             "ImportData" => new ImportDataAction(dict, reader),
+            "Rendition" => new RenditionAction(dict, reader),
             _ => new PdfAction(dict, reader),
         };
     }
@@ -559,7 +560,10 @@ public sealed class GoToRemoteAction : PdfAction
     {
         var dict = new PdfDictionary();
         dict.Set("S", new PdfName("GoToR"));
-        dict.Set("F", new PdfString(Encoding.Latin1.GetBytes(fileName)));
+        // Preserve non-Latin1 characters in the target path (e.g. a filename with curly quotes or
+        // CJK): EncodePdfTextString keeps ASCII/Latin1 verbatim and upgrades to UTF-16BE otherwise,
+        // both of which PdfString.ToText round-trips (plain Latin1 would flatten them to '?').
+        dict.Set("F", Forms.Field.EncodePdfTextString(fileName));
         dict.Set("D", destination.ToPdfArrayPublic());
         return dict;
     }
@@ -761,7 +765,7 @@ public sealed class SubmitFormAction : PdfAction
     public const int SubmitCoordinates = 16;
 
     /// <summary>Submit the field data as XFDF rather than FDF
-    /// (bit 6 of /Flags). Spelled "Xfdf" to match the Aspose.PDF for .NET member
+    /// (bit 6 of /Flags). Spelled "Xfdf" to match the Aspose.Pdf member
     /// name; the wire format is uppercase XFDF.</summary>
     public const int Xfdf = 32;
 
@@ -774,7 +778,7 @@ public sealed class SubmitFormAction : PdfAction
     public const int IncludeAnnotations = 128;
 
     /// <summary>Submit the entire PDF as the request body
-    /// (bit 9 of /Flags). Spelled "SubmitPdf" to match the Aspose.PDF for .NET
+    /// (bit 9 of /Flags). Spelled "SubmitPdf" to match the Aspose.Pdf
     /// member name.</summary>
     public const int SubmitPdf = 256;
 

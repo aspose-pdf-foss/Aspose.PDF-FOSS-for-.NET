@@ -31,6 +31,10 @@ public sealed class SignatureAppearance
     /// <summary>Font size for the text in the appearance stream. Defaults to 10.</summary>
     public double FontSize { get; set; } = 10;
 
+    /// <summary>Font family for the appearance text (from a
+    /// <c>SignatureCustomAppearance</c>). Null keeps the default Helvetica.</summary>
+    public string? FontFamily { get; set; }
+
     /// <summary>Optional image bytes embedded into the appearance XObject
     /// as the signature graphic.</summary>
     public byte[]? ImageBytes { get; set; }

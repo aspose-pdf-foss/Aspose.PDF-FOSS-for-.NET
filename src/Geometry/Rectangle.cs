@@ -205,7 +205,7 @@ public sealed class Rectangle
     public void Rotate(int angle)
     {
         var a = ((angle % 360) + 360) % 360;
-        // Match Aspose.PDF for .NET: a quarter-turn (90/270) swaps the X and Y
+        // Match Aspose.Pdf: a quarter-turn (90/270) swaps the X and Y
         // coordinate pairs (the box keeps positive coords and takes the rotated
         // dimensions); a half-turn (0/180) leaves the axis-aligned box unchanged.
         // Earlier this rotated the corners about the ORIGIN, which pushed the box to
@@ -378,8 +378,10 @@ public sealed class PageSize
     /// <summary>ISO A3 — 297 × 420 mm (841.890 × 1190.551 pt).</summary>
     public static PageSize A3 => new(841.890, 1190.551);
 
-    /// <summary>ISO A4 — 210 × 297 mm (595.276 × 841.890 pt).</summary>
-    public static PageSize A4 => new(595.276, 841.890);
+    /// <summary>ISO A4. Aspose.Pdf exposes this as the rounded 595 × 842 pt
+    /// (not the exact 595.276 × 841.890), so callers that resize/compare against
+    /// PageSize.A4 match the reference API.</summary>
+    public static PageSize A4 => new(595, 842);
 
     /// <summary>ISO A5 — 148 × 210 mm (419.528 × 595.276 pt).</summary>
     public static PageSize A5 => new(419.528, 595.276);

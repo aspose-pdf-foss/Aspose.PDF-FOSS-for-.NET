@@ -39,6 +39,13 @@ public class FontRepository
     /// </summary>
     public static Font? FindFont(string fontName) => FindFontInternal(fontName, ignoreCase: false);
 
+    /// <summary>Resolve <paramref name="fontName"/> through the registered sources
+    /// (and the system fallback) and return the raw TrueType program bytes, or null
+    /// when the name resolves to a non-embeddable face (e.g. a Standard-14 Type1) or
+    /// cannot be found. Used by the HTML converter to embed CSS font-family faces.</summary>
+    internal static byte[]? GetTtfData(string fontName)
+        => FindFontInternal(fontName, ignoreCase: true)?.TtfData;
+
     /// <summary>
     /// Find a font by family name and style. Style is honoured by family lookup
     /// (no synthesis); when no styled variant exists the closest match is returned.
@@ -148,6 +155,110 @@ public class FontRepository
         return fd;
     }
 
+    /// <summary>
+    /// Resolve a glyph-covering substitute for <paramref name="text"/> when
+    /// <paramref name="current"/> can't show it — the generator-side implementation of
+    /// <see cref="TextEditOptions.NoCharacterAction.ReplaceFonts"/>. Returns null when the
+    /// current font already covers the text (no substitution needed) or nothing covers it.
+    /// Order: a metric-only (Standard-14) current font is replaced by its host surrogate
+    /// (Helvetica→Arial) when that covers; then registered folder/file/memory sources
+    /// (first covering face wins — how a FolderFontSource supplies e.g. FangSong); then
+    /// host Arial; then the script-matched system CJK face (SimSun for Han, …).
+    /// </summary>
+    internal static FontData? SubstituteForMissingGlyphs(string text, Font? current)
+    {
+        if (string.IsNullOrEmpty(text)) return null;
+        // Coverage probe: the distinct non-ASCII chars. ASCII is covered by any usable face,
+        // and an all-ASCII run never needs substitution.
+        var probe = new HashSet<char>();
+        foreach (var c in text)
+            if (c > 0x7F && !char.IsControl(c))
+                probe.Add(c);
+        if (probe.Count == 0) return null;
+
+        var curTtf = current?.SourceFontData?.TtfData;
+        if (curTtf is { Length: > 0 } && Covers(curTtf, probe)) return null;
+
+        // Metric-only current font (Standard-14 — no physical program): ReplaceFonts asks
+        // for a physical face, so its host surrogate is the first candidate. This is why
+        // a default-font fragment reports "Arial" (Helvetica's host face) after save.
+        if (curTtf is null)
+        {
+            var host = SystemFontResolver.Resolve(current?.FontName ?? "Helvetica");
+            if (host is { Length: > 0 } && Covers(host, probe))
+                return MakeSubstituteFontData(host);
+        }
+
+        // Registered sources (folder/file/memory) — first covering face wins.
+        foreach (var source in _sources)
+        {
+            foreach (var face in source.EnumerateFaces())
+            {
+                var ttf = face.TtfData;
+                if (ttf is { Length: > 0 } && Covers(ttf, probe))
+                    return face;
+            }
+        }
+
+        // Host Arial: broad Latin/Cyrillic/Greek/Vietnamese coverage.
+        var arial = SystemFontResolver.Resolve("Arial");
+        if (arial is { Length: > 0 } && Covers(arial, probe))
+            return MakeSubstituteFontData(arial);
+
+        // Script-matched system CJK face (already normalized to a standalone sfnt).
+        var cjk = CjkFallbackFont.ResolveEmbeddableBytes(text);
+        if (cjk is { Length: > 0 } && Covers(cjk, probe))
+            return MakeSubstituteFontData(cjk);
+
+        // Broad-coverage host faces for the remaining scripts (Thai, Hebrew,
+        // Georgian, …) that neither Arial nor the CJK faces carry. Tahoma and
+        // Segoe UI ship wide script coverage on Windows; the trailing names are
+        // legacy super-fonts kept for older installs.
+        foreach (var candidate in new[]
+                 { "Tahoma", "Segoe UI", "Leelawadee UI", "Microsoft Sans Serif", "Arial Unicode MS" })
+        {
+            var face = SystemFontResolver.Resolve(candidate);
+            if (face is { Length: > 0 } && Covers(face, probe))
+                return MakeSubstituteFontData(face);
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether <paramref name="ttf"/> maps a real glyph for every non-ASCII
+    /// char of <paramref name="text"/>. True for null/empty probes.</summary>
+    internal static bool CoversText(byte[]? ttf, string text)
+    {
+        if (ttf is not { Length: > 0 } || string.IsNullOrEmpty(text)) return true;
+        var probe = new HashSet<char>();
+        foreach (var c in text)
+            if (c > 0x7F && !char.IsControl(c))
+                probe.Add(c);
+        return probe.Count == 0 || Covers(ttf, probe);
+    }
+
+    /// <summary>Whether <paramref name="ttf"/> has a real glyph for every probe char.</summary>
+    private static bool Covers(byte[] ttf, HashSet<char> probe)
+    {
+        try
+        {
+            var parser = new GlyphOutlineParser(ttf);
+            foreach (var c in probe)
+                if (!parser.CMap.TryGetValue(c, out var gid) || gid <= 0)
+                    return false;
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Wrap raw font bytes as a FontData named by the face's family name.</summary>
+    private static FontData MakeSubstituteFontData(byte[] ttf)
+    {
+        var fd = new FontData(ReadTtfFamilyName(ttf), FontType.TrueType);
+        fd.SetTtfData(ttf);
+        return fd;
+    }
+
     private static FontData? FindFontInternal(string fontName, bool ignoreCase)
     {
         if (string.IsNullOrEmpty(fontName)) return null;
@@ -178,7 +289,22 @@ public class FontRepository
         var systemTtf = SystemFontResolver.Resolve(fontName);
         if (systemTtf is not null)
         {
-            var fd = new FontData(fontName, FontType.TrueType);
+            // Name the resolved face from its own 'name' table rather than the caller's
+            // query string: FindFont("arial") must yield a font whose FontName is "Arial"
+            // (the real family), so an embedded round-trip reports "Arial" not "arial".
+            // Falls back to the query when the family can't be parsed.
+            var realName = fontName;
+            try
+            {
+                var ttp = new TrueTypeParser(systemTtf);
+                ttp.Parse();
+                var fam = ttp.FamilyName;
+                if (!string.IsNullOrWhiteSpace(fam) && fam != "Unknown")
+                    realName = fam;
+            }
+            catch { /* keep the query name if the face can't be parsed */ }
+
+            var fd = new FontData(realName, FontType.TrueType);
             fd.SetTtfData(systemTtf);
             return fd;
         }
@@ -516,6 +642,58 @@ public class FontRepository
     /// <summary>
     /// Read the font family name from a TrueType name table.
     /// </summary>
+    /// <summary>Read a font's FAMILY name (name-table ID 1), preferring the
+    /// ENGLISH record: Windows/lang 1033 first, then Mac/lang 0, then any Windows
+    /// record. CJK faces carry a localized family too (e.g. SIMFANG.TTF has both
+    /// "FangSong" and lang-2052 "仿宋") and a last-record-wins read surfaces the
+    /// localized one — substituted faces must report the English family.</summary>
+    internal static string ReadTtfFamilyName(byte[] data)
+    {
+        try
+        {
+            if (data.Length < 12) return "Unknown";
+            var numTables = ReadUInt16BE(data, 4);
+            for (int i = 0; i < numTables; i++)
+            {
+                var offset = 12 + i * 16;
+                if (offset + 16 > data.Length) break;
+                if (System.Text.Encoding.ASCII.GetString(data, offset, 4) != "name") continue;
+                var tableOffset = (int)ReadUInt32BE(data, offset + 8);
+                if (tableOffset + 6 > data.Length) break;
+                var count = ReadUInt16BE(data, tableOffset + 2);
+                var stringOffset = tableOffset + ReadUInt16BE(data, tableOffset + 4);
+                string? winEnglish = null, macEnglish = null, winAny = null;
+                for (int r = 0; r < count; r++)
+                {
+                    var recOff = tableOffset + 6 + r * 12;
+                    if (recOff + 12 > data.Length) break;
+                    var platformID = ReadUInt16BE(data, recOff);
+                    var languageID = ReadUInt16BE(data, recOff + 4);
+                    var nameID = ReadUInt16BE(data, recOff + 6);
+                    if (nameID != 1) continue;
+                    var length = ReadUInt16BE(data, recOff + 8);
+                    var strStart = stringOffset + ReadUInt16BE(data, recOff + 10);
+                    if (strStart + length > data.Length) continue;
+                    if (platformID == 3)
+                    {
+                        var v = System.Text.Encoding.BigEndianUnicode.GetString(data, strStart, length);
+                        if (languageID == 0x409) winEnglish ??= v;
+                        winAny ??= v;
+                    }
+                    else if (platformID == 1 && languageID == 0)
+                    {
+                        macEnglish ??= System.Text.Encoding.Latin1.GetString(data, strStart, length);
+                    }
+                }
+                var fam = winEnglish ?? macEnglish ?? winAny;
+                if (!string.IsNullOrWhiteSpace(fam)) return fam!;
+                break;
+            }
+        }
+        catch { }
+        return ReadTtfFontName(data);
+    }
+
     internal static string ReadTtfFontName(byte[] data)
     {
         if (data.Length < 12) return "Unknown";
@@ -537,12 +715,16 @@ public class FontRepository
         if (tableOffset + 6 > data.Length) return "Unknown";
         var count = ReadUInt16BE(data, tableOffset + 2);
         var stringOffset = tableOffset + ReadUInt16BE(data, tableOffset + 4);
-        string? fullName = null, familyName = null;
+        // Multi-language name tables (CJK fonts) can list a localized record before
+        // the English one — e.g. SourceHanSerif's TC face leads with 思源宋體 —
+        // so prefer English-language records and fall back to any language.
+        string? fullNameEn = null, familyNameEn = null, fullName = null, familyName = null;
         for (int i = 0; i < count; i++)
         {
             var recOff = tableOffset + 6 + i * 12;
             if (recOff + 12 > data.Length) break;
             var platformID = ReadUInt16BE(data, recOff);
+            var languageID = ReadUInt16BE(data, recOff + 4);
             var nameID = ReadUInt16BE(data, recOff + 6);
             var length = ReadUInt16BE(data, recOff + 8);
             var strOff = ReadUInt16BE(data, recOff + 10);
@@ -554,10 +736,13 @@ public class FontRepository
             else if (platformID == 1)
                 name = System.Text.Encoding.Latin1.GetString(data, strStart, length);
             else continue;
-            if (nameID == 4) fullName ??= name;
-            if (nameID == 1) familyName ??= name;
+            var english = (platformID == 3 && (languageID & 0x3FF) == 0x009) // any en-* LCID
+                          || (platformID == 1 && languageID == 0)
+                          || platformID == 0;
+            if (nameID == 4) { if (english) fullNameEn ??= name; fullName ??= name; }
+            if (nameID == 1) { if (english) familyNameEn ??= name; familyName ??= name; }
         }
-        return fullName ?? familyName ?? "Unknown";
+        return fullNameEn ?? familyNameEn ?? fullName ?? familyName ?? "Unknown";
     }
 
     /// <summary>
@@ -596,7 +781,7 @@ public class FontRepository
 
     /// <summary>
     /// Force the font sources to enumerate available fonts. The FOSS resolver
-    /// is fully lazy so this is a no-op; provided for Aspose.PDF for .NET API parity.
+    /// is fully lazy so this is a no-op; provided for Aspose.Pdf API parity.
     /// </summary>
     public static void LoadFonts() { }
 
@@ -673,11 +858,18 @@ public sealed class FontData
     /// <summary>File path if loaded from a file.</summary>
     public string? FilePath { get; }
 
-    /// <summary>Raw TTF data when loaded from a file. Lazy-loaded.</summary>
-    internal byte[]? TtfData => FilePath is not null && _ttfData is null
-        ? (_ttfData = System.IO.File.ReadAllBytes(FilePath))
-        : _ttfData;
+    /// <summary>Raw TTF data when loaded from a file. Lazy-loaded and shared
+    /// across every <see cref="FontData"/> that names the same file: the bytes
+    /// are immutable font data, so a process-wide by-path cache turns thousands
+    /// of independent look-ups of the same face (e.g. every table cell resolving
+    /// "Arial") into a single read instead of one full copy per instance.</summary>
+    internal byte[]? TtfData => _ttfData ??= FilePath is not null ? LoadTtf(FilePath) : null;
     private byte[]? _ttfData;
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> _ttfByPath = new();
+
+    private static byte[] LoadTtf(string path)
+        => _ttfByPath.GetOrAdd(path, System.IO.File.ReadAllBytes);
 
     internal void SetTtfData(byte[] data) => _ttfData = data;
 
@@ -720,6 +912,14 @@ public sealed class FontData
 public abstract class FontSource
 {
     internal abstract FontData? FindFont(string name, bool ignoreCase);
+
+    /// <summary>Enumerate every face this source can provide, for glyph-coverage
+    /// scans (NoCharacterAction.ReplaceFonts substitution). Default: none.
+    /// SystemFontSource deliberately does NOT enumerate — walking the whole OS
+    /// font directory per fragment is too costly; system substitution goes
+    /// through the targeted Arial / CJK fallbacks instead.</summary>
+    internal virtual IEnumerable<FontData> EnumerateFaces()
+        => System.Linq.Enumerable.Empty<FontData>();
 }
 
 /// <summary>
@@ -749,6 +949,7 @@ public sealed class FolderFontSource : FontSource
         var ttfPaths = new System.Collections.Generic.List<string>();
         foreach (var file in System.IO.Directory.EnumerateFiles(FolderPath, "*.ttf")
                      .Concat(System.IO.Directory.EnumerateFiles(FolderPath, "*.otf"))
+                     .Concat(System.IO.Directory.EnumerateFiles(FolderPath, "*.ttc"))
                      .Concat(System.IO.Directory.EnumerateFiles(FolderPath, "*.pfb")))
         {
             var nameWithout = System.IO.Path.GetFileNameWithoutExtension(file);
@@ -756,32 +957,78 @@ public sealed class FolderFontSource : FontSource
                 string.Equals(nameWithout.Replace(" ", "").Replace("-", ""), normalizedName, StringComparison.OrdinalIgnoreCase))
                 return new FontData(name, FontType.TrueType, file);
             var ext = System.IO.Path.GetExtension(file).ToLowerInvariant();
-            if (ext is ".ttf" or ".otf") ttfPaths.Add(file);
+            if (ext is ".ttf" or ".otf" or ".ttc") ttfPaths.Add(file);
         }
 
         // Filename didn't match. Open each TTF and check the embedded `name` table —
         // test font drops like ARIALUNI.TTF carry the family
         // name "Arial Unicode MS" inside the TTF but use a short DOS-8.3-style file
-        // name that won't fuzzy-match. Reading the name table once per file is cheap
-        // for the small font drops typically registered as test-data sources.
+        // name that won't fuzzy-match. The names read per file are cached process-wide
+        // by path so repeated FindFont misses don't re-read every registered font
+        // (a .ttc can be >10 MB).
+        // TrueType Collections (.ttc) carry one name PER FACE (e.g.
+        // SourceHanSerif-Regular.ttc = "Source Han Serif TC" / "... SC" / "... K" ...),
+        // so every face is scanned and the matching face is rebuilt to a standalone
+        // sfnt so both the name read and a later FontFile2 embed see a valid table
+        // directory.
         foreach (var file in ttfPaths)
+        {
+            var faceNames = _namesByPath.GetOrAdd(file, static f =>
+            {
+                try
+                {
+                    var raw = System.IO.File.ReadAllBytes(f);
+                    var names = new string[CjkFallbackFont.TtcFaceCount(raw)];
+                    for (int i = 0; i < names.Length; i++)
+                    {
+                        try { names[i] = FontRepository.ReadTtfFontName(CjkFallbackFont.NormalizeToSfnt(raw, i)); }
+                        catch { names[i] = "Unknown"; }
+                    }
+                    return names;
+                }
+                catch { return new[] { "Unknown" }; }
+            });
+            for (int face = 0; face < faceNames.Length; face++)
+            {
+                var actualName = faceNames[face];
+                if (string.IsNullOrEmpty(actualName) || actualName == "Unknown") continue;
+                if (string.Equals(actualName, name, comparison) ||
+                    string.Equals(actualName.Replace(" ", "").Replace("-", ""), normalizedName, StringComparison.OrdinalIgnoreCase))
+                {
+                    byte[] data;
+                    try { data = CjkFallbackFont.NormalizeToSfnt(System.IO.File.ReadAllBytes(file), face); }
+                    catch { continue; }
+                    var fd = new FontData(actualName, FontType.TrueType, file);
+                    fd.SetTtfData(data);
+                    return fd;
+                }
+            }
+        }
+        return null;
+    }
+
+    // Process-wide font-file → per-face name-table names for the fallback scan above.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string[]> _namesByPath = new();
+
+    internal override IEnumerable<FontData> EnumerateFaces()
+    {
+        if (!System.IO.Directory.Exists(FolderPath)) yield break;
+        var files = System.IO.Directory.EnumerateFiles(FolderPath, "*.ttf")
+            .Concat(System.IO.Directory.EnumerateFiles(FolderPath, "*.otf"))
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
+        foreach (var file in files)
         {
             byte[] data;
             try { data = System.IO.File.ReadAllBytes(file); }
             catch { continue; }
-            string? actualName = null;
-            try { actualName = FontRepository.ReadTtfFontName(data); }
-            catch { continue; }
-            if (string.IsNullOrEmpty(actualName) || actualName == "Unknown") continue;
-            if (string.Equals(actualName, name, comparison) ||
-                string.Equals(actualName.Replace(" ", "").Replace("-", ""), normalizedName, StringComparison.OrdinalIgnoreCase))
-            {
-                var fd = new FontData(actualName, FontType.TrueType, file);
-                fd.SetTtfData(data);
-                return fd;
-            }
+            var name = "Unknown";
+            try { name = FontRepository.ReadTtfFamilyName(data); } catch { }
+            if (name == "Unknown")
+                name = System.IO.Path.GetFileNameWithoutExtension(file);
+            var fd = new FontData(name, FontType.TrueType, file);
+            fd.SetTtfData(data);
+            yield return fd;
         }
-        return null;
     }
 }
 
@@ -836,6 +1083,21 @@ public sealed class FileFontSource : FontSource
         }
         return null;
     }
+
+    internal override IEnumerable<FontData> EnumerateFaces()
+    {
+        var ext = System.IO.Path.GetExtension(FilePath ?? "").ToLowerInvariant();
+        if (ext is not (".ttf" or ".otf") || !System.IO.File.Exists(FilePath)) yield break;
+        byte[] data;
+        try { data = System.IO.File.ReadAllBytes(FilePath!); }
+        catch { yield break; }
+        var name = "Unknown";
+        try { name = FontRepository.ReadTtfFamilyName(data); } catch { }
+        if (name == "Unknown") name = System.IO.Path.GetFileNameWithoutExtension(FilePath!);
+        var fd = new FontData(name, FontType.TrueType, FilePath);
+        fd.SetTtfData(data);
+        yield return fd;
+    }
 }
 
 /// <summary>A font source backed by an in-memory font byte buffer.</summary>
@@ -877,6 +1139,16 @@ public sealed class MemoryFontSource : FontSource, IDisposable
         }
         catch { }
         return null;
+    }
+
+    internal override IEnumerable<FontData> EnumerateFaces()
+    {
+        var name = "Unknown";
+        try { name = FontRepository.ReadTtfFamilyName(FontBytes); } catch { }
+        if (name == "Unknown") yield break;
+        var fd = new FontData(name, FontType.TrueType);
+        fd.SetTtfData(FontBytes);
+        yield return fd;
     }
 }
 
@@ -945,7 +1217,12 @@ public sealed class SystemFontSource : FontSource
                 var fileBase = Path.GetFileNameWithoutExtension(file);
                 if (string.Equals(fileBase, name, comparison) ||
                     string.Equals(fileBase.Replace(" ", "").Replace("-", ""), normalizedName, StringComparison.OrdinalIgnoreCase))
-                    return new FontData(name, FontType.TrueType, file);
+                    // Name the face from its own 'name' table, not the query string, so
+                    // FindFont("arial") yields a font whose FontName is "Arial" (real
+                    // family) — matching the Aspose.Pdf surface. The query
+                    // string is only used to locate the file; fall back to it if the
+                    // family can't be parsed (e.g. an unusual .ttc layout).
+                    return new FontData(RealFamilyName(file) ?? name, FontType.TrueType, file);
             }
 
             foreach (var subDir in Directory.EnumerateDirectories(dir))
@@ -958,9 +1235,26 @@ public sealed class SystemFontSource : FontSource
         catch (DirectoryNotFoundException) { }
         return null;
     }
+
+    /// <summary>Read a font file's family name from its 'name' table; null when it
+    /// can't be parsed. Used to report the real font name from a filename match.</summary>
+    private static string? RealFamilyName(string file)
+    {
+        try
+        {
+            var ttp = new TrueTypeParser(File.ReadAllBytes(file));
+            ttp.Parse();
+            var fam = ttp.FamilyName;
+            return string.IsNullOrWhiteSpace(fam) || fam == "Unknown" ? null : fam;
+        }
+        catch { return null; }
+    }
 }
 
-/// <summary>A collection of font sources used by <see cref="FontRepository"/>.</summary>
+/// <summary>A collection of font sources used by <see cref="FontRepository"/>.
+/// Thread-safe: the repository instance is process-global (static), so one thread can
+/// register a source while another resolves a font — mutations lock, and enumeration
+/// walks a snapshot so an in-flight FindFont never throws "collection was modified".</summary>
 public sealed class FontSourceCollection : System.Collections.Generic.IEnumerable<FontSource>
 {
     private readonly System.Collections.Generic.List<FontSource> _sources = new();
@@ -970,40 +1264,49 @@ public sealed class FontSourceCollection : System.Collections.Generic.IEnumerabl
         _sources.Add(new SystemFontSource());
     }
 
-    public int Count => _sources.Count;
+    public int Count { get { lock (SyncRoot) return _sources.Count; } }
 
-    public bool IsSynchronized => false;
+    public bool IsSynchronized => true;
     public object SyncRoot { get; } = new();
 
-    public FontSource this[int index] => _sources[index];
+    public FontSource this[int index] { get { lock (SyncRoot) return _sources[index]; } }
 
     public void Add(FontSource fontSource)
     {
         if (fontSource is null) throw new ArgumentNullException(nameof(fontSource));
-        // Dedup: SystemFontSource by type, FolderFontSource by folder path
-        foreach (var existing in _sources)
+        lock (SyncRoot)
         {
-            if (fontSource is SystemFontSource && existing is SystemFontSource)
-                return;
-            if (fontSource is FolderFontSource fs && existing is FolderFontSource efs
-                && string.Equals(fs.FolderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                                 efs.FolderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                                 StringComparison.OrdinalIgnoreCase))
-                return;
+            // Dedup: SystemFontSource by type, FolderFontSource by folder path
+            foreach (var existing in _sources)
+            {
+                if (fontSource is SystemFontSource && existing is SystemFontSource)
+                    return;
+                if (fontSource is FolderFontSource fs && existing is FolderFontSource efs
+                    && string.Equals(fs.FolderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                                     efs.FolderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                                     StringComparison.OrdinalIgnoreCase))
+                    return;
+            }
+            _sources.Add(fontSource);
         }
-        _sources.Add(fontSource);
     }
 
-    public bool Contains(FontSource item) => _sources.Contains(item);
+    public bool Contains(FontSource item) { lock (SyncRoot) return _sources.Contains(item); }
 
-    public void Delete(FontSource fontSource) => _sources.Remove(fontSource);
+    public void Delete(FontSource fontSource) { lock (SyncRoot) _sources.Remove(fontSource); }
 
-    public bool Remove(FontSource item) => _sources.Remove(item);
+    public bool Remove(FontSource item) { lock (SyncRoot) return _sources.Remove(item); }
 
-    public void CopyTo(FontSource[] array, int index) => _sources.CopyTo(array, index);
+    public void CopyTo(FontSource[] array, int index) { lock (SyncRoot) _sources.CopyTo(array, index); }
 
-    public void Clear() => _sources.Clear();
+    public void Clear() { lock (SyncRoot) _sources.Clear(); }
 
-    public System.Collections.Generic.IEnumerator<FontSource> GetEnumerator() => _sources.GetEnumerator();
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => _sources.GetEnumerator();
+    public System.Collections.Generic.IEnumerator<FontSource> GetEnumerator()
+    {
+        FontSource[] snapshot;
+        lock (SyncRoot) snapshot = _sources.ToArray();
+        return ((System.Collections.Generic.IEnumerable<FontSource>)snapshot).GetEnumerator();
+    }
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
 }

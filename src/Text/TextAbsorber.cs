@@ -15,17 +15,59 @@ public sealed class TextAbsorber
     // Each entry corresponds to a line boundary in _text.
     private readonly List<double> _lineYPositions = new();
     private double _currentLineY = double.NaN;
+    // Page-space Y offset (accumulated CTM translation, localCmTy) in effect when the
+    // current line's Y was established. _currentLineY is tracked in TEXT space (so it can
+    // be compared against text-space refs for line-break decisions), but line SORTING needs
+    // absolute page-space Y — so RecordLineY stores (_currentLineY + _currentLineCmTy).
+    // Without this, text drawn inside a translated Form XObject (e.g. a widget appearance
+    // placed by a `cm` translation) sorts by its local Tm Y instead of its page position.
+    private double _currentLineCmTy;
     // Counts text-showing operators (Tj/TJ/'/") seen while extracting the current
     // page (including nested Form XObjects). Used to emit the "no text operators"
     // diagnostic when TextSearchOptions.LogTextExtractionErrors is enabled.
     private int _textShowingOpCount;
+
+    // ── Pure-mode character-grid layout ─────────────────────────────────────
+    // Pure mode lays runs out on a per-page character grid (pdftotext -layout style)
+    // rather than emitting round(gap / spaceWidth) spaces per inter-run gap. Each run is
+    // placed at an absolute character column = round((runPageX − lineStartX) / cellWidth),
+    // and spaces pad from the current output column. This reproduces Aspose.Pdf's
+    // fixed-column spacing (a long label eats its column budget → 1 space; a short label →
+    // many spaces up to the shared value column) where a per-gap divisor cannot.
+    private double _pageCellWidth;       // page grid cell width (≈ mean glyph advance); 0 = disabled
+    // True when this page inserted inter-run gap spaces on some line — the signal
+    // that it has a column layout worth padding to a fixed width (see Visit(Document)).
+    private bool _sawIntraLineGapSpaces;
+    private double _lineStartPageX = double.NaN; // page-space X of the current line's first run
+    private int _lineStartTextOffset;    // _text offset where the current line's text begins
+
+    // ── hOCR searchable-overlay reconstruction ──────────────────────────────
+    // A page produced by Document.Convert(hOCR) carries every recognised word as its
+    // own invisible (Tr 3) BT/Td/Tj block. The streaming extractor would emit one word
+    // per line; instead we collect those invisible runs and rebuild the page on a
+    // page-absolute character grid (leading + column spacing + blank rows), matching
+    // the expected Pure-mode OCR layout. Only engaged in Pure mode when the
+    // page is dominated by such runs (see RebuildOcrOverlayPage), so normal PDFs are
+    // untouched.
+    private readonly List<(string text, double x, double y, double fs, double width)> _ocrRuns = new();
+    private bool _collectOcrRuns;
+    private bool _anyReconstructed;       // a page was rebuilt → preserve its leading spaces
 
     /// <summary>
     /// The extracted text after calling Visit(). Full Trim() is applied to
     /// strip both trailing newline sentinels emitted by the extraction loop
     /// and any spurious trailing spaces from gap-detection between BT/ET blocks.
     /// </summary>
-    public string Text => _text.ToString().Trim();
+    // A reconstructed OCR page carries meaningful leading spaces on its first line
+    // (page-absolute grid), so only trailing newlines are stripped in that case.
+    // Raw mode trims leading whitespace (no empty feeds above
+    // a clipped rectangle) but keeps the source stream's own TRAILING space
+    // glyphs — a document whose last show is a space extracts with it kept.
+    public string Text => _anyReconstructed
+        ? _text.ToString().TrimEnd('\r', '\n')
+        : ExtractionOptions?.FormattingMode == TextExtractionOptions.TextFormattingMode.Raw
+            ? _text.ToString().TrimStart().TrimEnd('\r', '\n')
+            : _text.ToString().Trim();
 
     /// <summary>
     /// The extracted text with only trailing \r\n stripped (preserving trailing
@@ -55,6 +97,7 @@ public sealed class TextAbsorber
     public TextAbsorber(TextExtractionOptions extractionOptions)
     {
         ExtractionOptions = extractionOptions ?? new TextExtractionOptions();
+        TextSearchOptions.IgnoreResourceFontErrors |= ExtractionOptions.IgnoreResourceFontErrors;
     }
 
     /// <summary>Initializes with text-search options.</summary>
@@ -68,6 +111,7 @@ public sealed class TextAbsorber
     {
         ExtractionOptions = extractionOptions ?? new TextExtractionOptions();
         TextSearchOptions = textSearchOptions ?? new TextSearchOptions();
+        TextSearchOptions.IgnoreResourceFontErrors |= ExtractionOptions.IgnoreResourceFontErrors;
     }
 
     /// <summary>Errors recorded during extraction.</summary>
@@ -88,17 +132,50 @@ public sealed class TextAbsorber
         var textStart = _text.Length;
         var yStart = _lineYPositions.Count;
         _currentLineY = double.NaN;
+        _currentLineCmTy = 0;
         _textShowingOpCount = 0;
 
+        // Pure mode: size the per-page character grid up front (see the column-model note
+        // on the fields). Raw mode keeps its single-space-per-gap behaviour (cellWidth 0).
+        var pureLayout = ExtractionOptions?.FormattingMode != TextExtractionOptions.TextFormattingMode.Raw;
+        (_pageCellWidth, _pageMinX) = pureLayout
+            ? EstimatePageGrid(contentStreams, page.Dict, reader)
+            : (0, double.NaN);
+        // A clip rectangle re-anchors extraction to the window, not the page:
+        // page-absolute columns/leading pads don't apply (the reference's
+        // rect-clipped output starts lines at the window edge).
+        if (TextSearchOptions?.Rectangle is not null)
+            _pageMinX = double.NaN;
+        _lineStartPageX = double.NaN;
+        _lineStartTextOffset = _text.Length;
+        _sawIntraLineGapSpaces = false;
+        _collectOcrRuns = pureLayout;
+        _ocrRuns.Clear();
+        _pageLineStarts.Clear();
+
+        // A page's content streams concatenate and share one graphics state, so a
+        // font set in an earlier stream is still in effect in a later one — thread the
+        // "is a font currently set" flag across the streams (for the strict no-font check).
+        bool pageFontSet = false;
         foreach (var streamBytes in contentStreams)
-            ExtractTextFromContentStream(streamBytes, page.Dict, reader);
+            pageFontSet = ExtractTextFromContentStream(streamBytes, page.Dict, reader, fontSetOnEntry: pageFontSet);
+
+        // A page that is an hOCR searchable overlay (many invisible single-word blocks)
+        // is rebuilt on a page-absolute grid instead of the streaming per-word lines.
+        if (_collectOcrRuns && RebuildOcrOverlayPage(textStart))
+            return;
+
+        // Pure-mode leading columns from the page-absolute grid origin
+        // (not for rect-clipped extraction — see the _pageMinX note above).
+        if (pureLayout && TextSearchOptions?.Rectangle is null)
+            InsertLeadingGridSpaces(textStart);
 
         // Sort this page's text lines by visual order (Y coordinate, top to bottom)
         SortLinesByY(textStart, yStart);
 
         // Diagnostic: a page that draws only images/graphics has no text-showing
         // operators. When the caller opted into error logging, surface this as a
-        // recorded extraction error (matches Aspose.PDF for .NET behaviour).
+        // recorded extraction error (matches Aspose.Pdf behaviour).
         if ((TextSearchOptions?.LogTextExtractionErrors ?? false) && _textShowingOpCount == 0)
         {
             const string msg = "Text showing operators aren't found on the page.";
@@ -113,13 +190,201 @@ public sealed class TextAbsorber
         }
     }
 
+    // Glue threshold: two words are joined with no space when the gap between the
+    // previous word's rendered advance end and this word's start is under 0.4 of a
+    // space glyph's width at this font size (a wide width-fit word can overshoot its
+    // box into the next — they render touching). Font-relative,
+    // so the same 1.14pt gap glues at fs13 but keeps a space at fs7.
+    private const double OcrGlueSpaceFraction = 0.4;
+    private const double HelveticaSpaceEm = 0.278; // space advance, em units
+
+    /// <summary>
+    /// Rebuild an hOCR searchable-overlay page from its collected invisible runs onto a
+    /// page-absolute character grid: line grouping by baseline, leading + column spacing
+    /// (cell = 0.6·(F−2), F = dominant-by-char font size, origin = leftmost run), glyph
+    /// glue on rendered overlap, and blank rows for vertical gaps
+    /// (blanks = min(2, ceil(gap / (2·fontSize)) − 1)). Returns false — leaving the
+    /// streaming output intact — unless the page is clearly such an overlay.
+    /// </summary>
+    private bool RebuildOcrOverlayPage(int textStart)
+    {
+        // Only an OCR searchable overlay qualifies: many runs, and the invisible runs
+        // must be essentially ALL of the page's text (a normal page with a little
+        // invisible text must keep its streamed, visible-text output).
+        if (_ocrRuns.Count < 25) return false;
+        if (_ocrRuns.Count < 0.9 * Math.Max(_ocrRuns.Count, _textShowingOpCount)) return false;
+
+        // Group runs into visual lines. Runs are taken top-to-bottom; one joins the
+        // current line when its baseline is within a font-relative tolerance of the
+        // line's top run — so a giant glyph (a "/" many times the text size) still
+        // joins its line, while the next text line, a full leading below, does not.
+        var ordered = new List<(string text, double x, double y, double fs, double width)>(_ocrRuns);
+        ordered.Sort((a, b) =>
+        {
+            var cy = b.y.CompareTo(a.y); // top of page first
+            return cy != 0 ? cy : a.x.CompareTo(b.x);
+        });
+        var lines = new List<List<(string text, double x, double fs, double width, double y)>>();
+        foreach (var r in ordered)
+        {
+            if (lines.Count > 0)
+            {
+                // Tolerance scales with the INCOMING run's own font: a big glyph (a "/")
+                // reaches up to join a small-text line, but a small word will not reach up
+                // to a big-font line above it (which would merge two distinct rows).
+                var cur = lines[^1];
+                if (cur[0].y - r.y < 0.4 * r.fs)
+                {
+                    cur.Add((r.text, r.x, r.fs, r.width, r.y));
+                    continue;
+                }
+            }
+            lines.Add(new List<(string, double, double, double, double)> { (r.text, r.x, r.fs, r.width, r.y) });
+        }
+        if (lines.Count < 3) return false;
+
+        // Per line: baseline = median glyph baseline; bottom = deepest glyph (lowest y).
+        var baseline = new double[lines.Count];
+        var bottom = new double[lines.Count];
+        for (int li = 0; li < lines.Count; li++)
+        {
+            var ys = new List<double>(lines[li].Count);
+            foreach (var w in lines[li]) ys.Add(w.y);
+            ys.Sort();
+            baseline[li] = ys[ys.Count / 2];
+            bottom[li] = ys[0]; // smallest page-space y = deepest point
+        }
+
+        // Grid geometry: cell from the dominant-by-char font size; origin at leftmost run.
+        double minX = double.MaxValue;
+        var charByFs = new Dictionary<int, int>();
+        foreach (var r in _ocrRuns)
+        {
+            if (r.x < minX) minX = r.x;
+            int f = (int)Math.Round(r.fs);
+            charByFs.TryGetValue(f, out var c);
+            charByFs[f] = c + r.text.Length;
+        }
+        int fdom = 0, bestChars = -1;
+        foreach (var kv in charByFs)
+            if (kv.Value > bestChars || (kv.Value == bestChars && kv.Key < fdom))
+            { bestChars = kv.Value; fdom = kv.Key; }
+        double cell = 0.6 * (fdom - 2);
+        if (cell <= 0) return false;
+
+        var sb = new StringBuilder();
+        for (int li = 0; li < lines.Count; li++)
+        {
+            var ws = new List<(string text, double x, double fs, double width)>(lines[li].Count);
+            foreach (var w in lines[li]) ws.Add((w.text, w.x, w.fs, w.width));
+            ws.Sort((a, b) => a.x.CompareTo(b.x));
+            if (li > 0)
+            {
+                // Vertical gap is measured from the PREVIOUS line's bottom (deepest glyph)
+                // to THIS line's baseline — an asymmetry that lets a tall descender (a "/")
+                // push the following line apart without affecting the line above it. Blank
+                // rows scale with the smallest baseline-sitting font on this line (unit =
+                // 2× that size), capped at 2; dashes are centred, not baseline glyphs.
+                double gap = bottom[li - 1] - baseline[li];
+                double fsMin = double.MaxValue;
+                foreach (var w in ws)
+                    if (w.fs > 0 && w.fs < fsMin && !IsDashOnly(w.text)) fsMin = w.fs;
+                if (fsMin == double.MaxValue)
+                    foreach (var w in ws) if (w.fs > 0 && w.fs < fsMin) fsMin = w.fs;
+                int blanks = 0;
+                if (fsMin is > 0 and < double.MaxValue)
+                    blanks = Math.Min(2, Math.Max(0, (int)Math.Ceiling(gap / (2.0 * fsMin)) - 1));
+                for (int k = 0; k <= blanks; k++) sb.Append("\r\n");
+            }
+            RenderOcrLine(sb, ws, minX, cell);
+        }
+
+        // Replace this page's streamed segment with the reconstruction (keeping any
+        // earlier pages' text intact for multi-page documents).
+        _text.Remove(textStart, _text.Length - textStart);
+        _text.Append(sb);
+        _anyReconstructed = true;
+        return true;
+    }
+
+    /// <summary>Emit one grid line: leading spaces to the first run's column, then each
+    /// run padded to its column (or glued when the previous run's rendered advance
+    /// overlaps it).</summary>
+    private static void RenderOcrLine(StringBuilder sb, List<(string text, double x, double fs, double width)> ws,
+        double minX, double cell)
+    {
+        int outlen = 0;
+        double prevPen = double.NaN;
+        for (int i = 0; i < ws.Count; i++)
+        {
+            var (text, x, fs, width) = ws[i];
+            int target = (int)Math.Round((x - minX) / cell - 0.32);
+            int sp;
+            if (i == 0)
+                sp = Math.Max(0, target);
+            else if (x - prevPen < OcrGlueSpaceFraction * HelveticaSpaceEm * fs)
+                sp = 0;
+            else
+                sp = Math.Max(1, target - outlen);
+            for (int s = 0; s < sp; s++) sb.Append(' ');
+            sb.Append(text);
+            outlen += sp + text.Length;
+            prevPen = x + width;
+        }
+    }
+
+    /// <summary>True when the run is only dash/hyphen characters (vertically centred
+    /// glyphs that don't establish a text baseline).</summary>
+    private static bool IsDashOnly(string s)
+    {
+        if (s.Length == 0) return false;
+        foreach (var c in s)
+            if (c is not ('-' or '‐' or '‑' or '‒' or '–' or '—'))
+                return false;
+        return true;
+    }
+
     /// <summary>
     /// Record the Y position of the current line (before emitting a newline).
     /// </summary>
     private void RecordLineY()
     {
         if (!double.IsNaN(_currentLineY))
-            _lineYPositions.Add(_currentLineY);
+            _lineYPositions.Add(_currentLineY + _currentLineCmTy);
+    }
+
+    /// <summary>
+    /// Pure-mode vertical-gap blank lines: the reference emits an empty line
+    /// when consecutive baselines are more than ~2 line-heights apart —
+    /// blanks = min(2, ceil(gap / (2·fontSize)) − 1) (the oracle-derived rule
+    /// from the OCR-grid work). Appends the extra "\r\n"s AFTER the caller's
+    /// own line break and keeps the recorded line-Y list aligned so the
+    /// Y-sorting pass still pairs lines with their positions.
+    /// </summary>
+    private void EmitBlankLinesForGap(double pageGap, double fontSize)
+    {
+        if (ExtractionOptions?.FormattingMode == TextExtractionOptions.TextFormattingMode.Raw) return;
+        if (fontSize <= 0 || double.IsNaN(pageGap)) return;
+        var blanks = Math.Min(2, (int)Math.Ceiling(pageGap / (2 * fontSize)) - 1);
+        for (var k = 0; k < blanks; k++)
+        {
+            if (_lineYPositions.Count > 0)
+                _lineYPositions.Add(_lineYPositions[^1]);
+            _text.Append("\r\n");
+        }
+    }
+
+    /// <summary>Adjustment added to the raw text-space line Y so that RecordLineY stores a
+    /// sortable page-space Y. Inside a Form XObject (depth > 0) it is the accumulated CTM Y
+    /// translation (see the Tm-handler note). At page level it is normally 0 — byte-identical
+    /// to the plain extraction path — except under a FLIPPED page CTM ("1 0 0 -1 0 H cm",
+    /// text-space Y growing downward), where raw Ys would sort bottom-up: there the stored
+    /// sum becomes the device Y (cmD·rawY + cmTy).</summary>
+    private static double LineCmAdjust(int depth, double cmD, double cmTy, double rawY)
+    {
+        if (depth > 0) return cmTy;
+        if (cmD < 0 && !double.IsNaN(rawY)) return (cmD - 1.0) * rawY + cmTy;
+        return 0.0;
     }
 
     /// <summary>
@@ -173,10 +438,13 @@ public sealed class TextAbsorber
             if (!hasSameYLines) return;
         }
 
-        // Create (y, index, line) tuples and sort by Y descending (top of page first)
+        // Create (y, index, line) tuples and sort by Y descending (top of page first).
+        // Lines were split on '\n' but were separated upstream by "\r\n", so each carries
+        // a trailing '\r'; strip it so re-joining doesn't produce a doubled "\r\r\n" between
+        // lines or a stray '\r' before a same-row column separator ("…large\r      companies").
         var indexed = new List<(double y, int idx, string line)>();
         for (int i = 0; i < lines.Length; i++)
-            indexed.Add((pageYs[i], i, lines[i]));
+            indexed.Add((pageYs[i], i, lines[i].TrimEnd('\r')));
 
         // Stable sort by Y descending; lines with NaN Y keep their relative order
         indexed.Sort((a, b) =>
@@ -193,6 +461,7 @@ public sealed class TextAbsorber
         _text.Remove(textStartOffset, _text.Length - textStartOffset);
         for (int i = 0; i < indexed.Count; i++)
         {
+            var merged = false;
             if (i > 0)
             {
                 var prevY = indexed[i - 1].y;
@@ -202,13 +471,16 @@ public sealed class TextAbsorber
                     Math.Abs(prevY - curY) < Math.Max(2.0, Math.Abs(prevY) * 0.01))
                 {
                     _text.Append("      "); // column separator
+                    merged = true;
                 }
                 else
                 {
                     _text.Append("\r\n");
                 }
             }
-            _text.Append(indexed[i].line);
+            // A merged continuation drops its own leading grid pad — the
+            // separator replaces it (the reference emits "left      right").
+            _text.Append(merged ? indexed[i].line.TrimStart(' ') : indexed[i].line);
         }
     }
 
@@ -262,6 +534,7 @@ public sealed class TextAbsorber
         var textStart = _text.Length;
         var yStart = _lineYPositions.Count;
         _currentLineY = double.NaN;
+        _currentLineCmTy = 0;
 
         ExtractTextFromContentStream(streamBytes, dict, reader);
         SortLinesByY(textStart, yStart);
@@ -278,16 +551,23 @@ public sealed class TextAbsorber
             _lineYPositions.Clear();
             Visit(page);
             var pageText = _text.ToString().Trim('\r', '\n');
-            if (pageText.Length > 0)
-            {
-                // Pure mode: pad each line to a consistent width so column
-                // layout is preserved visually. The Aspose.PDF for .NET Pure mode
-                // does this to maintain fixed-width column alignment.
-                if (isPure)
-                    pageText = PadLinesToFixedWidth(pageText);
-                pageTexts.Add(pageText);
-            }
+            // Pure mode: pad each line to a consistent width so column
+            // layout is preserved visually. The Aspose.Pdf Pure mode
+            // does this to maintain fixed-width COLUMN alignment — so only pad
+            // when this page actually shows column structure (some line needed
+            // inter-run gap spaces). A single-column page (one run per line,
+            // e.g. plain paragraphs) is NOT padded; blanket-padding appended
+            // dozens of trailing spaces to every short line.
+            if (pageText.Length > 0 && isPure && _sawIntraLineGapSpaces)
+                pageText = PadLinesToFixedWidth(pageText);
+            // A text-less page (e.g. image only) still contributes its empty entry,
+            // so the whole-document join keeps a page separator for it — the
+            // reference shows such a page as a blank line between its neighbours.
+            pageTexts.Add(pageText);
         }
+        // Trailing text-less pages don't add dangling separators.
+        while (pageTexts.Count > 0 && pageTexts[^1].Length == 0)
+            pageTexts.RemoveAt(pageTexts.Count - 1);
         _text.Clear();
         _text.Append(string.Join("\r\n", pageTexts));
         if (pageTexts.Count > 0)
@@ -296,7 +576,7 @@ public sealed class TextAbsorber
 
     /// <summary>
     /// Pad each line with trailing spaces to a fixed width (~80 chars).
-    /// This matches Aspose.PDF for .NET Pure mode behavior where column layouts produce
+    /// This matches Aspose.Pdf Pure mode behavior where column layouts produce
     /// fixed-width lines for consistent visual alignment. Lines longer than
     /// the target width are left unchanged. Only pads when the page has
     /// multiple lines (single-line pages are left as-is to avoid inflating
@@ -332,6 +612,7 @@ public sealed class TextAbsorber
         _text.Clear();
         _lineYPositions.Clear();
         _currentLineY = double.NaN;
+        _currentLineCmTy = 0;
     }
 
     /// <summary>Check if a text position is within the page's MediaBox/CropBox.</summary>
@@ -358,10 +639,131 @@ public sealed class TextAbsorber
         return [getNum(box[0]), getNum(box[1]), getNum(box[2]), getNum(box[3])];
     }
 
-    private void ExtractTextFromContentStream(byte[] streamBytes, PdfDictionary pageDict, PdfReader reader,
-        int depth = 0, double[]? inheritedBounds = null, double cmTx = 0, double cmTy = 0)
+    /// <summary>
+    /// The page's character-grid cell width for Pure-mode layout, matching the
+    /// reference's oracle-derived rule: <c>cell = 0.6·(F − 2)</c> where F is the
+    /// font size carrying the MOST characters on the page (mode by char count;
+    /// ties go to the smallest size). One cell per page, glyph-independent.
+    /// Falls back to the mean glyph advance when the dominant size is too small
+    /// for the formula, and to 0 when there is too little text to estimate.
+    /// </summary>
+    private static double EstimatePageCellWidth(List<byte[]> streams, PdfDictionary pageDict, PdfReader reader)
+        => EstimatePageGrid(streams, pageDict, reader).cell;
+
+    /// <summary>Pre-scan companion to the grid: the cell width plus the page's
+    /// leftmost text X (grid origin). MinX tracks Tm/Td/cm X translation the
+    /// same way the extraction loop does (scale-free approximation).</summary>
+    private static (double cell, double minX) EstimatePageGrid(List<byte[]> streams, PdfDictionary pageDict, PdfReader reader)
     {
-        if (depth > 10) return; // prevent infinite recursion
+        double sumW = 0; int cnt = 0;
+        var minX = double.NaN;
+        var charsPerSize = new Dictionary<double, int>();
+        var fonts = ResolveFonts(pageDict, reader);
+        foreach (var streamBytes in streams)
+        {
+            var lexer = new PdfLexer(streamBytes);
+            var operands = new List<PdfObject>();
+            FontMetrics? metrics = null; double fontSize = 12;
+            double tlmX = 0, cmTx = 0;
+            var cmStack = new Stack<double>();
+            void SeeShowX()
+            {
+                var x = tlmX + cmTx;
+                if (double.IsNaN(minX) || x < minX) minX = x;
+            }
+            while (true)
+            {
+                var tok = lexer.NextToken();
+                if (tok.Kind == TokenKind.Eof) break;
+                switch (tok.Kind)
+                {
+                    case TokenKind.Integer: operands.Add(new Core.PdfInteger(tok.IntValue)); break;
+                    case TokenKind.Real: operands.Add(new Core.PdfReal(tok.RealValue)); break;
+                    case TokenKind.LiteralString: operands.Add(new Core.PdfString(tok.BytesValue!)); break;
+                    case TokenKind.HexString: operands.Add(new Core.PdfString(tok.BytesValue!, isHex: true)); break;
+                    case TokenKind.Name: operands.Add(new Core.PdfName(tok.StringValue!)); break;
+                    case TokenKind.ArrayStart: operands.Add(ParseContentArray(lexer)); break;
+                    case TokenKind.Keyword:
+                        var op = tok.StringValue!;
+                        if (op == "Tf")
+                        {
+                            if (operands.Count >= 2 && operands[0] is Core.PdfName fn
+                                && fonts.TryGetValue(fn.Value, out var fdict))
+                            {
+                                try { metrics = FontMetrics.FromFontDict(fdict, reader); } catch { metrics = null; }
+                                fontSize = Math.Abs(GetNumber(operands[1]));
+                            }
+                        }
+                        else if (op == "BT") { tlmX = 0; }
+                        else if (op == "Tm" && operands.Count >= 6) { tlmX = GetNumber(operands[4]); }
+                        else if ((op == "Td" || op == "TD") && operands.Count >= 2) { tlmX += GetNumber(operands[0]); }
+                        else if (op == "q") { cmStack.Push(cmTx); }
+                        else if (op == "Q") { if (cmStack.Count > 0) cmTx = cmStack.Pop(); }
+                        else if (op == "cm" && operands.Count >= 6) { cmTx += GetNumber(operands[4]); }
+                        else if (op == "BI") { SkipInlineImage(lexer); }
+                        else if (op == "Tj" || op == "'" || op == "\"")
+                        {
+                            var s = operands.LastOrDefault(o => o is Core.PdfString) as Core.PdfString;
+                            if (s is not null && metrics is not null)
+                            {
+                                SeeShowX();
+                                sumW += metrics.MeasureString(s.Value, fontSize);
+                                var g = GlyphCount(s.Value.Length, metrics);
+                                cnt += g;
+                                charsPerSize[fontSize] = charsPerSize.GetValueOrDefault(fontSize) + g;
+                            }
+                        }
+                        else if (op == "TJ" && operands.Count >= 1 && operands[0] is Core.PdfArray arr)
+                        {
+                            var sawString = false;
+                            foreach (var it in arr)
+                                if (it is Core.PdfString ps && metrics is not null)
+                                {
+                                    sawString = true;
+                                    sumW += metrics.MeasureString(ps.Value, fontSize);
+                                    var g = GlyphCount(ps.Value.Length, metrics);
+                                    cnt += g;
+                                    charsPerSize[fontSize] = charsPerSize.GetValueOrDefault(fontSize) + g;
+                                }
+                            if (sawString) SeeShowX();
+                        }
+                        operands.Clear();
+                        break;
+                    default: operands.Clear(); break;
+                }
+            }
+        }
+        if (cnt < 8) return (0, minX);
+
+        // Dominant font size: most characters; tie → smallest size.
+        double domSize = 0; var domCount = -1;
+        foreach (var kv in charsPerSize)
+        {
+            if (kv.Value > domCount || (kv.Value == domCount && kv.Key < domSize))
+            {
+                domSize = kv.Key; domCount = kv.Value;
+            }
+        }
+        if (domSize > 2.5) return (0.6 * (domSize - 2), minX);
+        return (sumW / cnt, minX);
+    }
+
+    /// <summary>Approximate glyph count from a show-string's byte length: 2-byte codes for a
+    /// composite (CID/Identity-H) font, one byte per glyph otherwise. Keeps the mean-advance
+    /// estimate from halving the cell width on CID pages.</summary>
+    private static int GlyphCount(int byteLen, FontMetrics metrics)
+        => metrics.IsCid ? (byteLen + 1) / 2 : byteLen;
+
+    /// <summary>
+    /// Processes one content stream, appending extracted text. Returns whether a font is
+    /// set in the graphics state at the end of the stream, so a page's multiple content
+    /// streams (which share one graphics state) can thread the "font set" flag between them.
+    /// </summary>
+    private bool ExtractTextFromContentStream(byte[] streamBytes, PdfDictionary pageDict, PdfReader reader,
+        int depth = 0, double[]? inheritedBounds = null, double cmTx = 0, double cmTy = 0,
+        bool fontSetOnEntry = false, double cmD = 1)
+    {
+        if (depth > 10) return fontSetOnEntry; // prevent infinite recursion
         var fonts = ResolveFonts(pageDict, reader);
         var lexer = new PdfLexer(streamBytes);
         var operands = new List<PdfObject>();
@@ -374,10 +776,24 @@ public sealed class TextAbsorber
         var actualTextUsed = false;
         double fontSize = 12;
         double tmD = 1.0;
+        // X-scale (a component) of the most recent Tm. Td/TD advances and glyph widths
+        // are tracked in unscaled text-space units, so multiplying by tmA converts an X
+        // delta to page space. Usually equal to tmD (uniform scale).
+        double tmA = 1.0;
         double leading = 0.0;
         double tlmX = 0;
+        // Page-space X origin set by the most recent Tm (operands[4]). Td/TD advance tlmX
+        // in unscaled text-space units, so the true page-space pen X is
+        // tmOriginX + (tx - tmOriginX) * tmA. Tracked so the search-rectangle filter can
+        // clip glyphs in page space (see AppendClippedRun).
+        double tmOriginX = 0;
         double tx = 0;
         double lastRunEndX = double.NaN;
+        // A standalone whitespace run at the visual start of a line can be a mid-line word space
+        // emitted out of stream order (scrambled RTL/LTR run order — the space is streamed before
+        // the run it separates). Hold such a leading space and re-home it before the first RTL run
+        // on the same line, so a Hebrew/Arabic word space no longer lands as a leading space.
+        double pendingReorderSpaceY = double.NaN;
         int lastDecodedLength = 0;
         double lastRunEstWidth = 0;
         bool lastHadMetrics = false;
@@ -385,6 +801,13 @@ public sealed class TextAbsorber
         FontMetrics? currentMetrics = null;
         double horizScale = 1.0;
         double tmY = 0;
+        // Rotated-text line tracking: for a rotated Tm (d ≈ 0, b ≠ 0 — e.g.
+        // "0 1 -1 0 e f", 90° text) the visual line coordinate is the origin
+        // projected on the Tm up-axis (c,d) — ±e — not f. tmN is |(c,d)|, the
+        // per-unit line advance used to scale Td/T*/leading displacements.
+        double tmN = 1.0;
+        bool tmRotated = false;
+        int textRenderMode = 0; // Tr; 3 = invisible (hOCR overlay signature)
         // Track the Y at which the most recent Tj/TJ/'/" actually rendered so we can
         // distinguish "new logical line" (large Y delta) from "same row, repositioned
         // by Tm for a different column" (small Y delta). Used to suppress false
@@ -395,9 +818,18 @@ public sealed class TextAbsorber
         double[]? pageBounds = inheritedBounds ?? (pageBoundsActive ? GetPageMediaBox(pageDict, reader) : null);
         bool skipText = false;
         var searchRect = TextSearchOptions?.Rectangle;
-        // CTM tracking for cm operator — accumulates with inherited CTM from parent
-        double localCmTx = cmTx, localCmTy = cmTy;
-        var cmStack = new Stack<(double tx, double ty)>();
+        // CTM tracking for cm operator — accumulates with inherited CTM from parent.
+        // localCmD is the composed vertical scale (d): a page whose content is drawn
+        // under a flipped CTM ("1 0 0 -1 0 H cm", text-space Y growing downward) needs
+        // it to recover the device Y for line ordering.
+        double localCmTx = cmTx, localCmTy = cmTy, localCmD = cmD;
+        var cmStack = new Stack<(double tx, double ty, double d)>();
+        // Strict font-usage check: track whether a font is set in the current graphics
+        // state (Tf sets it; q/Q save/restore it as spec text state). A text-showing
+        // operator with no font set means the content stream is malformed (no preceding
+        // Tf) — throw IncorrectFontUsageException unless IgnoreResourceFontErrors is set.
+        bool fontSet = fontSetOnEntry;
+        var fontSetStack = new Stack<bool>();
 
         while (true)
         {
@@ -453,7 +885,7 @@ public sealed class TextAbsorber
                                 var at = props.Get("ActualText");
                                 if (at is PdfString ats)
                                 {
-                                    actualText = DecodeTextString(ats.Value);
+                                    actualText = CollapseTwoCharLigature(DecodeTextString(ats.Value));
                                     actualTextUsed = false;
                                 }
                             }
@@ -472,13 +904,19 @@ public sealed class TextAbsorber
                         }
                         case "cm" when operands.Count >= 6:
                             localCmTx += GetNumber(operands[4]);
-                            localCmTy += GetNumber(operands[5]);
+                            // Compose the Y transform (axis-aligned): with the CTM in effect
+                            // y_dev = D·y + T, appending "a b c d e f cm" gives
+                            // y_dev = (D·d)·y + (D·f + T).
+                            localCmTy += localCmD * GetNumber(operands[5]);
+                            localCmD *= GetNumber(operands[3]);
                             break;
                         case "q":
-                            cmStack.Push((localCmTx, localCmTy));
+                            cmStack.Push((localCmTx, localCmTy, localCmD));
+                            fontSetStack.Push(fontSet);
                             break;
                         case "Q":
-                            if (cmStack.Count > 0) (localCmTx, localCmTy) = cmStack.Pop();
+                            if (cmStack.Count > 0) (localCmTx, localCmTy, localCmD) = cmStack.Pop();
+                            if (fontSetStack.Count > 0) fontSet = fontSetStack.Pop();
                             break;
                         case "Do" when operands.Count >= 1 && operands[0] is PdfName doName:
                         {
@@ -489,14 +927,19 @@ public sealed class TextAbsorber
                                 if (xstr is not null && xstr.Dict.GetName("Subtype") == "Form")
                                 {
                                     var xbytes = reader.DecodeStream(xstr);
+                                    // A form XObject inherits the graphics state (incl. font) at the Do.
                                     ExtractTextFromContentStream(xbytes, xstr.Dict, reader, depth + 1,
-                                        pageBounds, localCmTx, localCmTy);
+                                        pageBounds, localCmTx, localCmTy, fontSet, localCmD);
                                 }
                             }
                             break;
                         }
+                        case "Tr" when operands.Count >= 1:
+                            textRenderMode = (int)GetNumber(operands[0]);
+                            break;
                         case "Tf" when operands.Count >= 2:
                             fontSize = GetNumber(operands[1]);
+                            fontSet = true;
                             if (operands[0] is PdfName tfFontName)
                             {
                                 currentFontName = tfFontName.Value;
@@ -522,6 +965,22 @@ public sealed class TextAbsorber
                             {
                                 var newTmY = GetNumber(operands[5]);
                                 tmD = Math.Abs(GetNumber(operands[3]));
+                                tmA = Math.Abs(GetNumber(operands[0]));
+                                var tmBraw = GetNumber(operands[1]);
+                                var tmCraw = GetNumber(operands[2]);
+                                var tmDraw = GetNumber(operands[3]);
+                                tmN = Math.Sqrt(tmCraw * tmCraw + tmDraw * tmDraw);
+                                if (tmN < 0.001) tmN = 1.0;
+                                tmRotated = tmD <= 0.001 && Math.Abs(tmBraw) > 0.001;
+                                if (tmRotated)
+                                {
+                                    // Line coordinate along the up-axis: successive visual
+                                    // lines of sideways text differ in ±e, not f. The sign
+                                    // (via c) keeps "later line" = smaller coordinate, so
+                                    // the Y-descending line sort yields reading order.
+                                    newTmY = (GetNumber(operands[4]) * tmCraw
+                                              + GetNumber(operands[5]) * tmDraw) / tmN;
+                                }
 
                                 // Emit newline when Tm repositions to a different Y line.
                                 // Compare against lastRenderedY (where the previous Tj/'/"
@@ -532,7 +991,17 @@ public sealed class TextAbsorber
                                 // e.g. 90° rotation [0 fs -fs 0 e f]) has meaningless f-value
                                 // differences that would generate false line breaks.
                                 var tmYThreshold = Math.Max(1.0, fontSize * 0.3);
-                                var refY = !double.IsNaN(lastRenderedY) ? lastRenderedY : prevTmY;
+                                // refY = where the last text landed. lastRenderedY / prevTmY are
+                                // per-content-stream locals, so they reset to NaN when text
+                                // continues inside a Form XObject drawn via Do (a common way to
+                                // place a diagram/overlay). Fall back to the instance-level
+                                // _currentLineY (which survives the recursion) so the XObject's
+                                // first positioned run still line-breaks against the outer text
+                                // instead of gluing onto it (e.g. floor-plan letters merging into
+                                // the paragraph line above them).
+                                var refY = !double.IsNaN(lastRenderedY) ? lastRenderedY
+                                         : !double.IsNaN(prevTmY) ? prevTmY
+                                         : _currentLineY;
                                 // After a ' or " operator, the actual rendered Y is tmY - leading,
                                 // but a subsequent Tm's newTmY is compared with the refY directly.
                                 // For same-row column layouts the Tm targets Y ≈ previous Tm's Y
@@ -544,19 +1013,39 @@ public sealed class TextAbsorber
                                 {
                                     refY = prevTmY;
                                 }
-                                bool tmSameRow = tmD > 0 && !double.IsNaN(refY)
+                                bool tmSameRow = (tmD > 0 || tmRotated) && !double.IsNaN(refY)
                                                  && Math.Abs(newTmY - refY) <= tmYThreshold;
-                                if (tmD > 0 && !double.IsNaN(refY) && !tmSameRow &&
+                                if ((tmD > 0 || tmRotated) && !double.IsNaN(refY) && !tmSameRow &&
                                     _text.Length > 0 && _text[^1] != '\n')
                                 {
                                     RecordLineY();
                                     _text.Append("\r\n");
                                 }
-                                // Track absolute page-space Y for line sorting
+                                // Track absolute page-space Y for line sorting: keep
+                                // _currentLineY in text space, but snapshot the CTM Y offset
+                                // in effect now so RecordLineY can emit page-space Y. Only inside
+                                // a Form XObject (depth > 0) — page-content Y tracking is left
+                                // byte-identical to avoid disturbing the common extraction path.
                                 _currentLineY = newTmY;
+                                _currentLineCmTy = LineCmAdjust(depth, localCmD, localCmTy, _currentLineY);
                                 prevTmY = newTmY;
                                 tmY = newTmY;
-                                tlmX = GetNumber(operands[4]);
+                                if (tmRotated)
+                                {
+                                    // Advance axis for sideways text is the origin projected
+                                    // on the Tm direction vector (a,b) — ±f, not e — so the
+                                    // word-gap / column-grid logic sees real line offsets.
+                                    var aRaw = GetNumber(operands[0]);
+                                    var n2 = Math.Sqrt(aRaw * aRaw + tmBraw * tmBraw);
+                                    if (n2 < 0.001) n2 = 1.0;
+                                    tlmX = (GetNumber(operands[4]) * aRaw
+                                            + GetNumber(operands[5]) * tmBraw) / n2;
+                                }
+                                else
+                                {
+                                    tlmX = GetNumber(operands[4]);
+                                }
+                                tmOriginX = tlmX;
                                 tx = tlmX;
                                 // Check page bounds for LimitToPageBounds filtering
                                 // Apply accumulated CTM translation to convert local coords to page space
@@ -567,13 +1056,14 @@ public sealed class TextAbsorber
                                     skipText = pageY < pageBounds[1] - 1 || pageY > pageBounds[3] + 1 ||
                                                pageX < pageBounds[0] - 1 || pageX > pageBounds[2] + 1;
                                 }
-                                // Check search rectangle filter
+                                // Check search rectangle filter. Y is a line-level filter;
+                                // X is clipped per glyph in the text-showing operators
+                                // (see AppendClippedRun), so don't gate the whole run on
+                                // its start X here.
                                 if (!skipText && searchRect is not null)
                                 {
                                     var pageY = newTmY + localCmTy;
-                                    var pageX = tlmX + localCmTx;
-                                    skipText = pageY < searchRect.LLY || pageY > searchRect.URY ||
-                                               pageX < searchRect.LLX || pageX > searchRect.URX;
+                                    skipText = pageY < searchRect.LLY || pageY > searchRect.URY;
                                 }
                                 // Reset gap-detection only when the Tm actually moved to a new
                                 // logical row. For same-row Tm (column reposition) keep
@@ -593,9 +1083,11 @@ public sealed class TextAbsorber
                             // for column-per-BT PDF layouts). Keep lastRunEndX alive — the next
                             // Tm will decide whether to clear it based on row change.
                             tlmX = 0;
+                            tmOriginX = 0;
                             tx = 0;
                             tmY = 0;
                             tmD = 1.0;
+                            tmA = 1.0;
                             lastRunEstWidth = 0;
                             horizScale = 1.0; // Tz resets to 100% at start of text object
                             break;
@@ -623,15 +1115,23 @@ public sealed class TextAbsorber
                                 tx = tlmX;
                                 // Compute actual page-space y-displacement: ty * tmD
                                 // (tmD is the y-scale component from the most recent Tm)
-                                var pageDisp = Math.Abs(rawTy * (tmD > 0 ? tmD : 1.0));
-                                tmY += rawTy * (tmD > 0 ? tmD : 1.0);
+                                var pageDisp = Math.Abs(rawTy * (tmD > 0 ? tmD : tmN));
+                                tmY += rawTy * (tmD > 0 ? tmD : tmN);
                                 if (pageDisp > 0.5)
                                 {
                                     RecordLineY();
                                     _text.Append("\r\n");
-                                    // Update currentLineY with Td displacement
-                                    if (!double.IsNaN(_currentLineY))
-                                        _currentLineY += rawTy * (tmD > 0 ? tmD : 1.0);
+                                    // Inside a Form XObject, mirror the absolute text-space baseline
+                                    // (tmY, already advanced above): assigning rather than incrementing
+                                    // keeps _currentLineY correct across a BT that reset tmY to 0 — e.g.
+                                    // a widget appearance drawn via BT+Td with no absolute Tm, which
+                                    // otherwise inherits the outer page line's stale Y. Page content
+                                    // (depth 0) keeps the original incremental update.
+                                    if (depth > 0)
+                                        _currentLineY = tmY;
+                                    else if (!double.IsNaN(_currentLineY))
+                                        _currentLineY += rawTy * (tmD > 0 ? tmD : tmN);
+                                    _currentLineCmTy = LineCmAdjust(depth, localCmD, localCmTy, _currentLineY);
                                     lastRunEndX = double.NaN;
                                 }
                                 // Check page bounds with CTM
@@ -642,36 +1142,63 @@ public sealed class TextAbsorber
                                     skipText = pageY < pageBounds[1] - 1 || pageY > pageBounds[3] + 1 ||
                                                pageX < pageBounds[0] - 1 || pageX > pageBounds[2] + 1;
                                 }
-                                // Check search rectangle filter
+                                // Check search rectangle filter. Y is a line-level filter;
+                                // X is clipped per glyph in the text-showing operators
+                                // (see AppendClippedRun), so don't gate the whole run on
+                                // its start X here.
                                 if (!skipText && searchRect is not null)
                                 {
                                     var pageY = tmY + localCmTy;
-                                    var pageX = tlmX + localCmTx;
-                                    skipText = pageY < searchRect.LLY || pageY > searchRect.URY ||
-                                               pageX < searchRect.LLX || pageX > searchRect.URX;
+                                    skipText = pageY < searchRect.LLY || pageY > searchRect.URY;
                                 }
                             }
                             break;
                         }
                         case "T*":
                         {
-                            // Equivalent to 0 -TL Td; apply same scale-aware threshold
-                            // T* resets text cursor to line origin (x=0 advance in Td terms)
+                            // Equivalent to 0 -TL Td: move the text line matrix down by the
+                            // current leading and reset the cursor to the line origin. Mirror
+                            // the Td handler so tmY, the line-break detection and the
+                            // page-bounds / search-rectangle filters all advance with the new
+                            // baseline. (The earlier version left tmY stale, so a Tj after a
+                            // run of T* operators was positioned and filtered against the Y of
+                            // a line several rows above, dropping in-rectangle text.)
                             tx = tlmX;
-                            var pageDisp = Math.Abs(leading * (tmD > 0 ? tmD : 1.0));
+                            var disp = leading * (tmD > 0 ? tmD : tmN);
+                            var pageDisp = Math.Abs(disp);
+                            tmY -= disp;
                             if (pageDisp > 0.5)
                             {
                                 RecordLineY();
                                 _text.Append("\r\n");
-                                if (!double.IsNaN(_currentLineY))
-                                    _currentLineY -= leading * (tmD > 0 ? tmD : 1.0);
+                                // See the Td note: inside an XObject mirror the absolute baseline
+                                // (survives a BT that zeroed tmY); page content keeps the decrement.
+                                if (depth > 0)
+                                    _currentLineY = tmY;
+                                else if (!double.IsNaN(_currentLineY))
+                                    _currentLineY -= disp;
+                                _currentLineCmTy = LineCmAdjust(depth, localCmD, localCmTy, _currentLineY);
                                 lastRunEndX = double.NaN;
+                            }
+                            // Re-evaluate the line-level filters at the new baseline.
+                            if (pageBounds is not null)
+                            {
+                                var pageY = tmY + localCmTy;
+                                var pageX = tlmX + localCmTx;
+                                skipText = pageY < pageBounds[1] - 1 || pageY > pageBounds[3] + 1 ||
+                                           pageX < pageBounds[0] - 1 || pageX > pageBounds[2] + 1;
+                            }
+                            if (!skipText && searchRect is not null)
+                            {
+                                var pageY = tmY + localCmTy;
+                                skipText = pageY < searchRect.LLY || pageY > searchRect.URY;
                             }
                             break;
                         }
                         case "Tj":
                         {
                             _textShowingOpCount++;
+                            EnsureFontSet(fontSet, op);
                             if (skipText) break;
                             if (operands.Count >= 1 && operands[0] is PdfString tjStr)
                             {
@@ -688,33 +1215,65 @@ public sealed class TextAbsorber
                                 }
                                 else
                                 {
-                                    var decoded = ApplyRtlIfPureRtl(NormalizeDecoded(DecodeString(tjStr.Value, currentToUnicode, currentFontDict, reader, useFontEngine)));
-                                    // Insert space for significant inter-word gap.
-                                    // With proper text line matrix tracking, gap = tx - lastRunEndX
-                                    // represents the actual visual gap between text runs (in user space).
-                                    // A word space is typically ~fontSize * 0.25; we use a lower threshold
-                                    // to catch narrow word spaces while avoiding false positives.
-                                    if (!double.IsNaN(lastRunEndX)
-                                        && _text.Length > 0 && _text[^1] != ' ' && _text[^1] != '\n')
+                                    var fullDecoded = ApplyRtlIfPureRtl(NormalizeDecoded(DecodeString(tjStr.Value, currentToUnicode, currentFontDict, reader, useFontEngine)));
+                                    // When a search rectangle is active, clip the run to the
+                                    // glyphs whose advance box falls inside it (page space).
+                                    var clipping = searchRect is not null && tmD > 0 && currentMetrics is not null;
+                                    var decoded = fullDecoded;
+                                    if (clipping)
                                     {
-                                        var gap = tx - lastRunEndX;
-                                        // Use a threshold based on font size. Lower threshold for runs
-                                        // with font metrics since tlmX tracking gives accurate gaps.
-                                        // Cumulative font metric imprecision over long runs can narrow
-                                        // the apparent gap, so use 0.10 * fontSize to catch narrow spaces.
-                                        var threshold = (lastHadMetrics || currentMetrics != null)
-                                            ? fontSize * 0.10
-                                            : fontSize * 0.4;
-                                        var spaces = ComputeSpaceCount(gap, threshold, fontSize);
-                                        for (int si = 0; si < spaces; si++) _text.Append(' ');
+                                        var clip = new StringBuilder();
+                                        var pen = tx;
+                                        AppendClippedRun(clip, tjStr.Value, currentToUnicode, currentFontDict,
+                                            reader, useFontEngine, currentMetrics, fontSize, horizScale,
+                                            searchRect!, tmOriginX, tmA, localCmTx, ref pen);
+                                        decoded = clip.ToString();
                                     }
-                                    // Avoid double spaces: if a space was just emitted and the decoded text
-                                    // starts with a space, skip the leading space.
-                                    if (_text.Length > 0 && _text[^1] == ' ' && decoded.Length > 0 && decoded[0] == ' ')
-                                        decoded = decoded.Substring(1);
-                                    _text.Append(decoded);
+                                    if (!clipping || decoded.Length > 0)
+                                    {
+                                        // In Pure mode, capture the current run's page-space X and keep the
+                                        // per-line grid origin up to date before computing spacing.
+                                        double runPageX = 0;
+                                        if (_pageCellWidth > 0)
+                                        {
+                                            runPageX = tmOriginX + (tx - tmOriginX) * tmA + localCmTx;
+                                            TrackLineStart(runPageX);
+                                        }
+                                        // Insert space for significant inter-word gap.
+                                        // With proper text line matrix tracking, gap = tx - lastRunEndX
+                                        // represents the actual visual gap between text runs (in user space).
+                                        // A word space is typically ~fontSize * 0.25; we use a lower threshold
+                                        // to catch narrow word spaces while avoiding false positives.
+                                        if (!double.IsNaN(lastRunEndX)
+                                            && _text.Length > 0 && _text[^1] != ' ' && _text[^1] != '\n')
+                                        {
+                                            var gap = tx - lastRunEndX;
+                                            // Use a threshold based on font size. Lower threshold for runs
+                                            // with font metrics since tlmX tracking gives accurate gaps.
+                                            // Cumulative font metric imprecision over long runs can narrow
+                                            // the apparent gap, so use 0.10 * fontSize to catch narrow spaces.
+                                            var threshold = (lastHadMetrics || currentMetrics != null)
+                                                ? fontSize * 0.10
+                                                : fontSize * 0.4;
+                                            var spaces = _pageCellWidth > 0
+                                                ? ColumnSpaces(gap, threshold, runPageX)
+                                                : ComputeSpaceCount(gap, threshold, fontSize);
+                                            if (spaces > 0) _sawIntraLineGapSpaces = true;
+                                            for (int si = 0; si < spaces; si++) _text.Append(' ');
+                                        }
+                                        // Avoid double spaces: if a space was just emitted and the decoded text
+                                        // starts with a space, skip the leading space.
+                                        if (_text.Length > 0 && _text[^1] == ' ' && decoded.Length > 0 && decoded[0] == ' ')
+                                            decoded = decoded.Substring(1);
+                                        _text.Append(decoded);
+                                    }
                                     var measuredWidth = currentMetrics?.MeasureString(tjStr.Value, fontSize);
-                                    var width = (measuredWidth ?? (fontSize * 0.5 * decoded.Length)) * horizScale;
+                                    var width = (measuredWidth ?? (fontSize * 0.5 * fullDecoded.Length)) * horizScale;
+                                    // Capture invisible (Tr 3) runs (with their rendered advance) for
+                                    // hOCR-overlay reconstruction.
+                                    if (_collectOcrRuns && textRenderMode == 3 && fullDecoded.Length > 0)
+                                        _ocrRuns.Add((fullDecoded,
+                                            tmOriginX + (tx - tmOriginX) * tmA + localCmTx, tmY, fontSize, width));
                                     lastRunEndX = tx + width;
                                     lastRunEstWidth = width;
                                     lastHadMetrics = measuredWidth.HasValue;
@@ -730,6 +1289,7 @@ public sealed class TextAbsorber
                         case "TJ":
                         {
                             _textShowingOpCount++;
+                            EnsureFontSet(fontSet, op);
                             if (skipText) break;
                             if (operands.Count >= 1 && operands[0] is PdfArray tjArr)
                             {
@@ -746,46 +1306,105 @@ public sealed class TextAbsorber
                                 {
                                     double tjWidth = 0;
                                     int tjDecodedLen = 0;
-                                    var tjFirst = true;
                                     // Buffer the TJ text so we can apply per-operator RTL reversal
                                     // after collecting all sub-strings (mirrors TypeScript applyRtl on TJ).
                                     var tjBuf = new StringBuilder();
+                                    // When a search rectangle is active, clip each glyph to it in
+                                    // page space; the pen advances over the whole array (strings and
+                                    // numeric adjustments) regardless of visibility.
+                                    var clipping = searchRect is not null && tmD > 0 && currentMetrics is not null;
+                                    var clipBuf = clipping ? new StringBuilder() : null;
+                                    var clipPen = tx;
+                                    var hadString = false;
+                                    // Track this run for the Pure-mode grid (line-start X for
+                                    // leading columns) — the TJ path must mirror the Tj path or
+                                    // TJ-drawn documents get no grid anchoring at all.
+                                    double tjRunPageX = 0;
+                                    if (_pageCellWidth > 0)
+                                    {
+                                        tjRunPageX = tmOriginX + (tx - tmOriginX) * tmA + localCmTx;
+                                        TrackLineStart(tjRunPageX);
+                                    }
+                                    // The inter-word space before the run depends only on pre-run state.
+                                    var leadingSpaces = 0;
+                                    if (!double.IsNaN(lastRunEndX)
+                                        && _text.Length > 0 && _text[^1] != ' ' && _text[^1] != '\n')
+                                    {
+                                        var tjGap = tx - lastRunEndX;
+                                        leadingSpaces = _pageCellWidth > 0
+                                            ? ColumnSpaces(tjGap, fontSize * 0.15, tjRunPageX)
+                                            : ComputeSpaceCount(tjGap, fontSize * 0.15, fontSize);
+                                    }
                                     foreach (var item in tjArr)
                                     {
                                         if (item is PdfString tjS)
                                         {
+                                            hadString = true;
                                             var tjDecoded = NormalizeDecoded(DecodeString(tjS.Value, currentToUnicode, currentFontDict, reader, useFontEngine));
-                                            // Insert inter-word space before first sub-string if gap detected.
-                                            // With proper tlmX tracking, gap is the actual visual gap.
-                                            if (tjFirst && !double.IsNaN(lastRunEndX)
-                                                && _text.Length > 0 && _text[^1] != ' ' && _text[^1] != '\n')
-                                            {
-                                                var tjGap = tx - lastRunEndX;
-                                                var tjThreshold = fontSize * 0.15;
-                                                var tjSpaces = ComputeSpaceCount(tjGap, tjThreshold, fontSize);
-                                                for (int si = 0; si < tjSpaces; si++) _text.Append(' ');
-                                            }
-                                            tjFirst = false;
                                             tjBuf.Append(tjDecoded);
                                             tjWidth += (currentMetrics?.MeasureString(tjS.Value, fontSize)
                                                        ?? (fontSize * 0.5 * tjS.Value.Length)) * horizScale;
                                             tjDecodedLen += tjDecoded.Length;
+                                            if (clipping)
+                                                AppendClippedRun(clipBuf!, tjS.Value, currentToUnicode, currentFontDict,
+                                                    reader, useFontEngine, currentMetrics, fontSize, horizScale,
+                                                    searchRect!, tmOriginX, tmA, localCmTx, ref clipPen);
                                         }
                                         else
                                         {
                                             var adj = GetNumber(item);
-                                            tjWidth += -adj * fontSize / 1000.0;
+                                            var advance = -adj * fontSize / 1000.0;
+                                            tjWidth += advance;
                                             if (adj < -190 && (tjBuf.Length == 0 || tjBuf[^1] != ' '))
                                                 tjBuf.Append(' ');
+                                            if (clipping)
+                                            {
+                                                // The synthesized word space sits at the current pen; emit it
+                                                // only when that point is inside the rectangle.
+                                                if (adj < -190)
+                                                {
+                                                    var pageX = tmOriginX + (clipPen - tmOriginX) * tmA + localCmTx;
+                                                    if (pageX >= searchRect!.LLX && pageX <= searchRect.URX
+                                                        && (clipBuf!.Length == 0 || clipBuf[^1] != ' '))
+                                                        clipBuf!.Append(' ');
+                                                }
+                                                clipPen += advance;
+                                            }
                                         }
                                     }
                                     // Apply per-operator RTL reversal: if all decoded TJ chars are RTL/neutral,
                                     // reverse to convert visual order to logical order (Hebrew, Arabic).
-                                    var tjText = ApplyRtlIfPureRtl(tjBuf.ToString());
+                                    var tjText = clipping ? clipBuf!.ToString() : ApplyRtlIfPureRtl(tjBuf.ToString());
+                                    if (clipping ? tjText.Length > 0 : hadString)
+                                    {
+                                        if (leadingSpaces > 0) _sawIntraLineGapSpaces = true;
+                                        for (int si = 0; si < leadingSpaces; si++) _text.Append(' ');
+                                    }
                                     // Avoid double spaces between previous run and this TJ block.
                                     if (_text.Length > 0 && _text[^1] == ' ' && tjText.Length > 0 && tjText[0] == ' ')
                                         tjText = tjText.Substring(1);
-                                    _text.Append(tjText);
+                                    bool tjIsLeadingPos = _text.Length == 0 || _text[^1] == '\n';
+                                    bool tjAllSpace = tjText.Length > 0 && tjText.Trim().Length == 0;
+                                    if (tjAllSpace && tjIsLeadingPos)
+                                    {
+                                        // Hold this leading whitespace run; re-home it below (do NOT append it now).
+                                        pendingReorderSpaceY = tmY;
+                                    }
+                                    else
+                                    {
+                                        if (!double.IsNaN(pendingReorderSpaceY))
+                                        {
+                                            if (System.Math.Abs(tmY - pendingReorderSpaceY) > 1.0)
+                                                pendingReorderSpaceY = double.NaN;              // different line: drop the orphan
+                                            else if (tjText.Length > 0 && Aspose.Pdf.Text.BidiReorderer.IsRtlChar(tjText[0])
+                                                     && _text.Length > 0 && _text[^1] != ' ')
+                                            {
+                                                _text.Append(' ');                             // re-home before the first RTL run
+                                                pendingReorderSpaceY = double.NaN;
+                                            }
+                                        }
+                                        _text.Append(tjText);
+                                    }
                                     lastRunEndX = tx + tjWidth;
                                     lastRunEstWidth = tjWidth;
                                     lastDecodedLength = tjDecodedLen;
@@ -800,6 +1419,7 @@ public sealed class TextAbsorber
                         case "\"":
                         {
                             _textShowingOpCount++;
+                            EnsureFontSet(fontSet, op);
                             // PDF spec: ' is "move to next line and show string" — equivalent to T* then Tj.
                             //          " is "set word/char spacing, move to next line, show string" —
                             //          operands = aw, ac, string.
@@ -814,7 +1434,7 @@ public sealed class TextAbsorber
                             else if (op == "\"" && operands.Count >= 3) qStr = operands[2] as PdfString;
 
                             // Move text line matrix down by leading (pre-text position).
-                            var newY = tmY - leading * (tmD > 0 ? tmD : 1.0);
+                            var newY = tmY - leading * (tmD > 0 ? tmD : tmN);
                             tmY = newY;
                             tx = tlmX;
 
@@ -847,21 +1467,38 @@ public sealed class TextAbsorber
                                 }
                                 else
                                 {
-                                    var decoded = ApplyRtlIfPureRtl(NormalizeDecoded(
+                                    var fullDecoded = ApplyRtlIfPureRtl(NormalizeDecoded(
                                         DecodeString(qStr.Value, currentToUnicode, currentFontDict, reader, useFontEngine)));
-                                    // Same-row continuation: insert proportional spaces for the
-                                    // horizontal gap (Pure mode), mirrors Tj/TJ gap logic.
-                                    if (sameRow && !double.IsNaN(lastRunEndX)
-                                        && _text.Length > 0 && _text[^1] != ' ' && _text[^1] != '\n')
+                                    // When a search rectangle is active, clip the run to the
+                                    // glyphs whose advance box falls inside it (page space).
+                                    var clipping = searchRect is not null && tmD > 0 && currentMetrics is not null;
+                                    var decoded = fullDecoded;
+                                    if (clipping)
                                     {
-                                        var gap = tx - lastRunEndX;
-                                        var threshold = fontSize * 0.2;
-                                        var spaces = ComputeSpaceCount(gap, threshold, fontSize);
-                                        for (int si = 0; si < spaces; si++) _text.Append(' ');
+                                        var clip = new StringBuilder();
+                                        var pen = tx;
+                                        AppendClippedRun(clip, qStr.Value, currentToUnicode, currentFontDict,
+                                            reader, useFontEngine, currentMetrics, fontSize, horizScale,
+                                            searchRect!, tmOriginX, tmA, localCmTx, ref pen);
+                                        decoded = clip.ToString();
                                     }
-                                    _text.Append(decoded);
+                                    if (!clipping || decoded.Length > 0)
+                                    {
+                                        // Same-row continuation: insert proportional spaces for the
+                                        // horizontal gap (Pure mode), mirrors Tj/TJ gap logic.
+                                        if (sameRow && !double.IsNaN(lastRunEndX)
+                                            && _text.Length > 0 && _text[^1] != ' ' && _text[^1] != '\n')
+                                        {
+                                            var gap = tx - lastRunEndX;
+                                            var threshold = fontSize * 0.2;
+                                            var spaces = ComputeSpaceCount(gap, threshold, fontSize);
+                                            if (spaces > 0) _sawIntraLineGapSpaces = true;
+                                            for (int si = 0; si < spaces; si++) _text.Append(' ');
+                                        }
+                                        _text.Append(decoded);
+                                    }
                                     var measuredWidth = currentMetrics?.MeasureString(qStr.Value, fontSize);
-                                    var width = (measuredWidth ?? (fontSize * 0.5 * decoded.Length)) * horizScale;
+                                    var width = (measuredWidth ?? (fontSize * 0.5 * fullDecoded.Length)) * horizScale;
                                     lastRunEndX = tx + width;
                                     lastRunEstWidth = width;
                                     lastHadMetrics = measuredWidth.HasValue;
@@ -871,6 +1508,7 @@ public sealed class TextAbsorber
                                 }
                             }
                             _currentLineY = newY;
+                            _currentLineCmTy = LineCmAdjust(depth, localCmD, localCmTy, _currentLineY);
                             break;
                         }
                         default:
@@ -887,6 +1525,21 @@ public sealed class TextAbsorber
                     break;
             }
         }
+        return fontSet;
+    }
+
+    /// <summary>
+    /// Strict font-usage guard for a text-showing operator: if no font is set in the
+    /// current graphics state the content stream is malformed (no preceding Tf), so throw
+    /// <see cref="IncorrectFontUsageException"/> — unless the caller opted into tolerant
+    /// extraction via <see cref="Text.TextSearchOptions.IgnoreResourceFontErrors"/>.
+    /// </summary>
+    private void EnsureFontSet(bool fontSet, string op)
+    {
+        if (fontSet) return;
+        if (TextSearchOptions?.IgnoreResourceFontErrors ?? false) return;
+        throw new IncorrectFontUsageException(
+            $"Document error: {op} operator without preceding Tf - no font set for the text segment");
     }
 
     private void ProcessOperator(string op, List<PdfObject> operands,
@@ -1027,15 +1680,98 @@ public sealed class TextAbsorber
     /// Decode a byte string using the font's encoding. Used by both TextAbsorber and TextFragmentAbsorber.
     /// </summary>
     internal static string DecodeStringPublic(byte[] bytes, Dictionary<int, string>? toUnicode,
-        PdfDictionary? fontDict, PdfReader reader, bool useFontEngineEncoding = false)
-        => NormalizeDecoded(DecodeString(bytes, toUnicode, fontDict, reader, useFontEngineEncoding));
+        PdfDictionary? fontDict, PdfReader reader, bool useFontEngineEncoding = false,
+        bool foldNbsp = true)
+        => NormalizeDecoded(DecodeString(bytes, toUnicode, fontDict, reader, useFontEngineEncoding), foldNbsp);
 
     /// <summary>
-    /// Normalize a decoded text string for extraction: replace U+00A0 (non-breaking space)
-    /// with regular space so that double-space suppression works correctly.
+    /// Normalize a decoded text string for extraction. Plain-text extraction
+    /// (TextAbsorber) folds U+00A0 (non-breaking space) to a regular space so
+    /// double-space suppression works \u2014 matching Aspose.Pdf; fragment
+    /// extraction (TextFragmentAbsorber) preserves it verbatim (foldNbsp=false),
+    /// which is the shape Aspose.Pdf fragments report.
     /// </summary>
-    private static string NormalizeDecoded(string s) =>
-        s.IndexOf('\u00A0') >= 0 ? s.Replace('\u00A0', ' ') : s;
+    private static string NormalizeDecoded(string s, bool foldNbsp = true)
+    {
+        if (foldNbsp && s.IndexOf('\u00a0') >= 0) s = s.Replace('\u00a0', ' ');
+        // Some PDFs ship a buggy ToUnicode CMap that maps a whitespace glyph to a
+        // sequence containing CR/LF (e.g. the space glyph -> "\t\r  "). Those are
+        // glyph text, not line structure (the absorber emits its own line breaks
+        // from Td/T*/' positioning), so a stray CR/LF inside decoded glyph text
+        // would corrupt extraction. Collapse any whitespace run that contains a
+        // CR or LF into a single space; tab-only and normal spacing are untouched.
+        if (s.IndexOf('\r') >= 0 || s.IndexOf('\n') >= 0)
+            s = CollapseControlWhitespace(s);
+        return s;
+    }
+
+    private static string CollapseControlWhitespace(string s)
+    {
+        static bool IsWs(char c) => c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v';
+        var sb = new System.Text.StringBuilder(s.Length);
+        int i = 0;
+        while (i < s.Length)
+        {
+            if (IsWs(s[i]))
+            {
+                int j = i;
+                bool hasBreak = false;
+                while (j < s.Length && IsWs(s[j]))
+                {
+                    if (s[j] == '\r' || s[j] == '\n') hasBreak = true;
+                    j++;
+                }
+                if (hasBreak) sb.Append(' ');          // whitespace run with CR/LF -> single space
+                else sb.Append(s, i, j - i);            // no CR/LF -> leave untouched
+                i = j;
+            }
+            else
+            {
+                sb.Append(s[i]);
+                i++;
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Append the glyphs of one show string that fall within the search rectangle, in
+    /// page space, to <paramref name="sb"/>. The pen (<paramref name="penText"/>, in the
+    /// unscaled text-space units the absorber tracks) advances over every glyph whether
+    /// or not it is visible, so positioning of later runs is unaffected. X is clipped per
+    /// glyph: a glyph contributes only when its whole advance box lies within
+    /// [LLX, URX]. Y is filtered at the line level by the caller before this runs.
+    /// </summary>
+    /// <remarks>
+    /// The absorber accumulates Td/TD advances unscaled but tracks the text-matrix X scale
+    /// in <paramref name="tmScaleX"/> and the page-space line origin in <paramref name="tmOriginX"/>,
+    /// so a text-space pen X maps to page space as
+    /// tmOriginX + (penText - tmOriginX) * tmScaleX + localCmTx.
+    /// </remarks>
+    private static void AppendClippedRun(StringBuilder sb, byte[] bytes,
+        Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, PdfReader reader,
+        bool useFontEngine, FontMetrics? metrics, double fontSize, double horizScale,
+        Rectangle searchRect, double tmOriginX, double tmScaleX, double localCmTx,
+        ref double penText)
+    {
+        const double eps = 0.05;
+        var isCid = metrics?.IsCid ?? (fontDict?.GetName("Subtype") == "Type0");
+        var step = isCid ? 2 : 1;
+        for (var i = 0; i + step - 1 < bytes.Length; i += step)
+        {
+            var code = isCid ? ((bytes[i] << 8) | bytes[i + 1]) : bytes[i];
+            var seg = isCid ? new[] { bytes[i], bytes[i + 1] } : new[] { bytes[i] };
+            var glyph = NormalizeDecoded(DecodeString(seg, toUnicode, fontDict, reader, useFontEngine));
+            var w = (metrics is not null
+                ? metrics.GetWidth(code) * fontSize / 1000.0
+                : fontSize * 0.5 * System.Math.Max(1, glyph.Length)) * horizScale;
+            var pageLeft = tmOriginX + (penText - tmOriginX) * tmScaleX + localCmTx;
+            var pageRight = tmOriginX + (penText + w - tmOriginX) * tmScaleX + localCmTx;
+            if (pageLeft >= searchRect.LLX - eps && pageRight <= searchRect.URX + eps)
+                sb.Append(glyph);
+            penText += w;
+        }
+    }
 
     private static string DecodeString(byte[] bytes, Dictionary<int, string>? toUnicode,
         PdfDictionary? fontDict, PdfReader reader, bool useFontEngineEncoding = false)
@@ -1074,14 +1810,45 @@ public sealed class TextAbsorber
             {
                 // Try to get Adobe CID collection ordering for predefined table lookup
                 var cidOrdering = GetCidOrdering(fontDict, reader);
-                // Only when the caller asked to decode via the font engine's encoding do we
-                // recover Unicode from the embedded program's cmap (inverting glyph id →
-                // Unicode). By default a CID font without /ToUnicode keeps the raw-code
-                // fallback, matching the established extraction behaviour.
-                var gidToUnicode = useFontEngineEncoding
-                    ? GetEmbeddedGidToUnicode(fontDict, reader)
-                    : null;
+                // A CID font without /ToUnicode: for a NON-embedded font, recover Unicode by
+                // inverting the installed system face's cmap — the producer assigned glyph
+                // ids from that same face, and the reference decodes these documents. For an
+                // EMBEDDED program the reference keeps the raw-code fallback (its
+                // "NoToUnicode_UseRawCode" behaviour), so cmap inversion there stays opt-in
+                // via TextSearchOptions.UseFontEngineEncoding.
+                var gidToUnicode = GetGidToUnicode(fontDict, reader, allowEmbedded: useFontEngineEncoding);
                 return DecodeCidString(bytes, toUnicode, cidOrdering, gidToUnicode);
+            }
+
+            // Predefined legacy national CMap (GBK-EUC-H, 90ms-RKSJ-H, KSC-EUC-H, …):
+            // the show-string bytes are a national multi-byte charset (mixed 1-/2-byte
+            // codes), NOT Adobe CIDs. Without this branch the bytes fell through to the
+            // per-byte WinAnsi default and Chinese/Japanese/Korean text extracted as
+            // Latin-1 mojibake ("由 扫描全能王" → "ÓÉ É¨Ãè…"). Decode through the same
+            // codepage tables the renderer already uses (GbkTable/SjisTable/KscTable).
+            if (cidEncoding is not null && GetLegacyCidInfo(fontDict, reader) is { } legacy)
+            {
+                var sb = new StringBuilder();
+                var i = 0;
+                while (i < bytes.Length)
+                {
+                    var step = legacy.LegacyByteLength(bytes[i]);
+                    if (step == 2 && i + 1 >= bytes.Length) step = 1;
+                    if (step == 1)
+                    {
+                        sb.Append((char)bytes[i]);
+                    }
+                    else
+                    {
+                        var code = (bytes[i] << 8) | bytes[i + 1];
+                        if (legacy.LegacyToUnicode(code) is int u)
+                            sb.Append(char.ConvertFromUtf32(u));
+                        else
+                            sb.Append('�');
+                    }
+                    i += step;
+                }
+                return sb.ToString();
             }
         }
 
@@ -1400,22 +2167,55 @@ public sealed class TextAbsorber
         return sb.ToString();
     }
 
-    // Cache of glyph-id → Unicode maps built from an embedded CIDFontType2 program, keyed
-    // by the Type0 font dictionary so a page's repeated decode calls parse the font once.
-    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfDictionary, Dictionary<int, int>> _gidToUnicodeCache = new();
+    /// <summary>Cache entry for a font's inverted gid → Unicode map, remembering whether the
+    /// inversion source was the font's own embedded program (opt-in for decoding) or the
+    /// installed system face (used by default for non-embedded fonts).</summary>
+    private sealed class GidToUnicodeEntry
+    {
+        public Dictionary<int, int> Map = new();
+        public bool FromEmbedded;
+    }
+
+    // Cache of glyph-id → Unicode maps built per Type0 font dictionary so a page's
+    // repeated decode calls parse the font program once.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfDictionary, GidToUnicodeEntry> _gidToUnicodeCache = new();
+
+    // Per-font-dict cache of CidFontInfo for the legacy-CMap decode branch (an entry with
+    // LegacyCodepage == 0 means "not a legacy national CMap" and is cached as null).
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfDictionary, CidFontInfo?> _legacyCidCache = new();
+
+    /// <summary>CidFontInfo for a Type0 font whose /Encoding is a predefined legacy
+    /// national CMap (LegacyCodepage != 0); null for every other font. Cached per dict.</summary>
+    private static CidFontInfo? GetLegacyCidInfo(PdfDictionary fontDict, PdfReader reader)
+    {
+        if (_legacyCidCache.TryGetValue(fontDict, out var cached)) return cached;
+        CidFontInfo? info = null;
+        try
+        {
+            var built = CidFontInfo.TryBuild(fontDict, reader);
+            if (built is { LegacyCodepage: not 0 }) info = built;
+        }
+        catch { info = null; }
+        _legacyCidCache.Add(fontDict, info);
+        return info;
+    }
 
     /// <summary>
     /// Build a glyph-id → Unicode map for an Identity-encoded Type0 font that lacks a
-    /// /ToUnicode CMap, by inverting the embedded TrueType program's cmap (and threading the
-    /// CID→GID mapping when /CIDToGIDMap is a stream). Returns an empty map when the font has
-    /// no usable embedded program. Cached per font dictionary.
+    /// /ToUnicode CMap, by inverting a TrueType cmap (threading the CID→GID mapping when
+    /// /CIDToGIDMap is a stream). The inversion source is the embedded program when present
+    /// (returned only when <paramref name="allowEmbedded"/> — the reference keeps raw codes
+    /// for embedded programs unless font-engine decoding is requested), otherwise the
+    /// installed system face named by /BaseFont. Cached per font dictionary.
     /// </summary>
-    private static Dictionary<int, int>? GetEmbeddedGidToUnicode(PdfDictionary fontDict, PdfReader reader)
+    private static Dictionary<int, int>? GetGidToUnicode(PdfDictionary fontDict, PdfReader reader,
+        bool allowEmbedded)
     {
         if (_gidToUnicodeCache.TryGetValue(fontDict, out var cached))
-            return cached.Count > 0 ? cached : null;
+            return cached.Map.Count > 0 && (allowEmbedded || !cached.FromEmbedded) ? cached.Map : null;
 
-        var map = new Dictionary<int, int>();
+        var entry = new GidToUnicodeEntry();
+        var map = entry.Map;
         try
         {
             var descArr = reader.Resolve(fontDict.Get("DescendantFonts")) as PdfArray;
@@ -1423,9 +2223,15 @@ public sealed class TextAbsorber
             var fd = descendant is null ? null : reader.ResolveDict(descendant.Get("FontDescriptor"));
             var ff2 = fd?.Get("FontFile2") ?? fd?.Get("FontFile3");
             var stream = ff2 is null ? null : reader.ResolveStream(ff2);
-            if (stream is not null)
+            byte[]? data = stream is not null ? reader.DecodeStream(stream) : null;
+            entry.FromEmbedded = data is not null;
+            // A NON-embedded Identity CID font draws with the glyph ids of the real face
+            // it names, so the installed system font's cmap carries the same gid → Unicode
+            // relation the producer used. Resolve it as the inversion source.
+            if (data is null && fontDict.GetName("BaseFont") is { } nonEmbeddedBase)
+                data = SystemFontResolver.Resolve(nonEmbeddedBase);
+            if (data is not null)
             {
-                var data = reader.DecodeStream(stream);
                 var parser = new TrueTypeParser(data);
                 parser.Parse();
                 // parser.CMap is Unicode → glyph id; invert it. When several codepoints map
@@ -1460,8 +2266,8 @@ public sealed class TextAbsorber
         }
         catch { /* best-effort: leave the map empty so the caller falls back */ }
 
-        _gidToUnicodeCache.AddOrUpdate(fontDict, map);
-        return map.Count > 0 ? map : null;
+        _gidToUnicodeCache.AddOrUpdate(fontDict, entry);
+        return map.Count > 0 && (allowEmbedded || !entry.FromEmbedded) ? map : null;
     }
 
     /// <summary>
@@ -1664,26 +2470,25 @@ public sealed class TextAbsorber
         return 0;
     }
 
-    // Known ligature sequences → single Unicode ligature characters.
-    // When a single glyph code maps to a multi-char decomposition in a ToUnicode CMap,
-    // replace with the ligature character to match Aspose.PDF for .NET behavior.
-    private static readonly Dictionary<string, string> LigatureSequences = new()
-    {
-        ["fi"] = "\uFB01",
-        ["fl"] = "\uFB02",
-        ["ff"] = "\uFB00",
-        ["ffi"] = "\uFB03",
-        ["ffl"] = "\uFB04",
-    };
-
     private static string HexToString(string hex)
     {
         var sb = new StringBuilder();
         for (var i = 0; i + 3 < hex.Length; i += 4)
         {
             var codePoint = ParseHexInt(hex[i..(i + 4)]);
+            // UTF-16BE surrogate pair (emoji / CJK Ext-B): combine with the next unit.
+            if (codePoint is >= 0xD800 and <= 0xDBFF && i + 7 < hex.Length)
+            {
+                var low = ParseHexInt(hex[(i + 4)..(i + 8)]);
+                if (low is >= 0xDC00 and <= 0xDFFF)
+                {
+                    sb.Append(char.ConvertFromUtf32(char.ConvertToUtf32((char)codePoint, (char)low)));
+                    i += 4;
+                    continue;
+                }
+            }
             if (codePoint is >= 0xD800 and <= 0xDFFF || codePoint > 0x10FFFF)
-                continue; // skip invalid surrogate codepoints
+                continue; // skip unpaired surrogate units
             sb.Append(char.ConvertFromUtf32(codePoint));
         }
         if (sb.Length == 0 && hex.Length >= 2)
@@ -1691,12 +2496,22 @@ public sealed class TextAbsorber
             // 2-digit hex = single byte
             sb.Append((char)ParseHexInt(hex));
         }
-        var result = sb.ToString();
-        // When a single glyph maps to a known ligature decomposition, use the ligature character
-        if (result.Length >= 2 && LigatureSequences.TryGetValue(result, out var ligature))
-            return ligature;
-        return result;
+        return CollapseTwoCharLigature(sb.ToString());
     }
+
+    /// <summary>A single glyph mapped (via ToUnicode or a marked-content
+    /// /ActualText) to a TWO-letter ligature decomposition surfaces as the
+    /// ligature codepoint — a "fi"-mapped glyph and an ActualText("fi") span both
+    /// surface as U+FB01. A THREE-letter decomposition
+    /// stays as its letters (e.g. "Effizent" stays searchable, not
+    /// E+U+FB03+zent).</summary>
+    private static string CollapseTwoCharLigature(string result) => result switch
+    {
+        "fi" => "ﬁ",
+        "fl" => "ﬂ",
+        "ff" => "ﬀ",
+        _ => result,
+    };
 
     /// <summary>
     /// Decode a PDF text string (handles BOM for UTF-16BE, otherwise Latin1).
@@ -1769,13 +2584,130 @@ public sealed class TextAbsorber
     //   count ≈ round(gap / spaceWidth), where spaceWidth is the typical space glyph width
     //   (~0.25 * fontSize for most Latin fonts). Clamped to avoid runaway widths.
     // Returns 0 when gap is below the threshold (no space should be inserted).
+    /// <summary>
+    /// Keep the Pure-mode grid origin current: find the start of the line being built
+    /// (text after the last newline) and, when it changes, reset the grid so the first run
+    /// of the new line anchors column 0. Called before spacing so <see cref="ColumnSpaces"/>
+    /// measures from the correct line origin.
+    /// </summary>
+    private void TrackLineStart(double runPageX)
+    {
+        int ls = _text.Length;
+        while (ls > 0 && _text[ls - 1] != '\n') ls--;
+        if (ls != _lineStartTextOffset) { _lineStartTextOffset = ls; _lineStartPageX = double.NaN; }
+        if (double.IsNaN(_lineStartPageX))
+        {
+            _lineStartPageX = runPageX;
+            // Remember every line's start offset + X so the page pass can pad
+            // leading grid columns from the page-absolute origin (minX).
+            _pageLineStarts.Add((ls, runPageX));
+        }
+        else if (runPageX < _lineStartPageX)
+        {
+            // The line's leading column reflects its LEFTMOST run: streams often
+            // draw a row's trailing space fragment (far right) before the row
+            // text, and anchoring on that first-seen X would pad wildly.
+            _lineStartPageX = runPageX;
+            for (var i = _pageLineStarts.Count - 1; i >= 0; i--)
+            {
+                if (_pageLineStarts[i].offset != ls) continue;
+                _pageLineStarts[i] = (ls, runPageX);
+                break;
+            }
+        }
+    }
+
+    // Per-page (offset, x) of each output line's first tracked run — the input to
+    // the leading-column padding pass. Reset in Visit().
+    private readonly List<(int offset, double x)> _pageLineStarts = new();
+
+    // Page grid origin (leftmost text X) from the pre-scan; NaN when unknown.
+    private double _pageMinX = double.NaN;
+
+    /// <summary>
+    /// Pure-mode leading columns: the reference lays each page on a character
+    /// grid anchored at the page's leftmost text X, so a line starting to the
+    /// right of that origin gets round((x − minX) / cell) leading spaces.
+    /// Runs after the page streams (before line sorting), inserting from the
+    /// last line backwards so recorded offsets stay valid.
+    /// </summary>
+    private void InsertLeadingGridSpaces(int pageTextStart)
+    {
+        if (_pageCellWidth <= 0 || _pageLineStarts.Count == 0) return;
+        var minX = double.IsNaN(_pageMinX) ? double.MaxValue : _pageMinX;
+        if (minX == double.MaxValue)
+        {
+            foreach (var (off, x) in _pageLineStarts)
+                if (off >= pageTextStart && x < minX) minX = x;
+            if (minX == double.MaxValue) return;
+        }
+
+        if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_GRIDDEBUG") == "1")
+        {
+            Console.Error.WriteLine($"[grid] cell={_pageCellWidth:F3} minX={minX:F2} lines={_pageLineStarts.Count}");
+            foreach (var (off, x) in _pageLineStarts)
+            {
+                var end = Math.Min(_text.Length, off + 30);
+                var snippet = _text.ToString(off, Math.Max(0, end - off)).Replace("\r", "").Replace("\n", "");
+                Console.Error.WriteLine($"[grid]   off={off} x={x:F2} n={(int)Math.Round((x - minX) / _pageCellWidth - 0.32)} '{snippet}'");
+            }
+        }
+
+        for (var i = _pageLineStarts.Count - 1; i >= 0; i--)
+        {
+            var (off, x) = _pageLineStarts[i];
+            if (off < pageTextStart || off > _text.Length) continue;
+            // −0.32·cell phase: the oracle-derived grid rounds with a negative
+            // phase (a run less than ~0.82 cells from the origin is column 0),
+            // matching the reference's boundary-glyph placement.
+            var n = (int)Math.Round((x - minX) / _pageCellWidth - 0.32);
+            if (n <= 0) continue;
+            if (n > 200) n = 200;
+            _text.Insert(off, new string(' ', n));
+        }
+    }
+
+    /// <summary>
+    /// Number of spaces to pad before a run under the Pure-mode character grid: the run is
+    /// placed at absolute column round((runPageX − lineStartX) / cellWidth), and we pad from
+    /// the number of characters already emitted on the line. A real gap always yields at
+    /// least one space; below the word-gap threshold the run is adjacent (no space).
+    /// </summary>
+    private int ColumnSpaces(double gap, double threshold, double runPageX)
+    {
+        if (gap <= threshold) return 0;
+        int targetCol, outputCol;
+        if (!double.IsNaN(_pageMinX))
+        {
+            // Page-absolute grid (the reference model): the run's column is
+            // measured from the page origin, and the output column counts the
+            // line's leading pad (inserted later from the same numbers) plus
+            // the characters already emitted on the line.
+            // Plain rounding here: the -0.32 phase applies to the leading-pad
+            // rounding (boundary glyphs), not the inter-gap column targets.
+            targetCol = (int)Math.Round((runPageX - _pageMinX) / _pageCellWidth);
+            var leadCols = (int)Math.Round((_lineStartPageX - _pageMinX) / _pageCellWidth - 0.32);
+            if (leadCols < 0) leadCols = 0;
+            outputCol = leadCols + (_text.Length - _lineStartTextOffset);
+        }
+        else
+        {
+            targetCol = (int)Math.Round((runPageX - _lineStartPageX) / _pageCellWidth);
+            outputCol = _text.Length - _lineStartTextOffset;
+        }
+        int spaces = targetCol - outputCol;
+        if (spaces < 1) spaces = 1;
+        if (spaces > 200) spaces = 200;
+        return spaces;
+    }
+
     private int ComputeSpaceCount(double gap, double threshold, double fontSize)
     {
         if (gap <= threshold) return 0;
         if (ExtractionOptions?.FormattingMode != TextExtractionOptions.TextFormattingMode.Raw)
         {
             // Pure mode: one space per ~0.217 * fontSize of gap width.
-            // Matches Aspose.PDF for .NET Pure mode column-spacing output.
+            // Matches Aspose.Pdf Pure mode column-spacing output.
             var spaceWidth = Math.Max(fontSize * 0.217, 0.5);
             var count = (int)Math.Round(gap / spaceWidth);
             if (count < 1) count = 1;

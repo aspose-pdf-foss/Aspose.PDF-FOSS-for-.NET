@@ -16,25 +16,33 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
 
     internal ArtifactCollection(Page page) => _page = page;
 
-    private readonly List<BackgroundArtifact> _backgrounds = new();
-
     /// <summary>Add a watermark artifact to the page.</summary>
     public void Add(WatermarkArtifact artifact) => artifact.AddToPage(_page);
 
-    /// <summary>Add a background artifact to the page. Stored only;
-    /// the renderer does not currently paint the background image, but the
-    /// artifact is recorded so callers can iterate it later.</summary>
-    public void Add(BackgroundArtifact artifact) => _backgrounds.Add(artifact);
+    /// <summary>Add a background artifact to the page: it is rendered into the
+    /// page content as a prepended /Artifact /Subtype /Background block and
+    /// recorded in the collection so it round-trips on reload.</summary>
+    public void Add(BackgroundArtifact artifact)
+    {
+        if (artifact is null) throw new ArgumentNullException(nameof(artifact));
+        EnsureParsed();
+        artifact.RenderToPage(_page);
+        artifact.Page = _page;
+        _items!.Add(artifact);
+    }
 
     /// <summary>Add a generic artifact to the collection. Delegates to the
-    /// strongly-typed overload when <paramref name="artifact"/> is a
-    /// <see cref="WatermarkArtifact"/>; otherwise the artifact is appended
-    /// to the parsed list.</summary>
+    /// strongly-typed overloads for <see cref="WatermarkArtifact"/> /
+    /// <see cref="BackgroundArtifact"/>; otherwise the artifact is rendered
+    /// into the page content as an /Artifact marked-content block and recorded
+    /// in the collection so it round-trips on reload.</summary>
     public void Add(Artifact artifact)
     {
         if (artifact is null) throw new ArgumentNullException(nameof(artifact));
         if (artifact is WatermarkArtifact w) { Add(w); return; }
+        if (artifact is BackgroundArtifact b) { Add(b); return; }
         EnsureParsed();
+        artifact.RenderToPage(_page);
         artifact.Page = _page;
         _items!.Add(artifact);
     }
@@ -117,21 +125,128 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
         return _items!.ToList().GetEnumerator();
     }
 
-    /// <summary>Delete the artifact at the given 1-based index.</summary>
+    /// <summary>Delete the artifact at the given 1-based index. The artifact's
+    /// /Artifact marked-content block is also spliced out of the page content stream
+    /// so the deletion survives save + reopen.</summary>
     public void Delete(int index)
     {
         EnsureParsed();
         var items = _items!;
         if (index < 1 || index > items.Count)
             throw new ArgumentOutOfRangeException(nameof(index));
+        RemoveArtifactBlockFromContent(index - 1);
         items.RemoveAt(index - 1);
     }
 
-    /// <summary>Remove an artifact by reference; no-op if not in the collection.</summary>
+    /// <summary>Remove an artifact by reference; no-op if not in the collection.
+    /// Also splices its marked-content block out of the page content.</summary>
     public void Delete(Artifact artifact)
     {
         EnsureParsed();
-        _items!.Remove(artifact);
+        var ordinal = _items!.IndexOf(artifact);
+        if (ordinal < 0) return;
+        RemoveArtifactBlockFromContent(ordinal);
+        _items.RemoveAt(ordinal);
+    }
+
+    /// <summary>Splice the (0-based) <paramref name="ordinal"/>-th top-level
+    /// /Artifact marked-content block out of the page content stream, so a deleted
+    /// artifact does not reappear on reload. The ordinal counts artifact blocks in
+    /// content order, which matches the parsed <c>_items</c> order.</summary>
+    private void RemoveArtifactBlockFromContent(int ordinal)
+    {
+        var content = _page.GetContentStreamBytes();
+        if (content is null || content.Length == 0) return;
+        var range = FindArtifactBlockRange(content, ordinal);
+        if (range is not var (start, end)) return;
+        var result = new byte[content.Length - (end - start)];
+        Array.Copy(content, 0, result, 0, start);
+        Array.Copy(content, end, result, start, content.Length - end);
+        _page.SetContentStream(result);
+    }
+
+    /// <summary>Rewrite the marked-content block of an artifact parsed from this page,
+    /// replacing it with a freshly emitted /Artifact … BDC … EMC block that carries the
+    /// artifact's current (mutated) properties and text. Called by
+    /// <see cref="Artifact.SaveUpdates"/> so in-place edits survive save + reopen. No-op
+    /// when the artifact is not in the collection or its block can't be located.</summary>
+    internal void RewriteArtifactBlockFor(Artifact artifact)
+    {
+        EnsureParsed();
+        var ordinal = _items!.IndexOf(artifact);
+        if (ordinal < 0) return;
+        var content = _page.GetContentStreamBytes();
+        if (content is null || content.Length == 0) return;
+        var range = FindArtifactBlockRange(content, ordinal);
+        if (range is not var (start, end)) return;
+
+        var replacement = System.Text.Encoding.ASCII.GetBytes(artifact.BuildInPlaceBlock(_page));
+        var result = new byte[start + replacement.Length + (content.Length - end)];
+        Array.Copy(content, 0, result, 0, start);
+        Array.Copy(replacement, 0, result, start, replacement.Length);
+        Array.Copy(content, end, result, start + replacement.Length, content.Length - end);
+        _page.SetContentStream(result);
+    }
+
+    /// <summary>Find the byte range [start, end) of the <paramref name="ordinal"/>-th
+    /// (0-based) top-level /Artifact BMC/BDC … EMC block in <paramref name="content"/>,
+    /// mirroring the marked-content nesting logic of the parser. Returns null when not
+    /// found.</summary>
+    private static (int start, int end)? FindArtifactBlockRange(byte[] content, int ordinal)
+    {
+        var lexer = new PdfLexer(content);
+        long operandRunStart = 0;
+        string? firstOperandName = null;
+        var firstOperandSeen = false;
+        var mcDepth = 0;
+        var inArtifact = false;
+        var artifactDepth = 0;
+        var blockStart = 0;
+        var count = 0;
+
+        while (true)
+        {
+            var tokenStart = lexer.Position;
+            var token = lexer.NextToken();
+            if (token.Kind == TokenKind.Eof) break;
+
+            if (token.Kind == TokenKind.Keyword)
+            {
+                var op = token.StringValue;
+                if (op is "BMC" or "BDC")
+                {
+                    mcDepth++;
+                    if (!inArtifact && firstOperandName == "Artifact")
+                    {
+                        inArtifact = true;
+                        artifactDepth = mcDepth;
+                        blockStart = (int)operandRunStart;
+                    }
+                }
+                else if (op == "EMC")
+                {
+                    if (inArtifact && mcDepth == artifactDepth)
+                    {
+                        if (count == ordinal) return (blockStart, (int)lexer.Position);
+                        count++;
+                        inArtifact = false;
+                        artifactDepth = 0;
+                    }
+                    if (mcDepth > 0) mcDepth--;
+                }
+
+                operandRunStart = lexer.Position;
+                firstOperandName = null;
+                firstOperandSeen = false;
+            }
+            else if (!firstOperandSeen)
+            {
+                firstOperandSeen = true;
+                operandRunStart = tokenStart;
+                firstOperandName = token.Kind == TokenKind.Name ? token.StringValue : null;
+            }
+        }
+        return null;
     }
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
@@ -159,6 +274,19 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
         {
             state.Current.Text = state.TextBuilder.ToString();
             _items.Add(state.Current);
+        }
+
+        // Surface each artifact's marked-content block as typed operators via
+        // Artifact.Contents — from "/Artifact BMC|BDC" through the closing "EMC"
+        // inclusive, matching the reference operator count.
+        for (int i = 0; i < _items.Count; i++)
+        {
+            if (_items[i].Contents.Count > 0) continue;
+            if (FindArtifactBlockRange(contentBytes, i) is not var (start, end) || end <= start) continue;
+            var slice = new byte[end - start];
+            Array.Copy(contentBytes, start, slice, 0, end - start);
+            foreach (var opText in ContentStreamOperatorParser.ParseOperators(slice))
+                _items[i].Contents.Add(TypedOperatorParser.Parse(opText));
         }
     }
 
@@ -227,6 +355,14 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
             case "Tj": HandleTj(operands, state); break;
             case "TJ": HandleTJArray(operands, state); break;
             case "'": HandleQuote(operands, state); break;
+            case "q": state.PushGs(); break;
+            case "Q": state.PopGs(); break;
+            case "cm" when operands.Count >= 6:
+                state.ConcatCm(GetNumericValue(operands[0]), GetNumericValue(operands[1]),
+                    GetNumericValue(operands[2]), GetNumericValue(operands[3]),
+                    GetNumericValue(operands[4]), GetNumericValue(operands[5]));
+                break;
+            case "gs": HandleGs(operands, state); break;
             case "Do": HandleDo(operands, state); break;
             // BT/ET are intentionally not handled — we don't insert newlines on BT
             // because many PDFs use separate BT/ET blocks for fragments on the same line.
@@ -263,8 +399,11 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
         // Apply properties dictionary (Type, Subtype, BBox, Attached)
         if (operands.Count > 1 && operands[1] is PdfDictionary props)
         {
-            if (string.Equals(props.GetName("Subtype"), "Watermark", StringComparison.OrdinalIgnoreCase))
+            var sub = props.GetName("Subtype");
+            if (string.Equals(sub, "Watermark", StringComparison.OrdinalIgnoreCase))
                 state.UpgradeToWatermark();
+            else if (string.Equals(sub, "Background", StringComparison.OrdinalIgnoreCase))
+                state.UpgradeToBackground();
             ApplyArtifactProperties(state.Current!, props);
         }
     }
@@ -291,7 +430,7 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
     /// XObject /Width and /Height).</summary>
     private static void HandleDo(List<PdfObject> operands, ParseState state)
     {
-        if (state.Current is not WatermarkArtifact wm) return;
+        if (state.Current is null) return;
         if (operands.Count < 1 || operands[0] is not PdfName name) return;
 
         var reader = state.Page.Reader;
@@ -299,11 +438,154 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
         var xobjects = reader.ResolveDict(resources?.Get("XObject"));
         if (xobjects is null) return;
         var stream = reader.ResolveStream(xobjects.Get(name.Value));
-        if (stream is null || stream.Dict.GetName("Subtype") != "Image") return;
+        if (stream is null) return;
 
-        // Surface the embedded image as an XImage over the XObject — its Width/Height
-        // come straight from the stream dictionary (no raster decode needed).
-        wm.Image = new XImage(name.Value, stream, reader);
+        var wm = state.Current as WatermarkArtifact;
+        var subtype = stream.Dict.GetName("Subtype");
+        if (subtype == "Image" && wm is not null)
+        {
+            // Surface the embedded image as an XImage over the XObject — its Width/Height
+            // come straight from the stream dictionary (no raster decode needed).
+            wm.Image = new XImage(name.Value, stream, reader);
+        }
+        else if (subtype == "Form")
+        {
+            // Any artifact (watermark, header/footer) that draws its caption inside a
+            // Form XObject (BT … Tj … ET) — pull the text out so the artifact reports it.
+            var formText = ExtractFormText(reader, stream);
+            if (formText.Length > 0) state.TextBuilder.Append(formText);
+
+            if (wm is not null)
+            {
+                // An image watermark draws its image one level down (q … cm /Im0 Do Q).
+                var nested = FindFirstImageInForm(reader, stream);
+                if (nested is not null)
+                {
+                    wm.Image = nested;
+                    // The image artifact's rectangle is the form's /BBox mapped into page
+                    // space by the CTM active at this /Do.
+                    if (reader.Resolve(stream.Dict.Get("BBox")) is PdfArray bbox && bbox.Count >= 4)
+                        wm.Rectangle = TransformBBox(bbox, state.Ctm);
+                }
+            }
+        }
+        // Record the rotation (from the CTM) and opacity (from the active ExtGState)
+        // in effect when the watermark XObject is painted.
+        if (wm is not null)
+        {
+            // The watermark's reported rotation is its CTM rotation measured against the
+            // page's *displayed* orientation, so a page /Rotate subtracts from it.
+            if (wm.Rotation == 0) wm.Rotation = RotationDegrees(state.Ctm) - state.Page.RotateDegrees;
+            if (state.Ca < 1.0) wm.Opacity = state.Ca;
+        }
+    }
+
+    /// <summary>Map a form /BBox [llx lly urx ury] into page space by transforming
+    /// its four corners with <paramref name="ctm"/> and taking the axis-aligned bounds.</summary>
+    private static Rectangle TransformBBox(PdfArray bbox, double[] ctm)
+    {
+        double x0 = GetNumericValue(bbox[0]), y0 = GetNumericValue(bbox[1]);
+        double x1 = GetNumericValue(bbox[2]), y1 = GetNumericValue(bbox[3]);
+        var xs = new double[4];
+        var ys = new double[4];
+        var corners = new[] { (x0, y0), (x1, y0), (x1, y1), (x0, y1) };
+        for (var i = 0; i < 4; i++)
+        {
+            var (x, y) = corners[i];
+            xs[i] = ctm[0] * x + ctm[2] * y + ctm[4];
+            ys[i] = ctm[1] * x + ctm[3] * y + ctm[5];
+        }
+        return new Rectangle(Math.Min(Math.Min(xs[0], xs[1]), Math.Min(xs[2], xs[3])),
+                             Math.Min(Math.Min(ys[0], ys[1]), Math.Min(ys[2], ys[3])),
+                             Math.Max(Math.Max(xs[0], xs[1]), Math.Max(xs[2], xs[3])),
+                             Math.Max(Math.Max(ys[0], ys[1]), Math.Max(ys[2], ys[3])));
+    }
+
+    /// <summary>Rotation angle (degrees) encoded by a transformation matrix's
+    /// (a, b) column: atan2(b, a). Rounded to the nearest degree.</summary>
+    private static double RotationDegrees(double[] m)
+    {
+        var deg = Math.Atan2(m[1], m[0]) * 180.0 / Math.PI;
+        return Math.Round(deg, MidpointRounding.AwayFromZero);
+    }
+
+    /// <summary>Concatenate the text shown by a Form XObject's Tj/TJ operators
+    /// (used to recover a text watermark's caption drawn one level down).</summary>
+    private static string ExtractFormText(Aspose.Pdf.IO.PdfReader reader, PdfStream form)
+    {
+        var sb = new System.Text.StringBuilder();
+        var content = reader.DecodeStream(form);
+        if (content is null || content.Length == 0) return string.Empty;
+        var lexer = new PdfLexer(content);
+        var operands = new List<PdfObject>();
+        while (true)
+        {
+            var tok = lexer.NextToken();
+            if (tok.Kind == TokenKind.Eof) break;
+            if (tok.Kind == TokenKind.Keyword)
+            {
+                var op = tok.StringValue!;
+                if (op == "Tj" && operands.Count > 0 && operands[^1] is PdfString s)
+                    sb.Append(s.ToText());
+                else if ((op == "TJ") && operands.Count > 0 && operands[^1] is PdfArray arr)
+                    foreach (var el in arr) if (el is PdfString ps) sb.Append(ps.ToText());
+                operands.Clear();
+                continue;
+            }
+            var o = TokenToObject(tok, lexer);
+            if (o is not null) operands.Add(o); else operands.Clear();
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>gs — apply an ExtGState by name; pull its fill opacity (/ca) into
+    /// the current graphics state so a watermark records its transparency.</summary>
+    private static void HandleGs(List<PdfObject> operands, ParseState state)
+    {
+        if (operands.Count < 1 || operands[0] is not PdfName name) return;
+        var reader = state.Page.Reader;
+        var resources = reader.ResolveDict(state.Page.Dict.Get("Resources"));
+        var egs = reader.ResolveDict(resources?.Get("ExtGState"));
+        var gs = reader.ResolveDict(egs?.Get(name.Value));
+        if (gs?.Get("ca") is PdfReal or PdfInteger)
+            state.Ca = GetNumericValue(gs.Get("ca")!);
+    }
+
+    /// <summary>Scan a Form XObject's content for the first image it paints (a
+    /// <c>/Name Do</c> resolving to an /Image XObject in the form's own resources),
+    /// descending through nested forms. Used to surface the image of a watermark
+    /// drawn through a form wrapper.</summary>
+    private static XImage? FindFirstImageInForm(PdfReader reader, PdfStream formStream)
+    {
+        var formRes = reader.ResolveDict(formStream.Dict.Get("Resources"));
+        var formXObjects = reader.ResolveDict(formRes?.Get("XObject"));
+        if (formXObjects is null) return null;
+
+        var content = reader.DecodeStream(formStream);
+        var lexer = new PdfLexer(content);
+        PdfName? lastName = null;
+        while (true)
+        {
+            var t = lexer.NextToken();
+            if (t.Kind == TokenKind.Eof) break;
+            if (t.Kind == TokenKind.Name) { lastName = new PdfName(t.StringValue!); continue; }
+            if (t.Kind == TokenKind.Keyword && t.StringValue == "Do" && lastName is not null)
+            {
+                var s = reader.ResolveStream(formXObjects.Get(lastName.Value));
+                if (s is not null)
+                {
+                    var sub = s.Dict.GetName("Subtype");
+                    if (sub == "Image") return new XImage(lastName.Value, s, reader);
+                    if (sub == "Form")
+                    {
+                        var nested = FindFirstImageInForm(reader, s);
+                        if (nested is not null) return nested;
+                    }
+                }
+            }
+            lastName = null;
+        }
+        return null;
     }
 
     // ── Text positioning operators ──────────────────────────────────────
@@ -415,6 +697,22 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
         if (bbox is { Count: >= 4 })
             artifact.Rectangle = Rectangle.FromPdfArray(bbox);
 
+        // Round-trip metadata written by Artifact.BuildPropsDict.
+        if (props.Get("Opacity") is PdfReal or PdfInteger)
+            artifact.Opacity = GetNumericValue(props.Get("Opacity")!);
+        if (props.Get("Rotation") is PdfReal or PdfInteger)
+            artifact.Rotation = GetNumericValue(props.Get("Rotation")!);
+        if (props.Get("Position") is PdfArray pos && pos.Count >= 2)
+            artifact.Position = new Point(GetNumericValue(pos[0]), GetNumericValue(pos[1]));
+
+        // Any remaining string-valued key is a custom name/value pair (SetValue).
+        foreach (var key in props.Keys)
+        {
+            if (Artifact.ReservedPropertyKeys.Contains(key)) continue;
+            if (props.Get(key) is PdfString s)
+                artifact.SetValue(key, s.ToText());
+        }
+
         // /Attached indicates edge alignment: "Top", "Bottom", "Left", "Right"
         var attached = props.Get("Attached") as PdfArray;
         if (attached is null) return;
@@ -512,6 +810,36 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
         /// </summary>
         public double LastTmY = double.NaN;
 
+        /// <summary>Current transformation matrix (a b c d e f), and the current fill
+        /// opacity (/ca from the active ExtGState). Tracked across cm/q/Q/gs so an
+        /// XObject-drawn watermark can record its rotation and opacity.</summary>
+        public double[] Ctm = { 1, 0, 0, 1, 0, 0 };
+        public double Ca = 1.0;
+        private readonly System.Collections.Generic.Stack<(double[] ctm, double ca)> _gsStack = new();
+
+        public void PushGs() => _gsStack.Push(((double[])Ctm.Clone(), Ca));
+
+        public void PopGs()
+        {
+            if (_gsStack.Count == 0) return;
+            (Ctm, Ca) = _gsStack.Pop();
+        }
+
+        /// <summary>Pre-multiply the CTM by a cm operand matrix (CTM' = cm · CTM).</summary>
+        public void ConcatCm(double a, double b, double c, double d, double e, double f)
+        {
+            var m = Ctm;
+            Ctm = new[]
+            {
+                a * m[0] + b * m[2],
+                a * m[1] + b * m[3],
+                c * m[0] + d * m[2],
+                c * m[1] + d * m[3],
+                e * m[0] + f * m[2] + m[4],
+                e * m[1] + f * m[3] + m[5],
+            };
+        }
+
         /// <summary>Initializes state for a new artifact block.</summary>
         public void StartNewArtifact()
         {
@@ -528,6 +856,15 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
         {
             if (Current is WatermarkArtifact) return;
             Current = new WatermarkArtifact { Page = _page };
+        }
+
+        /// <summary>Replace the current artifact with a typed
+        /// <see cref="BackgroundArtifact"/> (when the BDC subtype is /Background),
+        /// preserving the page.</summary>
+        public void UpgradeToBackground()
+        {
+            if (Current is BackgroundArtifact) return;
+            Current = new BackgroundArtifact { Page = _page };
         }
     }
 }

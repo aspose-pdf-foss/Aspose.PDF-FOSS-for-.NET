@@ -1,8 +1,9 @@
 namespace Aspose.Pdf.IO.Filters;
 
 /// <summary>
-/// Pure C# baseline JPEG (JFIF) decoder.
-/// Decodes SOF0 (baseline DCT) JPEG streams into raw RGB or grayscale pixel arrays.
+/// Pure C# JPEG (JFIF) decoder.
+/// Decodes SOF0 (baseline), SOF1 (extended sequential, 8-bit Huffman) and
+/// SOF2 (progressive) DCT JPEG streams into raw RGB or grayscale pixel arrays.
 /// Supports chroma subsampling modes 4:4:4, 4:2:2, and 4:2:0.
 /// </summary>
 internal static class JpegDecoder
@@ -60,8 +61,12 @@ internal static class JpegDecoder
                     case 0xFFC0: // SOF0 — Baseline DCT
                         ParseSOF();
                         break;
-                    case 0xFFC2: // SOF2 — Progressive (not supported, try baseline path)
+                    case 0xFFC1: // SOF1 — Extended sequential DCT (8-bit Huffman decodes as baseline)
                         ParseSOF();
+                        break;
+                    case 0xFFC2: // SOF2 — Progressive
+                        ParseSOF();
+                        _progressive = true;
                         break;
                     case 0xFFC4: // DHT
                         ParseDHT();
@@ -77,9 +82,11 @@ internal static class JpegDecoder
                         break;
                     case 0xFFDA: // SOS
                         ParseSOS();
-                        DecodeScan();
+                        if (_progressive) DecodeProgressiveScan();
+                        else DecodeScan();
                         break;
                     case 0xFFD9: // EOI
+                        if (_progressive) FinishProgressive();
                         return;
                     default:
                         // Skip unknown markers (APPn, COM, etc.)
@@ -91,6 +98,9 @@ internal static class JpegDecoder
                         break;
                 }
             }
+
+            // Truncated stream without an EOI — emit what accumulated so far.
+            if (_progressive) FinishProgressive();
         }
 
         private int ReadMarker()
@@ -246,7 +256,273 @@ internal static class JpegDecoder
                 }
             }
 
-            _pos += 3; // Ss, Se, AhAl (spectral selection — used in progressive)
+            _ss = _data[_pos++];
+            _se = _data[_pos++];
+            var ahAl = _data[_pos++];
+            _ah = (ahAl >> 4) & 0xF;
+            _al = ahAl & 0xF;
+        }
+
+        // ── Progressive (SOF2) support ──────────────────────────────────────
+        //
+        // A progressive JPEG carries several SOS scans that each deliver part of
+        // the DCT coefficients (spectral bands Ss..Se, successive-approximation
+        // bit positions Ah/Al). Coefficients accumulate in _coefs (natural order
+        // per 8x8 block); the final image is produced at EOI by dequantising and
+        // inverse-transforming every block.
+
+        private bool _progressive;
+        private int _ss, _se, _ah, _al;
+        private int[][] _coefs = [];
+        private int[] _blocksPerLine = [];   // MCU-aligned block columns per component
+        private int[] _blocksPerCol = [];    // MCU-aligned block rows per component
+        private int _eobrun;
+        private bool _outputDone;
+
+        private void EnsureCoefficientArrays()
+        {
+            if (_coefs.Length != 0) return;
+            var mcuCols = (Width + _maxH * 8 - 1) / (_maxH * 8);
+            var mcuRows = (Height + _maxV * 8 - 1) / (_maxV * 8);
+            _coefs = new int[_components.Length][];
+            _blocksPerLine = new int[_components.Length];
+            _blocksPerCol = new int[_components.Length];
+            for (var i = 0; i < _components.Length; i++)
+            {
+                _blocksPerLine[i] = mcuCols * _components[i].H;
+                _blocksPerCol[i] = mcuRows * _components[i].V;
+                _coefs[i] = new int[_blocksPerLine[i] * _blocksPerCol[i] * 64];
+            }
+        }
+
+        private void DecodeProgressiveScan()
+        {
+            EnsureCoefficientArrays();
+            var bits = new BitStream(_data, _pos);
+            _eobrun = 0;
+            var dcPred = new int[_components.Length];
+            var restartCounter = 0;
+
+            if (_scanComponentIndices.Length == 1)
+            {
+                // Non-interleaved scan: one data unit per component block, row-major
+                // over the component's own (unaligned) block grid.
+                var ci = _scanComponentIndices[0];
+                var comp = _components[ci];
+                var compWidth = (Width * comp.H + _maxH - 1) / _maxH;
+                var compHeight = (Height * comp.V + _maxV - 1) / _maxV;
+                var bw = (compWidth + 7) / 8;
+                var bh = (compHeight + 7) / 8;
+
+                for (var by = 0; by < bh; by++)
+                {
+                    for (var bx = 0; bx < bw; bx++)
+                    {
+                        if (_restartInterval > 0 && restartCounter == _restartInterval)
+                        {
+                            bits.AlignByte();
+                            bits.SkipRestartMarker();
+                            Array.Clear(dcPred);
+                            _eobrun = 0;
+                            restartCounter = 0;
+                        }
+                        DecodeProgressiveBlock(bits, ci, bx, by, ref dcPred[ci]);
+                        restartCounter++;
+                    }
+                }
+            }
+            else
+            {
+                var mcuCols = (Width + _maxH * 8 - 1) / (_maxH * 8);
+                var mcuRows = (Height + _maxV * 8 - 1) / (_maxV * 8);
+                for (var mcuRow = 0; mcuRow < mcuRows; mcuRow++)
+                {
+                    for (var mcuCol = 0; mcuCol < mcuCols; mcuCol++)
+                    {
+                        if (_restartInterval > 0 && restartCounter == _restartInterval)
+                        {
+                            bits.AlignByte();
+                            bits.SkipRestartMarker();
+                            Array.Clear(dcPred);
+                            _eobrun = 0;
+                            restartCounter = 0;
+                        }
+                        for (var sc = 0; sc < _scanComponentIndices.Length; sc++)
+                        {
+                            var ci = _scanComponentIndices[sc];
+                            var comp = _components[ci];
+                            for (var bv = 0; bv < comp.V; bv++)
+                                for (var bhh = 0; bhh < comp.H; bhh++)
+                                    DecodeProgressiveBlock(bits, ci,
+                                        mcuCol * comp.H + bhh, mcuRow * comp.V + bv,
+                                        ref dcPred[ci], sc);
+                        }
+                        restartCounter++;
+                    }
+                }
+            }
+
+            _pos = bits.BytePosition;
+        }
+
+        private void DecodeProgressiveBlock(BitStream bits, int ci, int bx, int by,
+            ref int dcPred, int scanComponent = 0)
+        {
+            var blockOff = (by * _blocksPerLine[ci] + bx) * 64;
+            var coefs = _coefs[ci];
+
+            if (_ss == 0)
+            {
+                var dcTable = _dcTables[_scanDcTableIds[scanComponent]];
+                if (_ah == 0)
+                {
+                    // DC first scan
+                    var cat = DecodeHuffman(bits, dcTable!);
+                    var diff = cat > 0 ? ReceiveExtend(bits, cat) : 0;
+                    dcPred += diff;
+                    coefs[blockOff] = dcPred << _al;
+                }
+                else
+                {
+                    // DC refinement — one correction bit
+                    if (bits.ReadBit() != 0)
+                        coefs[blockOff] |= 1 << _al;
+                }
+                return;
+            }
+
+            var acTable = _acTables[_scanAcTableIds[scanComponent]]!;
+            if (_ah == 0)
+            {
+                // AC first scan
+                if (_eobrun > 0) { _eobrun--; return; }
+                var k = _ss;
+                while (k <= _se)
+                {
+                    var rs = DecodeHuffman(bits, acTable);
+                    var r = (rs >> 4) & 0xF;
+                    var s = rs & 0xF;
+                    if (s == 0)
+                    {
+                        if (r < 15)
+                        {
+                            _eobrun = (1 << r) - 1;
+                            if (r > 0) _eobrun += bits.ReadBits(r);
+                            break;
+                        }
+                        k += 16;
+                        continue;
+                    }
+                    k += r;
+                    if (k > _se) break;
+                    coefs[blockOff + ZigZag[k]] = ReceiveExtend(bits, s) << _al;
+                    k++;
+                }
+                return;
+            }
+
+            // AC refinement scan (IJG decode_mcu_AC_refine structure)
+            var p1 = 1 << _al;
+            var m1 = -1 << _al;
+            var ki = _ss;
+            if (_eobrun == 0)
+            {
+                while (ki <= _se)
+                {
+                    var rs = DecodeHuffman(bits, acTable);
+                    var r = (rs >> 4) & 0xF;
+                    var s = rs & 0xF;
+                    var newVal = 0;
+                    if (s != 0)
+                    {
+                        // s is 1 in valid streams: a coefficient becoming nonzero
+                        newVal = bits.ReadBit() != 0 ? p1 : m1;
+                    }
+                    else
+                    {
+                        if (r != 15)
+                        {
+                            _eobrun = 1 << r;
+                            if (r > 0) _eobrun += bits.ReadBits(r);
+                            break;
+                        }
+                        // r == 15: skip over 16 zero-history coefficients
+                    }
+
+                    // Advance over r zero-history positions, sending correction
+                    // bits for every nonzero coefficient passed on the way.
+                    while (ki <= _se)
+                    {
+                        var pos = blockOff + ZigZag[ki];
+                        if (coefs[pos] != 0)
+                        {
+                            if (bits.ReadBit() != 0 && (coefs[pos] & p1) == 0)
+                                coefs[pos] += coefs[pos] >= 0 ? p1 : m1;
+                        }
+                        else
+                        {
+                            if (r == 0) break;
+                            r--;
+                        }
+                        ki++;
+                    }
+
+                    if (newVal != 0 && ki <= _se)
+                        coefs[blockOff + ZigZag[ki]] = newVal;
+                    ki++;
+                }
+            }
+
+            if (_eobrun > 0)
+            {
+                // Inside an EOB run: only correction bits for already-nonzero coefficients.
+                while (ki <= _se)
+                {
+                    var pos = blockOff + ZigZag[ki];
+                    if (coefs[pos] != 0 && bits.ReadBit() != 0 && (coefs[pos] & p1) == 0)
+                        coefs[pos] += coefs[pos] >= 0 ? p1 : m1;
+                    ki++;
+                }
+                _eobrun--;
+            }
+        }
+
+        private void FinishProgressive()
+        {
+            if (_outputDone || _coefs.Length == 0) return;
+            _outputDone = true;
+
+            var buffers = new int[_components.Length][];
+            var bufWidths = new int[_components.Length];
+            for (var i = 0; i < _components.Length; i++)
+            {
+                var bw = _blocksPerLine[i];
+                var bh = _blocksPerCol[i];
+                bufWidths[i] = bw * 8;
+                buffers[i] = new int[bw * 8 * bh * 8];
+                var qt = _quantTables[_components[i].QtId] ?? _quantTables[0];
+                var block = new int[64];
+                for (var by = 0; by < bh; by++)
+                {
+                    for (var bx = 0; bx < bw; bx++)
+                    {
+                        Array.Copy(_coefs[i], (by * bw + bx) * 64, block, 0, 64);
+                        Dequantize(block, qt!);
+                        IDCT(block);
+                        var px = bx * 8;
+                        var py = by * 8;
+                        for (var y = 0; y < 8; y++)
+                        {
+                            var dst = (py + y) * bufWidths[i] + px;
+                            var src = y * 8;
+                            for (var x = 0; x < 8; x++)
+                                buffers[i][dst + x] = Clamp(block[src + x] + 128);
+                        }
+                    }
+                }
+            }
+
+            ConvertBuffersToPixels(buffers, bufWidths);
         }
 
         private void DecodeScan()
@@ -325,6 +601,14 @@ internal static class JpegDecoder
 
             _pos = bits.BytePosition;
 
+            ConvertBuffersToPixels(buffers, bufWidths);
+        }
+
+        /// <summary>Colour-convert the per-component sample buffers (MCU-aligned)
+        /// into the packed output pixel array. Shared by the baseline and
+        /// progressive paths.</summary>
+        private void ConvertBuffersToPixels(int[][] buffers, int[] bufWidths)
+        {
             // Convert to output pixels
             if (Components == 1)
             {
@@ -689,6 +973,15 @@ internal static class JpegDecoder
         public void AlignByte()
         {
             _bitsLeft = 0;
+        }
+
+        /// <summary>Read <paramref name="count"/> bits MSB-first as an unsigned value.</summary>
+        public int ReadBits(int count)
+        {
+            var v = 0;
+            for (var i = 0; i < count; i++)
+                v = (v << 1) | ReadBit();
+            return v;
         }
 
         public void SkipRestartMarker()

@@ -532,23 +532,34 @@ internal sealed class ContentStreamParser
                 FireTextShown(s.Value, currentToUnicode);
                 break;
             case "TJ" when operands.Count >= 1 && operands[0] is PdfArray arr:
+            {
+                // In vertical writing mode (-V CMap) a TJ numeric adjustment displaces
+                // the VERTICAL coordinate — a positive number moves the next glyph down
+                // (PDF 32000 §9.4.3); Tz applies to horizontal displacements only.
+                var tjVertical = _currentCidInfo is { IsVertical: true };
                 foreach (var item in arr)
                 {
                     if (item is PdfString ts)
                         FireTextShown(ts.Value, currentToUnicode);
                     else if (item is PdfInteger pi)
                     {
-                        // Numeric adjustment: displaces text position by -value/1000 * fontSize
-                        var adj = -pi.Value / 1000.0 * _state.FontSize * (_state.HorizontalScaling / 100.0);
-                        _state.AdvanceTextPosition(adj, 0);
+                        if (tjVertical)
+                            _state.AdvanceTextPosition(0, -pi.Value / 1000.0 * _state.FontSize);
+                        else
+                            _state.AdvanceTextPosition(
+                                -pi.Value / 1000.0 * _state.FontSize * (_state.HorizontalScaling / 100.0), 0);
                     }
                     else if (item is PdfReal pr)
                     {
-                        var adj = -pr.Value / 1000.0 * _state.FontSize * (_state.HorizontalScaling / 100.0);
-                        _state.AdvanceTextPosition(adj, 0);
+                        if (tjVertical)
+                            _state.AdvanceTextPosition(0, -pr.Value / 1000.0 * _state.FontSize);
+                        else
+                            _state.AdvanceTextPosition(
+                                -pr.Value / 1000.0 * _state.FontSize * (_state.HorizontalScaling / 100.0), 0);
                     }
                 }
                 break;
+            }
             case "'" when operands.Count >= 1 && operands[0] is PdfString qs:
                 _state.MoveToNextLine();
                 FireTextShown(qs.Value, currentToUnicode);
@@ -761,13 +772,14 @@ internal sealed class ContentStreamParser
             else _state.StrokePatternName = patName.Value;
             return;
         }
-        // A bare /Pattern colour space: only route to the pattern renderer when the
-        // named pattern is a shading pattern (PatternType 2). Coloured tiling cells
-        // FOSS cannot rasterise fall through to the solid-fill path below, preserving
-        // the last solid colour rather than rendering blank.
+        // A bare /Pattern colour space: route to the pattern renderer for both shading
+        // patterns (PatternType 2) and coloured tiling patterns (PatternType 1), which
+        // the renderer now rasterises (FillWith[Tiling|Shading]Pattern). Without this a
+        // bare-pattern `scn` carries no numeric colour operands, so the fill falls back
+        // to the last solid colour (typically black) and paints the whole region opaque.
         if (cs is not null && _barePatternColorSpaces.Contains(cs)
             && operands.Count >= 1 && operands[^1] is PdfName barePat
-            && IsShadingPattern(barePat.Value))
+            && IsRenderablePattern(barePat.Value))
         {
             if (isFill) _state.FillPatternName = barePat.Value;
             else _state.StrokePatternName = barePat.Value;
@@ -796,10 +808,13 @@ internal sealed class ContentStreamParser
         ApplyColorOperands(operands, isFill);
     }
 
-    // True when the named pattern resolves to a shading pattern (PatternType 2),
-    // which FOSS rasterises. Tiling patterns (PatternType 1) return false so a
-    // bare-pattern fill keeps its solid-colour approximation.
-    private bool IsShadingPattern(string patternName)
+    // True when the named pattern resolves to a pattern the renderer can rasterise:
+    // a shading pattern (PatternType 2), or a coloured tiling pattern (PatternType 1)
+    // whose cell makes direct marks the renderer draws. Both are handled by
+    // FillWith[Tiling|Shading]Pattern; anything else (or an unresolvable pattern)
+    // returns false so a bare-pattern fill keeps its solid colour rather than pinning
+    // a pattern the renderer can't draw.
+    private bool IsRenderablePattern(string patternName)
     {
         if (_patterns is null) return false;
         var pat = _reader.Resolve(_patterns.Get(patternName));
@@ -809,7 +824,93 @@ internal sealed class ContentStreamParser
             PdfDictionary d => d,
             _ => null,
         };
-        return dict is not null && (int)dict.GetInt("PatternType") == 2;
+        if (dict is null) return false;
+        var type = (int)dict.GetInt("PatternType");
+        if (type == 2) return true;
+        // A tiling pattern (PatternType 1) is only worth pinning when its cell paints
+        // with operators the renderer actually rasterises. Cells whose only mark-making
+        // operator is `sh` (e.g. a soft-shadow built from free-form/Coons MESH shadings,
+        // which the renderer skips) would tile to nothing — pinning them would erase the
+        // region, whereas the solid-colour fallback approximates it. So require at least
+        // one direct fill/stroke/text/XObject paint operator in the cell content.
+        if (type != 1 || pat is not PdfStream cell) return false;
+        byte[] content;
+        try { content = _reader.DecodeStream(cell); } catch { return false; }
+        return TilingCellHasDirectMarks(content);
+    }
+
+    // Direct mark-making content operators (PDF 32000 §A): path-painting, text-showing
+    // and XObject invocation. `sh` is deliberately excluded — a shading-only cell is
+    // handled by the solid-colour fallback (see IsRenderablePattern).
+    private static readonly HashSet<string> _directPaintOps = new()
+    {
+        "f", "F", "f*", "S", "s", "B", "B*", "b", "b*",
+        "Tj", "TJ", "'", "\"", "Do",
+    };
+
+    // Scan a (decoded) tiling-cell content stream for any direct paint operator,
+    // skipping string / hex-string / comment regions so bytes inside them are not
+    // mistaken for operators. A lightweight tokenizer is enough: operators are
+    // whitespace/delimiter-separated regular-character runs.
+    private static bool TilingCellHasDirectMarks(byte[] c)
+    {
+        int i = 0, n = c.Length;
+        var tok = new System.Text.StringBuilder();
+        bool CheckTok()
+        {
+            if (tok.Length == 0) return false;
+            bool hit = _directPaintOps.Contains(tok.ToString());
+            tok.Clear();
+            return hit;
+        }
+        while (i < n)
+        {
+            byte b = c[i];
+            if (b == (byte)'(') // literal string — skip with balanced parens + escapes
+            {
+                if (CheckTok()) return true;
+                int depth = 1; i++;
+                while (i < n && depth > 0)
+                {
+                    if (c[i] == (byte)'\\') { i += 2; continue; }
+                    if (c[i] == (byte)'(') depth++;
+                    else if (c[i] == (byte)')') depth--;
+                    i++;
+                }
+                continue;
+            }
+            if (b == (byte)'%') // comment to end-of-line
+            {
+                if (CheckTok()) return true;
+                while (i < n && c[i] != (byte)'\n' && c[i] != (byte)'\r') i++;
+                continue;
+            }
+            if (b == (byte)'<')
+            {
+                if (CheckTok()) return true;
+                if (i + 1 < n && c[i + 1] == (byte)'<') { i += 2; continue; } // dict open
+                i++; // hex string — skip to '>'
+                while (i < n && c[i] != (byte)'>') i++;
+                i++;
+                continue;
+            }
+            if (b == (byte)'>' || b == (byte)'[' || b == (byte)']'
+                || b == (byte)'{' || b == (byte)'}' || b == (byte)'/')
+            {
+                if (CheckTok()) return true;
+                i++;
+                continue;
+            }
+            if (b is (byte)' ' or (byte)'\t' or (byte)'\n' or (byte)'\r' or (byte)'\f' or 0)
+            {
+                if (CheckTok()) return true;
+                i++;
+                continue;
+            }
+            tok.Append((char)b);
+            i++;
+        }
+        return CheckTok();
     }
 
     // Map alternate-space output (from a /Separation or /DeviceN tint function)
@@ -960,9 +1061,21 @@ internal sealed class ContentStreamParser
         }
         else if (_currentCidInfo is not null && _currentCidInfo.IsTwoByteEncoding)
         {
+            var vertical = _currentCidInfo.IsVertical;
             for (var i = 0; i + 1 < bytes.Length; i += 2)
             {
                 var cid = (bytes[i] << 8) | bytes[i + 1];
+                if (vertical)
+                {
+                    // Vertical writing: the cursor travels by the VERTICAL displacement
+                    // w1 (/W2 per-CID, else /DW2 default -1000) — not the horizontal
+                    // width, which is 500 for half-width forms and would halve the pitch.
+                    var c = _currentCidInfo.CodeToCid(cid);
+                    var w0 = _currentMetrics?.GetWidth(c) ?? 1000;
+                    var (w1y, _, _) = _currentCidInfo.VerticalMetrics(c, w0);
+                    totalWidth += -w1y / 1000.0 * fontSize + charSpacing;
+                    continue;
+                }
                 var w = _currentMetrics?.GetWidth(cid) ?? 1000;
                 totalWidth += (w / 1000.0 * fontSize + charSpacing) * hScaling;
                 // Word spacing: PDF spec §9.3.3 — applies to the single-byte code 32 only, which

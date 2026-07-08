@@ -48,7 +48,7 @@ public sealed class PdfFileMend : ISaveableFacade
 
     /// <summary>
     /// Whether to enable word wrapping for AddText operations. Set-only on
-    /// the public surface to match Aspose.PDF for .NET; internal code reads
+    /// the public surface to match Aspose.Pdf; internal code reads
     /// <see cref="WrapMode"/> for the resolved behaviour.
     /// </summary>
     public bool IsWordWrap { set => _isWordWrap = value; }
@@ -502,7 +502,13 @@ public sealed class PdfFileMend : ISaveableFacade
         sb.Append("ET\n");
         sb.Append("Q\n");
 
-        AppendContent(page, Encoding.Latin1.GetBytes(sb.ToString()));
+        // The font is declared /WinAnsiEncoding (see AddOrGetFont), so the glyph
+        // bytes must follow Windows-1252, not Latin-1. They differ in 0x80-0x9F,
+        // where WinAnsi carries the "smart" punctuation/symbols (' " – — ™ …).
+        // Encoding the stream with Latin-1 turned those into '?' and lost the text;
+        // Cp1252 maps them to their real bytes so extraction round-trips. All other
+        // code points ≤ 0xFF (and the ASCII operators) encode identically.
+        AppendContent(page, Cp1252.GetBytes(sb.ToString()));
     }
 
     private void AddImageToPage(Page page, byte[] imageData, float llx, float lly, float urx, float ury,
@@ -746,6 +752,8 @@ public sealed class PdfFileMend : ISaveableFacade
         var height = 0;
         var bitDepth = 0;
         var colorType = 0;
+        byte[]? palette = null;   // PLTE: RGB triples, one per index (colorType 3)
+        byte[]? trns = null;      // tRNS: alpha per palette index (optional)
         var idatData = new MemoryStream();
 
         while (pos < png.Length - 4)
@@ -760,6 +768,16 @@ public sealed class PdfFileMend : ISaveableFacade
                 height = ReadInt32BE(png, dataStart + 4);
                 bitDepth = png[dataStart + 8];
                 colorType = png[dataStart + 9];
+            }
+            else if (chunkType == "PLTE")
+            {
+                palette = new byte[chunkLen];
+                Array.Copy(png, dataStart, palette, 0, chunkLen);
+            }
+            else if (chunkType == "tRNS")
+            {
+                trns = new byte[chunkLen];
+                Array.Copy(png, dataStart, trns, 0, chunkLen);
             }
             else if (chunkType == "IDAT")
             {
@@ -792,12 +810,17 @@ public sealed class PdfFileMend : ISaveableFacade
         {
             0 => 1, // Grayscale
             2 => 3, // RGB
+            3 => 1, // Palette index
             4 => 2, // Grayscale + Alpha
             6 => 4, // RGBA
             _ => 3,
         };
-        var bpp = channels * (bitDepth / 8); // bytes per pixel
-        var stride = width * bpp;
+        // Bytes per pixel used by the row filters is ceil(bitsPerPixel/8), min 1
+        // (PNG spec §9.2). Stride is the packed scanline length; for 8/16-bit this
+        // equals width*channels*(bitDepth/8) as before, and it also handles the
+        // sub-byte (1/2/4-bit) palette/grayscale case.
+        var bpp = Math.Max(1, channels * bitDepth / 8);
+        var stride = (width * channels * bitDepth + 7) / 8;
 
         // Unfilter scanlines
         var raw = new byte[height * stride];
@@ -846,6 +869,32 @@ public sealed class PdfFileMend : ISaveableFacade
         }
 
         // Convert to RGB or RGBA
+        if (colorType == 3 && palette is not null) // Palette index -> RGB (RGBA when tRNS present)
+        {
+            var pixelCount = width * height;
+            var indices = UnpackIndices(raw, width, height, stride, bitDepth);
+            byte R(int idx) { var p = idx * 3; return p + 2 < palette.Length ? palette[p] : (byte)0; }
+            byte G(int idx) { var p = idx * 3; return p + 2 < palette.Length ? palette[p + 1] : (byte)0; }
+            byte B(int idx) { var p = idx * 3; return p + 2 < palette.Length ? palette[p + 2] : (byte)0; }
+            if (trns is not null)
+            {
+                var rgba = new byte[pixelCount * 4];
+                for (var i = 0; i < pixelCount; i++)
+                {
+                    var idx = indices[i];
+                    rgba[i * 4] = R(idx); rgba[i * 4 + 1] = G(idx); rgba[i * 4 + 2] = B(idx);
+                    rgba[i * 4 + 3] = idx < trns.Length ? trns[idx] : (byte)255;
+                }
+                return (rgba, width, height, true);
+            }
+            var rgb3 = new byte[pixelCount * 3];
+            for (var i = 0; i < pixelCount; i++)
+            {
+                var idx = indices[i];
+                rgb3[i * 3] = R(idx); rgb3[i * 3 + 1] = G(idx); rgb3[i * 3 + 2] = B(idx);
+            }
+            return (rgb3, width, height, false);
+        }
         if (colorType == 0) // Grayscale -> RGB
         {
             var rgb = new byte[width * height * 3];
@@ -872,6 +921,31 @@ public sealed class PdfFileMend : ISaveableFacade
 
         // colorType 2 (RGB) or 6 (RGBA) — already in correct format
         return (raw, width, height, hasAlpha);
+    }
+
+    /// <summary>Unpack one palette/grayscale index per pixel from filtered scanlines,
+    /// handling packed sub-byte depths (1/2/4-bit, MSB-first) as well as 8-bit.</summary>
+    private static byte[] UnpackIndices(byte[] raw, int width, int height, int stride, int bitDepth)
+    {
+        var outp = new byte[width * height];
+        if (bitDepth == 8)
+        {
+            for (var y = 0; y < height; y++)
+                Array.Copy(raw, y * stride, outp, y * width, width);
+            return outp;
+        }
+        var mask = (1 << bitDepth) - 1;
+        for (var y = 0; y < height; y++)
+        {
+            var rowBase = y * stride;
+            for (var x = 0; x < width; x++)
+            {
+                var bit = x * bitDepth;
+                var shift = 8 - bitDepth - (bit % 8);
+                outp[y * width + x] = (byte)((raw[rowBase + bit / 8] >> shift) & mask);
+            }
+        }
+        return outp;
     }
 
     private static int PaethPredictor(int a, int b, int c)

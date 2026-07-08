@@ -203,8 +203,8 @@ public class PdfWriterXRefStreamTests
         var saved = ms.ToArray();
         var text = Encoding.ASCII.GetString(saved);
 
-        // The xref stream object should contain /Type /XRef
-        Assert.Contains("/Type /XRef", text);
+        // The xref stream object should contain /Type/XRef (compact name serialization)
+        Assert.Contains("/Type/XRef", text);
     }
 
     /// <summary>

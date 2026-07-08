@@ -62,4 +62,4 @@ public enum BlendMode
 
 // ImageFilterType is already declared in src/Stubs/TypeStubs.cs at the
 // Aspose.Pdf namespace level (Jpeg2000 / Flate / Jpeg / CCITTFax — matches
-// Aspose.PDF for .NET). CompositingParameters references that existing enum.
+// Aspose.Pdf). CompositingParameters references that existing enum.

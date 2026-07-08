@@ -50,39 +50,44 @@ public sealed class DocumentInfo
         key is "Title" or "Author" or "Subject" or "Keywords" or "Creator"
             or "Producer" or "CreationDate" or "ModDate" or "Trapped";
 
+    /// <summary>Value surfaced for an absent predefined string entry: a NEW
+    /// document reads them as empty strings, a LOADED document
+    /// as null.</summary>
+    private string? MissingString => _document?.IsNewDocument == true ? string.Empty : null;
+
     public string? Title
     {
-        get => GetString("Title");
+        get => GetString("Title") ?? MissingString;
         set => SetString("Title", value);
     }
 
     public string? Author
     {
-        get => GetString("Author");
+        get => GetString("Author") ?? MissingString;
         set => SetString("Author", value);
     }
 
     public string? Subject
     {
-        get => GetString("Subject");
+        get => GetString("Subject") ?? MissingString;
         set => SetString("Subject", value);
     }
 
     public string? Keywords
     {
-        get => GetString("Keywords");
+        get => GetString("Keywords") ?? MissingString;
         set => SetString("Keywords", value);
     }
 
     public string? Creator
     {
-        get => GetString("Creator");
+        get => GetString("Creator") ?? MissingString;
         set => SetString("Creator", value);
     }
 
     public string? Producer
     {
-        get => GetString("Producer");
+        get => GetString("Producer") ?? MissingString;
         set => SetString("Producer", value);
     }
 
@@ -135,7 +140,11 @@ public sealed class DocumentInfo
     public TimeSpan CreationTimeZone
     {
         get => _creationTimeZoneOverride ?? ParseTimeZone(GetString("CreationDate"));
-        set => _creationTimeZoneOverride = value;
+        set
+        {
+            _creationTimeZoneOverride = value;
+            ReencodeDateTimeZone("CreationDate", value);
+        }
     }
 
     /// <summary>Timezone offset stored on the ModDate metadata, or
@@ -143,7 +152,26 @@ public sealed class DocumentInfo
     public TimeSpan ModTimeZone
     {
         get => _modTimeZoneOverride ?? ParseTimeZone(GetString("ModDate"));
-        set => _modTimeZoneOverride = value;
+        set
+        {
+            _modTimeZoneOverride = value;
+            ReencodeDateTimeZone("ModDate", value);
+        }
+    }
+
+    /// <summary>Rewrite an already-stored date entry's PDF date string so it
+    /// carries the timezone offset. The date components are preserved; only the
+    /// trailing <c>Z</c>/offset is replaced. No-op when the entry isn't set yet —
+    /// the offset is then applied later by <see cref="SetDate"/> when the date is
+    /// assigned (it consults the stored override).</summary>
+    private void ReencodeDateTimeZone(string key, TimeSpan tz)
+    {
+        EnsureDictForRead();
+        var dt = ParseDate(GetString(key));
+        if (dt is null) return;
+        EnsureDict();
+        _dict?.Set(key, new PdfString(Encoding.Latin1.GetBytes(FormatPdfDate(dt.Value, tz))));
+        FlushDirty();
     }
 
     /// <summary>Remove every entry from the /Info dictionary.</summary>
@@ -181,7 +209,7 @@ public sealed class DocumentInfo
 
     /// <summary>
     /// Adds a custom metadata property. Alias for <see cref="SetCustom"/>;
-    /// matches the Aspose.PDF for .NET DocumentInfo.Add(string, string) public surface.
+    /// matches the Aspose.Pdf DocumentInfo.Add(string, string) public surface.
     /// </summary>
     public void Add(string key, string value) => SetString(key, value);
 
@@ -197,7 +225,7 @@ public sealed class DocumentInfo
 
     /// <summary>
     /// Indexer access for any property — well-known ones (Title, Author, etc.)
-    /// or custom keys. Matches the Aspose.PDF for .NET DocumentInfo.this[string] surface.
+    /// or custom keys. Matches the Aspose.Pdf DocumentInfo.this[string] surface.
     /// </summary>
     public string? this[string key]
     {
@@ -293,12 +321,37 @@ public sealed class DocumentInfo
         }
         else
         {
-            var d = value.Value;
-            var dateStr = $"D:{d.Year:D4}{d.Month:D2}{d.Day:D2}{d.Hour:D2}{d.Minute:D2}{d.Second:D2}Z";
-            _dict.Set(key, new PdfString(Encoding.Latin1.GetBytes(dateStr)));
+            // Carry a timezone offset already set via the CreationTimeZone /
+            // ModTimeZone setter so assigning the date *after* the offset still
+            // emits it (the offset setters also re-encode when the date is set first).
+            var tz = key switch
+            {
+                "CreationDate" => _creationTimeZoneOverride,
+                "ModDate" => _modTimeZoneOverride,
+                _ => null,
+            };
+            _dict.Set(key, new PdfString(Encoding.Latin1.GetBytes(FormatPdfDate(value.Value, tz))));
         }
         FlushDirty();
     }
+
+    /// <summary>Format a <see cref="DateTime"/> as a PDF date string
+    /// (<c>D:YYYYMMDDHHmmSS</c>) with the timezone suffix — <c>Z</c> for a zero /
+    /// absent offset, otherwise <c>OHH'mm'</c> per PDF 32000-2 § 7.9.4.</summary>
+    private static string FormatPdfDate(DateTime d, TimeSpan? tz)
+    {
+        var body = $"D:{d.Year:D4}{d.Month:D2}{d.Day:D2}{d.Hour:D2}{d.Minute:D2}{d.Second:D2}";
+        if (tz is null || tz.Value == TimeSpan.Zero)
+            return body + "Z";
+        var t = tz.Value;
+        var sign = t.Ticks < 0 ? '-' : '+';
+        return $"{body}{sign}{Math.Abs(t.Hours):D2}'{Math.Abs(t.Minutes):D2}'";
+    }
+
+    /// <summary>The standard document-information text entries (§ 14.3.3) seeded as empty
+    /// strings when a from-scratch document's /Info dict is first created.</summary>
+    private static readonly string[] StandardTextEntries =
+        { "Title", "Author", "Subject", "Keywords", "Creator", "Producer" };
 
     private void EnsureDict()
     {
@@ -306,6 +359,18 @@ public sealed class DocumentInfo
         {
             var (dict, _) = _document.EnsureInfoDict();
             _dict = dict;
+
+            // A from-scratch document's /Info, the first time it is materialised, carries
+            // the standard text entries as empty strings — so a field left unset (the test
+            // sets only Title, say) reads back as "" rather than absent after the document
+            // is saved and reopened, matching Aspose.Pdf. The actual setter that
+            // triggered this overwrites its own key right after. Loaded documents are left
+            // untouched: an absent entry on an externally-authored file still reads as null.
+            if (_document.IsNewDocument && dict.Count == 0)
+            {
+                foreach (var key in StandardTextEntries)
+                    dict.Set(key, new PdfString(Array.Empty<byte>()));
+            }
         }
     }
 
@@ -362,24 +427,67 @@ public sealed class DocumentInfo
             s = s[2..];
 
         // Remove any control characters
-        s = s.TrimEnd('\x00', '\x01');
+        s = s.TrimEnd('\x00', '\x01').Trim();
 
         if (s.Length < 4) return null;
 
-        try
+        // PDF native numeric format — the leading four characters are the year.
+        // Only attempt it when they actually are digits, so a human-readable date
+        // like "21/02/2006" falls through to the lenient parse below instead of
+        // throwing on int.Parse("21/0").
+        if (StartsWithDigits(s, 4))
         {
-            var year = int.Parse(s[..4]);
-            var month = s.Length >= 6 ? int.Parse(s[4..6]) : 1;
-            var day = s.Length >= 8 ? int.Parse(s[6..8]) : 1;
-            var hour = s.Length >= 10 ? int.Parse(s[8..10]) : 0;
-            var minute = s.Length >= 12 ? int.Parse(s[10..12]) : 0;
-            var second = s.Length >= 14 ? int.Parse(s[12..14]) : 0;
+            try
+            {
+                var year = int.Parse(s[..4]);
+                var month = s.Length >= 6 ? int.Parse(s[4..6]) : 1;
+                var day = s.Length >= 8 ? int.Parse(s[6..8]) : 1;
+                var hour = s.Length >= 10 ? int.Parse(s[8..10]) : 0;
+                var minute = s.Length >= 12 ? int.Parse(s[10..12]) : 0;
+                var second = s.Length >= 14 ? int.Parse(s[12..14]) : 0;
 
-            return new DateTime(year, month, day, hour, minute, second, DateTimeKind.Utc);
+                return new DateTime(year, month, day, hour, minute, second, DateTimeKind.Utc);
+            }
+            catch
+            {
+                // fall through to the lenient human-readable parse
+            }
         }
-        catch
-        {
-            return null;
-        }
+
+        // Fallback for producers that write human-readable dates in the /Info
+        // dictionary (e.g. "21/02/2006" or "21/02/2006 5:22:55 PM"). Try
+        // day-first formats before month-first, then a generic invariant parse.
+        var human = ParseHumanDate(s);
+        if (human is not null) return human;
+
+        return null;
+    }
+
+    private static bool StartsWithDigits(string s, int n)
+    {
+        if (s.Length < n) return false;
+        for (var i = 0; i < n; i++)
+            if (!char.IsDigit(s[i])) return false;
+        return true;
+    }
+
+    private static readonly string[] HumanDateFormats =
+    {
+        "dd/MM/yyyy h:mm:ss tt", "dd/MM/yyyy hh:mm:ss tt", "dd/MM/yyyy HH:mm:ss",
+        "dd/MM/yyyy H:mm:ss", "dd/MM/yyyy", "d/M/yyyy h:mm:ss tt", "d/M/yyyy",
+        "MM/dd/yyyy h:mm:ss tt", "MM/dd/yyyy hh:mm:ss tt", "MM/dd/yyyy HH:mm:ss", "MM/dd/yyyy",
+        "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd",
+    };
+
+    private static DateTime? ParseHumanDate(string s)
+    {
+        if (System.DateTime.TryParseExact(s, HumanDateFormats,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var dt))
+            return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+        if (System.DateTime.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var any))
+            return DateTime.SpecifyKind(any, DateTimeKind.Utc);
+        return null;
     }
 }

@@ -277,3 +277,8 @@ XmlDocument xfa = source.Form.XFA.XDP;   // the XDP packet from another form
 target.Form.AssignXfa(xfa);
 target.Save("with-xfa.pdf");
 ```
+
+Dynamic XFA layouts can be **flattened** to real PDF pages whose AcroForm fields
+stay searchable and fillable, and XFA datasets sync two-way with the AcroForm
+fields and export / import via FDF, XFDF, and XML. Fine-grained authoring of
+individual XFA dataset fields is still limited.

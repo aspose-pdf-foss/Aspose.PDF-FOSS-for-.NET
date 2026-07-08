@@ -41,11 +41,22 @@ internal static class SvgToPdfConverter
         }
         catch (XmlException) { }
 
-        // Second attempt: strip unrecognized entities
-        var cleaned = Regex.Replace(svgText, @"&(?!amp;|lt;|gt;|quot;|apos;|#)\w+;", "");
+        // Second attempt: strip unrecognized entities (Adobe Illustrator SVGs reference
+        // custom entities like &ns_extend; in the <svg> xmlns attrs, defined only in an
+        // external DTD). Parse with the DTD IGNORED + no resolver — using LoadXml here
+        // instead would still try to process the DOCTYPE/external DTD and throw, dropping
+        // the file (and its viewBox) to the empty last-resort page.
+        // Adobe Illustrator SVGs reference custom entities (e.g. xmlns:i="&ns_ai;") defined only
+        // in an external DTD, and USE those prefixes on body elements (<i:pgf>…). Replace each
+        // unknown entity with a placeholder URI (not empty) so the prefixed xmlns stays a valid,
+        // non-empty declaration and the prefix remains declared for the body — dropping the decl
+        // (or emptying it) would make every use of that prefix an "undeclared prefix" parse error.
+        var cleaned = Regex.Replace(svgText, @"&(?!amp;|lt;|gt;|quot;|apos;|#)\w+;", "urn:svg-entity");
+        var ignoreDtd = new XmlReaderSettings { DtdProcessing = DtdProcessing.Ignore, XmlResolver = null };
         try
         {
-            xml.LoadXml(cleaned);
+            using var reader = XmlReader.Create(new StringReader(cleaned), ignoreDtd);
+            xml.Load(reader);
             return xml;
         }
         catch (XmlException) { }
@@ -56,7 +67,8 @@ internal static class SvgToPdfConverter
         cleaned = Regex.Replace(cleaned, @"</(?:link|meta|br|hr|img|input)\s*>", "", RegexOptions.IgnoreCase);
         try
         {
-            xml.LoadXml(cleaned);
+            using var reader = XmlReader.Create(new StringReader(cleaned), ignoreDtd);
+            xml.Load(reader);
             return xml;
         }
         catch (XmlException) { }
@@ -99,13 +111,23 @@ internal static class SvgToPdfConverter
         var heightAttr = svgRoot.GetAttribute("height");
         var viewBox = svgRoot.GetAttribute("viewBox");
 
+        // viewBox = "min-x min-y vb-width vb-height": the user-coordinate window the
+        // content is drawn in. The page size comes from width/height (else the viewBox
+        // extent); the content is then SCALED + OFFSET to map the viewBox onto the page.
+        double vbMinX = 0, vbMinY = 0, vbW = 0, vbH = 0;
+        bool hasViewBox = false;
         if (!string.IsNullOrEmpty(viewBox))
         {
             var parts = viewBox.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length >= 4)
             {
-                width = ParseLength(parts[2]);
-                height = ParseLength(parts[3]);
+                vbMinX = ParseLength(parts[0]);
+                vbMinY = ParseLength(parts[1]);
+                vbW = ParseLength(parts[2]);
+                vbH = ParseLength(parts[3]);
+                hasViewBox = vbW > 0 && vbH > 0;
+                width = vbW;
+                height = vbH;
             }
         }
 
@@ -126,6 +148,15 @@ internal static class SvgToPdfConverter
         // SVG coordinate system: origin at top-left, Y down
         // Transform: translate(0, height) then scale(1, -1)
         sb.Append($"q 1 0 0 -1 0 {F(height)} cm\n");
+
+        // Map the viewBox user-space onto the page: scale (page/viewBox) and offset the
+        // viewBox origin to (0,0). Without this, content authored in viewBox coordinates
+        // (e.g. a 2291x1666 window shown on an 1100x800 page) is drawn unscaled/off-page.
+        if (hasViewBox)
+        {
+            double sx = width / vbW, sy = height / vbH;
+            sb.Append($"{F(sx)} 0 0 {F(sy)} {F(-sx * vbMinX)} {F(-sy * vbMinY)} cm\n");
+        }
 
         RenderNode(svgRoot, sb, page);
 
@@ -303,14 +334,46 @@ internal static class SvgToPdfConverter
         // Ensure font resource exists
         var fontResName = EnsureFontResource(page, "Helvetica");
 
-        sb.Append("q\n");
-        ApplyFillColor(elem, sb);
-        sb.Append($"BT /{fontResName} {F(fontSize)} Tf {F(x)} {F(y)} Td ");
-
         // Escape text for PDF string
         var escaped = text.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+
+        sb.Append("q\n");
+        ApplyFillColor(elem, sb);
+
+        var transform = elem.GetAttribute("transform");
+        var tm = ParseMatrix(transform);
+        if (tm is not null)
+        {
+            // FOSS-generated SVG (round-trip): a matrix() transform on <text> is the PDF
+            // text matrix with its y-column negated (see SvgDevice.EmitTextRun) — negate it
+            // back to recover the text matrix and place the run with Tm.
+            sb.Append($"BT /{fontResName} {F(fontSize)} Tf " +
+                $"{F(tm[0])} {F(tm[1])} {F(-tm[2])} {F(-tm[3])} {F(tm[4])} {F(tm[5])} Tm ");
+        }
+        else
+        {
+            // External SVG: honour the element's own transform (translate/scale/rotate),
+            // then draw with a LOCAL y-flip (1 0 0 -1) so the glyphs are upright — cancelling
+            // the page's scale(1,-1); without the flip the text renders mirrored/upside-down.
+            if (!string.IsNullOrEmpty(transform)) ApplyTransform(elem, sb);
+            sb.Append($"BT /{fontResName} {F(fontSize)} Tf 1 0 0 -1 {F(x)} {F(y)} Tm ");
+        }
+
         sb.Append($"({escaped}) Tj ET\n");
         sb.Append("Q\n");
+    }
+
+    /// <summary>Parse a <c>matrix(a,b,c,d,e,f)</c> transform, or null if not a matrix.</summary>
+    private static double[]? ParseMatrix(string transform)
+    {
+        if (string.IsNullOrEmpty(transform)) return null;
+        var m = Regex.Match(transform, @"matrix\s*\(([^)]*)\)");
+        if (!m.Success) return null;
+        var nums = Regex.Matches(m.Groups[1].Value, @"-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+            .Cast<Match>()
+            .Select(x => double.Parse(x.Value, CultureInfo.InvariantCulture))
+            .ToArray();
+        return nums.Length >= 6 ? nums : null;
     }
 
     // ── SVG path → PDF path conversion ──────────────────────────────
@@ -449,10 +512,16 @@ internal static class SvgToPdfConverter
             sb.Append($"{F(ParseLength(strokeWidth))} w ");
     }
 
+    /// <summary>A fill/stroke value that paints nothing: <c>none</c> or <c>transparent</c>.
+    /// (A <c>url(#…)</c> gradient/pattern reference is NOT treated as no-paint here — it falls
+    /// through to a solid colour so a gradient-filled background isn't left blank.)</summary>
+    private static bool IsNoPaint(string? v) =>
+        !string.IsNullOrEmpty(v) && (v == "none" || v.Equals("transparent", StringComparison.OrdinalIgnoreCase));
+
     private static void ApplyFillColor(XmlElement elem, StringBuilder sb)
     {
         var fill = GetStyleProp(elem, "fill");
-        if (!string.IsNullOrEmpty(fill) && fill != "none")
+        if (!string.IsNullOrEmpty(fill) && !IsNoPaint(fill))
         {
             var (r, g, b) = ParseColor(fill);
             sb.Append($"{F(r)} {F(g)} {F(b)} rg ");
@@ -462,7 +531,7 @@ internal static class SvgToPdfConverter
     private static void ApplyStrokeColor(XmlElement elem, StringBuilder sb)
     {
         var stroke = GetStyleProp(elem, "stroke");
-        if (!string.IsNullOrEmpty(stroke) && stroke != "none")
+        if (!string.IsNullOrEmpty(stroke) && !IsNoPaint(stroke))
         {
             var (r, g, b) = ParseColor(stroke);
             sb.Append($"{F(r)} {F(g)} {F(b)} RG ");
@@ -474,31 +543,47 @@ internal static class SvgToPdfConverter
         var transform = elem.GetAttribute("transform");
         if (string.IsNullOrEmpty(transform)) return;
 
-        // Handle matrix(a,b,c,d,e,f)
-        var m = Regex.Match(transform, @"matrix\s*\(\s*([\d.e+-]+)[\s,]+([\d.e+-]+)[\s,]+([\d.e+-]+)[\s,]+([\d.e+-]+)[\s,]+([\d.e+-]+)[\s,]+([\d.e+-]+)\s*\)");
-        if (m.Success)
+        // A transform attribute may chain several functions, e.g.
+        // "translate(0,540) scale(1,-1)". SVG applies them left-to-right, so emit
+        // a `cm` per function in the same order. Emitting only the first (as the
+        // old code did) dropped later functions and pushed content off-page.
+        foreach (Match fn in Regex.Matches(transform, @"(matrix|translate|scale|rotate)\s*\(([^)]*)\)"))
         {
-            sb.Append($"{m.Groups[1].Value} {m.Groups[2].Value} {m.Groups[3].Value} {m.Groups[4].Value} {m.Groups[5].Value} {m.Groups[6].Value} cm\n");
-            return;
-        }
+            var op = fn.Groups[1].Value;
+            var args = Regex.Matches(fn.Groups[2].Value, @"-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+                .Cast<Match>()
+                .Select(m => double.Parse(m.Value, CultureInfo.InvariantCulture))
+                .ToArray();
 
-        // Handle translate(x,y)
-        m = Regex.Match(transform, @"translate\s*\(\s*([\d.e+-]+)[\s,]*([\d.e+-]*)\s*\)");
-        if (m.Success)
-        {
-            var tx = double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
-            var ty = m.Groups[2].Length > 0 ? double.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture) : 0;
-            sb.Append($"1 0 0 1 {F(tx)} {F(ty)} cm\n");
-            return;
-        }
-
-        // Handle scale(sx,sy)
-        m = Regex.Match(transform, @"scale\s*\(\s*([\d.e+-]+)[\s,]*([\d.e+-]*)\s*\)");
-        if (m.Success)
-        {
-            var sxx = double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
-            var syy = m.Groups[2].Length > 0 ? double.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture) : sxx;
-            sb.Append($"{F(sxx)} 0 0 {F(syy)} 0 0 cm\n");
+            switch (op)
+            {
+                case "matrix" when args.Length >= 6:
+                    sb.Append($"{F(args[0])} {F(args[1])} {F(args[2])} {F(args[3])} {F(args[4])} {F(args[5])} cm\n");
+                    break;
+                case "translate" when args.Length >= 1:
+                    sb.Append($"1 0 0 1 {F(args[0])} {F(args.Length > 1 ? args[1] : 0)} cm\n");
+                    break;
+                case "scale" when args.Length >= 1:
+                    var syy = args.Length > 1 ? args[1] : args[0];
+                    sb.Append($"{F(args[0])} 0 0 {F(syy)} 0 0 cm\n");
+                    break;
+                case "rotate" when args.Length >= 1:
+                    var rad = args[0] * Math.PI / 180.0;
+                    var cos = Math.Cos(rad);
+                    var sin = Math.Sin(rad);
+                    if (args.Length >= 3)
+                    {
+                        // rotate(angle, cx, cy) == translate(cx,cy) rotate translate(-cx,-cy)
+                        sb.Append($"1 0 0 1 {F(args[1])} {F(args[2])} cm\n");
+                        sb.Append($"{F(cos)} {F(sin)} {F(-sin)} {F(cos)} 0 0 cm\n");
+                        sb.Append($"1 0 0 1 {F(-args[1])} {F(-args[2])} cm\n");
+                    }
+                    else
+                    {
+                        sb.Append($"{F(cos)} {F(sin)} {F(-sin)} {F(cos)} 0 0 cm\n");
+                    }
+                    break;
+            }
         }
     }
 
@@ -507,15 +592,19 @@ internal static class SvgToPdfConverter
         var fill = GetStyleProp(elem, "fill");
         var stroke = GetStyleProp(elem, "stroke");
 
-        bool hasFill = fill != "none" && !string.IsNullOrEmpty(fill);
-        bool hasStroke = !string.IsNullOrEmpty(stroke) && stroke != "none";
+        bool hasFill = !string.IsNullOrEmpty(fill) && !IsNoPaint(fill);
+        bool hasStroke = !string.IsNullOrEmpty(stroke) && !IsNoPaint(stroke);
 
-        // Default: SVG elements are filled (black) unless fill="none"
+        // Default: SVG elements are filled (black) unless fill is none/transparent
         if (string.IsNullOrEmpty(fill)) hasFill = true;
 
-        if (hasFill && hasStroke) sb.Append("B\n");
+        // Honour fill-rule: even-odd must use the *-variant paint ops (f*/B*),
+        // otherwise nonzero winding fills the holes of hollow shapes solid.
+        bool evenOdd = GetStyleProp(elem, "fill-rule") == "evenodd";
+
+        if (hasFill && hasStroke) sb.Append(evenOdd ? "B*\n" : "B\n");
         else if (hasStroke) sb.Append("S\n");
-        else if (hasFill) sb.Append("f\n");
+        else if (hasFill) sb.Append(evenOdd ? "f*\n" : "f\n");
         else sb.Append("n\n");
     }
 
@@ -585,9 +674,25 @@ internal static class SvgToPdfConverter
             "blue" => (0, 0, 1),
             "yellow" => (1, 1, 0),
             "gray" or "grey" => (0.502, 0.502, 0.502),
+            "lightgray" or "lightgrey" => (0.827, 0.827, 0.827),
+            "darkgray" or "darkgrey" => (0.663, 0.663, 0.663),
+            "silver" => (0.753, 0.753, 0.753),
+            "gainsboro" => (0.863, 0.863, 0.863),
+            "whitesmoke" => (0.961, 0.961, 0.961),
             "orange" => (1, 0.647, 0),
+            "gold" => (1, 0.843, 0),
             "purple" => (0.502, 0, 0.502),
             "navy" => (0, 0, 0.502),
+            "maroon" => (0.502, 0, 0),
+            "olive" => (0.502, 0.502, 0),
+            "teal" => (0, 0.502, 0.502),
+            "aqua" or "cyan" => (0, 1, 1),
+            "fuchsia" or "magenta" => (1, 0, 1),
+            "lime" => (0, 1, 0),
+            "lightblue" => (0.678, 0.847, 0.902),
+            "darkblue" => (0, 0, 0.545),
+            "darkgreen" => (0, 0.392, 0),
+            "darkred" => (0.545, 0, 0),
             _ => (0, 0, 0), // default black
         };
     }

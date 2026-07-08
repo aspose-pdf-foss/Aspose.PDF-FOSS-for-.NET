@@ -10,7 +10,7 @@ using Aspose.Pdf.Operators;
 ///
 /// When constructed with a template operator (e.g. <c>new OperatorSelector(new
 /// Operators.Fill())</c>) the selector admits only operators whose runtime type
-/// equals the template's — mirroring the Aspose.PDF for .NET expectation that a caller
+/// equals the template's — mirroring the Aspose.Pdf expectation that a caller
 /// asking for <c>Fill</c> gets back only <c>Fill</c> instances. The
 /// parameterless constructor admits every visited operator.
 /// </summary>

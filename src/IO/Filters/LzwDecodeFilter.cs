@@ -25,9 +25,10 @@ internal static class LzwDecodeFilter
                 var columns = (int)parms.GetInt("Columns", 1);
                 var colors = (int)parms.GetInt("Colors", 1);
                 var bpc = (int)parms.GetInt("BitsPerComponent", 8);
-                output = FlateDecodeFilter.Decode(output,
-                    new PdfDictionary { }); // reuse PNG predictor logic
-                // Actually, let's just inline the predictor call
+                // LZWDecode and FlateDecode share the same /Predictor DecodeParms
+                // (PDF 32000 §7.4.4.4); apply the TIFF/PNG predictor to the decoded
+                // output exactly as FlateDecode does.
+                output = FlateDecodeFilter.RemovePredictor(output, predictor, columns, colors, bpc);
             }
         }
 
@@ -57,13 +58,9 @@ internal static class LzwDecodeFilter
                 codeSize = 9;
                 nextCode = 258;
                 prevEntry = null;
-
-                code = reader.ReadBits(codeSize);
-                if (code < 0 || code == EodCode) break;
-
-                var entry = table[code];
-                output.AddRange(entry);
-                prevEntry = entry;
+                // Let the main loop process the next code: it may legally be
+                // ANOTHER Clear (consecutive 256s), EOD, or a literal — the
+                // prevEntry==null state already handles the first post-clear code.
                 continue;
             }
 

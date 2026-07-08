@@ -78,14 +78,66 @@ internal static class PdfAValidator
         if (format is PdfFormat.PDF_UA_1)
             return ValidatePdfUa(document);
 
-        // Version-only formats — always return false (document doesn't "conform" to a version)
-        if (format is PdfFormat.v_1_7 or PdfFormat.v_2_0 or PdfFormat.Pdf)
-            return new PdfAValidationResult { IsValid = false, Format = format, Issues = ["Not a conformance format"] };
+        // Version-only formats (a plain PDF version, not a PDF/A·X·UA conformance level):
+        // a document that loaded is a structurally valid PDF of that version, so validation
+        // succeeds — matching the reference, where Validate(stream, v_1_x) returns true for a
+        // well-formed PDF. (Only PDF/A·X·UA carry conformance requirements that can fail.)
+        if (format is PdfFormat.v_1_0 or PdfFormat.v_1_1 or PdfFormat.v_1_2 or PdfFormat.v_1_3
+            or PdfFormat.v_1_4 or PdfFormat.v_1_5 or PdfFormat.v_1_6 or PdfFormat.v_1_7
+            or PdfFormat.v_2_0 or PdfFormat.Pdf)
+            return new PdfAValidationResult { IsValid = true, Format = format };
+
+        // CLAIM GATE (oracle-derived 2026-07-06):
+        // Validate(PDF_A_<p><c>) returns false — with a CLEAN log, nothing written —
+        // when the document's XMP pdfaid claim doesn't EXACTLY equal the requested
+        // part and conformance (case-sensitive; a claimed 3A validates as 3A only,
+        // never as 2B/3B). An ABSENT claim is NOT silent: it falls through so
+        // CheckMetadata logs the missing pdfaid entries.
+        var (reqPart, reqConf) = format switch
+        {
+            PdfFormat.PDF_A_1A => ("1", "A"),
+            PdfFormat.PDF_A_1B => ("1", "B"),
+            PdfFormat.PDF_A_2A => ("2", "A"),
+            PdfFormat.PDF_A_2B => ("2", "B"),
+            PdfFormat.PDF_A_2U => ("2", "U"),
+            PdfFormat.PDF_A_3A => ("3", "A"),
+            PdfFormat.PDF_A_3B => ("3", "B"),
+            PdfFormat.PDF_A_3U => ("3", "U"),
+            PdfFormat.ZUGFeRD => ("3", "B"),
+            PdfFormat.PDF_A_4 or PdfFormat.PDF_A_4E or PdfFormat.PDF_A_4F => ("4", (string?)null),
+            _ => ((string?)null, (string?)null),
+        };
+        var claimPart = document.HasMetadata ? document.Metadata?.Get("pdfaid:part") : null;
+        var claimConf = document.HasMetadata ? document.Metadata?.Get("pdfaid:conformance") : null;
+        if (reqPart is not null && !string.IsNullOrEmpty(claimPart)
+            && (claimPart != reqPart || (reqConf is not null && claimConf != reqConf)))
+            return new PdfAValidationResult { IsValid = false, Format = format };
+
+        // OUTPUT-INTENT GATE (silent like the claim gate): a matched claim without a
+        // /GTS_PDFA1 output intent fails without logging.
+        if (!string.IsNullOrEmpty(claimPart) && !HasPdfAOutputIntent(document))
+            return new PdfAValidationResult { IsValid = false, Format = format };
 
         var issues = new List<string>();
         var violations = new List<PdfAViolation>();
 
         var isPdfA1 = format is PdfFormat.PDF_A_1A or PdfFormat.PDF_A_1B;
+
+        // PDF/A-1 (ISO 19005-1 §6.1.4): cross-reference STREAMS are prohibited —
+        // the file must carry a classic xref table. Only flagged before a PDF/A
+        // conversion has stamped the document: Convert() repairs this (the file is
+        // rewritten with a classic table on save), and post-conversion validation
+        // of the same in-memory document must reflect the repaired state.
+        if (isPdfA1 && document.Reader.XRefTable.UsedXrefStream
+            && !document.PdfAConversionApplied)
+        {
+            issues.Add("The xref stream is prohibited in PDF/A-1; the file must use a cross-reference table.");
+            violations.Add(new PdfAViolation
+            {
+                Rule = "XrefStream",
+                Description = "The xref stream is prohibited in PDF/A-1; the file must use a cross-reference table.",
+            });
+        }
 
         // 1. Must have XMP metadata
         CheckMetadata(document, format, issues, violations);
@@ -101,19 +153,12 @@ internal static class PdfAValidator
             });
         }
 
-        // 3. Level A requirements
+        // 3. Level A requirements. NOTE: a document title is NOT one of them —
+        // ISO 19005 requires a title at no level (that's a PDF/UA rule); Acrobat
+        // preflight passes untitled Level-A files. The conversion still sets one
+        // as best practice, but validation must not demand it.
         if (format is PdfFormat.PDF_A_1A or PdfFormat.PDF_A_2A or PdfFormat.PDF_A_3A)
         {
-            if (string.IsNullOrEmpty(document.Info.Title))
-            {
-                issues.Add("Missing document title (required for PDF/A Level A).");
-                violations.Add(new PdfAViolation
-                {
-                    Rule = "DocumentTitle",
-                    Description = "Missing document title (required for PDF/A Level A).",
-                });
-            }
-
             if (!document.IsTagged)
             {
                 issues.Add("Document is not tagged (required for PDF/A Level A).");
@@ -232,6 +277,14 @@ internal static class PdfAValidator
         if (document.Reader.Trailer.Get("ID") is null)
             Fail("FileId", "Missing file ID in trailer (required for PDF/UA-1).");
 
+        // PDF/UA-1 §7.21.4.2 symbolic-TrueType cmap rule (what Preflight flags on
+        // the 57066 regression doc). NOTE: a general font-EMBEDDING requirement is
+        // deliberately NOT enforced here — FOSS-authored tagged documents render
+        // through Standard-14 faces that are only embedded at save, and the
+        // internal tagged-authoring suite validates them in memory.
+        foreach (var page in document.Pages)
+            CheckUaSymbolicCmap(document, page, issues, violations);
+
         return new PdfAValidationResult
         {
             IsValid = issues.Count == 0,
@@ -299,6 +352,43 @@ internal static class PdfAValidator
             });
         }
 
+        // PDF/X annotation layout: an annotation (other than TrapNet) must lie
+        // completely outside the printable page area. An annotation drawn on the
+        // page is the PDF/A validator's "ErrorAnnotationLayout" rule
+        // (the log carries that rule id).
+        foreach (var page in document.Pages)
+        {
+            if (document.Reader.Resolve(page.Dict.Get("Annots")) is not PdfArray annots) continue;
+            foreach (var aRef in annots)
+            {
+                var a = document.Reader.ResolveDict(aRef);
+                if (a is null || a.GetName("Subtype") is null or "TrapNet") continue;
+                var rect = document.Reader.Resolve(a.Get("Rect")) as PdfArray;
+                if (rect is not { Count: 4 }) continue;
+                var mb = page.MediaBox;
+                static double Num(PdfObject? o) => o switch
+                {
+                    PdfInteger i => i.Value,
+                    PdfReal r => r.Value,
+                    _ => 0,
+                };
+                var llx = Math.Min(Num(rect[0]), Num(rect[2]));
+                var lly = Math.Min(Num(rect[1]), Num(rect[3]));
+                var urx = Math.Max(Num(rect[0]), Num(rect[2]));
+                var ury = Math.Max(Num(rect[1]), Num(rect[3]));
+                var inside = urx > mb.LLX && llx < mb.URX && ury > mb.LLY && lly < mb.URY;
+                if (!inside) continue;
+                var msg = $"ErrorAnnotationLayout: annotation '{a.GetName("Subtype")}' inside the printable area on page {page.Number} (not allowed in PDF/X).";
+                issues.Add(msg);
+                violations.Add(new PdfAViolation
+                {
+                    Rule = "ErrorAnnotationLayout",
+                    Description = msg,
+                    PageNumber = page.Number,
+                });
+            }
+        }
+
         return new PdfAValidationResult
         {
             IsValid = issues.Count == 0,
@@ -348,27 +438,10 @@ internal static class PdfAValidator
                 });
             }
 
-            var dcTitle = document.Metadata.Get("dc:title");
-            if (string.IsNullOrEmpty(dcTitle))
-            {
-                issues.Add("Missing dc:title in XMP metadata.");
-                violations.Add(new PdfAViolation
-                {
-                    Rule = "MetadataDcTitle",
-                    Description = "Missing dc:title in XMP metadata.",
-                });
-            }
-
-            var pdfProducer = document.Metadata.Get("pdf:Producer");
-            if (string.IsNullOrEmpty(pdfProducer))
-            {
-                issues.Add("Missing pdf:Producer in XMP metadata.");
-                violations.Add(new PdfAViolation
-                {
-                    Rule = "MetadataPdfProducer",
-                    Description = "Missing pdf:Producer in XMP metadata.",
-                });
-            }
+            // dc:title and pdf:Producer are deliberately NOT validated: ISO 19005
+            // requires neither (Acrobat preflight passes files without them, e.g.
+            // the 50011 regression doc), and demanding them here produced false
+            // validation failures on conformant documents.
         }
     }
 
@@ -484,8 +557,22 @@ internal static class PdfAValidator
         var fontDict = document.Reader.ResolveDict(resources.Get("Font"));
         if (fontDict is null) return;
 
+        // Only fonts actually SELECTED by a Tf in the page content are checked —
+        // a non-embedded font merely declared in /Resources is never flagged
+        // (reference-validator behaviour, oracle-verified 2026-07-06).
+        HashSet<string>? usedFonts = null;
+        try
+        {
+            usedFonts = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var op in page.Contents)
+                if (op is Aspose.Pdf.Operators.SelectFont tf && !string.IsNullOrEmpty(tf.Name))
+                    usedFonts.Add(tf.Name);
+        }
+        catch { usedFonts = null; /* unparsable content: fall back to checking all */ }
+
         foreach (var fontKey in fontDict.Keys)
         {
+            if (usedFonts is not null && !usedFonts.Contains(fontKey)) continue;
             var font = document.Reader.ResolveDict(fontDict.Get(fontKey));
             if (font is null) continue;
 
@@ -552,10 +639,87 @@ internal static class PdfAValidator
         }
     }
 
+    /// <summary>PDF/UA-1 §7.21.4.2: a symbolic TrueType font program (one whose
+    /// cmap carries a Windows-Symbol (3,0) subtable) must contain EXACTLY one
+    /// cmap encoding. Checks the embedded programs of fonts used on the page
+    /// (Type0 descendants included).</summary>
+    private static void CheckUaSymbolicCmap(Document document, Page page,
+        List<string> issues, List<PdfAViolation> violations)
+    {
+        var reader = document.Reader;
+        var resources = reader.ResolveDict(page.Dict.Get("Resources"));
+        var fontRes = resources is null ? null : reader.ResolveDict(resources.Get("Font"));
+        if (fontRes is null) return;
+
+        foreach (var fontKey in fontRes.Keys)
+        {
+            var font = reader.ResolveDict(fontRes.Get(fontKey));
+            if (font is null) continue;
+            var baseFont = font.GetName("BaseFont") ?? "Unknown";
+            var target = font;
+            if (font.GetName("Subtype") == "Type0"
+                && reader.Resolve(font.Get("DescendantFonts")) is PdfArray { Count: > 0 } desc)
+                target = reader.ResolveDict(desc[0]) ?? font;
+            var descriptor = reader.ResolveDict(target.Get("FontDescriptor"));
+            var ff = descriptor is null ? null : reader.ResolveStream(descriptor.Get("FontFile2"));
+            if (ff is null) continue;
+
+            byte[] prog;
+            try { prog = reader.DecodeStream(ff); } catch { continue; }
+            if (prog.Length < 12) continue;
+
+            // Locate the cmap table in the sfnt directory and count its subtables.
+            int numTables = (prog[4] << 8) | prog[5];
+            for (var i = 0; i < numTables; i++)
+            {
+                var off = 12 + i * 16;
+                if (off + 16 > prog.Length) break;
+                if (prog[off] != 'c' || prog[off + 1] != 'm' || prog[off + 2] != 'a' || prog[off + 3] != 'p')
+                    continue;
+                var toff = (prog[off + 8] << 24) | (prog[off + 9] << 16) | (prog[off + 10] << 8) | prog[off + 11];
+                if (toff + 4 > prog.Length) break;
+                int subtables = (prog[toff + 2] << 8) | prog[toff + 3];
+                var hasSymbol = false;
+                for (var j = 0; j < subtables; j++)
+                {
+                    var e = toff + 4 + j * 8;
+                    if (e + 8 > prog.Length) break;
+                    int pid = (prog[e] << 8) | prog[e + 1];
+                    int eid = (prog[e + 2] << 8) | prog[e + 3];
+                    if (pid == 3 && eid == 0) hasSymbol = true;
+                }
+                if (hasSymbol && subtables != 1)
+                {
+                    var msg = $"Symbolic TrueType font '{baseFont}' program cmap must contain exactly one encoding (PDF/UA-1 7.21.4.2), found {subtables}";
+                    issues.Add(msg);
+                    violations.Add(new PdfAViolation
+                    {
+                        Rule = "FontCmap",
+                        Description = msg,
+                        PageNumber = page.Number,
+                    });
+                }
+                break;
+            }
+        }
+    }
+
     private static bool HasOutputIntent(Document document)
     {
         var outputIntents = document.Reader.Resolve(document.Catalog.Get("OutputIntents"));
         return outputIntents is PdfArray { Count: > 0 };
+    }
+
+    /// <summary>True when /OutputIntents carries an intent with /S /GTS_PDFA1 —
+    /// the (silent) PDF/A output-intent gate.</summary>
+    private static bool HasPdfAOutputIntent(Document document)
+    {
+        if (document.Reader.Resolve(document.Catalog.Get("OutputIntents")) is not PdfArray arr)
+            return false;
+        foreach (var item in arr)
+            if (document.Reader.ResolveDict(item)?.GetName("S") == "GTS_PDFA1")
+                return true;
+        return false;
     }
 
     private static void CheckColorSpaces(Document document, Page page, bool hasOutputIntent,

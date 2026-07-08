@@ -118,7 +118,7 @@ public sealed class TiffSettings
     public float Brightness { get; set; } = 0.5f;
 
     /// <summary>Preferred page orientation for rendered TIFF output. Stored
-    /// for API-parity with Aspose.PDF for .NET; the current renderer keeps
+    /// for API-parity with Aspose.Pdf; the current renderer keeps
     /// each page's native aspect ratio regardless of this hint.</summary>
     public ShapeType Shape { get; set; } = ShapeType.None;
 

@@ -8,10 +8,23 @@ namespace Aspose.Pdf.Converters;
 
 /// <summary>
 /// Converts Markdown files to PDF documents.
-/// Supports: headings, paragraphs, bold, italic, code blocks, lists, quotes, horizontal rules, links.
+/// Supports: ATX and setext headings, paragraphs, bold/italic/bold-italic,
+/// fenced and indented code, inline code, unordered/ordered lists, block
+/// quotes, horizontal rules and links.
 /// </summary>
 internal static class MarkdownToPdfConverter
 {
+    // Font resource names (set up by EnsureFonts).
+    private const string Normal = "F1";       // TimesNewRoman
+    private const string Bold = "F2";         // TimesNewRomanBold
+    private const string Italic = "F3";       // TimesNewRomanItalic
+    private const string BoldItalic = "F4";   // TimesNewRomanBoldItalic
+    private const string Mono = "F5";         // CourierNew
+
+    private const double BaseFontSize = 12.0;
+    private const double CodeBlockSize = 9.0;   // fenced / indented code
+    private const double InlineCodeSize = 10.4; // a whole line wrapped in `...`
+
     public static Document Convert(string mdPath, MdLoadOptions? options = null)
     {
         var mdText = File.ReadAllText(mdPath, Encoding.UTF8);
@@ -28,160 +41,213 @@ internal static class MarkdownToPdfConverter
     {
         var pageWidth = options?.PageInfo?.Width ?? 612;
         var pageHeight = options?.PageInfo?.Height ?? 792;
-        var marginLeft = options?.PageInfo?.Margin?.Left ?? 72;
-        var marginTop = options?.PageInfo?.Margin?.Top ?? 72;
-        var marginRight = options?.PageInfo?.Margin?.Right ?? 72;
-        var marginBottom = options?.PageInfo?.Margin?.Bottom ?? 72;
+        var marginLeft = options?.PageInfo?.Margin?.Left ?? 36;
+        var marginTop = options?.PageInfo?.Margin?.Top ?? 36;
+        var marginRight = options?.PageInfo?.Margin?.Right ?? 36;
+        var marginBottom = options?.PageInfo?.Margin?.Bottom ?? 36;
 
         var doc = Document.Create();
         var page = doc.Pages.Add(pageWidth, pageHeight);
-
-        // Ensure font resources
-        var fontResName = EnsureFont(page, "Helvetica", "F1");
-        var boldResName = EnsureFont(page, "Helvetica-Bold", "F2");
-        var italicResName = EnsureFont(page, "Helvetica-Oblique", "F3");
-        var monoResName = EnsureFont(page, "Courier", "F4");
+        EnsureFonts(page);
 
         var sb = new StringBuilder();
         var contentWidth = pageWidth - marginLeft - marginRight;
         var y = pageHeight - marginTop;
         var x = marginLeft;
-        var baseFontSize = 11.0;
-        var lineHeight = baseFontSize * 1.4;
+        var lineHeight = BaseFontSize * 1.4;
 
         var lines = mdText.Split('\n');
-        var inCodeBlock = false;
+        var inFence = false;
 
         for (int i = 0; i < lines.Length; i++)
         {
             var line = lines[i].TrimEnd('\r');
 
-            // Check for new page needed
+            // Start a new page when the cursor runs off the bottom margin.
             if (y < marginBottom + lineHeight * 2)
             {
                 page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
                 sb.Clear();
                 page = doc.Pages.Add(pageWidth, pageHeight);
-                EnsureFont(page, "Helvetica", "F1");
-                EnsureFont(page, "Helvetica-Bold", "F2");
-                EnsureFont(page, "Helvetica-Oblique", "F3");
-                EnsureFont(page, "Courier", "F4");
+                EnsureFonts(page);
                 y = pageHeight - marginTop;
             }
 
-            // Code block (fenced)
-            if (line.StartsWith("```"))
+            // Fenced code block toggling.
+            if (line.TrimStart().StartsWith("```"))
             {
-                inCodeBlock = !inCodeBlock;
+                inFence = !inFence;
                 continue;
             }
-
-            if (inCodeBlock)
+            if (inFence)
             {
-                EmitTextLine(sb, monoResName, baseFontSize * 0.9, x + 10, y, EscapePdf(line));
+                EmitTextLine(sb, Mono, CodeBlockSize, x, y, EscapePdf(line.TrimEnd()));
                 y -= lineHeight;
                 continue;
             }
 
-            // Empty line = paragraph break
+            // Blank line = paragraph break.
             if (string.IsNullOrWhiteSpace(line))
             {
                 y -= lineHeight * 0.5;
                 continue;
             }
 
-            // Horizontal rule
-            if (Regex.IsMatch(line, @"^(\*{3,}|-{3,}|_{3,})\s*$"))
+            // Horizontal rule (3+ of * - _).
+            if (Regex.IsMatch(line, @"^\s*(\*{3,}|-{3,}|_{3,})\s*$"))
             {
-                // Draw a line
                 sb.Append($"q 0.5 G 0.5 w {F(x)} {F(y)} m {F(x + contentWidth)} {F(y)} l S Q\n");
                 y -= lineHeight;
                 continue;
             }
 
-            // Headings
+            var trimmed = line.Trim();
+
+            // Setext heading: a plain text line underlined by a run of = (H1) or - (H2).
+            if (!IsBlockLine(line) && i + 1 < lines.Length)
+            {
+                var next = lines[i + 1].TrimEnd('\r').Trim();
+                if (Regex.IsMatch(next, @"^=+$"))
+                {
+                    EmitHeading(sb, 1, x, ref y, EscapePdf(TrimText(StripInlineMarkdown(trimmed))));
+                    i++;
+                    continue;
+                }
+                if (Regex.IsMatch(next, @"^-+$"))
+                {
+                    EmitHeading(sb, 2, x, ref y, EscapePdf(TrimText(StripInlineMarkdown(trimmed))));
+                    i++;
+                    continue;
+                }
+            }
+
+            // ATX heading (# .. ######).
             var headingMatch = Regex.Match(line, @"^(#{1,6})\s+(.+)$");
             if (headingMatch.Success)
             {
                 var level = headingMatch.Groups[1].Value.Length;
-                var text = headingMatch.Groups[2].Value;
-                var fontSize = level switch
-                {
-                    1 => baseFontSize * 2.0,
-                    2 => baseFontSize * 1.6,
-                    3 => baseFontSize * 1.3,
-                    4 => baseFontSize * 1.1,
-                    _ => baseFontSize,
-                };
-                y -= fontSize * 0.3; // spacing before heading
-                EmitTextLine(sb, boldResName, fontSize, x, y, EscapePdf(StripInlineMarkdown(text)));
-                y -= fontSize * 1.5;
+                EmitHeading(sb, level, x, ref y, EscapePdf(TrimText(StripInlineMarkdown(headingMatch.Groups[2].Value))));
                 continue;
             }
 
-            // Blockquote
-            if (line.StartsWith("> ") || line.StartsWith(">"))
+            // Block quote (one or more leading '>').
+            if (line.StartsWith(">"))
             {
-                var quoteText = line.TrimStart('>').TrimStart();
-                // Draw a gray left bar
-                sb.Append($"q 0.8 G 2 w {F(x)} {F(y + 2)} m {F(x)} {F(y - lineHeight + 4)} l S Q\n");
-                EmitTextLine(sb, italicResName, baseFontSize, x + 15, y, EscapePdf(StripInlineMarkdown(quoteText)));
+                var quoteText = line;
+                while (quoteText.StartsWith(">")) quoteText = quoteText.TrimStart('>').TrimStart();
+                EmitTextLine(sb, Normal, BaseFontSize, x, y, EscapePdf(TrimText(StripInlineMarkdown(quoteText))));
                 y -= lineHeight;
                 continue;
             }
 
-            // Unordered list
-            var ulMatch = Regex.Match(line, @"^(\s*)[*+-]\s+(.+)$");
+            // Unordered list item.
+            var ulMatch = Regex.Match(line, @"^(\s*)[*+\-]\s+(.+)$");
             if (ulMatch.Success)
             {
-                var indent = ulMatch.Groups[1].Value.Length * 10 + 15;
-                var text = ulMatch.Groups[2].Value;
-                // Bullet
-                sb.Append($"q 0 0 0 rg BT /{fontResName} {F(baseFontSize)} Tf {F(x + indent - 8)} {F(y)} Td (\\267) Tj ET Q\n");
-                EmitTextLine(sb, fontResName, baseFontSize, x + indent, y, EscapePdf(StripInlineMarkdown(text)));
+                var indent = ulMatch.Groups[1].Value.Length * 12 + 18;
+                var text = TrimText(StripInlineMarkdown(ulMatch.Groups[2].Value));
+                // Bullet (WinAnsi 0x95 = U+2022) as its own fragment.
+                EmitTextLine(sb, Normal, BaseFontSize, x + indent - 12, y, "\\225");
+                EmitTextLine(sb, Normal, BaseFontSize, x + indent, y, EscapePdf(text));
                 y -= lineHeight;
                 continue;
             }
 
-            // Ordered list
-            var olMatch = Regex.Match(line, @"^(\s*)\d+[.)]\s+(.+)$");
+            // Ordered list item.
+            var olMatch = Regex.Match(line, @"^(\s*)(\d+)[.)]\s+(.+)$");
             if (olMatch.Success)
             {
-                var indent = olMatch.Groups[1].Value.Length * 10 + 15;
-                var text = olMatch.Groups[2].Value;
-                var numStr = Regex.Match(line.TrimStart(), @"^(\d+)").Groups[1].Value;
-                EmitTextLine(sb, fontResName, baseFontSize, x + indent - 15, y, numStr + ".");
-                EmitTextLine(sb, fontResName, baseFontSize, x + indent, y, EscapePdf(StripInlineMarkdown(text)));
+                var indent = olMatch.Groups[1].Value.Length * 12 + 18;
+                var numStr = olMatch.Groups[2].Value;
+                var text = TrimText(StripInlineMarkdown(olMatch.Groups[3].Value));
+                EmitTextLine(sb, Normal, BaseFontSize, x + indent - 15, y, numStr + ".");
+                EmitTextLine(sb, Normal, BaseFontSize, x + indent, y, EscapePdf(text));
                 y -= lineHeight;
                 continue;
             }
 
-            // Indented code (4 spaces or tab)
+            // Indented code (4 spaces or a tab).
             if (line.StartsWith("    ") || line.StartsWith("\t"))
             {
-                var codeText = line.TrimStart();
-                EmitTextLine(sb, monoResName, baseFontSize * 0.9, x + 20, y, EscapePdf(codeText));
+                EmitTextLine(sb, Mono, CodeBlockSize, x, y, EscapePdf(line.Trim()));
                 y -= lineHeight;
                 continue;
             }
 
-            // Regular paragraph — handle inline formatting
-            var plainText = StripInlineMarkdown(line);
-            // Detect bold/italic for first-pass font selection
-            var usedFont = fontResName;
-            if (Regex.IsMatch(line, @"\*\*\*.+?\*\*\*|___.+?___")) usedFont = boldResName; // simplification
-            else if (Regex.IsMatch(line, @"\*\*.+?\*\*|__.+?__")) usedFont = boldResName;
-            else if (Regex.IsMatch(line, @"\*.+?\*|_.+?_")) usedFont = italicResName;
+            // A whole line wrapped in single backticks = inline code.
+            if (trimmed.Length >= 2 && trimmed.StartsWith("`") && trimmed.EndsWith("`"))
+            {
+                var code = trimmed.Substring(1, trimmed.Length - 2);
+                EmitTextLine(sb, Mono, InlineCodeSize, x, y, EscapePdf(code));
+                y -= lineHeight;
+                continue;
+            }
 
-            EmitTextLine(sb, usedFont, baseFontSize, x, y, EscapePdf(plainText));
+            // A whole line that is a single link: [text](url).
+            var linkMatch = Regex.Match(trimmed, @"^\[([^\]]+)\]\(([^)]+)\)$");
+            if (linkMatch.Success)
+            {
+                var linkText = linkMatch.Groups[1].Value;
+                var url = linkMatch.Groups[2].Value;
+                EmitTextLine(sb, Normal, BaseFontSize, x, y, EscapePdf(linkText));
+                var w = linkText.Length * BaseFontSize * 0.5;
+                var link = new Aspose.Pdf.Annotations.LinkAnnotation(page,
+                    new Rectangle(x, y, x + w, y + BaseFontSize))
+                {
+                    Action = new Aspose.Pdf.Annotations.GoToURIAction(url),
+                };
+                page.Annotations.Add(link);
+                y -= lineHeight;
+                continue;
+            }
+
+            // Regular paragraph — pick a font from whole-line emphasis.
+            var fontRes = Normal;
+            if (Regex.IsMatch(trimmed, @"^\*\*\*.+\*\*\*$") || Regex.IsMatch(trimmed, @"^___.+___$"))
+                fontRes = BoldItalic;
+            else if (Regex.IsMatch(trimmed, @"^\*\*.+\*\*$") || Regex.IsMatch(trimmed, @"^__.+__$"))
+                fontRes = Bold;
+            else if (Regex.IsMatch(trimmed, @"^\*.+\*$") || Regex.IsMatch(trimmed, @"^_.+_$"))
+                fontRes = Italic;
+
+            EmitTextLine(sb, fontRes, BaseFontSize, x, y, EscapePdf(TrimText(StripInlineMarkdown(line))));
             y -= lineHeight;
         }
 
-        // Flush remaining content
         if (sb.Length > 0)
             page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
 
         return doc;
+    }
+
+    /// <summary>Whether a line already opens a Markdown block construct
+    /// (heading, quote, list, rule or code) — used to avoid mistaking such
+    /// a line for the text of a setext heading.</summary>
+    private static bool IsBlockLine(string line)
+    {
+        if (line.StartsWith("#") || line.StartsWith(">")) return true;
+        if (line.StartsWith("    ") || line.StartsWith("\t")) return true;
+        if (Regex.IsMatch(line, @"^\s*(\*{3,}|-{3,}|_{3,})\s*$")) return true;
+        if (Regex.IsMatch(line, @"^(\s*)[*+\-]\s+")) return true;
+        if (Regex.IsMatch(line, @"^(\s*)\d+[.)]\s+")) return true;
+        return false;
+    }
+
+    private static void EmitHeading(StringBuilder sb, int level, double x, ref double y, string text)
+    {
+        var mult = level switch
+        {
+            1 => 2.0,
+            2 => 1.5,
+            3 => 1.17,
+            4 => 1.0,
+            5 => 0.83,
+            _ => 0.67,
+        };
+        var size = BaseFontSize * mult;
+        y -= size * 0.3; // spacing before heading
+        EmitTextLine(sb, Bold, size, x, y, text);
+        y -= size * 1.5;
     }
 
     private static void EmitTextLine(StringBuilder sb, string fontRes, double fontSize, double x, double y, string text)
@@ -189,6 +255,8 @@ internal static class MarkdownToPdfConverter
         if (string.IsNullOrEmpty(text)) return;
         sb.Append($"BT /{fontRes} {F(fontSize)} Tf {F(x)} {F(y)} Td ({text}) Tj ET\n");
     }
+
+    private static string TrimText(string text) => text.TrimEnd();
 
     private static string StripInlineMarkdown(string text)
     {
@@ -218,6 +286,15 @@ internal static class MarkdownToPdfConverter
     }
 
     private static string F(double v) => v.ToString("0.######", CultureInfo.InvariantCulture);
+
+    private static void EnsureFonts(Page page)
+    {
+        EnsureFont(page, "TimesNewRoman", Normal);
+        EnsureFont(page, "TimesNewRomanBold", Bold);
+        EnsureFont(page, "TimesNewRomanItalic", Italic);
+        EnsureFont(page, "TimesNewRomanBoldItalic", BoldItalic);
+        EnsureFont(page, "CourierNew", Mono);
+    }
 
     private static string EnsureFont(Page page, string baseFontName, string resName)
     {

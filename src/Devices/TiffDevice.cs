@@ -139,7 +139,7 @@ public sealed class TiffDevice : ImageDevice
         Settings = settings ?? new TiffSettings();
     }
 
-    // ── Public surface that mirrors Aspose.PDF for .NET ───────────────────────
+    // ── Public surface that mirrors Aspose.Pdf ───────────────────────
 
     /// <summary>Pixel width of the output bitmap. 0 when the device follows the
     /// page's natural size at <see cref="Resolution"/>.</summary>
@@ -155,7 +155,7 @@ public sealed class TiffDevice : ImageDevice
     public new FormPresentationMode FormPresentationMode { get; set; } = FormPresentationMode.Production;
 
     /// <summary>Redeclares the inherited Resolution property on TiffDevice so the
-    /// Aspose.PDF for .NET reflection signature (which uses BindingFlags.DeclaredOnly)
+    /// Aspose.Pdf reflection signature (which uses BindingFlags.DeclaredOnly)
     /// finds it on this type.</summary>
     public new Resolution Resolution => base.Resolution;
 
@@ -244,7 +244,7 @@ public sealed class TiffDevice : ImageDevice
 
     // CCITT3/CCITT4 are bilevel-only fax encodings, so they imply 1-bit depth even
     // when the caller leaves Settings.Depth at the (24bpp) default. Mirroring the
-    // behaviour of Aspose.PDF for .NET: requesting CCITT compression produces a 1bpp TIFF.
+    // behaviour of Aspose.Pdf: requesting CCITT compression produces a 1bpp TIFF.
     private static bool IsBilevelRequested(TiffSettings s)
         => s.Compression is CompressionType.CCITT3 or CompressionType.CCITT4
         || s.Depth == ColorDepth.Format1bpp;
@@ -255,17 +255,34 @@ public sealed class TiffDevice : ImageDevice
     private static ColorDepth EffectiveDepth(TiffSettings s)
         => IsBilevelRequested(s) ? ColorDepth.Format1bpp : s.Depth;
 
-    private static void ThresholdToBlackAndWhite(byte[] rgb)
+    // Maps TiffSettings.Brightness (0..1) to the 0..255 bilevel cutoff used by both
+    // 1bpp packers: a pixel is black when its lightness (min RGB channel) is below the
+    // cutoff. Aspose.Pdf binarises with a floor at the mid-grey cutoff 128
+    // (the value both packers hard-coded before) and only *raises* it as Brightness
+    // climbs above 0.5, linearly to 255 at Brightness 1.0 — cutoff = max(128,
+    // Brightness×255). Brightness ≤ 0.5 (the default) leaves output unchanged; higher
+    // Brightness pushes the cutoff up so mid-grey ink — scanned form rules, faint
+    // handwriting — also binarises to black instead of dropping out (Brightness 0.85 ⇒
+    // 217). Calibrated against 1bpp/CCITT output at Brightness 0.85
+    // (more black) and 0.1 (unchanged from the 128 floor, not the naïve 0.1×255=26).
+    private static int BilevelCutoff(float brightness)
+    {
+        var t = (int)System.Math.Round(brightness * 255f);
+        if (t < 128) t = 128;
+        return t > 255 ? 255 : t;
+    }
+
+    private static void ThresholdToBlackAndWhite(byte[] rgb, int cutoff)
     {
         // Ink-coverage threshold: a pixel is white only when every channel is light
         // (near paper white), so coloured ink — e.g. a cyan/azure heading printed as
         // CMYK — binarises to black rather than dropping out, matching how the
-        // Aspose.PDF for .NET fax/bilevel converter preserves any non-white ink. For grey
+        // Aspose.Pdf fax/bilevel converter preserves any non-white ink. For grey
         // content (R=G=B) this is identical to the previous Rec.601 luminance cutoff.
         for (var i = 0; i < rgb.Length; i += 3)
         {
             var ink = System.Math.Min(rgb[i], System.Math.Min(rgb[i + 1], rgb[i + 2]));
-            var v = ink >= 128 ? (byte)255 : (byte)0;
+            var v = ink >= cutoff ? (byte)255 : (byte)0;
             rgb[i] = v; rgb[i + 1] = v; rgb[i + 2] = v;
         }
     }
@@ -277,14 +294,14 @@ public sealed class TiffDevice : ImageDevice
     // heading) black instead of dropping it. Output uses the WhiteIsZero convention
     // (bit set ⇒ black) to match the IFD's Photometric=0 below.
     private static byte[] PackSupersampledRgbaToBilevel(byte[] rgba, int srcW, int srcH, int super,
-                                                       out int dstW, out int dstH)
+                                                       int cutoff, out int dstW, out int dstH)
     {
         dstW = srcW / super;
         dstH = srcH / super;
         var bytesPerRow = (dstW + 7) / 8;
         var output = new byte[bytesPerRow * dstH];
         var samplesPerBlock = super * super;
-        var threshold = 128 * samplesPerBlock;
+        var threshold = cutoff * samplesPerBlock;
         var stride = srcW * 4;
         for (var dy = 0; dy < dstH; dy++)
         {
@@ -499,9 +516,10 @@ public sealed class TiffDevice : ImageDevice
                                CompressionType compression, ColorDepth depth, int superFactor = 1)
     {
         var isPalette = depth == ColorDepth.Format8bpp;
+        var is4bpp = depth == ColorDepth.Format4bpp;
         var isBilevel = depth == ColorDepth.Format1bpp;
         // Default depth keeps the source alpha channel — emits 32bpp RGBA. Explicit
-        // Format24bpp drops alpha. The Aspose.PDF for .NET default is 32bpp ARGB; this
+        // Format24bpp drops alpha. The Aspose.Pdf default is 32bpp ARGB; this
         // matches PixelFormat.Format32bppArgb when the TIFF is read back.
         var isAlpha = depth == ColorDepth.Default;
 
@@ -513,6 +531,8 @@ public sealed class TiffDevice : ImageDevice
         //         dimensions become w/super × h/super.
         //   8bpp: indexed palette — adaptive (≤256 unique colours, lossless)
         //         falling back to 3-3-2 uniform.
+        //   4bpp: indexed palette — adaptive ≤16 colours (lossless) else the
+        //         16 most frequent, packed 2 indices/byte (high nibble first).
         //  32bpp: RGBA straight through with ExtraSamples=2 (unassociated alpha).
         //   else: 24-bit RGB (alpha stripped).
         byte[] stripInput;
@@ -523,16 +543,17 @@ public sealed class TiffDevice : ImageDevice
         }
         else if (isBilevel)
         {
+            var cutoff = BilevelCutoff(Settings.Brightness);
             if (superFactor > 1)
             {
-                stripInput = PackSupersampledRgbaToBilevel(rgba, w, h, superFactor, out var bw1, out var bh1);
+                stripInput = PackSupersampledRgbaToBilevel(rgba, w, h, superFactor, cutoff, out var bw1, out var bh1);
                 w = bw1;
                 h = bh1;
             }
             else
             {
                 var rgb = RgbaToRgb(rgba, w, h);
-                ThresholdToBlackAndWhite(rgb);
+                ThresholdToBlackAndWhite(rgb, cutoff);
                 stripInput = PackRgbToBilevel(rgb, w, h);
             }
         }
@@ -550,6 +571,13 @@ public sealed class TiffDevice : ImageDevice
                 stripInput = TiffPaletteQuantizer.QuantizeRgbTo8bpp(rgb, w, h);
                 colorMap = TiffPaletteQuantizer.BuildColorMap332();
             }
+        }
+        else if (is4bpp)
+        {
+            var rgb = RgbaToRgb(rgba, w, h);
+            var (indices, map) = TiffPaletteQuantizer.QuantizeTo4bpp(rgb, w, h);
+            stripInput = Pack4bpp(indices, w, h);
+            colorMap = map;
         }
         else
         {
@@ -570,7 +598,7 @@ public sealed class TiffDevice : ImageDevice
         // BitsPerSample array (RGB/RGBA only), ColorMap (palette-only),
         // ExtraSamples (RGBA-only).
         uint bpsOffset = 0;
-        if (!isPalette && !isBilevel)
+        if (!isPalette && !is4bpp && !isBilevel)
         {
             bpsOffset = (uint)output.Position;
             bw.Write((ushort)8);
@@ -580,7 +608,7 @@ public sealed class TiffDevice : ImageDevice
         }
 
         uint colorMapOffset = 0;
-        if (isPalette)
+        if (isPalette || is4bpp)
         {
             colorMapOffset = (uint)output.Position;
             foreach (var s in colorMap!) bw.Write(s);
@@ -607,7 +635,7 @@ public sealed class TiffDevice : ImageDevice
 
         // IFD tag count: base 13 (RGB/bilevel/RGBA without extras), +1 for palette
         // ColorMap, +1 for RGBA ExtraSamples.
-        ushort tagCount = (ushort)(13 + (isPalette ? 1 : 0) + (isAlpha ? 1 : 0));
+        ushort tagCount = (ushort)(13 + (isPalette || is4bpp ? 1 : 0) + (isAlpha ? 1 : 0));
         bw.Write(tagCount);
 
         // Tags MUST be written in ascending tag-number order per the TIFF 6.0 spec.
@@ -615,16 +643,18 @@ public sealed class TiffDevice : ImageDevice
         WriteTag(bw, 257, 3, 1, (uint)h);                               // ImageLength
         if (isPalette)
             WriteTag(bw, 258, 3, 1, 8);                                 // BitsPerSample = 8 (inline)
+        else if (is4bpp)
+            WriteTag(bw, 258, 3, 1, 4);                                 // BitsPerSample = 4 (inline)
         else if (isBilevel)
             WriteTag(bw, 258, 3, 1, 1);                                 // BitsPerSample = 1 (inline)
         else
             WriteTag(bw, 258, 3, isAlpha ? 4u : 3u, bpsOffset);         // BitsPerSample offset → [8,8,8(,8)]
         WriteTag(bw, 259, 3, 1, compressionTag);                        // Compression
         // Photometric: 0=WhiteIsZero (bilevel min-is-white), 2=RGB(/RGBA), 3=Palette.
-        var photometric = isPalette ? 3u : isBilevel ? 0u : 2u;
+        var photometric = (isPalette || is4bpp) ? 3u : isBilevel ? 0u : 2u;
         WriteTag(bw, 262, 3, 1, photometric);                            // PhotometricInterpretation
         WriteTag(bw, 273, 4, 1, stripOffset);                           // StripOffsets
-        var samplesPerPixel = (isPalette || isBilevel) ? 1u : isAlpha ? 4u : 3u;
+        var samplesPerPixel = (isPalette || is4bpp || isBilevel) ? 1u : isAlpha ? 4u : 3u;
         WriteTag(bw, 277, 3, 1, samplesPerPixel);                        // SamplesPerPixel
         WriteTag(bw, 278, 3, 1, (uint)h);                               // RowsPerStrip
         WriteTag(bw, 279, 4, 1, (uint)stripSize);                       // StripByteCounts
@@ -634,6 +664,8 @@ public sealed class TiffDevice : ImageDevice
         WriteTag(bw, 296, 3, 1, 2);                                     // ResolutionUnit = 2 (inches)
         if (isPalette)
             WriteTag(bw, 320, 3, 3 * 256, colorMapOffset);              // ColorMap (768 shorts)
+        else if (is4bpp)
+            WriteTag(bw, 320, 3, 3 * 16, colorMapOffset);               // ColorMap (48 shorts)
         if (isAlpha)
             WriteTag(bw, 338, 3, 1, 2);                                 // ExtraSamples = 2 (unassociated alpha, inline)
 
@@ -664,6 +696,29 @@ public sealed class TiffDevice : ImageDevice
                     var byteIdx = rowDst + (x >> 3);
                     output[byteIdx] |= (byte)(0x80 >> (x & 7));
                 }
+            }
+        }
+        return output;
+    }
+
+    // Pack one-index-per-pixel (each 0..15) into 4bpp rows: the left pixel of
+    // each pair goes in the high nibble, and every scanline is padded to a whole
+    // byte because TIFF requires byte-aligned rows. Mirrors the 1bpp packer.
+    private static byte[] Pack4bpp(byte[] indices, int width, int height)
+    {
+        var bytesPerRow = (width + 1) / 2;
+        var output = new byte[bytesPerRow * height];
+        for (var y = 0; y < height; y++)
+        {
+            var rowSrc = y * width;
+            var rowDst = y * bytesPerRow;
+            for (var x = 0; x < width; x++)
+            {
+                var nibble = (byte)(indices[rowSrc + x] & 0x0F);
+                if ((x & 1) == 0)
+                    output[rowDst + (x >> 1)] = (byte)(nibble << 4);
+                else
+                    output[rowDst + (x >> 1)] |= nibble;
             }
         }
         return output;

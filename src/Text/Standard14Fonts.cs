@@ -44,6 +44,14 @@ internal static class Standard14Fonts
     public static bool IsStandard14(string baseFontName) => ResolveAlias(baseFontName) is not null;
 
     /// <summary>
+    /// True only for the Core-14 names themselves (e.g. "Helvetica"), not for the
+    /// real-font aliases that merely map onto them (e.g. "Arial" → "Helvetica").
+    /// Lets callers prefer a real font's own metrics for an aliased name while
+    /// still using the AFM tables for the genuine Core-14 fonts.
+    /// </summary>
+    public static bool IsCoreName(string baseFontName) => ResolveAlias(baseFontName) == baseFontName;
+
+    /// <summary>
     /// Vertical glyph-box descent for a Standard-14 font (1/1000 units, negative).
     /// Values from Adobe Font Metrics. Returns 0 when the name isn't Standard-14.
     /// Used as a fallback when a PDF omits FontDescriptor for an implied

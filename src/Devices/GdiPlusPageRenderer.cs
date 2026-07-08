@@ -19,7 +19,7 @@ namespace Aspose.Pdf.Devices;
 
 /// <summary>
 /// PDF page renderer that rasterizes through GDI+ (<see cref="System.Drawing.Graphics"/>).
-/// On Windows this matches the reference rasterizer used to produce comparison
+/// On Windows this is the rasterizer used to produce comparison
 /// templates: anti-aliased vector fills/strokes, high-quality bicubic image
 /// resampling, and native glyph outlines. Windows-only — callers must fall back
 /// to <see cref="SoftwarePageRenderer"/> on other platforms (GDI+ drawing throws
@@ -74,7 +74,7 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
     internal RgbaBuffer RenderPage(Page page, int xDpi, int yDpi)
     {
         // Size to the crop box (clipped to the media box), not the media box: the
-        // reference renderer presents only the cropped region. Rotation swaps the
+        // rasterizer presents only the cropped region. Rotation swaps the
         // visible dimensions exactly as it does for the media box.
         var crop = SoftwarePageRenderer.EffectiveCropRect(page);
         var rot = ((page.RotateDegrees % 360) + 360) % 360;
@@ -255,6 +255,19 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
     private Dictionary<PdfDictionary, (IGlyphOutlineSource? parser, double hScale)> _glyphCache = new(ReferenceEqualityComparer.Instance);
     private Dictionary<PdfDictionary, CidFontInfo?> _cidCache = new(ReferenceEqualityComparer.Instance);
     private Dictionary<PdfDictionary, FontMetrics?> _metricsCache = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<string, Text.GlyphOutlineParser?> _fallbackParsers = new();
+    // Sticky substitute name so re-rendering one Document with a different DefaultFontName
+    // reuses the first render's choice. Keyed by the reader (document
+    // lifetime — stable across Process calls, unlike the per-render font-dict wrappers),
+    // then by /BaseFont. Never serialized.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IO.PdfReader,
+        System.Collections.Concurrent.ConcurrentDictionary<string, string>> _stickyFallback = new();
+
+    /// <summary>Font name used to render simple-font runs whose own program can't be
+    /// resolved (not embedded and no host match). Wired from
+    /// <see cref="RenderingOptions.DefaultFontName"/>; when null a system font matching
+    /// the run's /BaseFont (or Arial) is used. Without this such text is dropped entirely.</summary>
+    internal string? DefaultFontName { get; set; }
 
     // Optional-content (layer) visibility: OCGs the default config marks hidden, plus a
     // stack tracking whether the current marked-content scope is inside a hidden layer.
@@ -432,13 +445,83 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
             return;
         }
 
-        // Clip to the fill region, then execute the pattern cell directly at each tile
-        // offset. On entry the device transform is the fill's CTM and `path` is in user
-        // space, so set the clip first (which maps the path to device space) and then drop
-        // to the identity transform — each tile carries its own placement through the
-        // pattern coordinate system. One Save/Restore brackets the whole fill, and the
-        // graphics-state stack is swapped out for the duration, so an unbalanced q/Q or a
-        // stray clip inside a cell cannot leak onto the page.
+        // A pattern fill that carries transparency — group fill-alpha (/ca < 1), an active
+        // ExtGState soft mask, or a non-Normal blend mode — must composite as a unit
+        // (PDF 32000 §11.6.5-6): render the tiles onto a transparent layer, then blend that
+        // layer onto the page once at the fill alpha / mask / blend. Painting the cells
+        // straight onto the page (the common opaque case) ignores the alpha and over-inks
+        // the region — e.g. a faded content panel drawn as an opaque dark overlay.
+        bool needsComposite = state.FillAlpha < 0.999
+            || state.SoftMask is not null
+            || (!string.IsNullOrEmpty(state.BlendMode) && state.BlendMode != "Normal");
+
+        if (!needsComposite)
+        {
+            RenderTilingCells(path, pd, content, patMatrix, xstep, ystep, iMin, iMax, jMin, jMax);
+            return;
+        }
+
+        int pw = _bitmap.Width, ph = _bitmap.Height;
+        int rx0 = Math.Max(0, (int)Math.Floor(db.Left)), ry0 = Math.Max(0, (int)Math.Floor(db.Top));
+        int rx1 = Math.Min(pw, (int)Math.Ceiling(db.Right)), ry1 = Math.Min(ph, (int)Math.Ceiling(db.Bottom));
+        if (rx1 <= rx0 || ry1 <= ry0) return; // fill maps off-page
+        var compRect = new System.Drawing.Rectangle(rx0, ry0, rx1 - rx0, ry1 - ry0);
+
+        // Capture the inherited device-space clip so the pattern fill stays bounded.
+        var savedClipT = _g.Transform;
+        _g.ResetTransform();
+        var deviceClip = _g.Clip;
+        _g.Transform = savedClipT;
+        savedClipT.Dispose();
+
+        var layer = RentLayer(pw, ph);
+        var savedLG = _g; var savedLBmp = _bitmap; var savedLScratch = _blendScratch;
+        var lg = Graphics.FromImage(layer);
+        try
+        {
+            // Isolated source: start from a transparent backdrop under the fill rect.
+            lg.CompositingMode = CompositingMode.SourceCopy;
+            using (var clear = new SolidBrush(GdiColor.Transparent))
+                lg.FillRectangle(clear, compRect);
+            lg.CompositingMode = CompositingMode.SourceOver;
+            lg.SmoothingMode = savedLG.SmoothingMode;
+            lg.PixelOffsetMode = savedLG.PixelOffsetMode;
+            lg.InterpolationMode = savedLG.InterpolationMode;
+            lg.TextRenderingHint = savedLG.TextRenderingHint;
+            lg.CompositingQuality = savedLG.CompositingQuality;
+            if (deviceClip is not null) lg.Clip = deviceClip;
+            // RenderTilingCells reads `path` in user space then drops to identity, so the
+            // layer transform must be the fill CTM (= world) when it sets the clip.
+            using (var wclone = world.Clone()) lg.Transform = wclone;
+
+            _g = lg; _bitmap = layer; _blendScratch = null;
+            RenderTilingCells(path, pd, content, patMatrix, xstep, ystep, iMin, iMax, jMin, jMax);
+            _g.Flush();
+        }
+        finally
+        {
+            _g = savedLG; _bitmap = savedLBmp;
+            _blendScratch?.Dispose(); _blendScratch = savedLScratch;
+            lg.Dispose(); deviceClip?.Dispose();
+        }
+
+        CompositeGroupLayer(layer, state, state.BlendMode, compRect);
+        _layerPool.Push(layer);
+    }
+
+    /// <summary>
+    /// Execute a Type-1 tiling-pattern cell at every tile offset within the fill region,
+    /// painting onto the current <see cref="_g"/> (the page, or a transparency layer for the
+    /// alpha/soft-mask/blend path). On entry the device transform is the fill's CTM and
+    /// <paramref name="path"/> is in user space, so the clip is set first (mapping the path
+    /// to device space) and the transform then dropped to identity — each tile carries its
+    /// own placement through the pattern coordinate system. One Save/Restore brackets the
+    /// whole fill and the graphics-state stack is swapped out for the duration, so an
+    /// unbalanced q/Q or a stray clip inside a cell cannot leak out.
+    /// </summary>
+    private void RenderTilingCells(GraphicsPath path, PdfDictionary pd, byte[] content,
+        double[] patMatrix, double xstep, double ystep, int iMin, int iMax, int jMin, int jMax)
+    {
         _formDepth++;
         var savedScope = _scope;
         var savedGdi = _g.Save();
@@ -746,10 +829,11 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
                         (float)seg.X1, (float)seg.Y1, (float)seg.X2, (float)seg.Y2);
                     curX = (float)seg.X2; curY = (float)seg.Y2;
                     break;
-                case PathOp.CurveToY: // control2 = endpoint
+                case PathOp.CurveToY: // control2 = endpoint; the `y` operator's endpoint
+                                      // is stored in X2/Y2 (X3/Y3 are unused for this op)
                     path.AddBezier(curX, curY, (float)seg.X1, (float)seg.Y1,
-                        (float)seg.X3, (float)seg.Y3, (float)seg.X3, (float)seg.Y3);
-                    curX = (float)seg.X3; curY = (float)seg.Y3;
+                        (float)seg.X2, (float)seg.Y2, (float)seg.X2, (float)seg.Y2);
+                    curX = (float)seg.X2; curY = (float)seg.Y2;
                     break;
                 case PathOp.Rect:
                     path.StartFigure();
@@ -849,11 +933,21 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
         var cid = ResolveCid(state.FontName);
         var fill = ColorFrom(state.FillR, state.FillG, state.FillB, state.FillAlpha);
 
+        // An active ExtGState soft mask modulates GLYPH fills per pixel too
+        // (PDF 32000 §11.6.5.4) — without this, text drawn under a luminosity mask
+        // (e.g. artwork the mask hides) painted at full coverage as a visible ghost.
+        _curTextSoftMask = state.SoftMask is { } smText ? GetSoftMaskAlpha(smText) : null;
+        _curTextState = state;
+
         if (cid is not null && cid.IsTwoByteEncoding && rawBytes is not null)
             DrawCidText(rawBytes, cid, parser, metrics, state, hScale, fill);
         else
             DrawSimpleText(text, rawBytes, parser, metrics, state, hScale, fill, EncGidMap(state.FontName, parser));
     }
+
+    // Per-show-op soft-mask context consumed by PaintGlyph (set in DrawText).
+    private byte[]? _curTextSoftMask;
+    private GraphicsState? _curTextState;
 
     private int[]? EncGidMap(string? fontName, IGlyphOutlineSource? parser)
     {
@@ -871,6 +965,17 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
         var ctm = state.Ctm;
         var tfs = state.FontSize;
         var th = state.HorizontalScaling / 100.0;
+        // A simple-font run whose own program can't be resolved would otherwise draw
+        // nothing (gid stays 0). Substitute a host font (DefaultFontName / BaseFont /
+        // Arial) and look glyphs up by Unicode through its cmap. Only reached when the
+        // real parser is null, so embedded-font runs are unaffected.
+        bool useFallback = false;
+        if (parser is null)
+        {
+            parser = ResolveSimpleFallback(state.FontName);
+            useFallback = parser is not null;
+            encGidMap = null; // /Differences GIDs are for the original program, not the substitute
+        }
         var upm = parser is not null && parser.UnitsPerEm > 0 ? parser.UnitsPerEm : 1000;
         bool useBytes = rawBytes is not null && rawBytes.Length == text.Length;
         using var brush = new SolidBrush(fill);
@@ -879,7 +984,12 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
         {
             var ch = text[i];
             int gid = 0;
-            if (parser is not null)
+            if (useFallback && parser is not null)
+            {
+                // Host substitute: map the decoded Unicode char straight through its cmap.
+                if (!parser.CMap.TryGetValue(ch, out gid)) gid = 0;
+            }
+            else if (parser is not null)
             {
                 // An explicit /Encoding /Differences is authoritative for a simple font
                 // (PDF 32000 §9.6.6.1): the code→glyph-name mapping must override the
@@ -903,7 +1013,10 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
             int charWidth = 500;
             if (useBytes && metrics is not null) charWidth = metrics.GetWidth(rawBytes![i]);
             else if (metrics is not null) charWidth = metrics.GetWidth(ch);
-            if ((charWidth == 0 || (ch > 0xFF && (charWidth == 500 || charWidth <= 0)))
+            // With a host substitute and no PDF /Widths, take the advance from the
+            // substitute program so the run doesn't collapse to uniform 500-unit steps.
+            if ((charWidth == 0 || (ch > 0xFF && (charWidth == 500 || charWidth <= 0))
+                 || (useFallback && metrics is null))
                 && parser is not null && gid > 0)
             {
                 var adv = parser.GetAdvanceWidth(gid);
@@ -952,15 +1065,33 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
         }
         var fbUpm = fallback is not null && fallback.UnitsPerEm > 0 ? fallback.UnitsPerEm : 1000;
 
+        var vertical = cid.IsVertical;
         for (int i = 0; i + 1 < rawBytes.Length; i += 2)
         {
             int code = (rawBytes[i] << 8) | rawBytes[i + 1];
             int c = cid.CodeToCid(code);
+            int charWidth = metrics?.GetWidth(c) ?? 1000;
+
+            // Vertical writing (-V CMap, PDF 32000 §9.7.4.3): the pen runs DOWN the
+            // column. Each glyph's origin is displaced by the position vector
+            // v = (vx, vy) — default (w0/2, /DW2 vy) — so the glyph centres on the
+            // column axis with its body below the pen; the pen then advances by the
+            // vertical displacement w1 (default /DW2, per-CID /W2 override).
+            var glyphTm = tm;
+            double w1y = 0;
+            if (vertical)
+            {
+                var (w1, vx, vy) = cid.VerticalMetrics(c, charWidth);
+                w1y = w1;
+                glyphTm = GraphicsState.MultiplyMatrices(
+                    new double[] { 1, 0, 0, 1, -vx / 1000.0 * tfs, -vy / 1000.0 * tfs }, tm);
+            }
+
             if (parser is not null)
             {
                 int gid = parser is CffGlyphSource cff && cff.IsCidKeyed ? cff.CidToGid(c) : cid.ResolveGid(c);
                 if (gid > 0)
-                    PaintGlyph(parser, gid, tm, ctm, tfs, th, state.Rise, hScale, upm, brush);
+                    PaintGlyph(parser, gid, glyphTm, ctm, tfs, th, state.Rise, hScale, upm, brush);
             }
             else if (fallback is not null)
             {
@@ -970,11 +1101,21 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
                 else
                     fbGid = Text.CjkFallbackFont.ResolveFallbackGid(cid.Ordering, c);
                 if (fbGid > 0)
-                    PaintGlyph(fallback, fbGid, tm, ctm, tfs, th, state.Rise, hScale, fbUpm, brush);
+                    PaintGlyph(fallback, fbGid, glyphTm, ctm, tfs, th, state.Rise, hScale, fbUpm, brush);
             }
-            int charWidth = metrics?.GetWidth(c) ?? 1000;
-            double tx = (charWidth / 1000.0 * tfs + state.CharSpacing + (c == 32 ? state.WordSpacing : 0)) * th;
-            tm = GraphicsState.MultiplyMatrices(new double[] { 1, 0, 0, 1, tx, 0 }, tm);
+
+            if (vertical)
+            {
+                // Advance down: w1 is negative (downward) in glyph space; Tc adds to
+                // the travel. Tz applies to horizontal displacements only (§9.3.4).
+                double ty = w1y / 1000.0 * tfs - state.CharSpacing;
+                tm = GraphicsState.MultiplyMatrices(new double[] { 1, 0, 0, 1, 0, ty }, tm);
+            }
+            else
+            {
+                double tx = (charWidth / 1000.0 * tfs + state.CharSpacing + (c == 32 ? state.WordSpacing : 0)) * th;
+                tm = GraphicsState.MultiplyMatrices(new double[] { 1, 0, 0, 1, tx, 0 }, tm);
+            }
         }
     }
 
@@ -1063,6 +1204,16 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
         }
 
         if (_curTextMode == 7) return; // clip-only, no paint
+
+        // Active ExtGState soft mask: composite the glyph per pixel through the mask's
+        // alpha (same path as masked shape fills) instead of a plain opaque fill.
+        if (_curTextSoftMask is not null && _curTextState is not null)
+        {
+            var blend = Rasterizer.BlendModes.Parse(_curTextState.BlendMode);
+            FillPathBlended(path, world, blend, _curTextState, _curTextSoftMask);
+            saved.Dispose();
+            return;
+        }
 
         _g.Transform = world;
         try { _g.FillPath(brush, path); }
@@ -1191,6 +1342,42 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
         return p;
     }
 
+    /// <summary>Resolve a host-font glyph source to draw a simple-font run whose own
+    /// program is unavailable. Prefers <see cref="DefaultFontName"/>, then the run's
+    /// /BaseFont (subset prefix stripped), then Arial. Cached per resolved name.</summary>
+    private Text.GlyphOutlineParser? ResolveSimpleFallback(string? fontName)
+    {
+        PdfDictionary? fd = null;
+        var baseFont = fontName is not null && _scope.Fonts is not null
+            && _scope.Fonts.TryGetValue(fontName, out fd)
+            ? (_reader.Resolve(fd.Get("BaseFont")) as Core.PdfName)?.Value
+            : null;
+        // Strip a subset tag ("ABCDEF+Foo" -> "Foo").
+        if (baseFont is { Length: > 7 } && baseFont[6] == '+') baseFont = baseFont.Substring(7);
+
+        // Which host face substitutes this run: DefaultFontName, else the /BaseFont, else
+        // Arial. The choice is STICKY per font dict for the document's lifetime — the first
+        // render of a font pins its substitute so re-rendering the same Document with a
+        // different DefaultFontName reuses the original (rendering one document twice
+        // must give identical output). A fresh Document gets a fresh choice.
+        string Pick() => !string.IsNullOrEmpty(DefaultFontName) ? DefaultFontName!
+            : !string.IsNullOrEmpty(baseFont) ? baseFont!
+            : "Arial";
+        var name = _reader is not null
+            ? _stickyFallback.GetValue(_reader, _ => new()).GetOrAdd(baseFont ?? fontName ?? "", _ => Pick())
+            : Pick();
+        if (_fallbackParsers.TryGetValue(name, out var cached)) return cached;
+
+        Text.GlyphOutlineParser? parser = null;
+        var ttf = Text.SystemFontResolver.Resolve(name) ?? Text.SystemFontResolver.Resolve("Arial");
+        if (ttf is { Length: > 0 })
+        {
+            try { parser = new Text.GlyphOutlineParser(ttf); } catch { parser = null; }
+        }
+        _fallbackParsers[name] = parser;
+        return parser;
+    }
+
     private FontMetrics? ResolveMetrics(string? fontName)
     {
         if (fontName is null || _scope.Fonts is null || !_scope.Fonts.TryGetValue(fontName, out var fd)) return null;
@@ -1247,7 +1434,14 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
             // over the content beneath.
             if (shading is AxialShading ax) DrawAxialShading(ax, state, fillRegion: state.SoftMask is null);
             else if (shading is RadialShading ra) DrawRadialShading(ra, state);
-            // Mesh / function-based shadings are not yet translated to GDI+ brushes.
+            // Mesh shadings (Types 4-7): tessellate the triangle/patch geometry and flat-fill
+            // each cell with its interpolated colour. The bare `sh` paints the current clip,
+            // so an active soft mask is left to compose elsewhere rather than painted opaque.
+            else if (state.SoftMask is null
+                && shading is FreeFormGouraudShading or LatticeFormGouraudShading
+                            or CoonsPatchShading or TensorPatchShading)
+                DrawMeshShading(shading, state);
+            // Function-based (Type 1) shadings are not yet translated to GDI+ brushes.
         }
         finally
         {
@@ -1378,6 +1572,139 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
         finally { _g.Transform = saved; }
     }
 
+    // ── Mesh shadings (Types 4-7, §8.7.4.5) ─────────────────────────
+    //
+    // GDI+ has no Gouraud/patch gradient primitive, so the mesh geometry is
+    // tessellated and each small cell is flat-filled with its (bilinearly /
+    // averaged) colour. At the cell sizes used here the facet steps fall below
+    // the visual-comparison threshold. The current GDI clip (installed by the
+    // `… W n … sh` idiom) and the shading /BBox bound the paint, so cells that
+    // fall outside the shape are clipped away by GDI+.
+    private void DrawMeshShading(ShadingBase shading, GraphicsState state)
+    {
+        var saved = _g.Transform;
+        var savedSmoothing = _g.SmoothingMode;
+        using var world = WorldMatrix(state.Ctm);
+        _g.Transform = world;
+        // Flat-filled adjacent cells share exact edges; anti-aliasing those edges
+        // would leave hairline seams, so disable it for the duration of the mesh.
+        _g.SmoothingMode = SmoothingMode.None;
+        var alpha = (byte)Clamp255(state.FillAlpha);
+        try
+        {
+            switch (shading)
+            {
+                case FreeFormGouraudShading g: DrawTriangleMesh(g.Vertices, g.Triangles, shading, alpha); break;
+                case LatticeFormGouraudShading l: DrawTriangleMesh(l.Vertices, l.Triangles, shading, alpha); break;
+                case CoonsPatchShading c: DrawPatchMesh(c.Patches, shading, alpha); break;
+                case TensorPatchShading t: DrawPatchMesh(t.Patches, shading, alpha); break;
+            }
+        }
+        catch { /* malformed mesh — skip rather than abort the page */ }
+        finally { _g.SmoothingMode = savedSmoothing; _g.Transform = saved; }
+    }
+
+    private GdiColor MeshColor(double[]? comp, ShadingBase shading, byte alpha)
+    {
+        if (comp is null || comp.Length == 0) return GdiColor.FromArgb(alpha, 0, 0, 0);
+        SoftwarePageRenderer.ComponentsToRgb(comp, shading.ColorSpaceName, out var r, out var g, out var b,
+            shading.TintTransform, shading.AltSpaceName);
+        return GdiColor.FromArgb(alpha, r, g, b);
+    }
+
+    private void DrawTriangleMesh(MeshVertex[] verts, (int A, int B, int C)[] tris, ShadingBase shading, byte alpha)
+    {
+        var pts = new PointF[3];
+        foreach (var (a, b, c) in tris)
+        {
+            if (a < 0 || b < 0 || c < 0 || a >= verts.Length || b >= verts.Length || c >= verts.Length) continue;
+            var va = verts[a]; var vb = verts[b]; var vc = verts[c];
+            var avg = AvgColor(va.Color, vb.Color, vc.Color);
+            pts[0] = new PointF((float)va.X, (float)va.Y);
+            pts[1] = new PointF((float)vb.X, (float)vb.Y);
+            pts[2] = new PointF((float)vc.X, (float)vc.Y);
+            using var brush = new SolidBrush(MeshColor(avg, shading, alpha));
+            _g.FillPolygon(brush, pts);
+        }
+    }
+
+    private void DrawPatchMesh(MeshPatch[] patches, ShadingBase shading, byte alpha)
+    {
+        const int N = 8; // tessellation grid per patch (N×N cells)
+        var quad = new PointF[4];
+        foreach (var p in patches)
+        {
+            for (var i = 0; i < N; i++)
+            {
+                double u0 = (double)i / N, u1 = (double)(i + 1) / N;
+                for (var j = 0; j < N; j++)
+                {
+                    double v0 = (double)j / N, v1 = (double)(j + 1) / N;
+                    EvalPatch(p, u0, v0, out var x00, out var y00);
+                    EvalPatch(p, u1, v0, out var x10, out var y10);
+                    EvalPatch(p, u1, v1, out var x11, out var y11);
+                    EvalPatch(p, u0, v1, out var x01, out var y01);
+                    var col = BilinearColor(p.CornerColors, (u0 + u1) * 0.5, (v0 + v1) * 0.5);
+                    quad[0] = new PointF((float)x00, (float)y00);
+                    quad[1] = new PointF((float)x10, (float)y10);
+                    quad[2] = new PointF((float)x11, (float)y11);
+                    quad[3] = new PointF((float)x01, (float)y01);
+                    using var brush = new SolidBrush(MeshColor(col, shading, alpha));
+                    _g.FillPolygon(brush, quad);
+                }
+            }
+        }
+    }
+
+    // Tensor-product surface S(u,v) = ΣΣ B_i(u) B_j(v) P[i,j] over the 4×4 control net.
+    private static void EvalPatch(MeshPatch p, double u, double v, out double x, out double y)
+    {
+        double sx = 0, sy = 0;
+        for (var i = 0; i < 4; i++)
+        {
+            var bu = Bernstein(i, u);
+            for (var j = 0; j < 4; j++)
+            {
+                var w = bu * Bernstein(j, v);
+                sx += w * p.Px[i, j];
+                sy += w * p.Py[i, j];
+            }
+        }
+        x = sx; y = sy;
+    }
+
+    private static double Bernstein(int i, double t) => i switch
+    {
+        0 => (1 - t) * (1 - t) * (1 - t),
+        1 => 3 * (1 - t) * (1 - t) * t,
+        2 => 3 * (1 - t) * t * t,
+        3 => t * t * t,
+        _ => 0,
+    };
+
+    // Corner colours are stored in UV order 00, 03, 33, 30 (MeshPatch); bilinear-blend
+    // them across the patch parameter square.
+    private static double[]? BilinearColor(double[][] corners, double u, double v)
+    {
+        var c00 = corners[0]; var c01 = corners[1]; var c11 = corners[2]; var c10 = corners[3];
+        if (c00 is null || c01 is null || c11 is null || c10 is null) return c00 ?? c01 ?? c11 ?? c10;
+        var n = c00.Length;
+        var outp = new double[n];
+        double w00 = (1 - u) * (1 - v), w01 = (1 - u) * v, w11 = u * v, w10 = u * (1 - v);
+        for (var k = 0; k < n; k++)
+            outp[k] = w00 * c00[k] + w01 * c01[k] + w11 * c11[k] + w10 * c10[k];
+        return outp;
+    }
+
+    private static double[]? AvgColor(double[] a, double[] b, double[] c)
+    {
+        if (a is null || b is null || c is null) return a ?? b ?? c;
+        var n = Math.Min(a.Length, Math.Min(b.Length, c.Length));
+        var outp = new double[n];
+        for (var k = 0; k < n; k++) outp[k] = (a[k] + b[k] + c[k]) / 3.0;
+        return outp;
+    }
+
     // ── XObjects (images + forms) ───────────────────────────────────
 
     private void DrawXObject(string name, GraphicsState state)
@@ -1495,6 +1822,14 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
         var saved = _g.Transform;
         using var world = WorldMatrix(ctm);
         _g.Transform = world;
+        // Composite a semi-transparent image in straight sRGB (no gamma) so its alpha
+        // blend matches the platform renderer — the same reason the shape-fill path
+        // forces AssumeLinear (PDF §11.3.6 composites in the device colour space, not
+        // linear light). Without this a soft-masked overlay (e.g. a slide's translucent
+        // blue/photo panels) composites a few levels too light and drifts off the
+        // visual comparator. Opaque images are unaffected (src fully replaces dst).
+        var savedCq = _g.CompositingQuality;
+        _g.CompositingQuality = CompositingQuality.AssumeLinear;
         try
         {
             // Device-space extent of the unit square under the world transform.
@@ -1532,7 +1867,7 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
             }
             else _g.DrawImage(bmp, dest);
         }
-        finally { _g.Transform = saved; }
+        finally { _g.Transform = saved; _g.CompositingQuality = savedCq; }
     }
 
     /// <summary>
@@ -2265,6 +2600,10 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
                     SoftwarePageRenderer.BuildSeparationLut(csInfo, SoftwarePageRenderer.GrayDecodeInverts(dict))), w, h);
             else if (csInfo.BaseName == "DeviceRGB" && bpc == 8 && decoded.Length >= w * h * 3)
                 bgra = RgbToBgra(decoded, w, h);
+            else if (csInfo.BaseName == "DeviceRGB" && (bpc == 1 || bpc == 2 || bpc == 4))
+                // Sub-byte (3·bpc bits/pixel) DeviceRGB: unpack each component. Without this a
+                // 1-bpc RGB image falls to BilevelToBgra (1 bit/pixel) and the rows desync.
+                bgra = RgbToBgra(UnpackRgbSamples(decoded, w, h, bpc), w, h);
             else if (csInfo.BaseName == "DeviceGray" && bpc == 8 && decoded.Length >= w * h)
                 bgra = GrayToBgra(decoded, w, h);
             else if (csInfo.BaseName == "DeviceGray" && (bpc == 2 || bpc == 4))
@@ -2272,11 +2611,39 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
             else if (csInfo.BaseName == "DeviceCMYK" && bpc == 8 && decoded.Length >= w * h * 4)
                 bgra = CmykToBgra(decoded, w, h);
             else if (bpc == 1)
-                bgra = BilevelToBgra(decoded, w, h);
+                // /Decode [1 0] (common on BlackIs1 CCITT scans) reverses the default
+                // bit → gray mapping; without it such scans render white-on-black.
+                bgra = BilevelToBgra(decoded, w, h, DecodeInverts(dict));
 
             if (bgra is null) return null;
             var (mbgra, mw2, mh2) = ApplyMasks(dict, reader, bgra, w, h);
             return FromBgra(mbgra, mw2, mh2);
+        }
+
+        // Unpack a sub-byte (1/2/4 bpc) three-component DeviceRGB image into packed 8-bit RGB.
+        // Each pixel is 3·bpc bits; rows are byte-aligned. Without this a 1-bpc RGB image
+        // (3 bits/pixel) is mis-read as 1-bit bilevel (1 bit/pixel), desyncing the rows.
+        private static byte[] UnpackRgbSamples(byte[] data, int w, int h, int bpc)
+        {
+            var outp = new byte[w * h * 3];
+            var rowBytes = (w * 3 * bpc + 7) / 8;
+            var maxv = (1 << bpc) - 1;
+            for (int y = 0; y < h; y++)
+            {
+                int rowBase = y * rowBytes;
+                for (int x = 0; x < w; x++)
+                {
+                    for (int c = 0; c < 3; c++)
+                    {
+                        int bitPos = (x * 3 + c) * bpc;
+                        int bi = rowBase + (bitPos >> 3);
+                        int shift = 8 - bpc - (bitPos & 7);
+                        int sample = bi < data.Length ? (data[bi] >> shift) & maxv : 0;
+                        outp[(y * w + x) * 3 + c] = (byte)(sample * 255 / maxv);
+                    }
+                }
+            }
+            return outp;
         }
 
         private static Bitmap BuildMask(byte[] decoded, int w, int h, GraphicsState state, bool invert)
@@ -2358,10 +2725,11 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
             return bgra;
         }
 
-        private static byte[] BilevelToBgra(byte[] data, int w, int h)
+        private static byte[] BilevelToBgra(byte[] data, int w, int h, bool invert = false)
         {
             var bgra = new byte[w * h * 4];
             var rowBytes = (w + 7) / 8;
+            var inv = invert ? 1 : 0;
             for (int y = 0; y < h; y++)
             {
                 var rowBase = y * rowBytes;
@@ -2369,7 +2737,7 @@ public sealed class GdiPlusPageRenderer : IPageRenderer
                 {
                     var bi = rowBase + x / 8;
                     byte v = 0;
-                    if (bi < data.Length) v = ((data[bi] >> (7 - (x & 7))) & 1) == 1 ? (byte)255 : (byte)0;
+                    if (bi < data.Length) v = (((data[bi] >> (7 - (x & 7))) & 1) ^ inv) == 1 ? (byte)255 : (byte)0;
                     var o = (y * w + x) * 4;
                     bgra[o + 0] = v; bgra[o + 1] = v; bgra[o + 2] = v; bgra[o + 3] = 255;
                 }

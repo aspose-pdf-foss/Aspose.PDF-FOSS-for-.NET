@@ -43,7 +43,7 @@ namespace Aspose.Pdf.Facades
         /// <summary>1-based end page for extraction. 0 = to the last page.</summary>
         public int EndPage { get; set; }
 
-        /// <summary>Text extraction mode. Matches the Aspose.PDF for .NET API shape —
+        /// <summary>Text extraction mode. Matches the Aspose.Pdf API shape —
         /// int-typed because tests do both `= (int)` and `= ExtractTextMode.Pure`
         /// (via implicit enum-to-int conversion). 0 = Pure (strip formatting),
         /// 1 = Raw (keep it).</summary>
@@ -76,8 +76,9 @@ namespace Aspose.Pdf.Facades
             return false;
         }
 
-        /// <summary>Password used when binding encrypted PDFs. Currently no-op —
-        /// stored for API-parity.</summary>
+        /// <summary>Password used when binding an encrypted PDF. Applied by
+        /// <see cref="BindPdf(string)"/> / <see cref="BindPdf(Stream)"/> so the
+        /// document's content can be decrypted for extraction.</summary>
         public string? Password { get; set; }
 
         private Aspose.Pdf.Text.TextSearchOptions? _textSearchOptions;
@@ -98,7 +99,9 @@ namespace Aspose.Pdf.Facades
 
         public void BindPdf(string inputFile)
         {
-            _document = Document.Open(inputFile);
+            _document = string.IsNullOrEmpty(Password)
+                ? Document.Open(inputFile)
+                : Document.Open(inputFile, Password);
             _ownsDocument = true;
             Reset();
         }
@@ -112,7 +115,9 @@ namespace Aspose.Pdf.Facades
 
         public void BindPdf(Stream inputStream)
         {
-            _document = new Document(inputStream);
+            _document = string.IsNullOrEmpty(Password)
+                ? new Document(inputStream)
+                : new Document(inputStream, Password);
             _ownsDocument = true;
             Reset();
         }
@@ -127,14 +132,104 @@ namespace Aspose.Pdf.Facades
                 throw new InvalidOperationException("No document bound. Call BindPdf first.");
 
             var absorber = new TextAbsorber();
+            // Honour the facade's mode: Raw keeps the source stream's own
+            // whitespace and skips the Pure-mode column grid entirely.
+            if (ExtractTextMode == (int)Aspose.Pdf.ExtractTextMode.Raw)
+                absorber.ExtractionOptions = new Aspose.Pdf.Text.TextExtractionOptions(
+                    Aspose.Pdf.Text.TextExtractionOptions.TextFormattingMode.Raw);
             var from = StartPage > 0 ? StartPage : 1;
             var to = EndPage > 0 ? EndPage : _document.PageCount;
             for (var i = from; i <= to; i++)
                 absorber.Visit(_document.Pages.At(i));
 
-            _extractedText = absorber.Text;
+            _extractedText = ReorderRtlLines(absorber.Text);
             _extracted = true;
             _nextPageCursor = from;
+        }
+
+        /// <summary>
+        /// The absorber emits each RTL word in logical glyph order but keeps the WORDS in
+        /// visual (left-to-right) order, so a Hebrew/Arabic line comes out with its words
+        /// reversed. For every line whose base direction is RTL (first strong-directional
+        /// character is RTL), reverse the word order to logical order while keeping maximal
+        /// runs of left-to-right words (e.g. numbers) in their original internal order — the
+        /// bounded slice of the Unicode Bidi Algorithm that extracted RTL text needs.
+        /// LTR-base lines (the overwhelming majority of documents) are returned unchanged
+        /// byte-for-byte, so non-RTL extraction is unaffected.
+        /// </summary>
+        private static string ReorderRtlLines(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            var lines = text.Split('\n');
+            var changed = false;
+            for (var li = 0; li < lines.Length; li++)
+            {
+                var line = lines[li];
+                // Preserve a trailing '\r' so "\r\n" separators survive intact.
+                var cr = line.EndsWith("\r", StringComparison.Ordinal) ? "\r" : "";
+                var core = cr.Length > 0 ? line[..^1] : line;
+                if (BaseDirectionIsRtl(core))
+                {
+                    lines[li] = ReverseWordOrder(core) + cr;
+                    changed = true;
+                }
+            }
+            return changed ? string.Join("\n", lines) : text;
+        }
+
+        /// <summary>Base direction of a line = direction of its first strong character
+        /// (Unicode Bidi rule P2/P3). Numbers are not strong, so a line that opens with a
+        /// number followed by Hebrew is still RTL-based.</summary>
+        private static bool BaseDirectionIsRtl(string s)
+        {
+            foreach (var c in s)
+            {
+                if (Aspose.Pdf.Text.BidiReorderer.IsRtlChar(c)) return true;
+                if (IsStrongLtr(c)) return false;
+            }
+            return false;
+        }
+
+        private static bool IsStrongLtr(char c) =>
+            char.IsLetter(c) && !Aspose.Pdf.Text.BidiReorderer.IsRtlChar(c);
+
+        /// <summary>Reverse the whitespace-separated words of an RTL line, keeping each
+        /// maximal run of consecutive left-to-right words (numbers, Latin) in its original
+        /// order so embedded numbers read forward.</summary>
+        private static string ReverseWordOrder(string line)
+        {
+            var words = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (words.Length <= 1) return line;
+            var isLtr = new bool[words.Length];
+            for (var i = 0; i < words.Length; i++) isLtr[i] = WordIsLtr(words[i]);
+
+            var outWords = new List<string>(words.Length);
+            var idx = words.Length - 1;
+            while (idx >= 0)
+            {
+                if (isLtr[idx])
+                {
+                    var j = idx;
+                    while (j - 1 >= 0 && isLtr[j - 1]) j--;
+                    for (var k = j; k <= idx; k++) outWords.Add(words[k]);
+                    idx = j - 1;
+                }
+                else { outWords.Add(words[idx]); idx--; }
+            }
+            return string.Join(" ", outWords);
+        }
+
+        /// <summary>A word is treated as left-to-right when its first strong-or-numeric
+        /// character is Latin/number; a word of only neutrals (punctuation) is not LTR, so
+        /// it flows with the RTL reversal.</summary>
+        private static bool WordIsLtr(string w)
+        {
+            foreach (var c in w)
+            {
+                if (Aspose.Pdf.Text.BidiReorderer.IsRtlChar(c)) return false;
+                if (IsStrongLtr(c) || (c >= '0' && c <= '9')) return true;
+            }
+            return false;
         }
 
         /// <summary>Extract text from the bound PDF and save it to the given file (UTF-16 LE bytes).</summary>
@@ -237,8 +332,8 @@ namespace Aspose.Pdf.Facades
                 throw new InvalidOperationException("No document bound. Call BindPdf first.");
 
             // Dedupe by underlying PDF stream: a shared image referenced from
-            // multiple pages (e.g. a tiling-pattern asset reused by both pages
-            // in 35439.pdf) should surface once -- the contract is
+            // multiple pages (e.g. a tiling-pattern asset reused by both pages)
+            // should surface once -- the contract is
             // "one entry per image object", not "one entry per page reference".
             var list = new System.Collections.Generic.List<ImageXObject>();
             var seen = new System.Collections.Generic.HashSet<Core.PdfStream>();
@@ -307,7 +402,7 @@ namespace Aspose.Pdf.Facades
                 if (seen.Add(images[i].stream))
                     list.Insert(0, new ImageXObject(images[i].name, images[i].stream, reader));
             // Tiling patterns are content streams with their own /Resources; producers
-            // (e.g. Aspose.Words) emit raster images there as the pattern's only paint,
+            // (e.g. some word-processor exporters) emit raster images there as the pattern's only paint,
             // so an image can live only inside a pattern and never under /XObject.
             CollectPatternImages(resources, reader, list, seen, 0);
         }

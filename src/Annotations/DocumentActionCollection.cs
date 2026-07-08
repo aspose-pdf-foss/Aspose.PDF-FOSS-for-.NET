@@ -10,6 +10,29 @@ public sealed class DocumentActionCollection
     public DocumentActionCollection(Document document)
     {
         _document = document ?? throw new System.ArgumentNullException(nameof(document));
+        LoadFromCatalog();
+    }
+
+    /// <summary>Populate the slots from the catalog's existing /AA dictionary so
+    /// document-level actions round-trip through save/reload (without this, a
+    /// reopened document reports every slot as null).</summary>
+    private void LoadFromCatalog()
+    {
+        var reader = _document.Reader;
+        var aa = reader?.ResolveDict(reader.Catalog?.Get("AA"));
+        if (aa is null) return;
+
+        PdfAction? Load(string key)
+        {
+            var d = reader!.ResolveDict(aa.Get(key));
+            return d is null ? null : PdfAction.Create(d, reader);
+        }
+
+        BeforeClosing = Load("WC");
+        BeforeSaving = Load("WS");
+        AfterSaving = Load("DS");
+        BeforePrinting = Load("WP");
+        AfterPrinting = Load("DP");
     }
 
     /// <summary>Triggered before the document is closed (/AA /WC).</summary>

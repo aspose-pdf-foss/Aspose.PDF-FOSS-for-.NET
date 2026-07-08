@@ -187,6 +187,12 @@ public sealed class DocumentPrivilege : IComparable<object>
     /// <summary>The raw permission flags value.</summary>
     internal int Flags => _flags;
 
+    /// <summary>
+    /// The raw permission flags as an integer (the /P value semantics). Mirrors
+    /// <see cref="Document.Permissions"/>: <see cref="AllowAll"/> yields -1 (all bits set).
+    /// </summary>
+    public int Value => _flags;
+
     public int CompareTo(object? obj)
     {
         if (obj is null) return 1;

@@ -91,9 +91,12 @@ public sealed class Form : IDisposable
     {
         // Buffer the source into an independent array so the facade never owns or
         // mutates the caller's stream (Form must not dispose the
-        // source stream on Save). Preserve the caller's position so the same source
-        // stream can be reused across several Form instances in a loop.
+        // source stream on Save). A seekable source is read from offset 0 —
+        // Aspose.Pdf semantics, so `doc.Save(ms); new Form(ms)` works without
+        // the caller rewinding — and the caller's position is restored afterwards so
+        // the same source stream can be reused across several Form instances in a loop.
         long origPos = srcStream.CanSeek ? srcStream.Position : -1;
+        if (srcStream.CanSeek) srcStream.Position = 0;
         using var ms = new MemoryStream();
         srcStream.CopyTo(ms);
         _doc = Document.Open(ms.ToArray());
@@ -174,6 +177,10 @@ public sealed class Form : IDisposable
         // For XFA forms, update the XFA datasets XML directly
         if (_doc.Form.IsXfa)
         {
+            // Only fill a path that resolves to a genuine XFA template field — a non-matching
+            // (e.g. wrong-container) or partial (leaf-only) path returns false, matching
+            // Aspose.Pdf, rather than silently creating a stray datasets node.
+            if (!_doc.Form.XfaTemplateFieldExists(fieldName)) return false;
             _doc.Form.SetXfaFieldValue(fieldName, fieldValue);
             // Also try AcroForm field if it exists
             var field = _doc.Form.FindByName(fieldName);
@@ -558,11 +565,16 @@ public sealed class Form : IDisposable
                     return xfaNames;
                 }
             }
+            // Each field name is reported once. A radio/checkbox group whose widgets
+            // are split across several /Kids (or that resolves through more than one
+            // enumerated entry) must not inflate the count — the facade lists the
+            // logical field name a single time, matching the reference.
             var names = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var f in _doc.Form.Fields)
             {
                 var name = f.FullName ?? f.PartialName;
-                if (name is not null) names.Add(name);
+                if (name is not null && seen.Add(name)) names.Add(name);
             }
             return names.ToArray();
         }
@@ -598,7 +610,19 @@ public sealed class Form : IDisposable
     {
         if (_doc is null) return;
         if (!_doc.HasForm) return;
-        _doc.Form.Flatten(_doc);
+        // Flattening a dynamic XFA form locks its template fields (access="readOnly"); the
+        // /XFA packet + datasets must survive, so do NOT run the AcroForm flatten below — it
+        // strips the whole /AcroForm dict (which carries /XFA). Rendering a dynamic XFA
+        // template into a flattened static page is a separate, unimplemented feature.
+        if (_doc.Form.IsXfa)
+        {
+            _doc.Form.SetXfaFieldsReadOnly();
+            return;
+        }
+        // The facade flatten numbers its flattened FRM{n} XObjects from 1 (document/form flatten
+        // numbers from 0) and folds every annotation — including markup such as FreeText — into
+        // the page content so the FRM index lines up with /Annots. Matches Aspose.Pdf.
+        _doc.Form.Flatten(_doc, settings: null, frmStartIndex: 1, flattenNonWidgets: true);
     }
 
     /// <summary>
@@ -613,7 +637,30 @@ public sealed class Form : IDisposable
         if (_doc is null) throw new InvalidOperationException("No document bound.");
 
         var xml = new XmlDocument();
-        xml.Load(xmlStream);
+        // Aspose.Pdf reads the XML through the Windows default codepage unless
+        // the stream carries a BOM or an explicit <?xml encoding=...?> declaration, so
+        // UTF-8 bytes in a bare XML arrive as Windows-1252 characters. Field values
+        // written that way round-trip through the XFA datasets verbatim; decode the
+        // same way so imported values match.
+        using (var buffer = new MemoryStream())
+        {
+            xmlStream.CopyTo(buffer);
+            var bytes = buffer.ToArray();
+            bool hasBom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF
+                || bytes.Length >= 2 && (bytes[0] == 0xFF && bytes[1] == 0xFE || bytes[0] == 0xFE && bytes[1] == 0xFF);
+            bool hasDeclaredEncoding = false;
+            if (!hasBom && bytes.Length >= 5 && bytes[0] == (byte)'<' && bytes[1] == (byte)'?')
+            {
+                var declEnd = System.Array.IndexOf(bytes, (byte)'>', 0, Math.Min(bytes.Length, 256));
+                if (declEnd > 0)
+                    hasDeclaredEncoding = System.Text.Encoding.ASCII
+                        .GetString(bytes, 0, declEnd).Contains("encoding=", StringComparison.OrdinalIgnoreCase);
+            }
+            if (hasBom || hasDeclaredEncoding)
+                xml.Load(new MemoryStream(bytes));
+            else
+                xml.LoadXml(Aspose.Pdf.Text.Cp1252.GetString(bytes));
+        }
 
         // Check if this is an XFA form
         if (_doc.Form.IsXfa)
@@ -702,6 +749,15 @@ public sealed class Form : IDisposable
         if (_doc is null) throw new InvalidOperationException("No document bound.");
         using var reader = new StreamReader(inputXfdfStream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true, bufferSize: 4096);
         var xfdfXml = reader.ReadToEnd();
+        if (_doc.Form.IsXfa)
+        {
+            // Persist into the XFA datasets, but still report per-field import
+            // status (TrackResults resolves names against the XFA field paths).
+            var xfaNames = ParseXfdfFieldNames(xfdfXml);
+            ImportXfdfXfa(xfdfXml);
+            _importResult = TrackResults(xfaNames);
+            return;
+        }
         var names = ParseXfdfFieldNames(xfdfXml);
         _doc.Form.ImportXfdf(xfdfXml);
         _importResult = TrackResults(names);
@@ -716,6 +772,13 @@ public sealed class Form : IDisposable
         using var ms = new MemoryStream();
         inputFdfStream.CopyTo(ms);
         var bytes = ms.ToArray();
+        if (_doc.Form.IsXfa)
+        {
+            var xfaNames = ParseFdfFieldNames(bytes);
+            ImportFdfXfa(bytes);
+            _importResult = TrackResults(xfaNames);
+            return;
+        }
         var names = ParseFdfFieldNames(bytes);
         _doc.Form.ImportFdf(bytes);
         _importResult = TrackResults(names);
@@ -727,22 +790,42 @@ public sealed class Form : IDisposable
         var form = _doc.Form;
         // For XFA forms, AcroForm FindByName won't match XFA dotted paths;
         // resolve names against the set of XFA field paths instead.
-        HashSet<string>? xfaPaths = null;
-        if (form.IsXfa && form.XFA is not null)
-        {
-            xfaPaths = new HashSet<string>(form.XFA.FieldNames, StringComparer.Ordinal);
-        }
+        // For XFA forms, AcroForm FindByName won't match XFA dotted paths. Resolve
+        // names against the XFA field paths, index-insensitively: a flat leaf name
+        // (from a flat-FDF /T(Employee[0])) matches the full path form1[0]…Employee[0],
+        // and a full dotted path matches exactly. Only genuine template fields are in
+        // the set, so a field named in the import but absent from the form (e.g.
+        // 33618's TextFieldX) reports FieldNotFound.
+        List<string>? xfaPathsNorm = XfaFieldPathsNorm();
 
         var list = new List<FormImportResult>();
         foreach (var name in fieldNames)
         {
-            bool found = xfaPaths is not null
-                ? xfaPaths.Contains(name)
+            bool found = xfaPathsNorm is not null
+                ? IsKnownXfaField(name, xfaPathsNorm)
                 : form.FindByName(name) is not null;
             var status = found ? ImportStatus.Success : ImportStatus.FieldNotFound;
             list.Add(new FormImportResult { FieldName = name, Status = status });
         }
         return list.ToArray();
+    }
+
+    /// <summary>The XFA template's field paths with per-segment <c>[n]</c> indices stripped,
+    /// or null when the form is not XFA.</summary>
+    private List<string>? XfaFieldPathsNorm()
+    {
+        var form = _doc?.Form;
+        if (form is null || !form.IsXfa || form.XFA is null) return null;
+        return form.XFA.FieldNames.Select(StripPathIndices).ToList();
+    }
+
+    /// <summary>True when <paramref name="name"/> (a flat leaf like <c>Employee[0]</c> or a full
+    /// dotted path) resolves to a genuine XFA template field — index-insensitively, matched as a
+    /// full path or a trailing segment-suffix of one.</summary>
+    private static bool IsKnownXfaField(string name, List<string> normPaths)
+    {
+        var n = StripPathIndices(name);
+        return normPaths.Any(p => p == n || p.EndsWith("." + n, StringComparison.Ordinal));
     }
 
     private static List<string> ParseXfdfFieldNames(string xfdfXml)
@@ -994,6 +1077,12 @@ public sealed class Form : IDisposable
     public void ExportFdf(Stream outputFdfStream)
     {
         if (_doc is null) throw new InvalidOperationException("No document bound.");
+        if (_doc.Form.IsXfa)
+        {
+            ExportFdfXfa(outputFdfStream);
+            if (outputFdfStream.CanSeek) outputFdfStream.Position = 0;
+            return;
+        }
         var bytes = _doc.Form.ExportFdf();
         outputFdfStream.Write(bytes, 0, bytes.Length);
         if (outputFdfStream.CanSeek)
@@ -1006,6 +1095,12 @@ public sealed class Form : IDisposable
     public void ExportXfdf(Stream outputXfdfStream)
     {
         if (_doc is null) throw new InvalidOperationException("No document bound.");
+        if (_doc.Form.IsXfa)
+        {
+            ExportXfdfXfa(outputXfdfStream);
+            if (outputXfdfStream.CanSeek) outputXfdfStream.Position = 0;
+            return;
+        }
         var xml = _doc.Form.ExportXfdf();
         var bytes = System.Text.Encoding.UTF8.GetBytes(xml);
         outputXfdfStream.Write(bytes, 0, bytes.Length);
@@ -1088,6 +1183,15 @@ public sealed class Form : IDisposable
         var bytes = _doc.ToArray();
         if (DestStream is not null)
         {
+            // The destination may be the very stream the document was read from
+            // (Form(fs, fs) — an in-place save), which leaves the position at EOF.
+            // Reset to the start and truncate so the written bytes replace the file
+            // rather than being appended after the original (which corrupts it).
+            if (DestStream.CanSeek)
+            {
+                DestStream.Seek(0, SeekOrigin.Begin);
+                DestStream.SetLength(0);
+            }
             DestStream.Write(bytes, 0, bytes.Length);
             // Form(srcPath, destPath) opens DestStream itself in the ctor; the
             // contract is that Save() returns with the destination
@@ -1162,9 +1266,12 @@ public sealed class Form : IDisposable
             var nameAttr = node.Attributes?["name"]?.Value;
             var fieldName = nameAttr ?? node.LocalName;
 
-            // Extract value: check for <value> child element first
+            // Extract value: check for <value> child element first. Strip the
+            // newline characters introduced by pretty-printed (indented) XML —
+            // Acrobat/Aspose keep the value's spaces but drop the layout newlines,
+            // so "\n            Product\n        " imports as "            Product        ".
             var valueNode = node.SelectSingleNode("value");
-            var fieldValue = valueNode?.InnerText ?? node.InnerText;
+            var fieldValue = (valueNode?.InnerText ?? node.InnerText).Replace("\r", "").Replace("\n", "");
 
             var field = form.FindByName(fieldName);
             if (field is not null)
@@ -1236,6 +1343,10 @@ public sealed class Form : IDisposable
         // For XFA forms, replace the entire datasets with the imported XML
         var xfaForm = _doc!.Form;
         xfaForm.ReplaceXfaDatasets(xml);
+        // Push the imported values into the AcroForm widgets (static XFA) so the two
+        // representations agree — otherwise the save-time AcroForm→XFA sync writes the
+        // stale widget state back over the imported datasets.
+        xfaForm.SyncXfaToAcroForm();
     }
 
     private static void ImportXfaNode(XmlNode node, string path, Forms.Form form)
@@ -1262,50 +1373,60 @@ public sealed class Form : IDisposable
     {
         var form = _doc!.Form;
         var datasetsXml = form.GetXfaDatasetsXml();
-        // If the datasets contain rich content (from import/fill), extract and export directly
+        // If the datasets carry real form data (from an import/fill), export it directly.
         if (datasetsXml is not null)
         {
             try
             {
                 var dsDoc = new XmlDocument();
                 dsDoc.LoadXml(datasetsXml);
-                // Find the <data> node inside <datasets>
-                XmlNode? dataNode = null;
-                if (dsDoc.DocumentElement?.LocalName == "datasets")
+
+                // Locate a GENUINE XFA data root: the <data> element inside <datasets>
+                // (xfa-data namespace), or a bare <data>/<datasets> root. GetXfaDatasetsXml
+                // can return the whole XDP (preamble/config/template/. concatenated) when the
+                // form has no datasets packet — that is presentation metadata, NOT form data,
+                // so we must only take the rich path when a real <datasets>/<data> node exists;
+                // otherwise we fall through to building the export from the template below.
+                XmlNode? datasetsNode = dsDoc.SelectSingleNode("//*[local-name()='datasets']");
+                XmlNode? dataNode = datasetsNode?.SelectSingleNode("*[local-name()='data']")
+                    ?? (dsDoc.DocumentElement?.LocalName == "data" ? dsDoc.DocumentElement : null);
+
+                XmlElement? dataRoot = null;
+                if (dataNode is not null)
                 {
-                    foreach (XmlNode c in dsDoc.DocumentElement.ChildNodes)
-                        if (c.NodeType == XmlNodeType.Element && c.LocalName == "data")
-                            { dataNode = c; break; }
+                    foreach (XmlNode c in dataNode.ChildNodes)
+                        if (c is XmlElement el) { dataRoot = el; break; }
                 }
-                else
-                    dataNode = dsDoc.DocumentElement;
 
-                var dataRoot = dataNode?.FirstChild as XmlElement ?? dsDoc.DocumentElement as XmlElement;
+                // Only export the datasets verbatim when they carry a RICH, foreign
+                // structure (an imported document root the template can't reproduce,
+                // e.g. <us-request> with many nested elements). A sparse data root —
+                // a few filled fields (FillField) or a form-shaped import (13347) —
+                // must instead be merged onto the template below so the export carries
+                // the COMPLETE field structure (all fields, empty ones included) and
+                // any CDATA/text values (collected via InnerText) survive.
+                int dataElementCount = 0;
                 if (dataRoot is not null)
-                {
-                    // Count data elements — if >5, datasets have real content, use them directly
-                    int elementCount = 0;
-                    foreach (var _ in IterateElements(dataRoot)) { elementCount++; if (elementCount > 5) break; }
+                    foreach (var _ in DescendantElements(dataRoot)) { if (++dataElementCount > 5) break; }
 
-                    if (elementCount > 5)
+                if (dataRoot is not null && dataElementCount > 5)
+                {
+                    // Export with xfa:data wrapper
+                    var settings = new XmlWriterSettings
                     {
-                        // Export with xfa:data wrapper
-                        var settings = new XmlWriterSettings
-                        {
-                            Indent = true,
-                            OmitXmlDeclaration = false,
-                            Encoding = Encoding.UTF8
-                        };
-                        using var writer = XmlWriter.Create(output, settings);
-                        writer.WriteStartElement("xfa", "data",
-                            "http://www.xfa.org/schema/xfa-data/1.0/");
-                        // Write the data root element (typically the imported XML's root,
-                        // e.g. <us-request>). Preserves the document structure expected by callers.
-                        ExportXfaNodeClean(dataRoot, writer);
-                        writer.WriteEndElement(); // xfa:data
-                        writer.Flush();
-                        return;
-                    }
+                        Indent = true,
+                        OmitXmlDeclaration = false,
+                        Encoding = Encoding.UTF8
+                    };
+                    using var writer = XmlWriter.Create(output, settings);
+                    writer.WriteStartElement("xfa", "data",
+                        "http://www.xfa.org/schema/xfa-data/1.0/");
+                    // Write the data root element (typically the imported XML's root,
+                    // e.g. <us-request>). Preserves the document structure expected by callers.
+                    ExportXfaNodeClean(dataRoot, writer);
+                    writer.WriteEndElement(); // xfa:data
+                    writer.Flush();
+                    return;
                 }
             }
             catch { }
@@ -1347,14 +1468,14 @@ public sealed class Form : IDisposable
         }
     }
 
-    private static IEnumerable<XmlElement> IterateElements(XmlElement root)
+    private static IEnumerable<XmlElement> DescendantElements(XmlElement root)
     {
         foreach (XmlNode child in root.ChildNodes)
         {
             if (child is XmlElement el)
             {
                 yield return el;
-                foreach (var desc in IterateElements(el))
+                foreach (var desc in DescendantElements(el))
                     yield return desc;
             }
         }
@@ -1375,8 +1496,9 @@ public sealed class Form : IDisposable
         {
             if (child is XmlElement childElement)
                 ExportXfaNodeClean(childElement, writer);
-            else if (child is XmlText text)
-                writer.WriteString(text.Value ?? "");
+            else if (child is XmlCharacterData cdata
+                     && (child.NodeType == XmlNodeType.Text || child.NodeType == XmlNodeType.CDATA))
+                writer.WriteString(cdata.Value ?? "");
         }
         writer.WriteEndElement();
     }
@@ -1468,6 +1590,319 @@ public sealed class Form : IDisposable
         }
     }
 
+    // ── XFA FDF / XFDF Import/Export ──────────────────────────────────────
+    //
+    // A dynamic XFA form carries no AcroForm widget fields, so the AcroForm
+    // FDF/XFDF exporters emit an empty /Fields set. These XFA-aware variants
+    // build the data tree from the template (with values from the datasets
+    // packet, if any), the same source ExportXmlXfa uses, and render it as
+    // FDF (flat /T(leaf[0]) entries) or XFDF (nested xfdf:fields). Import
+    // resolves the entries back to XFA data paths and persists them through
+    // the same ReplaceXfaDatasets path ImportXml uses.
+
+    /// <summary>Build the XFA data tree (root e.g. &lt;form1&gt; with one child per
+    /// field/subform) from the template, filling values from the datasets packet.
+    /// Returns null when no XFA template is present.</summary>
+    private XmlDocument? BuildXfaDataDocument()
+    {
+        var form = _doc!.Form;
+        var templateXml = form.GetXfaTemplateXml();
+        if (templateXml is null) return null;
+
+        var dataValues = new Dictionary<string, string>(StringComparer.Ordinal);
+        var datasetsXml = form.GetXfaDatasetsXml();
+        if (datasetsXml is not null)
+        {
+            try
+            {
+                var ds = new XmlDocument();
+                ds.LoadXml(datasetsXml);
+                CollectDataValues(ds.DocumentElement, "", dataValues);
+            }
+            catch { }
+        }
+
+        try
+        {
+            var tmpl = new XmlDocument();
+            tmpl.LoadXml(templateXml);
+            using var ms = new MemoryStream();
+            var settings = new XmlWriterSettings
+            {
+                Indent = false,
+                OmitXmlDeclaration = true,
+                Encoding = new UTF8Encoding(false),
+            };
+            using (var w = XmlWriter.Create(ms, settings))
+            {
+                BuildXfaExportXml(tmpl.DocumentElement!, "", w, dataValues);
+                w.Flush();
+            }
+            var dataDoc = new XmlDocument();
+            dataDoc.LoadXml(Encoding.UTF8.GetString(ms.ToArray()));
+            return dataDoc;
+        }
+        catch { return null; }
+    }
+
+    private static List<XmlElement> ElementChildren(XmlNode node)
+    {
+        var list = new List<XmlElement>();
+        foreach (XmlNode c in node.ChildNodes)
+            if (c is XmlElement el) list.Add(el);
+        return list;
+    }
+
+    private void ExportFdfXfa(Stream output)
+    {
+        var dataDoc = BuildXfaDataDocument();
+        var fields = XfaFieldPathsNorm();
+        var sb = new StringBuilder();
+        sb.Append("%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [\n");
+        if (dataDoc?.DocumentElement is not null)
+            EmitFdfLeaves(dataDoc.DocumentElement, sb, fields);
+        sb.Append("] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+        var bytes = Encoding.Latin1.GetBytes(sb.ToString());
+        output.Write(bytes, 0, bytes.Length);
+    }
+
+    /// <summary>Emit a flat <c>/T(leafName[0]) /V(value)</c> FDF entry for each
+    /// leaf field (an element with no element children). When <paramref name="fields"/>
+    /// is non-null, a leaf that isn't a genuine XFA field (an empty subform/draw the
+    /// template build left behind) is skipped so the export carries only bound fields.</summary>
+    private static void EmitFdfLeaves(XmlElement element, StringBuilder sb, List<string>? fields)
+    {
+        var children = ElementChildren(element);
+        if (children.Count == 0)
+        {
+            if (fields is not null && !IsKnownXfaField(element.LocalName, fields)) return;
+            sb.Append("  << /T(");
+            sb.Append(EscapeFdf(element.LocalName + "[0]"));
+            sb.Append(") /V(");
+            sb.Append(EscapeFdf(element.InnerText));
+            sb.Append(") >>\n");
+            return;
+        }
+        foreach (var child in children)
+            EmitFdfLeaves(child, sb, fields);
+    }
+
+    private static string EscapeFdf(string s)
+        => s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+
+    private void ExportXfdfXfa(Stream output)
+    {
+        var dataDoc = BuildXfaDataDocument();
+        const string ns = "http://ns.adobe.com/xfdf/";
+        var settings = new XmlWriterSettings
+        {
+            Indent = true,
+            Encoding = new UTF8Encoding(false),
+        };
+        using var w = XmlWriter.Create(output, settings);
+        w.WriteStartDocument();
+        w.WriteStartElement("xfdf", ns);
+        w.WriteStartElement("fields", ns);
+        if (dataDoc?.DocumentElement is not null)
+            EmitXfdfField(dataDoc.DocumentElement, w, ns, XfaFieldPathsNorm());
+        w.WriteEndElement(); // fields
+        w.WriteEndElement(); // xfdf
+        w.WriteEndDocument();
+    }
+
+    /// <summary>Emit a nested <c>&lt;field name="elem[0]"&gt;</c> element. A container
+    /// holds a <c>&lt;fields&gt;</c> with its children; a leaf holds a <c>&lt;value&gt;</c>.
+    /// A leaf that isn't a genuine XFA field (when <paramref name="fields"/> is non-null)
+    /// is skipped so only bound fields carry a value entry.</summary>
+    private static void EmitXfdfField(XmlElement element, XmlWriter w, string ns, List<string>? fields)
+    {
+        var children = ElementChildren(element);
+        // A known XFA field is a value leaf; anything else (including an empty
+        // subform such as a table header row) is a container that still exports a
+        // <field><fields/></field> wrapper.
+        bool isField = fields is not null && IsKnownXfaField(element.LocalName, fields);
+
+        w.WriteStartElement("field", ns);
+        w.WriteAttributeString("name", element.LocalName + "[0]");
+
+        if (isField)
+        {
+            // Value field: emit <value> only when filled; an unfilled field is
+            // self-closing (<field name="X[0]" />).
+            var value = element.InnerText;
+            if (!string.IsNullOrEmpty(value))
+            {
+                w.WriteStartElement("value", ns);
+                w.WriteString(value);
+                w.WriteEndElement(); // value
+            }
+        }
+        else
+        {
+            // Container subform: always wrap children in <fields> (empty → <fields />).
+            w.WriteStartElement("fields", ns);
+            foreach (var child in children)
+                EmitXfdfField(child, w, ns, fields);
+            w.WriteEndElement(); // fields
+        }
+        w.WriteEndElement(); // field
+    }
+
+    private void ImportFdfXfa(byte[] bytes)
+    {
+        var dataDoc = BuildXfaDataDocument();
+        if (dataDoc?.DocumentElement is null) return;
+        var text = Encoding.Latin1.GetString(bytes);
+        foreach (var (name, value) in ParseFdfTV(text))
+            SetDataDocValue(dataDoc.DocumentElement, name, value);
+        _doc!.Form.ReplaceXfaDatasets(dataDoc);
+    }
+
+    private void ImportXfdfXfa(string xfdfXml)
+    {
+        var dataDoc = BuildXfaDataDocument();
+        if (dataDoc?.DocumentElement is null) return;
+        XmlDocument xfdf;
+        try { xfdf = new XmlDocument(); xfdf.LoadXml(xfdfXml); }
+        catch { return; }
+        var fields = xfdf.DocumentElement?.SelectSingleNode("*[local-name()='fields']");
+        if (fields is null) return;
+        foreach (var (path, value) in CollectXfdfValues(fields, parentPath: null))
+            SetDataDocValue(dataDoc.DocumentElement, path, value);
+        _doc!.Form.ReplaceXfaDatasets(dataDoc);
+    }
+
+    /// <summary>Walk nested xfdf:field elements, yielding (dotted-path, value) for
+    /// each leaf that carries a &lt;value&gt;. Names keep their [n] index, joined with '.'.</summary>
+    private static IEnumerable<(string path, string value)> CollectXfdfValues(XmlNode container, string? parentPath)
+    {
+        foreach (XmlNode child in container.ChildNodes)
+        {
+            if (child is not XmlElement fieldEl || fieldEl.LocalName != "field") continue;
+            var name = fieldEl.GetAttribute("name");
+            if (string.IsNullOrEmpty(name)) continue;
+            var path = parentPath is null ? name : parentPath + "." + name;
+
+            var valueEl = fieldEl.SelectSingleNode("*[local-name()='value']");
+            var nestedFields = fieldEl.SelectSingleNode("*[local-name()='fields']");
+            if (nestedFields is not null)
+            {
+                foreach (var pair in CollectXfdfValues(nestedFields, path))
+                    yield return pair;
+            }
+            else if (valueEl is not null)
+            {
+                yield return (path, valueEl.InnerText);
+            }
+        }
+    }
+
+    /// <summary>Set a value in the XFA data document by a dotted path whose segments may
+    /// carry [n] indices and may or may not include the data-root element. A bare leaf
+    /// name (FDF) is matched anywhere in the tree.</summary>
+    private static void SetDataDocValue(XmlElement root, string dottedName, string value)
+    {
+        var segments = dottedName.Split('.');
+        // Drop a leading segment that names the data root itself (e.g. "form1[0]").
+        int start = 0;
+        if (segments.Length > 1 && StripIndex(segments[0]) == root.LocalName)
+            start = 1;
+
+        if (segments.Length - start == 1)
+        {
+            // Single segment: locate the leaf anywhere under the root by local name.
+            var leaf = StripIndex(segments[start]);
+            var node = leaf == root.LocalName ? root : FindDescendantByLocalName(root, leaf);
+            if (node is not null) node.InnerText = value;
+            return;
+        }
+
+        XmlElement? current = root;
+        for (int i = start; i < segments.Length && current is not null; i++)
+        {
+            var seg = StripIndex(segments[i]);
+            XmlElement? next = null;
+            foreach (var c in ElementChildren(current))
+                if (c.LocalName == seg) { next = c; break; }
+            current = next;
+        }
+        if (current is not null) current.InnerText = value;
+    }
+
+    private static XmlElement? FindDescendantByLocalName(XmlElement root, string localName)
+    {
+        foreach (var c in ElementChildren(root))
+        {
+            if (c.LocalName == localName) return c;
+            var found = FindDescendantByLocalName(c, localName);
+            if (found is not null) return found;
+        }
+        return null;
+    }
+
+    private static string StripIndex(string name)
+    {
+        var br = name.IndexOf('[');
+        return br < 0 ? name : name.Substring(0, br);
+    }
+
+    /// <summary>Strip the <c>[n]</c> occurrence index from every dotted segment
+    /// (<c>form1[0].P1[0].Employee[0]</c> → <c>form1.P1.Employee</c>).</summary>
+    private static string StripPathIndices(string path)
+        => string.Join('.', path.Split('.').Select(StripIndex));
+
+    /// <summary>Normalise an XFA SOM path for a full-path match: strip every <c>[n]</c>
+    /// occurrence index and drop anonymous <c>#</c>-container segments (e.g.
+    /// <c>form1[0].#subform[0].TextField1[0]</c> → <c>form1.TextField1</c>), so a caller's
+    /// container-collapsed path lines up with the enumerated field name.</summary>
+    /// <summary>Parse flat <c>/T(name) /V(value)</c> pairs from FDF text, honouring
+    /// <c>\(</c>/<c>\)</c>/<c>\\</c> escapes.</summary>
+    private static IEnumerable<(string name, string value)> ParseFdfTV(string fdf)
+    {
+        int pos = 0;
+        while (true)
+        {
+            int tIdx = fdf.IndexOf("/T", pos, StringComparison.Ordinal);
+            if (tIdx < 0) yield break;
+            int open = fdf.IndexOf('(', tIdx);
+            if (open < 0) yield break;
+            var name = ReadFdfLiteral(fdf, open, out int afterName);
+            // Look for an immediately following /V (allow whitespace between).
+            int vIdx = fdf.IndexOf("/V", afterName, StringComparison.Ordinal);
+            string value = "";
+            int next = afterName;
+            if (vIdx >= 0 && fdf.IndexOf("/T", afterName, StringComparison.Ordinal) is var nextT
+                && (nextT < 0 || vIdx < nextT))
+            {
+                int vOpen = fdf.IndexOf('(', vIdx);
+                if (vOpen >= 0)
+                {
+                    value = ReadFdfLiteral(fdf, vOpen, out next);
+                }
+            }
+            yield return (name, value);
+            pos = next;
+        }
+    }
+
+    /// <summary>Read a PDF/FDF string literal beginning at <paramref name="open"/> (the '(').</summary>
+    private static string ReadFdfLiteral(string s, int open, out int afterClose)
+    {
+        var sb = new StringBuilder();
+        int depth = 0;
+        int i = open;
+        for (; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c == '\\' && i + 1 < s.Length) { sb.Append(s[++i]); continue; }
+            if (c == '(') { if (depth > 0) sb.Append(c); depth++; continue; }
+            if (c == ')') { depth--; if (depth == 0) { i++; break; } sb.Append(c); continue; }
+            if (depth > 0) sb.Append(c);
+        }
+        afterClose = i;
+        return sb.ToString();
+    }
+
     // ── API-shape additions ───────────────────────────────────────────────
 
     /// <summary>Extract the document's XFA datasets XML to a stream.</summary>
@@ -1505,11 +1940,26 @@ public sealed class Form : IDisposable
         return FillField(fieldName, value);
     }
 
-    /// <summary>Fill a choice field by selected-option index.</summary>
+    /// <summary>Fill a choice or radio field by selected-option index (0-based).</summary>
     public bool FillField(string fieldName, int index)
     {
         if (_doc?.Form is null) return false;
-        if (_doc.Form.FindByName(fieldName) is ChoiceField cf)
+        var field = _doc.Form.FindByName(fieldName);
+        // A radio button is selected by widget index. Its appearance on-state can
+        // differ from its export value (the /Opt entry) — "index and value do not
+        // match" — so drive the selection by index (RadioButtonField.Selected is
+        // 1-based) and, for an XFA-backed form, write the option's export value into
+        // the XFA datasets directly. We deliberately bypass the reverse
+        // XFA->acro-field sync here: re-applying the export value would re-match it
+        // against an unrelated widget on-state and move the selection.
+        if (field is RadioButtonField rb)
+        {
+            if (index < 0 || index >= rb.Options.Count) return false;
+            rb.Selected = index + 1; // RadioButtonField.Selected is 1-based
+            _doc.Form.SetXfaFieldValue(fieldName, rb.Options[index + 1].Value);
+            return true;
+        }
+        if (field is ChoiceField cf)
         {
             if (index >= 0 && index < cf.Options.Count)
             {
@@ -1542,7 +1992,12 @@ public sealed class Form : IDisposable
         {
             if (!FillField(fieldNames[i], fieldValues[i])) allOk = false;
         }
-        var bytes = _doc.ToArray();
+        // A signed document must be updated incrementally so the original bytes
+        // (and thus the existing signature's /ByteRange) survive; a full rewrite
+        // would invalidate the signature.
+        var bytes = _doc.Form is { SignaturesExist: true }
+            ? _doc.ToArrayIncremental()
+            : _doc.ToArray();
         output.Write(bytes, 0, bytes.Length);
         output.Position = 0;
         return allOk;
@@ -1555,13 +2010,21 @@ public sealed class Form : IDisposable
     public void FillImageField(string fieldName, Stream imageStream)
     {
         if (_doc?.Form is null || imageStream is null) return;
-        var field = _doc.Form.FindByName(fieldName);
-        if (field is null) return;
 
         using var ms = new MemoryStream();
         imageStream.CopyTo(ms);
         var imageBytes = ms.ToArray();
         if (imageBytes.Length == 0) return;
+
+        // XFA image fields carry their picture as a base64 datasets value tagged with a
+        // contentType; record it so it round-trips through XFA.GetFieldNode. A dynamic
+        // XFA field has no AcroForm widget (FindByName is null), so this is the only sink.
+        if (_doc.Form.IsXfa)
+            _doc.Form.SetXfaFieldImage(fieldName, Convert.ToBase64String(imageBytes),
+                DetectImageContentType(imageBytes));
+
+        var field = _doc.Form.FindByName(fieldName);
+        if (field is null) return;
 
         // A field is either a terminal widget (its own dict carries /Rect + /AP) or
         // a parent with one /Kids widget per placement. Target every widget.
@@ -1570,6 +2033,15 @@ public sealed class Form : IDisposable
 
         foreach (var widget in widgets)
             SetImageAppearance(widget, imageBytes);
+
+        // Surface the field as an image push-button: filling a (text or button) field
+        // with an image converts it to a push button whose icon is the image, so a
+        // reloaded document reports FieldType.Image and the field is
+        // a ButtonField carrying the image appearance.
+        field.Dict.Set("FT", new Core.PdfName("Btn"));
+        field.Dict.Set("Ff", new Core.PdfInteger(65536)); // push button
+        field.Dict.Remove("V");
+        field.Dict.Remove("DV");
     }
 
     /// <summary>Fill an image field from a file path.</summary>
@@ -1578,6 +2050,17 @@ public sealed class Form : IDisposable
         if (string.IsNullOrEmpty(imageFileName) || !File.Exists(imageFileName)) return;
         using var fs = File.OpenRead(imageFileName);
         FillImageField(fieldName, fs);
+    }
+
+    /// <summary>MIME type for an XFA image field's datasets <c>contentType</c>, from the
+    /// image's magic bytes. Uses <c>image/jpg</c> (XFA's spelling, not image/jpeg).</summary>
+    private static string DetectImageContentType(byte[] b)
+    {
+        if (b.Length >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "image/jpg";
+        if (b.Length >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return "image/png";
+        if (b.Length >= 3 && b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46) return "image/gif";
+        if (b.Length >= 2 && b[0] == 0x42 && b[1] == 0x4D) return "image/bmp";
+        return "image/jpg";
     }
 
     /// <summary>Build an image XObject from <paramref name="imageBytes"/> and write
@@ -1602,20 +2085,32 @@ public sealed class Form : IDisposable
         var resources = new Core.PdfDictionary();
         resources.Set("XObject", xobjects);
 
-        // Proportional fit, centered — the standard Acrobat icon fit (/MK /IF). The
-        // image is scaled to fit inside the widget rectangle preserving its aspect
-        // ratio, then centered. This matches the AddImage placement and
-        // how independent renderers (pdf.js / MuPDF) draw button icons; stretch-to-
-        // fill would distort images whose aspect ratio differs from the widget.
-        double dw = w, dh = h, tx = 0, ty = 0;
-        if (stamp.PixelWidth > 0 && stamp.PixelHeight > 0)
+        // Honour the widget's icon rotation (/MK /R, in degrees). For 90°/270° the
+        // appearance is drawn in a coordinate space with width/height swapped and
+        // mapped back into the widget rect by the form /Matrix.
+        int rot = 0;
+        var mk = reader.ResolveDict(widget.Get("MK"));
+        if (mk is not null && mk.ContainsKey("R"))
+            rot = (int)(((mk.GetInt("R") % 360) + 360) % 360);
+        bool swap = rot == 90 || rot == 270;
+        double boxW = swap ? h : w;   // appearance-space box dimensions
+        double boxH = swap ? w : h;
+
+        // Proportional fit, centered, inset by a 2-unit icon margin on each side —
+        // the standard Acrobat push-button icon fit (/MK /IF default). The image is
+        // scaled to fit inside the (inset) box preserving its aspect ratio, then
+        // centered; stretch-to-fill would distort non-matching aspect ratios.
+        const double inset = 2.0;
+        double availW = Math.Max(0, boxW - 2 * inset);
+        double availH = Math.Max(0, boxH - 2 * inset);
+        double dw = availW, dh = availH, tx = inset, ty = inset;
+        if (stamp.PixelWidth > 0 && stamp.PixelHeight > 0 && availW > 0 && availH > 0)
         {
-            double imgAspect = (double)stamp.PixelWidth / stamp.PixelHeight;
-            double rectAspect = w / h;
-            if (imgAspect > rectAspect) { dw = w; dh = dw / imgAspect; }
-            else                        { dh = h; dw = dh * imgAspect; }
-            tx = (w - dw) / 2.0;
-            ty = (h - dh) / 2.0;
+            double scale = Math.Min(availW / stamp.PixelWidth, availH / stamp.PixelHeight);
+            dw = stamp.PixelWidth * scale;
+            dh = stamp.PixelHeight * scale;
+            tx = inset + (availW - dw) / 2.0;
+            ty = inset + (availH - dh) / 2.0;
         }
         var content = Encoding.ASCII.GetBytes(
             $"q {Fmt(dw)} 0 0 {Fmt(dh)} {Fmt(tx)} {Fmt(ty)} cm /Im0 Do Q");
@@ -1624,7 +2119,9 @@ public sealed class Form : IDisposable
         apN.Set("Type", new Core.PdfName("XObject"));
         apN.Set("Subtype", new Core.PdfName("Form"));
         apN.Set("FormType", new Core.PdfInteger(1));
-        apN.Set("BBox", MakeRectArray(0, 0, w, h));
+        apN.Set("BBox", MakeRectArray(0, 0, boxW, boxH));
+        if (rot != 0)
+            apN.Set("Matrix", IconRotationMatrix(rot, w, h));
         apN.Set("Resources", resources);
         apN.Set("Length", new Core.PdfInteger(content.Length));
         var apStream = new Core.PdfStream(apN, content);
@@ -1632,6 +2129,28 @@ public sealed class Form : IDisposable
         var ap = reader.ResolveDict(widget.Get("AP")) ?? new Core.PdfDictionary();
         ap.Set("N", apStream);
         widget.Set("AP", ap);
+
+        // Mark the widget as an icon (image) button so GetFieldType reports Image after
+        // a reload, and expose the icon via /MK /I.
+        if (mk is null) { mk = new Core.PdfDictionary(); widget.Set("MK", mk); }
+        mk.Set("TP", new Core.PdfInteger(1));
+        mk.Set("I", apStream);
+    }
+
+    /// <summary>The /Matrix that maps an icon appearance drawn in the (rotated)
+    /// appearance space back into the widget rectangle for an /MK /R rotation.</summary>
+    private static Core.PdfArray IconRotationMatrix(int rot, double w, double h)
+    {
+        var (a, b, c, d, e, f) = rot switch
+        {
+            90  => (0.0, 1.0, -1.0, 0.0, h, 0.0),
+            180 => (-1.0, 0.0, 0.0, -1.0, w, h),
+            270 => (0.0, -1.0, 1.0, 0.0, 0.0, w),
+            _   => (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+        };
+        var arr = new Core.PdfArray();
+        foreach (var v in new[] { a, b, c, d, e, f }) arr.Add(new Core.PdfReal(v));
+        return arr;
     }
 
     private static Core.PdfArray MakeRectArray(double llx, double lly, double urx, double ury)

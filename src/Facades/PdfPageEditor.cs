@@ -61,10 +61,13 @@ public sealed class PdfPageEditor : System.IDisposable
     /// <summary>
     /// Bind a PDF stream for editing.
     /// </summary>
-    /// <summary>Bind to an existing <see cref="Document"/>; caller owns lifetime.</summary>
+    /// <summary>Bind to an existing <see cref="Document"/>; caller owns lifetime.
+    /// A null argument unbinds (clears the bound document) rather than throwing, so
+    /// callers can release the editor's reference before disposing; subsequent edit
+    /// or Save calls still guard against an unbound document.</summary>
     public void BindPdf(Document srcDoc)
     {
-        _document = srcDoc ?? throw new ArgumentNullException(nameof(srcDoc));
+        _document = srcDoc;
     }
 
     public void BindPdf(Stream stream)
@@ -83,6 +86,7 @@ public sealed class PdfPageEditor : System.IDisposable
             throw new InvalidOperationException("No document bound. Call BindPdf first.");
         ApplyPendingPageResize();
         ApplyPendingContentTransform();
+        PruneOrphans();
         var bytes = _document.ToArray();
         File.WriteAllBytes(outputFile, bytes);
     }
@@ -94,8 +98,24 @@ public sealed class PdfPageEditor : System.IDisposable
             throw new InvalidOperationException("No document bound. Call BindPdf first.");
         ApplyPendingPageResize();
         ApplyPendingContentTransform();
+        PruneOrphans();
         var bytes = _document.ToArray();
         outputStream.Write(bytes, 0, bytes.Length);
+    }
+
+    // Resizing/moving a page replaces its /Contents with a new stream (and may re-wrap it),
+    // leaving the original content stream unreferenced. The default save serialises every
+    // in-use xref entry, so without a reachability sweep those orphaned streams inflate the
+    // output. This pure prune (RemoveUnusedObjects only) drops them; it never rewrites or
+    // recompresses live content.
+    private void PruneOrphans()
+    {
+        _document?.OptimizeResources(new Aspose.Pdf.Optimization.OptimizationOptions
+        {
+            RemoveUnusedObjects = true,
+            RemoveUnusedStreams = false,
+            LinkDuplicateStreams = false,
+        });
     }
 
     /// <summary>
@@ -161,6 +181,13 @@ public sealed class PdfPageEditor : System.IDisposable
                 Aspose.Pdf.VerticalAlignment.Top => ph - scaledH,
                 _ => 0,
             };
+            // Account for a non-zero MediaBox origin: the original content is drawn in
+            // the old box's coordinate space (which may start at a negative LLX/LLY, e.g.
+            // a [0 -1008 612 0] box), but the new MediaBox is normalised to (0,0). Shift
+            // the content by the old origin so it lands inside the new page instead of
+            // off it (which produced a blank resized page). Zero-origin pages are unchanged.
+            tx -= sx * box.LLX;
+            ty -= sx * box.LLY;
             page.ApplyContentResize(sx, sx, tx, ty);
             page.SetMediaBox(new Rectangle(0, 0, pw, ph));
         }
@@ -177,13 +204,44 @@ public sealed class PdfPageEditor : System.IDisposable
     {
         if (_document is null || PageSize is not null) return;
         double sx = Zoom > 0 ? Zoom : 1.0;
-        if (sx == 1.0 && _moveX == 0 && _moveY == 0) return;
+        bool hasAlignment = HorizontalAlignment != Aspose.Pdf.HorizontalAlignment.None
+            || VerticalAlignmentType != Aspose.Pdf.VerticalAlignment.None;
+        if (sx == 1.0 && _moveX == 0 && _moveY == 0 && !hasAlignment) return;
         foreach (var page in TargetPagesForStateful())
         {
             if (!_transformedPages.Add(page)) continue;
-            // ApplyZoomAsForm brackets the moved content with q/Q INSIDE the form
-            // (form contents = q … original … Q).
-            page.ApplyZoomAsForm(sx, sx, _moveX, _moveY);
+            double tx = _moveX, ty = _moveY;
+            if (hasAlignment)
+            {
+                // Position the zoomed content per the alignment settings. The offsets
+                // are computed in a (0,0)-based space, so the MediaBox is normalised
+                // to a zero origin as well — otherwise aligned content computed this
+                // way lands outside a negative-origin box (e.g. [0 -612 792 0]).
+                var box = page.MediaBox;
+                double scaledW = box.Width * sx, scaledH = box.Height * sx;
+                tx += HorizontalAlignment switch
+                {
+                    Aspose.Pdf.HorizontalAlignment.Center => (box.Width - scaledW) / 2,
+                    Aspose.Pdf.HorizontalAlignment.Right => box.Width - scaledW,
+                    _ => 0,
+                };
+                ty += VerticalAlignmentType switch
+                {
+                    Aspose.Pdf.VerticalAlignment.Center => (box.Height - scaledH) / 2,
+                    Aspose.Pdf.VerticalAlignment.Top => box.Height - scaledH,
+                    _ => 0,
+                };
+                tx -= sx * box.LLX;
+                ty -= sx * box.LLY;
+                // ApplyZoomAsForm brackets the moved content with q/Q INSIDE the form
+                // (form contents = q … original … Q).
+                page.ApplyZoomAsForm(sx, sx, tx, ty);
+                page.SetMediaBox(new Rectangle(0, 0, box.Width, box.Height));
+            }
+            else
+            {
+                page.ApplyZoomAsForm(sx, sx, tx, ty);
+            }
         }
     }
 
@@ -326,7 +384,10 @@ public sealed class PdfPageEditor : System.IDisposable
             foreach (var (pageNo, rotation) in value)
             {
                 if (pageNo < 1 || pageNo > _document.PageCount) continue;
-                _document.Pages.At(pageNo).Dict.Set("Rotate", new PdfInteger(((rotation % 360) + 360) % 360));
+                // Bake the rotation into the page geometry (content + boxes + annotation
+                // rectangles), per the PdfPageEditor.PageRotations contract, which stores
+                // the rotation as content rather than the /Rotate viewing flag.
+                _document.Pages.At(pageNo).BakeRotation(rotation);
             }
         }
     }

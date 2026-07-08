@@ -6,7 +6,7 @@ namespace Aspose.Pdf;
 
 /// <summary>
 /// zlib (RFC 1950) deflating output stream — a public helper matching the
-/// Aspose.PDF for .NET surface. Bytes written are zlib-compressed into the
+/// Aspose.Pdf surface. Bytes written are zlib-compressed into the
 /// destination stream. Call <see cref="Finish"/> (or dispose) to flush the
 /// compression trailer; the destination stream is left open.
 /// </summary>
@@ -56,7 +56,7 @@ public sealed class ZDeflaterOutputStream : Stream
 
 /// <summary>
 /// zlib (RFC 1950) inflating input stream — a public helper matching the
-/// Aspose.PDF for .NET surface. Reads zlib-compressed data from the source
+/// Aspose.Pdf surface. Reads zlib-compressed data from the source
 /// stream and yields the decompressed bytes. The source stream is left open.
 /// </summary>
 public sealed class ZInflaterInputStream : Stream

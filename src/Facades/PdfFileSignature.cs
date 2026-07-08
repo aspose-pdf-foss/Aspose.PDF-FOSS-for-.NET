@@ -12,10 +12,19 @@ public sealed class PdfFileSignature : IDisposable
     private byte[]? _boundPdf;
     private string? _outputFile;
     private Document? _document;
+    // Password the bound document was opened with, when it is encrypted — the
+    // bound bytes are still encrypted, so re-opening them to read fields or to
+    // sign/verify must authenticate again with this password.
+    private string? _password;
 
     /// <summary>The bound document, lazily opened from the bound PDF bytes,
     /// for reading its fields / signatures.</summary>
-    public Document Document => _document ??= Document.Open(RequireBound());
+    public Document Document => _document ??= OpenDoc(RequireBound());
+
+    /// <summary>Open bound PDF bytes, re-authenticating with the captured
+    /// password when the document is encrypted.</summary>
+    private Document OpenDoc(byte[] data)
+        => _password is not null ? Document.Open(data, _password) : Document.Open(data);
 
     public void Dispose() { _document?.Dispose(); _document = null; _boundPdf = null; }
     public void Close() => Dispose();
@@ -25,6 +34,7 @@ public sealed class PdfFileSignature : IDisposable
     public PdfFileSignature(Document document)
     {
         _boundPdf = document.Reader.RawData;
+        _password = document.Reader.Password;
     }
 
     public PdfFileSignature(Document document, string outputFile)
@@ -66,13 +76,18 @@ public sealed class PdfFileSignature : IDisposable
     public void BindPdf(Document document)
     {
         if (document is null) throw new ArgumentNullException(nameof(document));
-        _boundPdf = document.ToArray();
+        // Prefer the original on-disk bytes: re-serializing (ToArray) shifts
+        // object offsets, so any existing signature's /ByteRange no longer
+        // matches the data and verification breaks. Fall back to ToArray only
+        // for in-memory documents that were never read from a source.
+        _boundPdf = document.Reader?.RawData ?? document.ToArray();
+        _password ??= document.Reader?.Password;
     }
 
     public IList<string> GetSignNames()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         return Signature.EnumerateSignatures(doc)
             .Select(s => s.FieldName ?? "")
             .ToList();
@@ -87,7 +102,7 @@ public sealed class PdfFileSignature : IDisposable
         // When false, return every signed field regardless of whether subsequent
         // incremental updates have invalidated the signature.
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         var names = new List<string>();
         foreach (var sig in Signature.EnumerateSignatures(doc))
         {
@@ -104,11 +119,11 @@ public sealed class PdfFileSignature : IDisposable
     }
 
     /// <summary>All signed signature fields wrapped as <see cref="SignatureName"/>
-    /// entries (matches the partial+full+HasSignature shape Aspose.PDF for .NET expects).</summary>
+    /// entries (matches the partial+full+HasSignature shape Aspose.Pdf expects).</summary>
     public IList<SignatureName> GetSignatureNames()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         return Signature.EnumerateSignatures(doc)
             .Select(s => BuildSignatureName(s.FieldName, hasSignature: true))
             .ToList();
@@ -125,7 +140,7 @@ public sealed class PdfFileSignature : IDisposable
     public IList<string> GetBlankSignNames()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         return EnumerateBlankSignatureFields(doc)
             .Select(f => f.FullName)
             .ToList();
@@ -134,7 +149,7 @@ public sealed class PdfFileSignature : IDisposable
     public IList<SignatureName> GetBlankSignatureNames()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         return EnumerateBlankSignatureFields(doc)
             .Select(f => BuildSignatureName(f.FullName, hasSignature: false))
             .ToList();
@@ -146,7 +161,7 @@ public sealed class PdfFileSignature : IDisposable
     {
         if (string.IsNullOrEmpty(signName)) return 0;
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         var index = 0;
         foreach (var sig in Signature.EnumerateSignatures(doc))
         {
@@ -164,7 +179,7 @@ public sealed class PdfFileSignature : IDisposable
     public int GetTotalRevision()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         return Signature.EnumerateSignatures(doc).Count();
     }
 
@@ -175,7 +190,7 @@ public sealed class PdfFileSignature : IDisposable
     public Forms.DocMDPAccessPermissions GetAccessPermissions()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         var form = doc.Form;
         if (form is null) return Forms.DocMDPAccessPermissions.NoChanges;
         foreach (var field in form.Fields)
@@ -269,7 +284,7 @@ public sealed class PdfFileSignature : IDisposable
     public bool VerifySignature(string signName)
     {
         var input = RequireBound();
-        return PdfSigner.Verify(input, signName);
+        return PdfSigner.Verify(input, signName, _password);
     }
 
     public string? GetSignerName(string signName)
@@ -300,21 +315,28 @@ public sealed class PdfFileSignature : IDisposable
     public bool IsCoversWholeDocument(string signName)
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         var sig = Signature.EnumerateSignatures(doc)
             .FirstOrDefault(s => s.FieldName == signName);
         if (sig?.ByteRangeRaw is null || sig.ByteRangeRaw.Length < 4)
             return false;
 
+        // A signature covers the whole document only when its /ByteRange starts at the
+        // very beginning of the file (offset 0) AND its second segment reaches the end,
+        // excluding just the /Contents hex gap. Content appended after signing leaves
+        // start2+len2 short of the file length; a tampered range crafted with a non-zero
+        // start so that start2+len2 happens to equal the length (e.g. [106 … len 0]) is
+        // likewise rejected here.
         var br = sig.ByteRangeRaw;
         var coveredEnd = br[2] + br[3];
-        return coveredEnd == input.Length;
+        return br[0] == 0 && coveredEnd == input.Length;
     }
 
     public void RemoveSignature(string signName)
     {
+        GuardCertificationRemoval(signName);
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         StripSignatureValue(doc, signName);
         _boundPdf = doc.ToArray();
     }
@@ -323,10 +345,11 @@ public sealed class PdfFileSignature : IDisposable
     /// or the entire signature field (true) by name.</summary>
     public void RemoveSignature(string signName, bool removeField)
     {
+        GuardCertificationRemoval(signName);
         if (removeField)
         {
             var input = RequireBound();
-            using var doc = Document.Open(input);
+            using var doc = OpenDoc(input);
             RemoveSignatureField(doc, signName);
             _boundPdf = doc.ToArray();
         }
@@ -339,7 +362,7 @@ public sealed class PdfFileSignature : IDisposable
     public void RemoveSignatures()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         StripSignatureValue(doc, null);
         _boundPdf = doc.ToArray();
     }
@@ -347,7 +370,7 @@ public sealed class PdfFileSignature : IDisposable
     public bool IsContainSignature()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         return Signature.HasAny(doc);
     }
 
@@ -361,7 +384,7 @@ public sealed class PdfFileSignature : IDisposable
         get
         {
             var input = RequireBound();
-            using var doc = Document.Open(input);
+            using var doc = OpenDoc(input);
             var form = doc.Form;
             if (form is null) return false;
             foreach (var field in form.Fields)
@@ -383,6 +406,32 @@ public sealed class PdfFileSignature : IDisposable
         }
     }
 
+    /// <summary>Refuse to remove a certification (DocMDP) signature — doing so
+    /// would break the document's certification. This throws a
+    /// <see cref="PdfException"/>; approval signatures remain removable.</summary>
+    private void GuardCertificationRemoval(string signName)
+    {
+        var input = RequireBound();
+        using var doc = OpenDoc(input);
+        var form = doc.Form;
+        if (form is null) return;
+        foreach (var field in form.Fields)
+        {
+            if (field.Type != Forms.FieldType.Signature) continue;
+            if (field.FullName != signName && field.PartialName != signName) continue;
+            var sigDict = doc.Reader.ResolveDict(field.Dict.Get("V"));
+            var refs = doc.Reader.Resolve(sigDict?.Get("Reference")) as Aspose.Pdf.Core.PdfArray;
+            if (refs is null) continue;
+            foreach (var refObj in refs)
+            {
+                var refDict = doc.Reader.ResolveDict(refObj);
+                if (refDict?.GetName("TransformMethod") == "DocMDP")
+                    throw new PdfException(
+                        $"Signature '{signName}' certifies the document (DocMDP) and cannot be removed; removal would break the certification.");
+            }
+        }
+    }
+
     /// <summary>
     /// Extract the X.509 signing certificate from the named signature field
     /// and return it as a memory stream of DER-encoded bytes (.cer format).
@@ -392,7 +441,7 @@ public sealed class PdfFileSignature : IDisposable
     public Stream? ExtractCertificate(string signName)
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         var form = doc.Form;
         if (form is null) return null;
         Forms.Field? field = null;
@@ -434,7 +483,7 @@ public sealed class PdfFileSignature : IDisposable
     public bool ContainsUsageRights()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         var perms = doc.Reader.ResolveDict(doc.Reader.Catalog.Get("Perms"));
         if (perms is null) return false;
         return perms.ContainsKey("UR") || perms.ContainsKey("UR3");
@@ -443,7 +492,7 @@ public sealed class PdfFileSignature : IDisposable
     public void RemoveUsageRights()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         var perms = doc.Reader.ResolveDict(doc.Reader.Catalog.Get("Perms"));
         if (perms is null)
         {
@@ -459,16 +508,26 @@ public sealed class PdfFileSignature : IDisposable
 
     public bool ContainsSignature() => IsContainSignature();
 
+    /// <summary>A signing error that <see cref="Sign(int, string, string, string, bool, System.Drawing.Rectangle, Forms.Signature)"/>
+    /// records but defers to <see cref="Save(string)"/> — matching Aspose.Pdf,
+    /// where the incompatible-algorithm check surfaces when the document is written.</summary>
+    private Exception? _deferredSignException;
+
     public void Save(string outputFile)
     {
+        if (_deferredSignException is not null) throw _deferredSignException;
         var input = RequireBound();
         File.WriteAllBytes(outputFile, input);
     }
 
     public void Save(Stream outputStream)
     {
+        if (_deferredSignException is not null) throw _deferredSignException;
         var input = RequireBound();
         outputStream.Write(input, 0, input.Length);
+        // Aspose.Pdf leaves a seekable output rewound so callers can read
+        // the signed bytes back without seeking.
+        if (outputStream.CanSeek) outputStream.Position = 0;
     }
 
     // ── Sign / Certify / SetCertificate ──────────────────────────────
@@ -558,7 +617,7 @@ public sealed class PdfFileSignature : IDisposable
     }
 
     /// <summary>Verifies that a signed signature is intact. Alias for
-    /// <see cref="VerifySignature(string)"/> matching Aspose.PDF for .NET naming.</summary>
+    /// <see cref="VerifySignature(string)"/> matching Aspose.Pdf naming.</summary>
     public bool VerifySigned(string signName) => VerifySignature(signName);
 
     /// <summary>Verify a signature with explicit options + return a
@@ -691,7 +750,7 @@ public sealed class PdfFileSignature : IDisposable
     public List<Security.SignatureAlgorithmInfo> GetSignaturesInfo()
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         var result = new List<Security.SignatureAlgorithmInfo>();
         foreach (var sig in Signature.EnumerateSignatures(doc))
         {
@@ -714,7 +773,7 @@ public sealed class PdfFileSignature : IDisposable
         get
         {
             var input = RequireBound();
-            using var doc = Document.Open(input);
+            using var doc = OpenDoc(input);
             return doc.Reader.Catalog.ContainsKey("DSS");
         }
     }
@@ -725,7 +784,7 @@ public sealed class PdfFileSignature : IDisposable
     public Stream? ExtractImage(string signName)
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         var form = doc.Form;
         if (form is null) return null;
         foreach (var field in form.Fields)
@@ -734,7 +793,8 @@ public sealed class PdfFileSignature : IDisposable
             if (field.FullName != signName && field.PartialName != signName) continue;
             // Look in the field's /AP /N, then in any widget child's /AP /N.
             var stream = FindAppearanceStream(field.Dict, doc.Reader);
-            if (stream is not null) return new MemoryStream(doc.Reader.DecodeStream(stream), writable: false);
+            var img = ExtractAppearanceImage(stream, doc.Reader);
+            if (img is not null) return img;
             var kids = doc.Reader.Resolve(field.Dict.Get("Kids")) as Aspose.Pdf.Core.PdfArray;
             if (kids is null) continue;
             foreach (var kid in kids)
@@ -742,10 +802,80 @@ public sealed class PdfFileSignature : IDisposable
                 var kidDict = doc.Reader.ResolveDict(kid);
                 if (kidDict is null) continue;
                 stream = FindAppearanceStream(kidDict, doc.Reader);
-                if (stream is not null) return new MemoryStream(doc.Reader.DecodeStream(stream), writable: false);
+                img = ExtractAppearanceImage(stream, doc.Reader);
+                if (img is not null) return img;
             }
         }
         return null;
+    }
+
+    /// <summary>Return the image embedded in a signature appearance Form XObject:
+    /// the first /Subtype /Image in its /Resources /XObject. For DCT/JPX-coded
+    /// images the raw stream bytes are a standalone JPEG/JP2 file and are returned
+    /// verbatim; otherwise the decoded appearance content stream is returned as a
+    /// fallback.</summary>
+    private static Stream? ExtractAppearanceImage(Aspose.Pdf.Core.PdfStream? apStream,
+        Aspose.Pdf.IO.PdfReader reader)
+    {
+        if (apStream is null) return null;
+        var raw = FindImageInForm(apStream, reader, depth: 0);
+        if (raw is not null) return new MemoryStream(raw, writable: false);
+        // Fallback: the decoded appearance content stream (legacy behaviour).
+        return new MemoryStream(reader.DecodeStream(apStream), writable: false);
+    }
+
+    /// <summary>Recursively search a Form XObject (and any nested Form XObjects,
+    /// e.g. Adobe's /FRM → /n2 signature-appearance layers) for the first
+    /// DCT/JPX-coded image, returning its raw (standalone JPEG/JP2) bytes.</summary>
+    private static byte[]? FindImageInForm(Aspose.Pdf.Core.PdfStream form,
+        Aspose.Pdf.IO.PdfReader reader, int depth)
+    {
+        if (depth > 8) return null;
+        var resources = reader.ResolveDict(form.Dict.Get("Resources"));
+        var xobjs = resources is null ? null : reader.ResolveDict(resources.Get("XObject"));
+        if (xobjs is null) return null;
+        foreach (var key in xobjs.Keys)
+        {
+            if (reader.Resolve(xobjs.Get(key)) is not Aspose.Pdf.Core.PdfStream xs) continue;
+            var subtype = xs.Dict.GetName("Subtype");
+            if (subtype == "Image")
+            {
+                var filter = FirstFilterName(xs.Dict, reader);
+                // JPEG / JPEG2000 payloads are already a self-contained image stream.
+                if (filter is "DCTDecode" or "JPXDecode")
+                    return xs.RawData;
+                // Every other image (FlateDecode/raw/CCITT, e.g. a scanned signature
+                // graphic) is decoded and re-encoded to PNG so the returned bytes are
+                // a readable image rather than raw pixel data.
+#pragma warning disable CA1416 // System.Drawing image encode — Windows-only at runtime
+                try
+                {
+                    using var png = new MemoryStream();
+                    new Aspose.Pdf.ImageXObject(key, xs, reader)
+                        .Save(png, System.Drawing.Imaging.ImageFormat.Png);
+                    if (png.Length > 0) return png.ToArray();
+                }
+                catch { /* fall through to the next XObject / the caller's fallback */ }
+#pragma warning restore CA1416
+            }
+            else if (subtype == "Form")
+            {
+                var nested = FindImageInForm(xs, reader, depth + 1);
+                if (nested is not null) return nested;
+            }
+        }
+        return null;
+    }
+
+    private static string? FirstFilterName(Aspose.Pdf.Core.PdfDictionary dict, Aspose.Pdf.IO.PdfReader reader)
+    {
+        var f = reader.Resolve(dict.Get("Filter"));
+        return f switch
+        {
+            Aspose.Pdf.Core.PdfName n => n.Value,
+            Aspose.Pdf.Core.PdfArray a when a.Count > 0 && reader.Resolve(a[^1]) is Aspose.Pdf.Core.PdfName ln => ln.Value,
+            _ => null,
+        };
     }
 
     public Stream? ExtractImage(SignatureName signName)
@@ -761,8 +891,19 @@ public sealed class PdfFileSignature : IDisposable
 
     private void SignCore(Security.PdfCertificate cert, string? fieldName,
         int page, string? reason, string? contact, string? location,
-        bool visible, System.Drawing.Rectangle annotRect, Forms.Signature? sig)
+        bool visible, System.Drawing.Rectangle annotRect, Forms.Signature? sig,
+        int? docMdpPermissions = null)
     {
+        // A PKCS#1 (adbe.x509.rsa_sha1) signature is raw RSA and cannot carry a
+        // DSA/ECDSA signature — Aspose.Pdf rejects the combination when the
+        // document is written. Record the error and defer it to Save().
+        if (sig is Forms.PKCS1 && cert.KeyKind != Security.SignatureKeyKind.Rsa)
+        {
+            _deferredSignException =
+                new PdfException("DSA algorithm supported for PKCS7 and PKC7Detached only");
+            return;
+        }
+
         var input = RequireBound();
         var opts = new Security.SignatureOptions
         {
@@ -770,13 +911,27 @@ public sealed class PdfFileSignature : IDisposable
             Location = location,
             ContactInfo = contact,
             FieldName = fieldName,
+            Password = _password,
+            DocMdpPermissions = docMdpPermissions,
         };
         // Honour Forms.Signature signer knobs when present.
         if (sig is not null)
         {
+            if (!string.IsNullOrEmpty(sig.Authority)) opts.SignerName = sig.Authority;
+            if (sig.Date != default) opts.SigningDate = sig.Date;
             if (sig.DefaultSignatureLength > 0) opts.ContentsSize = sig.DefaultSignatureLength;
             if (sig.AvoidEstimatingSignatureLength) opts.AvoidEstimating = true;
             if (sig.CustomSignHash is not null) opts.CustomSignHash = sig.CustomSignHash;
+            if (sig.UseLtv) opts.UseLtv = true;
+            // /SubFilter reflects the concrete signature subtype so the reloaded
+            // signature round-trips to the same type (an enveloping PKCS7 vs a
+            // detached PKCS7 — the CMS bytes are detached either way here).
+            opts.SubFilter = sig switch
+            {
+                Forms.PKCS7Detached => "adbe.pkcs7.detached",
+                Forms.PKCS7 => "adbe.pkcs7.sha1",
+                _ => opts.SubFilter,
+            };
         }
         var appearance = visible ? BuildAppearance(page, annotRect, sig) : null;
         if (appearance is not null)
@@ -792,42 +947,11 @@ public sealed class PdfFileSignature : IDisposable
         bool visible, System.Drawing.Rectangle annotRect,
         Forms.DocMDPAccessPermissions accessPermissions)
     {
-        SignCore(cert, fieldName, page, reason, contact, location, visible, annotRect, sig: null);
-        // After signing, re-open and add a /DocMDP /TransformParams /P
-        // reference to the signature dict so downstream readers recognise
-        // this as a certifying signature.
-        var input = RequireBound();
-        using var doc = Document.Open(input);
-        var form = doc.Form;
-        if (form is null) return;
-        foreach (var field in form.Fields)
-        {
-            if (field.Type != Forms.FieldType.Signature) continue;
-            if (fieldName is not null && field.FullName != fieldName) continue;
-            var sigDict = doc.Reader.ResolveDict(field.Dict.Get("V"));
-            if (sigDict is null) continue;
-            AttachDocMdpReference(sigDict, accessPermissions);
-            break;
-        }
-        _boundPdf = doc.ToArray();
-    }
-
-    private static void AttachDocMdpReference(Aspose.Pdf.Core.PdfDictionary sigDict,
-        Forms.DocMDPAccessPermissions p)
-    {
-        var transformParams = new Aspose.Pdf.Core.PdfDictionary();
-        transformParams.Set("Type", new Aspose.Pdf.Core.PdfName("TransformParams"));
-        transformParams.Set("P", new Aspose.Pdf.Core.PdfInteger((int)p));
-        transformParams.Set("V", new Aspose.Pdf.Core.PdfName("1.2"));
-
-        var refDict = new Aspose.Pdf.Core.PdfDictionary();
-        refDict.Set("Type", new Aspose.Pdf.Core.PdfName("SigRef"));
-        refDict.Set("TransformMethod", new Aspose.Pdf.Core.PdfName("DocMDP"));
-        refDict.Set("TransformParams", transformParams);
-
-        var refs = new Aspose.Pdf.Core.PdfArray();
-        refs.Add(refDict);
-        sigDict.Set("Reference", refs);
+        // The /DocMDP transform reference and catalog /Perms are written by the
+        // signer BEFORE the ByteRange is hashed, so the certifying reference is
+        // covered by (and does not invalidate) the signature.
+        SignCore(cert, fieldName, page, reason, contact, location, visible, annotRect,
+            sig: null, docMdpPermissions: (int)accessPermissions);
     }
 
     private byte[]? ResolveAppearanceImageBytes()
@@ -859,6 +983,12 @@ public sealed class PdfFileSignature : IDisposable
             appearance.Location = sig.Location;
             appearance.ContactInfo = sig.ContactInfo;
             appearance.SignerName = sig.Authority;
+        }
+        // Honour a custom appearance's font and size.
+        if (sig?.CustomAppearance is { } ca)
+        {
+            appearance.FontFamily = ca.FontFamilyName;
+            if (ca.FontSize > 0) appearance.FontSize = ca.FontSize;
         }
         return appearance;
     }
@@ -894,7 +1024,7 @@ public sealed class PdfFileSignature : IDisposable
     private Signature? FindSignature(string fieldName)
     {
         var input = RequireBound();
-        using var doc = Document.Open(input);
+        using var doc = OpenDoc(input);
         return Signature.EnumerateSignatures(doc)
             .FirstOrDefault(s => s.FieldName == fieldName);
     }

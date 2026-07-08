@@ -91,8 +91,14 @@ internal sealed class PdfReader
     {
         var reader = FromBytes(data, options);
         reader.InitDecryptor(password);
+        reader.Password = password;
         return reader;
     }
+
+    /// <summary>The password this reader was opened with (user or owner), or
+    /// null when opened without one. Lets facades that must re-open the raw
+    /// bytes (e.g. the signer's incremental update) authenticate again.</summary>
+    internal string? Password { get; private set; }
 
     /// <summary>Raw PDF file bytes.</summary>
     public byte[] RawData => _data;
@@ -106,6 +112,9 @@ internal sealed class PdfReader
     internal Aspose.Pdf.Document? OwnerDocument { get; set; }
     public bool IsEncrypted => Trailer.ContainsKey("Encrypt");
     public bool IsDecrypted => _decryptor is not null;
+    /// <summary>The active standard-security decryptor (also used to encrypt
+    /// newly appended objects), or null when the document is not encrypted.</summary>
+    internal Security.PdfDecryptor? Decryptor => _decryptor;
     /// <summary>True when the supplied password matched the owner /O entry
     /// (full permissions). False when it matched the user /U entry or no
     /// password was needed.</summary>
@@ -119,6 +128,12 @@ internal sealed class PdfReader
 
     /// <summary>Clear the resolved-object cache to free memory after batch operations.</summary>
     internal void ClearCache() => _cache.Clear();
+
+    /// <summary>Set when an in-place edit (e.g. replacing an image's data) may have left the
+    /// original object orphaned. Signals the full-rewrite save to run a reachability pass so
+    /// the superseded object is not written out (otherwise a load-replace-save keeps both the
+    /// old and new image and the file never shrinks).</summary>
+    internal bool MayHaveOrphansOnSave { get; set; }
 
     /// <summary>
     /// Returns true if the PDF is linearized (optimized for fast web viewing).
@@ -254,6 +269,43 @@ internal sealed class PdfReader
         // /Filter and /DecodeParms may be stored as indirect refs in the stream dict.
         // Resolve them before passing to StreamFilter so filters are always applied.
         return StreamFilter.Decode(data, ResolveStreamFilterDict(stream.Dict));
+    }
+
+    /// <summary>Decode at most <paramref name="maxBytes"/> of a stream's leading content
+    /// without materialising the whole payload (see <see cref="StreamFilter.DecodePrefix"/>).
+    /// Used to sniff a large embedded-file header cheaply. Decryption still runs in full —
+    /// the cipher operates on the (typically small) raw stream bytes, not the decoded output.</summary>
+    public byte[] DecodeStreamPrefix(PdfStream stream, int maxBytes, int objectNumber = 0, int generation = 0)
+    {
+        var data = stream.RawData;
+
+        if (objectNumber == 0 && stream.ObjectNumber > 0)
+        {
+            objectNumber = stream.ObjectNumber;
+            generation = stream.Generation;
+        }
+
+        if (_decryptor is not null && objectNumber > 0)
+        {
+            string? cryptFilterName = null;
+            var filterObj = stream.Dict.Get("Filter");
+            if (filterObj is PdfName filterName && filterName.Value == "Crypt")
+            {
+                var dp = stream.Dict.Get("DecodeParms") as PdfDictionary;
+                cryptFilterName = dp?.GetName("Name") ?? "Identity";
+            }
+            else if (filterObj is PdfArray filterArr && filterArr.Count > 0
+                     && filterArr[0] is PdfName fn && fn.Value == "Crypt")
+            {
+                var dpArr = stream.Dict.Get("DecodeParms") as PdfArray;
+                cryptFilterName = dpArr is { Count: > 0 } && dpArr[0] is PdfDictionary dp
+                    ? dp.GetName("Name") ?? "Identity"
+                    : "Identity";
+            }
+            data = _decryptor.DecryptStream(data, objectNumber, generation, cryptFilterName);
+        }
+
+        return StreamFilter.DecodePrefix(data, ResolveStreamFilterDict(stream.Dict), maxBytes);
     }
 
     /// <summary>
@@ -469,9 +521,21 @@ internal sealed class PdfReader
             else if (isModernEncryption)
                 // AES-256 (V5/R5/R6): strict — always require password
                 throw new InvalidPasswordException("The document is password protected. A password is required to open this document.");
-            // V1–V4 with empty password: lenient — allow opening without decryption
+            // V1–V4 with empty password: lenient here — the reader stays usable so
+            // metadata surfaces (IsEncrypted etc.) work without a key — but flag the
+            // failed authentication so Document construction can refuse the open
+            // (the document has a real user password; strings/streams would decode
+            // to garbage).
+            RequiresPassword = true;
         }
     }
+
+    /// <summary>True when the document is encrypted with a non-empty user password and no
+    /// (or an empty) password was supplied: object structure is readable but strings and
+    /// streams cannot be decrypted. Set by <see cref="InitDecryptor"/>'s lenient V1–V4
+    /// branch; <see cref="Document"/> construction turns it into
+    /// <see cref="InvalidPasswordException"/>.</summary>
+    internal bool RequiresPassword { get; private set; }
 
     /// <summary>
     /// Try to initialize decryption with empty password (for PDFs with owner-only protection).
@@ -545,7 +609,7 @@ internal sealed class PdfReader
             var indirect = _parser.ParseIndirectObject();
 
             // If the parsed object number doesn't match, try scanning nearby
-            // for the correct header (handles shifted xref offsets, e.g. 39980.pdf)
+            // for the correct header (handles shifted xref offsets)
             if (indirect.ObjectNumber != objectNumber)
             {
                 var correctedOffset = FindObjectOffset(entry.Offset, objectNumber, generation);

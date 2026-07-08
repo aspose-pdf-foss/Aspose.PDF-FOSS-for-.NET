@@ -43,10 +43,10 @@ public class Signature
     public DateTime Date { get; set; }
 
     /// <summary>FOSS-only long[] backing of the underlying signature's
-    /// /ByteRange entry — int[] is exposed publicly to match Aspose.PDF for .NET.</summary>
+    /// /ByteRange entry — int[] is exposed publicly to match Aspose.Pdf.</summary>
     internal long[]? ByteRangeRaw { get; set; }
 
-    /// <summary>The signature's /ByteRange entry. Aspose.PDF for .NET shape int[].
+    /// <summary>The signature's /ByteRange entry. Aspose.Pdf shape int[].
     /// Returns the raw /ByteRange (e.g. four entries: offset, length,
     /// offset, length) for the bytes the signature covers.</summary>
     public int[] ByteRange
@@ -102,6 +102,11 @@ public class Signature
     internal string? Filter { get; set; }
     internal string? SubFilter { get; set; }
     internal byte[]? ContentsRaw { get; set; }
+
+    /// <summary>The signer certificate(s) from the signature's /Cert entry,
+    /// present only for the raw adbe.x509.rsa_sha1 (PKCS#1) handler where the
+    /// certificate lives in the signature dictionary rather than in a CMS.</summary>
+    internal System.Collections.Generic.List<byte[]>? CertRaw { get; set; }
 
     /// <summary>Verify the loaded signature's PKCS#7 against the original
     /// PDF bytes — returns true when the signature decodes and validates.
@@ -231,18 +236,32 @@ public class Signature
 
     internal static Signature FromDict(PdfDictionary sigDict, PdfReader reader, string? fieldName)
     {
-        var sig = new Signature
+        // Reconstruct the concrete signature subtype from /SubFilter so that
+        // callers can pattern-match `.Signature is PKCS7` etc. on a loaded
+        // document (Table 252, ISO 32000-1 §12.8.3):
+        //   adbe.x509.rsa_sha1  → PKCS#1 (raw RSA)     → PKCS1
+        //   adbe.pkcs7.sha1     → PKCS#7 envelope       → PKCS7
+        //   adbe.pkcs7.detached → detached PKCS#7 (CMS) → PKCS7Detached
+        //   ETSI.CAdES.detached → CAdES detached (CMS)  → PKCS7Detached
+        var subFilter = sigDict.GetName("SubFilter");
+        Signature sig = subFilter switch
         {
-            FieldName = fieldName,
-            Authority = GetString(sigDict, reader, "Name") ?? string.Empty,
-            Reason = GetString(sigDict, reader, "Reason") ?? string.Empty,
-            Location = GetString(sigDict, reader, "Location") ?? string.Empty,
-            ContactInfo = GetString(sigDict, reader, "ContactInfo") ?? string.Empty,
-            Filter = sigDict.GetName("Filter"),
-            SubFilter = sigDict.GetName("SubFilter"),
-            ByteRangeRaw = GetByteRange(sigDict, reader),
-            ContentsRaw = GetContents(sigDict, reader),
+            "adbe.x509.rsa_sha1" => new PKCS1(),
+            "adbe.pkcs7.sha1" => new PKCS7(),
+            "adbe.pkcs7.detached" => new PKCS7Detached(),
+            "ETSI.CAdES.detached" => new PKCS7Detached(),
+            _ => new Signature(),
         };
+        sig.FieldName = fieldName;
+        sig.Authority = GetString(sigDict, reader, "Name") ?? string.Empty;
+        sig.Reason = GetString(sigDict, reader, "Reason") ?? string.Empty;
+        sig.Location = GetString(sigDict, reader, "Location") ?? string.Empty;
+        sig.ContactInfo = GetString(sigDict, reader, "ContactInfo") ?? string.Empty;
+        sig.Filter = sigDict.GetName("Filter");
+        sig.SubFilter = subFilter;
+        sig.ByteRangeRaw = GetByteRange(sigDict, reader);
+        sig.ContentsRaw = GetContents(sigDict, reader);
+        sig.CertRaw = GetCerts(sigDict, reader);
         sig.Date = ParseDate(GetString(sigDict, reader, "M"));
         return sig;
     }
@@ -270,6 +289,22 @@ public class Signature
     {
         var obj = reader.Resolve(dict.Get("Contents"));
         return obj is PdfString s ? s.Value : null;
+    }
+
+    /// <summary>Read the /Cert entry — a single certificate string or an array
+    /// of them (DER) — used by the raw adbe.x509.rsa_sha1 handler.</summary>
+    private static System.Collections.Generic.List<byte[]>? GetCerts(PdfDictionary dict, PdfReader reader)
+    {
+        var obj = reader.Resolve(dict.Get("Cert"));
+        if (obj is PdfString s) return new() { s.Value };
+        if (obj is PdfArray arr)
+        {
+            var list = new System.Collections.Generic.List<byte[]>();
+            foreach (var e in arr)
+                if (reader.Resolve(e) is PdfString es) list.Add(es.Value);
+            return list.Count > 0 ? list : null;
+        }
+        return null;
     }
 
     private static DateTime ParseDate(string? dateStr)

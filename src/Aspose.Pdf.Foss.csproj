@@ -10,8 +10,18 @@
 
     <!-- Package / release metadata -->
     <PackageId>Aspose.PDF.FOSS</PackageId>
-    <Version>26.6.0</Version>
+    <Version>26.7.0</Version>
     <Product>Aspose.PDF FOSS for .NET</Product>
+    <PackageReleaseNotes>
+v26.7.0 - large update.
+
+New: real PDF&lt;-&gt;SVG conversion, Markdown save/load, document Comparison (Diff), PDF 3D annotation reading, dynamic XFA flatten rendering.
+Text: CR/LF line structure, RTL/bidi and CJK extraction, ligatures, post-replace reflow.
+Rendering/images: image alt-text, inline-image enumeration, DPI-preserving XImage.Save, improved TIFF/JPEG/JBIG2/CCITT handling.
+Also: fonts, Forms/AcroForm/XFA, signatures (SHA-1/DSA/ECDSA, LTV, DocMDP), PDF/A and save/optimize improvements.
+
+Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/releases/tag/v26.7.0
+    </PackageReleaseNotes>
     <Authors>Aspose</Authors>
     <Company>Aspose Pty Ltd</Company>
     <Copyright>Copyright (c) 2026 Aspose Pty Ltd</Copyright>
@@ -22,16 +32,24 @@
     <RepositoryType>git</RepositoryType>
     <PackageTags>pdf;aspose;pdf-library;acroform;pdf-a;document;foss</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- Packed into the NuGet package when/if `dotnet pack` is run; inert for plain builds. -->
     <None Include="..\README.md" Pack="true" PackagePath="\" />
+    <None Include="icon.png" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 <ItemGroup>
-    <InternalsVisibleTo Include="Aspose.Pdf.Foss.Tests" />
+    <InternalsVisibleTo Include="Aspose.Pdf.Foss.Tests" Condition="'$(ExcludeInternalsVisibleTo)' != 'true'" />
   </ItemGroup>
+
+  <!-- Without InternalsVisibleTo the compiler warns (CS0649) on internal fields a friend
+       assembly could assign; suppress it in the pack build so the DLL stays identical. -->
+  <PropertyGroup Condition="'$(ExcludeInternalsVisibleTo)' == 'true'">
+    <NoWarn>$(NoWarn);CS0649</NoWarn>
+  </PropertyGroup>
 
 <ItemGroup>
   <PackageReference Include="System.Drawing.Common" Version="8.0.0" />

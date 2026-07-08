@@ -14,7 +14,7 @@ public sealed class FontAbsorber
     /// <summary>Gets the fonts collected after the last <c>Visit</c> call.</summary>
     public IReadOnlyList<FontInfo> FontInfos => _fonts;
 
-    /// <summary>Fonts collected — Aspose.PDF for .NET-shape <see cref="FontCollection"/> surface.</summary>
+    /// <summary>Fonts collected — Aspose.Pdf-shape <see cref="FontCollection"/> surface.</summary>
     public FontCollection Fonts
     {
         get

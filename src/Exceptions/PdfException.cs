@@ -2,7 +2,7 @@ namespace Aspose.Pdf;
 
 /// <summary>
 /// Represents errors that occur during PDF application execution.
-/// Mirrors the public Aspose.PDF for .NET exception type.
+/// Mirrors the public Aspose.Pdf exception type.
 /// </summary>
 public class PdfException : Exception
 {
@@ -98,6 +98,20 @@ public class PdfTextDecodingException : PdfException
     public PdfTextDecodingException(string message) : base(message) { }
     public PdfTextDecodingException(string message, Exception innerException) : base(message, innerException) { }
     public PdfTextDecodingException(Exception innerException) : base(innerException) { }
+}
+
+/// <summary>Thrown during text extraction when the content stream issues a
+/// text-showing operator (Tj/TJ/'/") while no font is set in the current
+/// graphics state — i.e. no preceding <c>Tf</c> is in effect (the document is
+/// malformed). Strict by default; suppressed when
+/// <see cref="Aspose.Pdf.Text.TextSearchOptions.IgnoreResourceFontErrors"/> is set,
+/// in which case extraction proceeds tolerantly. Mirrors the public Aspose.PDF type.</summary>
+public class IncorrectFontUsageException : PdfException
+{
+    public IncorrectFontUsageException() { }
+    public IncorrectFontUsageException(string message) : base(message) { }
+    public IncorrectFontUsageException(string message, Exception innerException) : base(message, innerException) { }
+    public IncorrectFontUsageException(Exception innerException) : base(innerException) { }
 }
 
 /// <summary>Thrown when a requested font cannot be located (no system

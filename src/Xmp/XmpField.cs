@@ -1,7 +1,7 @@
 namespace Aspose.Pdf;
 
 /// <summary>
-/// XMP field categories (matches the Aspose.PDF for .NET reflection signature
+/// XMP field categories (matches the Aspose.Pdf reflection signature
 /// exactly — the underlying integer values are not load-bearing because
 /// callers compare against the named members).
 /// </summary>
@@ -65,7 +65,7 @@ public sealed class XmpField
     public bool IsEmpty => Value is null;
 
     /// <summary>The xml:lang qualifier attached to this field (or null when
-    /// none). Returned as a nested <see cref="XmpField"/> per the Aspose.PDF for .NET
+    /// none). Returned as a nested <see cref="XmpField"/> per the Aspose.Pdf
     /// signature; the xml:lang field's value carries the language tag.</summary>
     public XmpField? Lang { get; private set; }
 

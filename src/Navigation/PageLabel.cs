@@ -14,15 +14,15 @@ public enum NumberingStyle
     LowerRoman,
     UpperAlpha,
     LowerAlpha,
-    /// <summary>Aspose.PDF for .NET alias for <see cref="Decimal"/>.</summary>
+    /// <summary>Aspose.Pdf alias for <see cref="Decimal"/>.</summary>
     NumeralsArabic = Decimal,
-    /// <summary>Aspose.PDF for .NET alias for <see cref="UpperRoman"/>.</summary>
+    /// <summary>Aspose.Pdf alias for <see cref="UpperRoman"/>.</summary>
     NumeralsRomanUppercase = UpperRoman,
-    /// <summary>Aspose.PDF for .NET alias for <see cref="LowerRoman"/>.</summary>
+    /// <summary>Aspose.Pdf alias for <see cref="LowerRoman"/>.</summary>
     NumeralsRomanLowercase = LowerRoman,
-    /// <summary>Aspose.PDF for .NET alias for <see cref="UpperAlpha"/>.</summary>
+    /// <summary>Aspose.Pdf alias for <see cref="UpperAlpha"/>.</summary>
     LettersUppercase = UpperAlpha,
-    /// <summary>Aspose.PDF for .NET alias for <see cref="LowerAlpha"/>.</summary>
+    /// <summary>Aspose.Pdf alias for <see cref="LowerAlpha"/>.</summary>
     LettersLowercase = LowerAlpha,
 }
 
@@ -32,7 +32,7 @@ public enum NumberingStyle
 public sealed class PageLabel
 {
     /// <summary>0-based page index where this label range starts.</summary>
-    public int StartPage { get; init; }
+    public int StartPage { get; internal set; }
 
     /// <summary>0-based page index of the last page this range applies to, or -1 for end of document.</summary>
     public int LastPageIndex { get; internal set; } = -1;
@@ -40,14 +40,14 @@ public sealed class PageLabel
     /// <summary>The numbering style.</summary>
     public NumberingStyle Style { get; set; }
 
-    /// <summary>Aspose.PDF for .NET alias for <see cref="Style"/>.</summary>
+    /// <summary>Aspose.Pdf alias for <see cref="Style"/>.</summary>
     public NumberingStyle NumberingStyle
     {
         get => Style;
         set => Style = value;
     }
 
-    /// <summary>Aspose.PDF for .NET alias for <see cref="Start"/>.</summary>
+    /// <summary>Aspose.Pdf alias for <see cref="Start"/>.</summary>
     public int StartingValue
     {
         get => Start;
@@ -222,6 +222,9 @@ public sealed class PageLabelCollection : IEnumerable<PageLabel>
     {
         if (pageLabel is null) throw new ArgumentNullException(nameof(pageLabel));
         IsDirty = true;
+        // The label range starts at the given page index — bind it to the
+        // argument (callers build the PageLabel without setting StartPage).
+        pageLabel.StartPage = pageIndex;
         for (int i = 0; i < _labels.Count; i++)
         {
             if (_labels[i].StartPage == pageIndex)
@@ -275,6 +278,25 @@ public sealed class PageLabelCollection : IEnumerable<PageLabel>
     {
         var active = GetLabel(pageIndex);
         return active?.FormatLabel(pageIndex) ?? (pageIndex + 1).ToString();
+    }
+
+    /// <summary>Format the label of the last page in the label range that contains
+    /// <paramref name="pageIndex"/> (0-based), within a document of
+    /// <paramref name="pageCount"/> pages. This is the "$P" (section total) macro:
+    /// the section's final page rendered in that section's own numbering, so on a
+    /// document with no labels it degrades to the total page count.</summary>
+    public string GetRangeLastLabel(int pageIndex, int pageCount)
+    {
+        var active = GetLabel(pageIndex);
+        // Start of the next range after the active one (or after the implicit
+        // pre-first-range section when no range is active yet).
+        var activeStart = active?.StartPage ?? 0;
+        var nextStart = pageCount;
+        foreach (var l in _labels)
+            if (l.StartPage > activeStart) { nextStart = l.StartPage; break; }
+        var lastIndex = Math.Min(nextStart - 1, pageCount - 1);
+        if (lastIndex < 0) lastIndex = 0;
+        return FormatLabel(lastIndex);
     }
 
     private void ParseNumberTree(PdfDictionary node, PdfReader reader)

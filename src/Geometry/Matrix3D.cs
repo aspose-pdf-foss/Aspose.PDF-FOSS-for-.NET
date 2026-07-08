@@ -1,6 +1,6 @@
 namespace Aspose.Pdf;
 
-/// <summary>4×3 affine 3D matrix (Aspose.PDF for .NET shape for PDF 3D camera
+/// <summary>4×3 affine 3D matrix (Aspose.Pdf shape for PDF 3D camera
 /// positioning). Stored only — the FOSS build does not yet render 3D
 /// content streams.</summary>
 public sealed class Matrix3D

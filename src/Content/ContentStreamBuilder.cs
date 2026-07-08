@@ -167,9 +167,26 @@ public sealed class ContentStreamBuilder
         return this;
     }
 
+    /// <summary>Horizontal text scaling (Tz), expressed as a percentage of the normal
+    /// width (100 = unscaled). Written verbatim so the run stretches/compresses on
+    /// render and round-trips through the absorber's TextState.HorizontalScaling.</summary>
+    public ContentStreamBuilder SetHorizontalScaling(double percent)
+    {
+        _sb.Append($"{F(percent)} Tz\n");
+        return this;
+    }
+
     public ContentStreamBuilder SetTextRenderingMode(int mode)
     {
         _sb.Append($"{mode} Tr\n");
+        return this;
+    }
+
+    // Text rise (Ts): raises (positive) or lowers (negative) the baseline — used for
+    // superscript / subscript. The absorber reads it back as Position + IsSuper/Subscript.
+    public ContentStreamBuilder SetTextRise(double rise)
+    {
+        _sb.Append($"{F(rise)} Ts\n");
         return this;
     }
 
@@ -178,13 +195,33 @@ public sealed class ContentStreamBuilder
         _sb.Append('(');
         foreach (var c in text)
         {
-            if (c is '(' or ')' or '\\')
+            var ch = ToWinAnsi(c);
+            if (ch is '(' or ')' or '\\')
                 _sb.Append('\\');
-            _sb.Append(c);
+            _sb.Append(ch);
         }
         _sb.Append(") Tj\n");
         return this;
     }
+
+    /// <summary>Map a Unicode char to its Windows-1252 (WinAnsi) code point so Build()'s
+    /// Latin-1 round-trip preserves the byte under a font's /WinAnsiEncoding. Chars already
+    /// &lt;= 0xFF pass through unchanged; the CP1252 C1 punctuation block (en/em dash, curly
+    /// quotes, ellipsis, bullet, euro, ...) maps to 0x80-0x9F. Unmapped &gt;0xFF chars pass
+    /// through (Build's Latin-1 substitutes them, as before).</summary>
+    private static char ToWinAnsi(char c) => c <= 0xFF ? c : c switch
+    {
+        '\u20AC' => (char)0x80, '\u201A' => (char)0x82, '\u0192' => (char)0x83,
+        '\u201E' => (char)0x84, '\u2026' => (char)0x85, '\u2020' => (char)0x86,
+        '\u2021' => (char)0x87, '\u02C6' => (char)0x88, '\u2030' => (char)0x89,
+        '\u0160' => (char)0x8A, '\u2039' => (char)0x8B, '\u0152' => (char)0x8C,
+        '\u017D' => (char)0x8E, '\u2018' => (char)0x91, '\u2019' => (char)0x92,
+        '\u201C' => (char)0x93, '\u201D' => (char)0x94, '\u2022' => (char)0x95,
+        '\u2013' => (char)0x96, '\u2014' => (char)0x97, '\u02DC' => (char)0x98,
+        '\u2122' => (char)0x99, '\u0161' => (char)0x9A, '\u203A' => (char)0x9B,
+        '\u0153' => (char)0x9C, '\u017E' => (char)0x9E, '\u0178' => (char)0x9F,
+        _ => c
+    };
 
     /// <summary>
     /// Show pre-encoded single-byte text. Each byte is written verbatim into a
@@ -313,7 +350,7 @@ public sealed class ContentStreamBuilder
     }
 
     // Colour components (rg/RG/g/G operands) keep more precision than geometry:
-    // Aspose.PDF for .NET writes e.g. 119/255 as "0.4666666667" (10 fractional digits), and
+    // Aspose.Pdf writes e.g. 119/255 as "0.4666666667" (10 fractional digits), and
     // an exact-string check on the parsed operator needs that form.
     // 10 digits, no exponent, trailing zeros trimmed.
     private static string Fc(double v)

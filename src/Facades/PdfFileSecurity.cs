@@ -72,8 +72,8 @@ public sealed class PdfFileSecurity : IDisposable
             inputStream.CopyTo(ms);
             _sourceBytes = ms.ToArray();
         }
-        _doc = Document.Open(_sourceBytes);
-        _ownsDoc = true;
+        _doc = TryBindOpen(_sourceBytes);
+        _ownsDoc = _doc is not null;
     }
 
     /// <summary>Bind from a path and save to a path.</summary>
@@ -84,8 +84,8 @@ public sealed class PdfFileSecurity : IDisposable
         // Capture the raw source so DecryptFile/ChangePassword can re-open the
         // original (still-encrypted) bytes rather than a re-serialised copy.
         _sourceBytes = File.ReadAllBytes(inputFile);
-        _doc = Document.Open(_sourceBytes);
-        _ownsDoc = true;
+        _doc = TryBindOpen(_sourceBytes);
+        _ownsDoc = _doc is not null;
     }
 
     public void Dispose()
@@ -100,7 +100,7 @@ public sealed class PdfFileSecurity : IDisposable
     /// <summary>Always true and cannot be changed — the direct (non-Try) methods
     /// always propagate exceptions; the <c>Try*</c> variants always capture the
     /// last exception in <see cref="LastException"/> and return false. Matching
-    /// Aspose.PDF for .NET, the setter throws <see cref="NotSupportedException"/>.</summary>
+    /// Aspose.Pdf, the setter throws <see cref="NotSupportedException"/>.</summary>
     public bool AllowExceptions
     {
         get => true;
@@ -119,8 +119,8 @@ public sealed class PdfFileSecurity : IDisposable
             _inputFile = value;
             if (_ownsDoc && _doc is not null) _doc.Dispose();
             _sourceBytes = File.ReadAllBytes(value);
-            _doc = Document.Open(_sourceBytes);
-            _ownsDoc = true;
+            _doc = TryBindOpen(_sourceBytes);
+            _ownsDoc = _doc is not null;
         }
     }
 
@@ -137,8 +137,8 @@ public sealed class PdfFileSecurity : IDisposable
                 value.CopyTo(ms);
                 _sourceBytes = ms.ToArray();
             }
-            _doc = Document.Open(_sourceBytes);
-            _ownsDoc = true;
+            _doc = TryBindOpen(_sourceBytes);
+            _ownsDoc = _doc is not null;
         }
     }
 
@@ -322,8 +322,15 @@ public sealed class PdfFileSecurity : IDisposable
         var opened = Document.Open(src, ownerPassword);
         if (!opened.IsEncrypted)
         {
-            // No existing encryption to change the password of.
+            // No existing encryption to change the password of. If the caller
+            // supplied an access password (even ""), the reference facade
+            // rejects the call — you should not provide a password for an
+            // unencrypted document. A null password means "none supplied", so
+            // fall through to the historical no-op false return (the Try*
+            // variants also convert the throw to a false via LastException).
             opened.Dispose();
+            if (ownerPassword != null)
+                throw new PdfException("Pdf document is not encrypted, so don't provide password to get access.");
             return false;
         }
         if (_ownsDoc) _doc?.Dispose();
@@ -348,8 +355,15 @@ public sealed class PdfFileSecurity : IDisposable
         var opened = Document.Open(src, ownerPassword);
         if (!opened.IsEncrypted)
         {
-            // No existing encryption to change the password of.
+            // No existing encryption to change the password of. If the caller
+            // supplied an access password (even ""), the reference facade
+            // rejects the call — you should not provide a password for an
+            // unencrypted document. A null password means "none supplied", so
+            // fall through to the historical no-op false return (the Try*
+            // variants also convert the throw to a false via LastException).
             opened.Dispose();
+            if (ownerPassword != null)
+                throw new PdfException("Pdf document is not encrypted, so don't provide password to get access.");
             return false;
         }
         if (_ownsDoc) _doc?.Dispose();

@@ -5,7 +5,7 @@ namespace Aspose.Pdf.Forms;
 /// <summary>
 /// XmlNode-based accessor for the document's XFA packets (template / datasets /
 /// config / form / xdp). Distinct from <see cref="XfaAccessor"/>; this surface
-/// matches the Aspose.PDF for .NET public API. Backed by the existing XFA storage in
+/// matches the Aspose.Pdf public API. Backed by the existing XFA storage in
 /// <see cref="Form"/>; nodes are returned via temporary XmlDocuments built from
 /// the underlying XML strings.
 /// </summary>
@@ -25,11 +25,32 @@ public sealed class XFA
         _nsMgr.AddNamespace("xdp", "http://ns.adobe.com/xdp/");
     }
 
-    /// <summary>Namespace manager used when navigating the XFA XML packets.</summary>
-    public XmlNamespaceManager NamespaceManager => _nsMgr;
+    /// <summary>Namespace manager used when navigating the XFA XML packets. The <c>tpl</c>
+    /// prefix is re-pointed at the document's actual xfa-template namespace version (2.6 /
+    /// 2.8 / 3.0 / …) so a caller's <c>tpl:field</c> XPath matches regardless of version.</summary>
+    public XmlNamespaceManager NamespaceManager { get { EnsureTemplateNamespace(); return _nsMgr; } }
 
-    /// <summary>Method-form alias for <see cref="NamespaceManager"/> (Aspose.PDF for .NET API shape).</summary>
-    public XmlNamespaceManager GetNamespaceManager() => _nsMgr;
+    private bool _tplNsResolved;
+    /// <summary>Re-register the <c>tpl</c> prefix with the template packet's real namespace
+    /// URI (the hard-coded default is only the 2.6 version) so version-specific XPath
+    /// queries against the template resolve.</summary>
+    private void EnsureTemplateNamespace()
+    {
+        if (_tplNsResolved) return;
+        _tplNsResolved = true;
+        var ns = Template?.NamespaceURI;
+        if (!string.IsNullOrEmpty(ns))
+            _nsMgr.AddNamespace("tpl", ns);
+    }
+
+    /// <summary>Method-form alias for <see cref="NamespaceManager"/> (Aspose.Pdf API shape).</summary>
+    public XmlNamespaceManager GetNamespaceManager() { EnsureTemplateNamespace(); return _nsMgr; }
+
+    /// <summary>Resolve a template SOM path (e.g.
+    /// "FormB101[0].Page1[0]…CourtName[0]") to its bound datasets value, applying the
+    /// XFA template-to-data binding (skips presentation-only <c>bind match="none"</c>
+    /// subforms, honours <c>bind match="dataRef"</c>). Backs <see cref="XfaField.Value"/>.</summary>
+    internal string? ResolveFieldValueBySom(string somPath) => _form.GetXfaFieldValue(somPath);
 
     /// <summary>Return the XFA datasets data node for the named field (dotted path,
     /// e.g. "form1[0].#subform[0].ImageField[0]"), or null when absent. Anonymous
@@ -49,7 +70,8 @@ public sealed class XFA
     private static XmlNode? WalkDatasetsByPath(XmlNode root, string path)
     {
         XmlNode? current = root;
-        foreach (var part in path.Split('.'))
+        // XFA has a `Form` PROPERTY that shadows the Form class, so qualify fully.
+        foreach (var part in Aspose.Pdf.Forms.Form.SplitSomPath(path))
         {
             if (current is null) return null;
             var m = System.Text.RegularExpressions.Regex.Match(part, @"^(.+)\[(\d+)\]$");
@@ -118,7 +140,17 @@ public sealed class XFA
     {
         var tpl = Template;
         if (tpl?.OwnerDocument is null) return null;
-        return tpl.SelectSingleNode($".//*[@name='{fieldName}']", _nsMgr);
+        EnsureTemplateNamespace();
+
+        // Rare: a node whose @name is literally the full dotted path.
+        var direct = tpl.SelectSingleNode($".//*[@name='{fieldName}']", _nsMgr);
+        if (direct is not null) return direct;
+
+        // Template nodes are named by their leaf name only (no dotted path / occurrence
+        // index), so walk the hierarchy segment by segment — named segments descend
+        // through the matching subform/exclGroup/field node, anonymous class segments
+        // ("#subform[0]") through the nth child of that class.
+        return Aspose.Pdf.Forms.Form.WalkTemplateBySomPath(tpl, fieldName);
     }
 
     /// <summary>Return every XFA template field node.</summary>

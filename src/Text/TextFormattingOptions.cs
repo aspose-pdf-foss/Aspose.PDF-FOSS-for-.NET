@@ -47,7 +47,7 @@ public sealed class TextFormattingOptions
     /// <summary>Line-spacing interpretation mode. Default is <see cref="LineSpacingMode.FontSize"/>.</summary>
     public LineSpacingMode LineSpacing { get; set; } = LineSpacingMode.FontSize;
 
-    /// <summary>Line-spacing value in points (FOSS-internal — the Aspose.PDF for .NET API exposes the mode only).</summary>
+    /// <summary>Line-spacing value in points (FOSS-internal — the Aspose.Pdf API exposes the mode only).</summary>
     public double LineSpacingPoints { get; set; }
 
     /// <summary>Indent applied to the first line of the paragraph (points).</summary>

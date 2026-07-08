@@ -153,7 +153,23 @@ public sealed class PdfFileStamp : System.IDisposable
     {
         if (_document is null) throw new InvalidOperationException("No document bound.");
         ApplyConvertTo();
+        PruneOrphans();
         _document.Save(destFile);
+    }
+
+    // Stamping replaces a page's /Contents with a combined stream (existing + stamp),
+    // leaving the original content stream orphaned in the xref. The default save serialises
+    // every in-use entry, so the output keeps growing by the old content size on each stamp.
+    // This pure reachability prune (RemoveUnusedObjects only) drops the orphans without
+    // rewriting or recompressing live content; the shared stamp form stays reachable.
+    private void PruneOrphans()
+    {
+        _document?.OptimizeResources(new Aspose.Pdf.Optimization.OptimizationOptions
+        {
+            RemoveUnusedObjects = true,
+            RemoveUnusedStreams = false,
+            LinkDuplicateStreams = false,
+        });
     }
 
     /// <summary>
@@ -163,6 +179,7 @@ public sealed class PdfFileStamp : System.IDisposable
     {
         if (_document is null) throw new InvalidOperationException("No document bound.");
         ApplyConvertTo();
+        PruneOrphans();
         var data = _document.ToArray();
         destStream.Write(data);
     }
@@ -174,6 +191,7 @@ public sealed class PdfFileStamp : System.IDisposable
     {
         if (_document is null) throw new InvalidOperationException("No document bound.");
         ApplyConvertTo();
+        PruneOrphans();
         return _document.ToArray();
     }
 
@@ -308,6 +326,26 @@ public sealed class PdfFileStamp : System.IDisposable
             throw new InvalidOperationException("No document bound.");
 
         var pages = stamp.Pages;
+
+        // A single PDF-page stamp instance is reused across every target page so its
+        // imported source-page Form XObject is shared (imported once) rather than re-cloned
+        // per page — see PdfPageStamp's per-document form cache.
+        PdfPageStamp? pdfPageStamp = null;
+        if (!stamp.IsTextStamp && stamp.LogoImage is null && stamp.PdfBytes is not null)
+        {
+            pdfPageStamp = new PdfPageStamp(new MemoryStream(stamp.PdfBytes), stamp.PdfPageNumber)
+            {
+                IsBackground = stamp.IsBackground,
+                XIndent = stamp.XOrigin,
+                YIndent = stamp.YOrigin,
+                // Facade layout: the stamp form's fonts surface at page level
+                // (Resources.Fonts["F1"]…) and the form's own /Font is emptied.
+                PromoteFontsToPage = true,
+            };
+            if (stamp.ImageWidth > 0) pdfPageStamp.Width = stamp.ImageWidth;
+            if (stamp.ImageHeight > 0) pdfPageStamp.Height = stamp.ImageHeight;
+        }
+
         foreach (var page in _document.Pages)
         {
             if (pages is not null && pages.Length > 0)
@@ -328,19 +366,11 @@ public sealed class PdfFileStamp : System.IDisposable
             {
                 ApplyImageStamp(page, stamp);
             }
-            else if (stamp.PdfBytes is not null)
+            else if (pdfPageStamp is not null)
             {
                 // PDF-page stamp (Stamp.BindPdf): draw the source page as a Form
                 // XObject onto the target page, importing its resource graph.
-                var pageStamp = new PdfPageStamp(new MemoryStream(stamp.PdfBytes), stamp.PdfPageNumber)
-                {
-                    IsBackground = stamp.IsBackground,
-                    XIndent = stamp.XOrigin,
-                    YIndent = stamp.YOrigin,
-                };
-                if (stamp.ImageWidth > 0) pageStamp.Width = stamp.ImageWidth;
-                if (stamp.ImageHeight > 0) pageStamp.Height = stamp.ImageHeight;
-                pageStamp.ApplyTo(page);
+                pdfPageStamp.ApplyTo(page);
             }
         }
     }
@@ -352,6 +382,7 @@ public sealed class PdfFileStamp : System.IDisposable
     {
         if (_document is null) return;
         ApplyConvertTo();
+        PruneOrphans();
         if (_outputPath is not null)
         {
             _document.Save(_outputPath);
@@ -376,46 +407,230 @@ public sealed class PdfFileStamp : System.IDisposable
     {
         var text = stamp.LogoText!;
         var ts = stamp.TextState;
-        // Register the stamp's font as a page resource and reference its actual
-        // resource key. Emitting the raw base-font name (e.g. /Courier) referenced
-        // a font that wasn't in the page's /Resources/Font, so the glyphs silently
-        // failed to render.
         var fontName = string.IsNullOrEmpty(text.FontName) ? "Helvetica" : text.FontName;
-        var fontRes = EnsureFont(page, fontName);
-        var sb = new StringBuilder();
-        // Always emit the %StampId comment (id 0 when the caller did not assign
-        // one) so that even unnamed text stamps are discoverable through the
-        // stamp facade — matching the image-stamp path.
-        sb.Append($"%StampId={stamp.StampId}\n");
-        sb.Append("q\n");
-        // Background-colour fill behind the glyphs, honouring FormattedText.BackgroundColor.
-        // Drawn first so it renders underneath the text (e.g. a highlighted text box).
-        if (!text.BackgroundColor.IsEmpty)
+
+        // Stamp bounds in page space. The logo box is TextWidth wide and ~1.1·FontSize tall
+        // (a single line at default leading); a 90°/270° rotation swaps those dimensions. The
+        // box is anchored at the stamp origin and grows +x/+y, per the GetStamps contract.
+        double fontSize = text.FontSize;
+        double boxW = text.TextWidth;
+        double boxH = fontSize * 1.1;
+        double rot = ((stamp.Rotation % 360f) + 360f) % 360f;
+        bool quarterTurn = rot is 90f or 270f;
+        double rectW = quarterTurn ? boxH : boxW;
+        double rectH = quarterTurn ? boxW : boxH;
+        double ox = stamp.XOrigin, oy = stamp.YOrigin;
+
+        // Every line of the (possibly multi-line) FormattedText; .Text is only the first.
+        var lines = new System.Collections.Generic.List<string>();
+        foreach (var line in text.Lines) lines.Add(line.Text);
+        if (lines.Count == 0) lines.Add(text.Text);
+
+        // The stamp's drawing operators in local coordinates, first baseline at the
+        // origin: an optional background box, the fill/stroke colour + render mode,
+        // then one Tj per line. Shared by both the Form-XObject and inline paths.
+        string DrawOps(string fontRes)
         {
-            double descent = (Aspose.Pdf.Text.Standard14Fonts.IsStandard14(fontName)
-                ? Aspose.Pdf.Text.Standard14Fonts.GetDescent(fontName) : -207) * text.FontSize / 1000.0;
-            sb.Append($"{NormColor(text.BackgroundColor.R)} {NormColor(text.BackgroundColor.G)} {NormColor(text.BackgroundColor.B)} rg\n");
-            sb.Append($"{Format(stamp.XOrigin)} {Format(stamp.YOrigin + descent)} {Format(text.TextWidth)} {Format(text.FontSize - descent)} re f\n");
+            var b = new StringBuilder();
+            if (!text.BackgroundColor.IsEmpty)
+            {
+                double descent = (Aspose.Pdf.Text.Standard14Fonts.IsStandard14(fontName)
+                    ? Aspose.Pdf.Text.Standard14Fonts.GetDescent(fontName) : -207) * text.FontSize / 1000.0;
+                b.Append($"{NormColor(text.BackgroundColor.R)} {NormColor(text.BackgroundColor.G)} {NormColor(text.BackgroundColor.B)} rg\n");
+                b.Append($"0 {Format(descent)} {Format(text.TextWidth)} {Format(text.FontSize - descent)} re f\n");
+            }
+            if (ts?.ForegroundColor is { } fg)
+                b.Append($"{NormColor(fg.R)} {NormColor(fg.G)} {NormColor(fg.B)} rg\n");
+            else
+                b.Append($"{NormColor(text.ForegroundColor.R)} {NormColor(text.ForegroundColor.G)} {NormColor(text.ForegroundColor.B)} rg\n");
+            if (ts?.StrokingColor is { } sc)
+                b.Append($"{NormColor(sc.R)} {NormColor(sc.G)} {NormColor(sc.B)} RG\n");
+            if (ts is not null && (int)ts.RenderingMode != 0)
+                b.Append($"{(int)ts.RenderingMode} Tr\n");
+            b.Append($"BT /{fontRes} {Format(text.FontSize)} Tf 0 0 Td ");
+            for (int i = 0; i < lines.Count; i++)
+            {
+                if (i > 0) b.Append($"0 {Format(-fontSize)} Td ");
+                b.Append($"({EscapePdfString(lines[i])}) Tj ");
+            }
+            b.Append("ET\n");
+            return b.ToString();
         }
-        // A bound TextState overrides text-rendering defaults: fill colour (rg),
-        // stroking colour (RG, used by the stroke/fill+stroke rendering modes) and
-        // the rendering mode itself (Tr). These are graphics/text-state operators
-        // and are valid before the BT...ET block; the text extractor reads them
-        // back into TextFragment.TextState. When no TextState is
-        // bound, fall back to the FormattedText's own foreground colour.
-        if (ts?.ForegroundColor is { } fg)
-            sb.Append($"{NormColor(fg.R)} {NormColor(fg.G)} {NormColor(fg.B)} rg\n");
+
+        var sb = new StringBuilder();
+        sb.Append($"%StampId={stamp.StampId}\n");
+        sb.Append($"%StampRect={Format(ox)} {Format(oy)} {Format(ox + rectW)} {Format(oy + rectH)}\n");
+        sb.Append("q\n");
+        if (rot == 0f)
+        {
+            // Upright stamp: draw into a Form XObject so the text lands in
+            // Resources.Forms; a Do at 1 0 0 1 ox oy is
+            // pixel-identical to drawing there directly.
+            var fmName = AddTextStampForm(page, DrawOps("F0"), fontName, boxW, fontSize, lines.Count);
+            sb.Append($"1 0 0 1 {Format(ox)} {Format(oy)} cm\n");
+            sb.Append($"/{fmName} Do\n");
+        }
+        else if (!stamp.IsBackground)
+        {
+            // Rotated FOREGROUND stamp: draw inline. The renderer rasterises a rotated
+            // Form XObject with a small offset, and the era-templates for foreground
+            // watermarks capture this exact inline placement — keep it pixel-exact.
+            var fontRes = EnsureFont(page, fontName);
+            double radInline = rot * Math.PI / 180.0;
+            double cosInline = Math.Cos(radInline), sinInline = Math.Sin(radInline);
+            sb.Append($"{Format(cosInline)} {Format(sinInline)} {Format(-sinInline)} {Format(cosInline)} {Format(ox)} {Format(oy)} cm\n");
+            sb.Append(DrawOps(fontRes));
+        }
         else
-            sb.Append($"{NormColor(text.ForegroundColor.R)} {NormColor(text.ForegroundColor.G)} {NormColor(text.ForegroundColor.B)} rg\n");
-        if (ts?.StrokingColor is { } sc)
-            sb.Append($"{NormColor(sc.R)} {NormColor(sc.G)} {NormColor(sc.B)} RG\n");
-        if (ts is not null && (int)ts.RenderingMode != 0)
-            sb.Append($"{(int)ts.RenderingMode} Tr\n");
-        sb.Append($"BT /{fontRes} {Format(text.FontSize)} Tf ");
-        sb.Append($"{Format(stamp.XOrigin)} {Format(stamp.YOrigin)} Td ");
-        sb.Append($"({EscapePdfString(text.Text)}) Tj ET\n");
+        {
+            // Rotated BACKGROUND stamp: Aspose.Pdf draws it through an UNROTATED
+            // Form XObject whose BBox spans [0 0 max(TextWidth, pageWidth) pageHeight],
+            // TextWidth being the real system-face advance sum (unrounded hmtx units,
+            // e.g. Windows Arial for "Arial" — not the rounded Standard-14 AFM). The
+            // rotation lives in the page-level cm, translated so the rotated block
+            // rect [0,W]×[0,(N+0.1)·S] stays in the first quadrant, and the text
+            // baseline inside the form is lifted by the font descent.
+            double realW = 0;
+            foreach (var line in lines)
+                realW = Math.Max(realW, MeasureSystemFaceWidth(line, text, fontSize));
+            var mbox = page.MediaBox;
+            double bboxW = Math.Max(realW, mbox.Width);
+            double bboxH = mbox.Height;
+
+            var descent = Aspose.Pdf.Text.Standard14Fonts.IsStandard14(fontName)
+                ? Aspose.Pdf.Text.Standard14Fonts.GetDescent(fontName)
+                : Aspose.Pdf.Text.Standard14Fonts.GetDescent("Helvetica");
+            var lift = (descent < 0 ? -descent : 207) * fontSize / 1000.0;
+
+            var fg = ts?.ForegroundColor ?? text.ForegroundColor;
+            var fb = new StringBuilder();
+            fb.Append("q\n0 0 0 0 re\n0 0 0 rg\n0 0 0 RG\nf*\nq\n");
+            fb.Append($"BT\n/F0 {Format(fontSize)} Tf\n");
+            fb.Append($"{NormColor(fg.R)} {NormColor(fg.G)} {NormColor(fg.B)} rg\n");
+            if (ts?.StrokingColor is { } strokeCol)
+                fb.Append($"{NormColor(strokeCol.R)} {NormColor(strokeCol.G)} {NormColor(strokeCol.B)} RG\n");
+            if (ts is not null && (int)ts.RenderingMode != 0)
+                fb.Append($"{(int)ts.RenderingMode} Tr\n");
+            for (int i = 0; i < lines.Count; i++)
+            {
+                var lineY = lift + (lines.Count - 1 - i) * fontSize;
+                fb.Append($"1 0 0 1 0 {Format(lineY)} Tm\n({EscapePdfString(lines[i])}) Tj\n");
+            }
+            fb.Append("0 g\n1 0 0 1 0 0 Tm\nET\nQ\nQ\n");
+
+            var fmName = AddTextStampFormWithBBox(page, fb.ToString(), fontName, bboxW, bboxH);
+
+            double rad = rot * Math.PI / 180.0;
+            double cos = Math.Cos(rad), sin = Math.Sin(rad);
+            // Shift the rotated block rect into the first quadrant: e/f undo the
+            // most-negative rotated corner of [0,realW]×[0,blockH].
+            double blockH = (lines.Count + 0.1) * fontSize;
+            double minX = Math.Min(Math.Min(0, realW * cos),
+                          Math.Min(-blockH * sin, realW * cos - blockH * sin));
+            double minY = Math.Min(Math.Min(0, realW * sin),
+                          Math.Min(blockH * cos, realW * sin + blockH * cos));
+            if (stamp.Opacity < 1f)
+            {
+                var gsName = page.AddExtGState(new Content.ExtGState
+                {
+                    FillAlpha = stamp.Opacity,
+                });
+                sb.Append($"/{gsName} gs\n");
+            }
+            sb.Append($"{Format(cos)} {Format(sin)} {Format(-sin)} {Format(cos)} {Format(ox - minX)} {Format(oy - minY)} cm\n");
+            sb.Append($"/{fmName} Do\n");
+        }
         sb.Append("Q\n");
         AppendContent(page, Encoding.ASCII.GetBytes(sb.ToString()));
+    }
+
+    /// <summary>Advance width of <paramref name="line"/> at <paramref name="fontSize"/>
+    /// measured with the REAL system face the caller asked for (unrounded hmtx units,
+    /// e.g. Windows Arial for "Arial"), matching the Aspose.Pdf facade
+    /// TextWidth model. Falls back to the FormattedText's AFM-based TextWidth when no
+    /// TrueType face resolves.</summary>
+    private static double MeasureSystemFaceWidth(string line, FormattedText text, double fontSize)
+    {
+        var faceName = text.RequestedFontName ?? text.FontName;
+        if (!string.IsNullOrEmpty(faceName))
+        {
+            var ttf = Aspose.Pdf.Text.FontRepository.GetTtfData(faceName);
+            if (ttf is not null)
+            {
+                var (widths, upm) = Aspose.Pdf.Text.FontRepository.ReadTtfRawMetrics(ttf);
+                if (upm > 0 && widths is { Length: >= 256 })
+                {
+                    double total = 0;
+                    foreach (var ch in line)
+                        total += widths[ch < 256 ? ch : '?'];
+                    return total * fontSize / upm;
+                }
+            }
+        }
+        return text.TextWidth;
+    }
+
+    /// <summary>Variant of <see cref="AddTextStampForm"/> with an explicit
+    /// [0 0 <paramref name="bboxW"/> <paramref name="bboxH"/>] BBox (the rotated facade
+    /// stamp's page-sized form).</summary>
+    private static string AddTextStampFormWithBBox(Page page, string content, string fontName,
+        double bboxW, double bboxH)
+    {
+        return AddTextStampFormCore(page, content, fontName, 0, 0, bboxW, bboxH);
+    }
+
+    /// <summary>Create a Form XObject holding a text stamp's <paramref name="content"/>
+    /// (with its own /Resources/Font/F0), register it on the document, add it to the
+    /// page's /Resources/XObject under a fresh Fm{n} name and return that name.</summary>
+    private static string AddTextStampForm(Page page, string content, string fontName,
+        double boxW, double fontSize, int lineCount)
+    {
+        return AddTextStampFormCore(page, content, fontName,
+            -fontSize, -lineCount * fontSize - fontSize, boxW + fontSize, fontSize * 1.5);
+    }
+
+    private static string AddTextStampFormCore(Page page, string content, string fontName,
+        double llx, double lly, double urx, double ury)
+    {
+        var reader = page.Reader;
+        var doc = reader.OwnerDocument!;
+
+        var font = new PdfDictionary();
+        font.Set("Type", new PdfName("Font"));
+        font.Set("Subtype", new PdfName("Type1"));
+        font.Set("BaseFont", new PdfName(fontName));
+        font.Set("Encoding", new PdfName("WinAnsiEncoding"));
+        var fontDict = new PdfDictionary();
+        fontDict.Set("F0", font);
+        var res = new PdfDictionary();
+        res.Set("Font", fontDict);
+
+        var xdict = new PdfDictionary();
+        xdict.Set("Type", new PdfName("XObject"));
+        xdict.Set("Subtype", new PdfName("Form"));
+        var bbox = new PdfArray();
+        bbox.Add(new PdfReal(llx));
+        bbox.Add(new PdfReal(lly));
+        bbox.Add(new PdfReal(urx));
+        bbox.Add(new PdfReal(ury));
+        xdict.Set("BBox", bbox);
+        xdict.Set("Resources", res);
+        var bytes = Encoding.ASCII.GetBytes(content);
+        xdict.Set("Length", new PdfInteger(bytes.Length));
+        var stream = new PdfStream(xdict, bytes);
+
+        var objNum = doc.AllocateObjectNumber();
+        doc.AddNewObject(objNum, stream);
+
+        var resources = reader.ResolveDict(page.Dict.Get("Resources"));
+        if (resources is null) { resources = new PdfDictionary(); page.Dict.Set("Resources", resources); }
+        var xobjs = reader.ResolveDict(resources.Get("XObject")) ?? resources.Get("XObject") as PdfDictionary;
+        if (xobjs is null) { xobjs = new PdfDictionary(); resources.Set("XObject", xobjs); }
+        int n = 0;
+        while (xobjs.ContainsKey($"Fm{n}")) n++;
+        var name = $"Fm{n}";
+        xobjs.Set(name, new PdfIndirectRef(objNum, 0));
+        return name;
     }
 
     // Ensure a Type1 base font named <paramref name="fontName"/> is present in the
@@ -597,6 +812,14 @@ public sealed class PdfFileStamp : System.IDisposable
             contentBytes.CopyTo(combined, existingData.Length + 1);
             page.SetContentStream(combined);
         }
+        else if (existing is PdfArray)
+        {
+            // /Contents is already an array — typically because an earlier stamp
+            // (e.g. an image stamp) added its own content stream. Append this stamp
+            // as a new array entry so the earlier stamps and the page's original
+            // content are preserved; replacing the array would drop them.
+            page.AddContentStream(contentBytes);
+        }
         else
         {
             page.SetContentStream(contentBytes);
@@ -718,9 +941,13 @@ public sealed class PdfFileStamp : System.IDisposable
     {
         if (_document is null) throw new InvalidOperationException("No document bound.");
         var fontSize = formattedText.FontSize;
+        // FormattedText.Text is only the first line; a header/footer built from a
+        // multi-line FormattedText (AddNewLineText) must carry every line so the
+        // stamp renders each as its own row.
+        var bandText = string.Join("\n", formattedText.Lines.Select(l => l.Text));
         foreach (var page in _document.Pages)
         {
-            var stamp = BuildTextStamp(formattedText.Text, formattedText);
+            var stamp = BuildTextStamp(bandText, formattedText);
             stamp.HorizontalAlignment = HorizontalAlignment.Center;
             stamp.VerticalAlignment = top ? VerticalAlignment.Top : VerticalAlignment.Bottom;
             stamp.XIndent = leftMargin - rightMargin;
@@ -755,10 +982,21 @@ public sealed class PdfFileStamp : System.IDisposable
     private void ApplyImageBand(byte[] imageBytes, bool top, float primaryMargin, float leftMargin, float rightMargin)
     {
         if (_document is null) throw new InvalidOperationException("No document bound.");
+        // Auto-detect JPEG vs PNG vs (Windows) GDI-decodable formats by header bytes,
+        // falling back to raw RGB only for genuinely raw pixel payloads. A header/footer
+        // image is normally an encoded PNG/JPEG file, never a raw width×height×3 buffer.
         var isJpeg = imageBytes.Length >= 2 && imageBytes[0] == 0xFF && imageBytes[1] == 0xD8;
+        var isPng = imageBytes.Length >= 8 && imageBytes[0] == 0x89 && imageBytes[1] == 0x50
+                    && imageBytes[2] == 0x4E && imageBytes[3] == 0x47;
         foreach (var page in _document.Pages)
         {
-            var stamp = isJpeg ? ImageStamp.FromJpeg(imageBytes) : ImageStamp.FromRgb(imageBytes, 100, 100);
+            ImageStamp stamp;
+            if (isJpeg) stamp = ImageStamp.FromJpeg(imageBytes);
+            else if (isPng) stamp = ImageStamp.FromPngData(imageBytes);
+            else if (OperatingSystem.IsWindows()
+                     && ImageStamp.TryFromGdiPlusDecoder(imageBytes) is { } gdiStamp)
+                stamp = gdiStamp;
+            else stamp = ImageStamp.FromRgb(imageBytes, 100, 100);
             var w = stamp.DisplayWidth > 0 ? stamp.DisplayWidth : 100;
             var h = stamp.DisplayHeight > 0 ? stamp.DisplayHeight : 100;
             var pageW = page.MediaBox.Width;

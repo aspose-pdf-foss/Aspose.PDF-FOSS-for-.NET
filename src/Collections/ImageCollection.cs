@@ -39,6 +39,9 @@ public class ImageXObject
     /// </summary>
     internal void ReplaceImageData(byte[] newData)
     {
+        // Replacing an image can leave the original (often large) image object orphaned;
+        // ask the save to reachability-prune so the superseded data isn't carried over.
+        _reader.MayHaveOrphansOnSave = true;
         // PNG (89 50 4E 47): a PDF image XObject cannot carry a PNG codestream
         // verbatim, so decode it to raw RGB samples and re-store as a FlateDecode
         // image with a matching dictionary. Without this the PNG bytes would sit
@@ -97,9 +100,48 @@ public class ImageXObject
     /// at the requested quality. Used by Replace(int, Stream, int, bool) so
     /// callers can shrink an image at save time without external dependencies.
     /// </summary>
-    internal void ReplaceImageData(byte[] newData, int quality)
+    internal void ReplaceImageData(byte[] newData, int quality, bool blackAndWhite = false)
     {
+        _reader.MayHaveOrphansOnSave = true;
         var (pixels, w, h, comps) = IO.Filters.JpegDecoder.Decode(newData);
+
+        if (blackAndWhite)
+        {
+            // Threshold to bitonal and store as CCITT G4 — the compact encoding
+            // used for isBlackAndWhite replacements.
+            var stride = (w + 7) / 8;
+            var packed = new byte[stride * h]; // bit 1 = black
+            for (var i = 0; i < w * h; i++)
+            {
+                int lum;
+                if (comps == 1) lum = pixels[i];
+                else
+                {
+                    var src = i * comps;
+                    lum = (pixels[src] * 299 + pixels[src + 1] * 587 + pixels[src + 2] * 114) / 1000;
+                }
+                if (lum < 128)
+                    packed[i / w * stride + i % w / 8] |= (byte)(0x80 >> (i % w % 8));
+            }
+            var g4 = IO.Filters.CcittG4Encoder.Encode(packed, w, h, stride);
+            _stream.ReplaceData(g4);
+            var bwDict = _stream.Dict;
+            bwDict.Set("Filter", new PdfName("CCITTFaxDecode"));
+            var parms = new PdfDictionary();
+            parms.Set("K", new PdfInteger(-1));
+            parms.Set("Columns", new PdfInteger(w));
+            parms.Set("Rows", new PdfInteger(h));
+            bwDict.Set("DecodeParms", parms);
+            bwDict.Set("Width", new PdfInteger(w));
+            bwDict.Set("Height", new PdfInteger(h));
+            bwDict.Set("BitsPerComponent", new PdfInteger(1));
+            bwDict.Set("ColorSpace", new PdfName("DeviceGray"));
+            bwDict.Remove("SMask");
+            bwDict.Remove("Decode");
+            bwDict.Remove("ImageMask");
+            return;
+        }
+
         // Encoder always emits RGB (3-component) JPEG; for grayscale input we
         // duplicate the gray channel into R/G/B so the final image is visually
         // identical even after we re-tag /ColorSpace as DeviceRGB.
@@ -251,20 +293,29 @@ public class ImageXObject
     }
 
     /// <summary>
-    /// Save the image to a stream. JPEG images are saved as .jpg.
-    /// Other formats are saved as PNG.
+    /// Save the image to a stream as JPEG (matching Aspose.Pdf, whose
+    /// <c>XImage.Save(Stream)</c> emits a JFIF-tagged JPEG for the base image).
+    /// Source JPEGs are streamed out verbatim so their JFIF density survives;
+    /// other formats are re-encoded to JPEG from the base colour plane. A soft
+    /// mask is a separate image XObject and is not composited here, matching the
+    /// reference. Because JFIF density is an integer dots-per-inch, a resolution
+    /// set on the round-tripped bitmap round-trips exactly — a PNG's
+    /// pixels-per-metre pHYs cannot represent e.g. 200 dpi without rounding.
     /// </summary>
     public void Save(Stream output)
     {
         if (IsJpeg)
         {
             output.Write(_stream.RawData);
+            return;
         }
-        else
+        if (GetPixelSource() is { } getter)
         {
-            var png = ToPng();
-            output.Write(png);
+            var (g2, w2, h2) = CapHugeImage(getter, Width, Height);
+            output.Write(IO.JpegEncoderImpl.Encode(g2, w2, h2, 95));
+            return;
         }
+        output.Write(ToPng());
     }
 
     /// <summary>
@@ -297,7 +348,59 @@ public class ImageXObject
         output.Write(png);
     }
 
-    // Aspose.PDF for .NET XImage.Save renders the image at ~150 DPI, which downscales
+    /// <summary>
+    /// Save the decoded image rotated <paramref name="clockwiseQuarterTurns"/> × 90°
+    /// clockwise. A JPEG source re-encodes as JPEG; every other format is written as
+    /// PNG. Used when an image is drawn on a rotated page so the extracted file keeps
+    /// the orientation in which the image appears on the displayed page (matching
+    /// Aspose.Pdf, which extracts the rotated image upright).
+    /// </summary>
+    internal void SaveRotated(Stream output, int clockwiseQuarterTurns)
+    {
+        var turns = ((clockwiseQuarterTurns % 4) + 4) % 4;
+        var src = turns == 0 ? null : GetPixelSource();
+        if (src is null)
+        {
+            // No rotation requested, or a colour space the pixel decoder can't read —
+            // fall back to the verbatim save rather than producing a blank image.
+            Save(output);
+            return;
+        }
+
+        int w = Width, h = Height;
+        int ow = turns == 2 ? w : h;
+        int oh = turns == 2 ? h : w;
+
+        IO.PixelGetter rotated = turns switch
+        {
+            // 90° CW: output(x,y) = source(y, h-1-x)
+            1 => (int x, int y, out byte r, out byte g, out byte b) => src(y, h - 1 - x, out r, out g, out b),
+            // 180°: output(x,y) = source(w-1-x, h-1-y)
+            2 => (int x, int y, out byte r, out byte g, out byte b) => src(w - 1 - x, h - 1 - y, out r, out g, out b),
+            // 270° CW: output(x,y) = source(w-1-y, x)
+            _ => (int x, int y, out byte r, out byte g, out byte b) => src(w - 1 - y, x, out r, out g, out b),
+        };
+
+        if (IsJpeg)
+        {
+            var jpg = IO.JpegEncoderImpl.Encode(rotated, ow, oh, 90);
+            output.Write(jpg);
+            return;
+        }
+
+        // Materialise the rotated RGB samples and PNG-encode them.
+        var rgb = new byte[(long)ow * oh * 3];
+        long p = 0;
+        for (var y = 0; y < oh; y++)
+            for (var x = 0; x < ow; x++)
+            {
+                rotated(x, y, out var r, out var g, out var b);
+                rgb[p++] = r; rgb[p++] = g; rgb[p++] = b;
+            }
+        output.Write(IO.PngEncoder.Encode(rgb, ow, oh, 2, 8));
+    }
+
+    // Aspose.Pdf XImage.Save renders the image at ~150 DPI, which downscales
     // pathologically over-resolution images (e.g. a 35000x35000 fax scan placed on a
     // 8400pt page) to a manageable size. Mirror that: cap a huge image's longest side
     // and box-average the source so sparse scan lines survive the reduction (a plain
@@ -781,7 +884,7 @@ public class ImageCollection : IReadOnlyList<ImageXObject>
         // /Resources is inheritable through the /Pages tree -- when a page
         // doesn't carry its own, the nearest ancestor /Pages node's entry
         // applies. Walk up via /Parent until we find one, then recurse into
-        // Form XObjects (Aspose.Words and similar producers wrap content
+        // Form XObjects (some producers wrap content
         // there). Cycle-guarded by stream identity so a self-referencing
         // form can't loop forever.
         var visited = new HashSet<PdfStream>();
@@ -850,7 +953,7 @@ public class ImageCollection : IReadOnlyList<ImageXObject>
 
         // Tiling-pattern resources -- a Type-1 (tiling) pattern is itself a
         // content stream with its own /Resources, and producers like
-        // Aspose.Words emit raster images there as the pattern's only paint.
+        // some producers emit raster images there as the pattern's only paint.
         // Recurse so page.Images surfaces them too.
         var patternDict = reader.ResolveDict(resources.Get("Pattern"));
         if (patternDict is not null)
@@ -911,17 +1014,17 @@ public class ImageCollection : IReadOnlyList<ImageXObject>
 
     /// <summary>
     /// Replace the image at the given 1-based index with the provided stream,
-    /// re-encoding to JPEG at <paramref name="quality"/> (0–100). The
-    /// <paramref name="optimize"/> flag is reserved for compatibility with
-    /// the public API surface; the implementation always re-encodes via
-    /// the in-tree JPEG encoder regardless.
+    /// re-encoding to JPEG at <paramref name="quality"/> (0–100). When
+    /// <paramref name="optimize"/> is true the image is thresholded to bitonal
+    /// and stored as CCITT G4 instead (the XImageCollection overload surfaces
+    /// this flag as isBlackAndWhite).
     /// </summary>
     public void Replace(int index, Stream stream, int quality, bool optimize)
     {
         if (index < 1 || index > _images.Count)
             throw new ArgumentException($"Index {index} is outside the collection (1..{_images.Count})", nameof(index));
         if (stream is null) throw new ArgumentNullException(nameof(stream));
-        _images[index - 1].ReplaceImageData(ReadAll(stream), quality);
+        _images[index - 1].ReplaceImageData(ReadAll(stream), quality, blackAndWhite: optimize);
     }
 
     /// <summary>
@@ -1009,6 +1112,10 @@ public class XImageCollection : ImageCollection
         try
         {
             var bytes = DrainStream(image);
+            // A vector SVG can't be embedded as an /Image XObject directly — rasterise
+            // it to PNG first (SVG image XObjects are rasterised when added to resources).
+            if (IsSvg(bytes) && ImageRasterizer.RasterizeSvg(bytes) is { } png)
+                bytes = png;
             var stamp = new ImageStamp(new MemoryStream(bytes));
             return AppendImageXObject(stamp.BuildImageXObject());
         }
@@ -1016,6 +1123,18 @@ public class XImageCollection : ImageCollection
         {
             return $"Im{Count + 1}";
         }
+    }
+
+    /// <summary>Sniff whether <paramref name="data"/> is an SVG document — an XML
+    /// prolog or a bare &lt;svg&gt; root, after an optional UTF-8 BOM / whitespace.</summary>
+    internal static bool IsSvg(byte[] data)
+    {
+        if (data is null || data.Length < 4) return false;
+        int i = 0;
+        if (data.Length >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) i = 3;
+        while (i < data.Length && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
+        var head = System.Text.Encoding.ASCII.GetString(data, i, System.Math.Min(512, data.Length - i));
+        return head.StartsWith("<?xml") ? head.Contains("<svg") : head.StartsWith("<svg");
     }
 
     /// <summary>Append an image from a stream using the given filter; returns its assigned resource name.</summary>
@@ -1161,7 +1280,10 @@ public class XImageCollection : ImageCollection
     /// <summary>Append an image from a stream re-encoded as JPEG at the given quality.</summary>
     public void Add(Stream image, int quality)
     {
-        _ = image; _ = quality;
+        // quality is a JPEG re-encode hint (1..100); the image is embedded as-is
+        // here, but it must still be attached so Images[Count] resolves to it.
+        _ = quality;
+        Add(image);
     }
 
     /// <summary>Append an image from a raw bitmap; returns its assigned resource name.</summary>
@@ -1311,7 +1433,7 @@ public class XImageCollection : ImageCollection
 }
 
 /// <summary>
-/// Image XObject wrapper that mirrors the Aspose.PDF for .NET XImage public surface.
+/// Image XObject wrapper that mirrors the Aspose.Pdf XImage public surface.
 /// </summary>
 public class XImage : ImageXObject
 {
@@ -1377,7 +1499,12 @@ public class XImage : ImageXObject
     private Metadata BuildMetadata()
     {
         var mdStream = Reader.ResolveStream(Stream.Dict.Get("Metadata"));
-        return mdStream is null ? new Metadata() : new Metadata(new XmpMetadata(mdStream, Reader));
+        if (mdStream is null) return new Metadata();
+        var xmp = new XmpMetadata(mdStream, Reader);
+        // Edits to image XMP are written straight back into this /Metadata stream
+        // (the reader caches it, so the save loop serialises the mutated bytes).
+        xmp.EnableWriteBackTo(mdStream);
+        return new Metadata(xmp);
     }
 
     /// <summary>Attach a stencil mask from a stream. Stored only — the mask is not currently emitted into the image XObject's /SMask.</summary>
@@ -1420,17 +1547,200 @@ public class XImage : ImageXObject
     /// </summary>
     public List<string> GetAlternativeText(Page page)
     {
-        _ = page;
-        return new List<string>();
+        var result = new List<string>();
+        if (page is null) return result;
+        var mcids = FindMcidsForImage(page, Name);
+        if (mcids.Count == 0) return result;
+        var root = page.Reader.ResolveDict(page.Reader.Catalog.Get("StructTreeRoot"));
+        if (root is null) return result;
+        foreach (var element in FindStructElementsForMcids(page, root, mcids))
+        {
+            var alt = page.Reader.Resolve(element.Get("Alt"));
+            if (alt is PdfString s) result.Add(s.ToText());
+        }
+        return result;
     }
 
-    /// <summary>Detect the colour family from the image's /ColorSpace entry.</summary>
-    public ColorType GetColorType() => ColorSpace switch
+    /// <summary>
+    /// The MCIDs of the marked-content sequences that draw the named image XObject
+    /// on the page (in content order, distinct). An image drawn outside any
+    /// /MCID-bearing marked content contributes nothing.
+    /// </summary>
+    private static List<int> FindMcidsForImage(Page page, string imageName)
     {
-        "DeviceGray" or "CalGray" => ColorType.Grayscale,
-        "DeviceCMYK" => ColorType.Cmyk,
-        _ => ColorType.Rgb,
-    };
+        var mcids = new List<int>();
+        var reader = page.Reader;
+        var resources = reader.ResolveDict(page.Dict.Get("Resources"));
+        var properties = resources is null ? null : reader.ResolveDict(resources.Get("Properties"));
+
+        // Innermost enclosing MCID wins; BMC and MCID-less BDC push null so
+        // EMC pops stay balanced.
+        var stack = new List<int?>();
+        var parser = new Content.ContentStreamParser(reader);
+        parser.OnMarkedContentBegin += (_, props) =>
+            stack.Add(props?.Get("MCID") is PdfInteger m ? (int)m.Value : null);
+        parser.OnMarkedContentEnd += () =>
+        {
+            if (stack.Count > 0) stack.RemoveAt(stack.Count - 1);
+        };
+        parser.OnImageDrawn += (name, _) =>
+        {
+            if (name != imageName) return;
+            for (var i = stack.Count - 1; i >= 0; i--)
+            {
+                if (stack[i] is { } mcid)
+                {
+                    if (!mcids.Contains(mcid)) mcids.Add(mcid);
+                    return;
+                }
+            }
+        };
+
+        foreach (var bytes in GetPageContentStreams(page))
+            parser.Parse(bytes, properties: properties);
+        return mcids;
+    }
+
+    private static List<byte[]> GetPageContentStreams(Page page)
+    {
+        var reader = page.Reader;
+        var result = new List<byte[]>();
+        var contents = reader.Resolve(page.Dict.Get("Contents"));
+        if (contents is PdfStream single)
+        {
+            result.Add(reader.DecodeStream(single));
+        }
+        else if (contents is PdfArray arr)
+        {
+            foreach (var item in arr)
+            {
+                var s = reader.ResolveStream(item);
+                if (s is not null) result.Add(reader.DecodeStream(s));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Structure elements (pre-order) with a marked-content kid on <paramref name="page"/>
+    /// whose MCID is in <paramref name="mcids"/>. The /Pg page association is inherited
+    /// down the tree; an MCR kid may override it.
+    /// </summary>
+    private static List<PdfDictionary> FindStructElementsForMcids(Page page, PdfDictionary root, List<int> mcids)
+    {
+        var reader = page.Reader;
+        var found = new List<PdfDictionary>();
+        var visited = new HashSet<PdfDictionary>();
+
+        bool IsTargetPage(PdfObject? pgEntry)
+        {
+            if (pgEntry is null) return false;
+            if (pgEntry is PdfIndirectRef r && page.SourceObjectNumber > 0)
+                return r.ObjectNumber == page.SourceObjectNumber;
+            return ReferenceEquals(reader.ResolveDict(pgEntry), page.Dict);
+        }
+
+        void Walk(PdfDictionary element, bool pgIsTarget)
+        {
+            if (!visited.Add(element)) return;
+            var ownPg = element.Get("Pg");
+            if (ownPg is not null) pgIsTarget = IsTargetPage(ownPg);
+
+            var kids = reader.Resolve(element.Get("K"));
+            var kidList = kids is PdfArray arr ? arr.ToList()
+                : kids is not null ? new List<PdfObject> { kids }
+                : new List<PdfObject>();
+
+            // Match the element's own marked-content kids first (pre-order: an
+            // element precedes its descendants), then recurse into child elements.
+            foreach (var kid in kidList)
+            {
+                var resolved = reader.Resolve(kid);
+                var matched = resolved switch
+                {
+                    PdfInteger mcid => pgIsTarget && mcids.Contains((int)mcid.Value),
+                    PdfDictionary mcr when mcr.GetName("Type") == "MCR" =>
+                        (mcr.Get("Pg") is { } p ? IsTargetPage(p) : pgIsTarget)
+                        && mcids.Contains((int)mcr.GetInt("MCID")),
+                    _ => false,
+                };
+                if (matched)
+                {
+                    found.Add(element);
+                    break;
+                }
+            }
+            foreach (var kid in kidList)
+            {
+                if (reader.Resolve(kid) is PdfDictionary child
+                    && child.GetName("Type") is null or "StructElem"
+                    && child.GetName("Type") != "MCR")
+                    Walk(child, pgIsTarget);
+            }
+        }
+
+        var rootKids = reader.Resolve(root.Get("K"));
+        if (rootKids is PdfArray rootArr)
+        {
+            foreach (var kid in rootArr)
+                if (reader.ResolveDict(kid) is { } d) Walk(d, pgIsTarget: false);
+        }
+        else if (rootKids is not null && reader.ResolveDict(rootKids) is { } single)
+        {
+            Walk(single, pgIsTarget: false);
+        }
+        return found;
+    }
+
+    /// <summary>Detect the colour family of the image. The declared /ColorSpace gives the
+    /// base family, but an image stored in an RGB space whose pixels are all neutral
+    /// (R==G==B) is really a black-and-white image — Aspose.Pdf reports it as
+    /// Grayscale. So RGB-family images are sampled and downgraded to Grayscale when their
+    /// decoded content carries no colour. Declared Gray/CMYK keep their name-based type.</summary>
+    public ColorType GetColorType()
+    {
+        var byName = ColorSpace switch
+        {
+            "DeviceGray" or "CalGray" => ColorType.Grayscale,
+            "DeviceCMYK" => ColorType.Cmyk,
+            _ => ColorType.Rgb,
+        };
+        // Pixel sampling needs System.Drawing (Windows-only); elsewhere keep the name-based
+        // result. Only downgrade RGB→Grayscale, never the reverse.
+        if (byName == ColorType.Rgb && OperatingSystem.IsWindows()
+            && DetectColorTypeByPixels() == ColorType.Grayscale)
+            return ColorType.Grayscale;
+        return byName;
+    }
+
+    /// <summary>Sample the decoded image across a ~64×64 grid and report Grayscale when every
+    /// sampled pixel is neutral, Rgb on the first coloured pixel, Undefined when decoding
+    /// fails. Strides over the whole image (not just a corner) so a colour patch anywhere is
+    /// caught.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private ColorType DetectColorTypeByPixels()
+    {
+        try
+        {
+#pragma warning disable CA1416
+            using var ms = new MemoryStream(GetDecodedData());
+            using var bmp = new System.Drawing.Bitmap(ms);
+            int stepX = Math.Max(1, bmp.Width / 64);
+            int stepY = Math.Max(1, bmp.Height / 64);
+            for (int y = 0; y < bmp.Height; y += stepY)
+                for (int x = 0; x < bmp.Width; x += stepX)
+                {
+                    var p = bmp.GetPixel(x, y);
+                    if (p.R != p.G || p.G != p.B) return ColorType.Rgb;
+                }
+            return ColorType.Grayscale;
+#pragma warning restore CA1416
+        }
+        catch
+        {
+            return ColorType.Undefined;
+        }
+    }
 
     /// <summary>The resource name as registered in the page's XObject dictionary.</summary>
     public string GetNameInCollection() => Name;
@@ -1439,7 +1749,16 @@ public class XImage : ImageXObject
     public MemoryStream GetRawImageData() => new(GetRawData());
 
     /// <summary>Reference equality against another XImage.</summary>
-    public bool IsTheSameObject(XImage image) => image is not null && ReferenceEquals(this, image);
+    public bool IsTheSameObject(XImage image)
+    {
+        if (image is null) return false;
+        if (ReferenceEquals(this, image)) return true;
+        // Two XImage wrappers refer to the same image when they wrap the same underlying
+        // indirect PDF stream — the reader shares one PdfStream instance per XObject, so a
+        // reference check on the stream identifies images shared across pages (a fresh wrapper
+        // is produced on every Resources.Images[...] access, so wrapper identity is not enough).
+        return ReferenceEquals(Stream, image.Stream);
+    }
 
     /// <summary>Rename the image's resource entry.</summary>
     public void Rename(string name)
@@ -1511,12 +1830,151 @@ public class XImage : ImageXObject
 
     /// <summary>
     /// Attach alternative text to this image via the page's structure tree.
-    /// Returns true on success. The tagged-PDF write path is not currently
-    /// implemented, so the call records intent and returns false.
+    /// With exactly one structure element referencing the image's marked content,
+    /// its /Alt is replaced. With none, the image's Do is wrapped in a new
+    /// /Figure marked-content sequence and a matching Figure structure element
+    /// (with /Alt) is created under /StructTreeRoot — both created on demand.
+    /// Returns false when the association is ambiguous (multiple elements) or
+    /// the image is not drawn at the page level.
     /// </summary>
     public bool TrySetAlternativeText(string alternativeText, Page page)
     {
-        _ = alternativeText; _ = page;
-        return false;
+        if (alternativeText is null || page is null) return false;
+        var reader = page.Reader;
+        var mcids = FindMcidsForImage(page, Name);
+        var root = reader.ResolveDict(reader.Catalog.Get("StructTreeRoot"));
+
+        if (mcids.Count > 0 && root is not null)
+        {
+            var elements = FindStructElementsForMcids(page, root, mcids);
+            if (elements.Count > 1) return false;
+            if (elements.Count == 1)
+            {
+                elements[0].Set("Alt", MakeTextString(alternativeText));
+                return true;
+            }
+        }
+
+        // No structure element references this image yet: mark the image's Do with
+        // a fresh MCID and grow the structure tree around it.
+        var mcid = WrapImageDoInFigureMarkedContent(page, Name);
+        if (mcid < 0) return false;
+
+        if (root is null)
+        {
+            root = new PdfDictionary();
+            root.Set("Type", new PdfName("StructTreeRoot"));
+            reader.Catalog.Set("StructTreeRoot", root);
+            var markInfo = new PdfDictionary();
+            markInfo.Set("Marked", PdfBoolean.True);
+            reader.Catalog.Set("MarkInfo", markInfo);
+        }
+
+        var figure = new PdfDictionary();
+        figure.Set("Type", new PdfName("StructElem"));
+        figure.Set("S", new PdfName("Figure"));
+        figure.Set("Alt", MakeTextString(alternativeText));
+        figure.Set("K", new PdfInteger(mcid));
+        if (page.SourceObjectNumber > 0)
+            figure.Set("Pg", new PdfIndirectRef(page.SourceObjectNumber, 0));
+
+        var kids = reader.Resolve(root.Get("K"));
+        if (kids is PdfArray arr)
+            arr.Add(figure);
+        else if (kids is not null)
+            root.Set("K", new PdfArray(new List<PdfObject> { kids, figure }));
+        else
+            root.Set("K", new PdfArray(new List<PdfObject> { figure }));
+        return true;
+    }
+
+    /// <summary>Encode a text string for a PDF string object — UTF-16BE with BOM
+    /// when any character is outside Latin-1, plain bytes otherwise.</summary>
+    private static PdfString MakeTextString(string text)
+    {
+        var needsUnicode = text.Any(c => c > 0xFF);
+        if (!needsUnicode)
+            return new PdfString(System.Text.Encoding.Latin1.GetBytes(text));
+        var utf16 = System.Text.Encoding.BigEndianUnicode.GetBytes(text);
+        var bytes = new byte[utf16.Length + 2];
+        bytes[0] = 0xFE;
+        bytes[1] = 0xFF;
+        utf16.CopyTo(bytes, 2);
+        return new PdfString(bytes);
+    }
+
+    /// <summary>
+    /// Wrap the first page-level <c>/name Do</c> invocation in a
+    /// <c>/Figure &lt;&lt;/MCID n&gt;&gt; BDC … EMC</c> pair, rewriting the containing
+    /// content stream in place. Returns the new MCID, or -1 when the image is not
+    /// drawn at the page level.
+    /// </summary>
+    private static int WrapImageDoInFigureMarkedContent(Page page, string imageName)
+    {
+        var reader = page.Reader;
+        var contents = reader.Resolve(page.Dict.Get("Contents"));
+        var streams = new List<PdfStream>();
+        if (contents is PdfStream single) streams.Add(single);
+        else if (contents is PdfArray arr)
+            foreach (var item in arr)
+                if (reader.ResolveStream(item) is { } s) streams.Add(s);
+        if (streams.Count == 0) return -1;
+
+        // New MCID = one past the page's current maximum so /ParentTree-less
+        // consumers (our own reader included) can't collide with existing ids.
+        var maxMcid = -1;
+        var propsDict = reader.ResolveDict(reader.ResolveDict(page.Dict.Get("Resources"))?.Get("Properties"));
+        var parser = new Content.ContentStreamParser(reader);
+        parser.OnMarkedContentBegin += (_, props) =>
+        {
+            if (props?.Get("MCID") is PdfInteger m && m.Value > maxMcid) maxMcid = (int)m.Value;
+        };
+        foreach (var s in streams)
+            parser.Parse(reader.DecodeStream(s), properties: propsDict);
+        var mcid = maxMcid + 1;
+
+        // Textual wrap of the first "/name Do" occurrence. Resource names in these
+        // streams are plain (/Im0 …); the token match requires the exact name
+        // followed by whitespace and the Do keyword, so substring names can't hit.
+        foreach (var s in streams)
+        {
+            var text = System.Text.Encoding.Latin1.GetString(reader.DecodeStream(s));
+            var idx = FindDoInvocation(text, imageName);
+            if (idx < 0) continue;
+            var doEnd = text.IndexOf("Do", idx, StringComparison.Ordinal) + 2;
+            var rewritten = text[..idx]
+                + $"/Figure <</MCID {mcid}>> BDC\n"
+                + text[idx..doEnd]
+                + "\nEMC"
+                + text[doEnd..];
+            s.ReplaceData(System.Text.Encoding.Latin1.GetBytes(rewritten));
+            s.Dict.Remove("Filter");
+            s.Dict.Remove("DecodeParms");
+            s.Dict.Set("Length", new PdfInteger(rewritten.Length));
+            return mcid;
+        }
+        return -1;
+    }
+
+    /// <summary>Index of the first <c>/name … Do</c> token pair, or -1.</summary>
+    private static int FindDoInvocation(string content, string imageName)
+    {
+        var needle = "/" + imageName;
+        var from = 0;
+        while (true)
+        {
+            var idx = content.IndexOf(needle, from, StringComparison.Ordinal);
+            if (idx < 0) return -1;
+            var after = idx + needle.Length;
+            // Exact name token (not a prefix of a longer name) followed by "Do".
+            if (after >= content.Length || char.IsWhiteSpace(content[after]))
+            {
+                var scan = after;
+                while (scan < content.Length && char.IsWhiteSpace(content[scan])) scan++;
+                if (scan + 1 < content.Length && content[scan] == 'D' && content[scan + 1] == 'o')
+                    return idx;
+            }
+            from = idx + 1;
+        }
     }
 }

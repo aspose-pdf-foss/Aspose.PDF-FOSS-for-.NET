@@ -21,6 +21,26 @@ public sealed class SignatureOptions
     /// <summary>The signature field name. If null, a default name is generated.</summary>
     public string? FieldName { get; set; }
 
+    /// <summary>The signer's name (maps to signature dict /Name). If null or
+    /// empty, the certificate subject common name is used.</summary>
+    public string? SignerName { get; set; }
+
+    /// <summary>Password for an encrypted input document, so the signer can
+    /// re-open the raw (still-encrypted) bytes to read its structure and
+    /// append the incremental signature update. Null for unencrypted input.</summary>
+    public string? Password { get; set; }
+
+    /// <summary>The /SubFilter (signature-handler) name written to the
+    /// signature dictionary. Defaults to <c>adbe.pkcs7.detached</c>; callers
+    /// signing with a concrete PKCS7 (envelope) subtype pass
+    /// <c>adbe.pkcs7.sha1</c> so the reloaded signature round-trips to the
+    /// same concrete type.</summary>
+    public string SubFilter { get; set; } = "adbe.pkcs7.detached";
+
+    /// <summary>The signing date (maps to signature dict /M). If null, the
+    /// current time is used.</summary>
+    public DateTime? SigningDate { get; set; }
+
     /// <summary>
     /// Size in bytes reserved for the /Contents hex string.
     /// Defaults to 8192 which is sufficient for most certificates.
@@ -40,6 +60,19 @@ public sealed class SignatureOptions
     /// to the implementation; the returned bytes are written into
     /// /Contents verbatim and must already be a complete CMS envelope.</summary>
     public Forms.SignHash? CustomSignHash { get; set; }
+
+    /// <summary>When true, enable long-term validation: the signer writes a
+    /// /DSS (Document Security Store, ISO 32000-2 §12.8.4.3) entry into the
+    /// catalog carrying the signer certificate chain, so the signature stays
+    /// verifiable after the signing certificate expires.</summary>
+    public bool UseLtv { get; set; }
+
+    /// <summary>When set, produce a certifying (author) signature: a /DocMDP
+    /// SigRef with this /P access-permission level (1/2/3, ISO 32000-1
+    /// §12.8.2.2) is written into the signature dictionary before signing and a
+    /// catalog /Perms /DocMDP entry points at it. Null = an ordinary approval
+    /// signature.</summary>
+    public int? DocMdpPermissions { get; set; }
 }
 
 /// <summary>
@@ -56,14 +89,18 @@ public sealed class PdfSigner
         SignatureOptions? options = null)
     {
         options ??= new SignatureOptions();
-        var fieldName = options.FieldName ?? "Signature1";
         var contentsSize = options.ContentsSize;
 
         // Step 1: Parse the original document to find AcroForm and allocate objects
-        using var doc = Document.Open(pdfData);
+        using var doc = OpenDoc(pdfData, options.Password);
         var reader = doc.Reader;
         var trailer = reader.Trailer;
         var xref = reader.XRefTable;
+
+        // Resolve the target field name. An explicit name is honoured; otherwise
+        // pick the first SignatureN that is free or blank — signing again must not
+        // overwrite an already-signed field (each signature is its own revision).
+        var fieldName = ResolveSignatureFieldName(doc, options.FieldName);
 
         // Determine next available object numbers
         var maxObj = 0;
@@ -71,10 +108,21 @@ public sealed class PdfSigner
             if (entry.ObjectNumber > maxObj) maxObj = entry.ObjectNumber;
         var nextObj = maxObj + 1;
 
+        // If the document already contains a (blank) signature field with this
+        // name, reuse it — update its /V in place rather than appending a
+        // duplicate field. Otherwise allocate a fresh field object.
+        var existingFieldRef = FindTopLevelFieldRef(doc, fieldName);
+        var existingFieldDict = existingFieldRef is not null
+            ? doc.Reader.ResolveDict(existingFieldRef)
+            : null;
+
         // Allocate object numbers for: sig value dict, sig field, updated AcroForm
         var sigValObjNum = nextObj++;
-        var sigFieldObjNum = nextObj++;
+        var sigFieldObjNum = existingFieldDict is not null
+            ? existingFieldRef!.ObjectNumber
+            : nextObj++;
         var acroFormObjNum = nextObj++;
+        var dssCertObjNum = options.UseLtv ? nextObj++ : 0;
 
         // Step 2: Build the incremental update with placeholder
         using var ms = new MemoryStream();
@@ -85,11 +133,16 @@ public sealed class PdfSigner
         // Build signature value dictionary with placeholder
         var sigValDict = BuildSignatureValueDict(certificate, options, contentsSize);
 
-        // Build signature field widget
-        var sigFieldDict = BuildSignatureFieldDict(fieldName, sigValObjNum, doc);
+        // Build signature field widget — reuse the existing field dict (keeping
+        // its /Rect, /P, /AP, /MK …) when signing a pre-existing blank field.
+        var sigFieldDict = existingFieldDict is not null
+            ? BuildUpdatedSignatureFieldDict(existingFieldDict, sigValObjNum)
+            : BuildSignatureFieldDict(fieldName, sigValObjNum, doc);
 
-        // Build or update AcroForm
-        var acroFormDict = BuildAcroFormDict(doc, sigFieldObjNum);
+        // Build or update AcroForm. When reusing an existing field, it is
+        // already listed in /Fields — don't append a duplicate reference.
+        var acroFormDict = BuildAcroFormDict(doc, sigFieldObjNum,
+            appendField: existingFieldDict is null);
 
         // Write the new objects
         var offsets = new Dictionary<int, long>();
@@ -115,6 +168,24 @@ public sealed class PdfSigner
         var catalogObjNum = catalogRef?.ObjectNumber ?? 1;
         var catalogDict = CloneDict(reader.Catalog);
         catalogDict.Set("AcroForm", new PdfIndirectRef(acroFormObjNum, 0));
+
+        // Certifying signature: catalog /Perms /DocMDP points at the sig value.
+        if (options.DocMdpPermissions is not null)
+        {
+            var perms = new PdfDictionary();
+            perms.Set("DocMDP", new PdfIndirectRef(sigValObjNum, 0));
+            catalogDict.Set("Perms", perms);
+        }
+
+        // LTV: embed the signer certificate in a /DSS (Document Security Store)
+        // so the signature stays verifiable after the certificate expires.
+        if (options.UseLtv)
+        {
+            offsets[dssCertObjNum] = ms.Position;
+            WriteStreamObject(ms, dssCertObjNum, BuildCertStreamDict(certificate.CertificateDer));
+            catalogDict.Set("DSS", BuildDssDict(dssCertObjNum));
+        }
+
         offsets[catalogObjNum] = ms.Position;
         WriteIndirectObject(ms, catalogObjNum, catalogDict);
 
@@ -138,17 +209,18 @@ public sealed class PdfSigner
         // Find and replace the placeholder ByteRange
         PatchByteRange(fileBytes, byteRange);
 
-        // Step 5: Compute the hash over the two byte ranges
-        // Hash the two byte ranges with SHA-256
+        // Step 5: Compute the hash over the two byte ranges (SHA-256, or SHA-1 for
+        // the adbe.pkcs7.sha1 / adbe.x509.rsa_sha1 handlers).
+        var digest = DigestForSubFilter(options.SubFilter);
         var hashInput = new byte[(int)byteRange[1] + (int)byteRange[3]];
         Array.Copy(fileBytes, 0, hashInput, 0, (int)byteRange[1]);
         Array.Copy(fileBytes, (int)byteRange[2], hashInput, (int)byteRange[1], (int)byteRange[3]);
-        var hash = ShaDigest.Sha256(hashInput);
+        var hash = HashByteRange(hashInput, digest);
 
         // Step 6: Create PKCS#7/CMS detached signature
         var signatureBytes = options.CustomSignHash is not null
-            ? options.CustomSignHash(hash, DigestHashAlgorithm.Sha256)
-            : CreatePkcs7Signature(hash, certificate);
+            ? options.CustomSignHash(hash, digest)
+            : CreatePkcs7Signature(hash, certificate, digest);
 
         if (signatureBytes.Length > contentsSize)
             throw new InvalidOperationException(
@@ -170,40 +242,132 @@ public sealed class PdfSigner
     /// <summary>
     /// Verify a signature in a PDF document. Returns true if the signature is cryptographically valid.
     /// </summary>
-    public static bool Verify(byte[] pdfData, string? fieldName = null)
+    public static bool Verify(byte[] pdfData, string? fieldName = null, string? password = null)
     {
-        using var doc = Document.Open(pdfData);
+        using var doc = OpenDoc(pdfData, password);
         var sigs = Forms.Signature.EnumerateSignatures(doc);
 
         var sig = fieldName is not null
             ? sigs.FirstOrDefault(s => s.FieldName == fieldName)
             : sigs.FirstOrDefault();
 
-        if (sig is null || sig.ByteRangeRaw is null || sig.ContentsRaw is null)
+        if (sig is null || sig.ByteRangeRaw is null)
             return false;
 
         var br = sig.ByteRangeRaw;
         if (br.Length != 4) return false;
 
-        // Collect the signed byte ranges (the raw data the signature covers)
-        var signedData = new byte[(int)br[1] + (int)br[3]];
-        Array.Copy(pdfData, (int)br[0], signedData, 0, (int)br[1]);
-        Array.Copy(pdfData, (int)br[2], signedData, (int)br[1], (int)br[3]);
+        // Read the PKCS#7 /Contents directly from the raw ByteRange gap
+        // (between the two covered ranges). The signature /Contents is exempt
+        // from document encryption (ISO 32000-1 §7.6.1), so the reader-decrypted
+        // sig.ContentsRaw is garbled for encrypted documents — the on-disk hex
+        // bytes in the gap are always the true, unencrypted envelope.
+        var contents = ExtractContentsFromGap(pdfData, (int)br[1], (int)br[2])
+                       ?? sig.ContentsRaw;
+        if (contents is null) return false;
 
-        // Compute SHA-256 hash over the byte ranges
-        var hash = ShaDigest.Sha256(signedData);
+        // Collect the signed byte ranges (the raw data the signature covers).
+        // Guard against a /ByteRange that does not fit the supplied bytes (e.g.
+        // a re-serialized or truncated document): a signature we cannot slice
+        // out is simply unverifiable, so return false rather than throwing.
+        long off1 = br[0], len1 = br[1], off2 = br[2], len2 = br[3];
+        if (off1 < 0 || len1 < 0 || off2 < 0 || len2 < 0 ||
+            off1 + len1 > pdfData.Length || off2 + len2 > pdfData.Length)
+            return false;
+
+        var signedData = new byte[len1 + len2];
+        Array.Copy(pdfData, off1, signedData, 0, len1);
+        Array.Copy(pdfData, off2, signedData, len1, len2);
+
+        // Raw adbe.x509.rsa_sha1 (PKCS#1): /Contents is a bare RSA signature over
+        // SHA-1 of the ByteRange, and the certificate lives in the signature dict's
+        // /Cert entry (not a CMS envelope).
+        if (sig.SubFilter == "adbe.x509.rsa_sha1" && sig.CertRaw is { Count: > 0 })
+        {
+            var sha1 = HmacSha.Sha1Hash(signedData);
+            var unwrapped = TryUnwrapOctetString(contents);
+            foreach (var certDer in sig.CertRaw)
+            {
+                if (CmsBuilder.VerifyRsaPkcs1(certDer, sha1, contents)) return true;
+                if (unwrapped is not null && CmsBuilder.VerifyRsaPkcs1(certDer, sha1, unwrapped)) return true;
+            }
+            return false;
+        }
 
         // Try verification with raw signed bytes first (standard CMS detached),
-        // then fall back to hash-as-content (used by some signers including this library's Sign).
-        if (TryVerifyCms(signedData, sig.ContentsRaw))
+        // then fall back to hash-as-content: adbe.pkcs7.sha1 embeds the SHA-1
+        // digest of the ByteRange as the CMS content, and this library's own
+        // Sign signs over the digest directly (SHA-256, or SHA-1 for pkcs7.sha1).
+        if (TryVerifyCms(signedData, contents))
             return true;
-        if (TryVerifyCms(hash, sig.ContentsRaw))
+        if (TryVerifyCms(ShaDigest.Sha256(signedData), contents))
+            return true;
+        if (TryVerifyCms(HmacSha.Sha1Hash(signedData), contents))
             return true;
         return false;
     }
 
+    /// <summary>If <paramref name="data"/> is a single DER OCTET STRING, return its
+    /// contents; otherwise null. Some producers wrap the adbe.x509.rsa_sha1 signature
+    /// value in an OCTET STRING.</summary>
+    private static byte[]? TryUnwrapOctetString(byte[]? data)
+    {
+        if (data is null || data.Length < 2 || data[0] != 0x04) return null;
+        try { return new Asn1Reader(data).ReadOctetString(); }
+        catch { return null; }
+    }
+
+    /// <summary>Extract the raw PKCS#7 bytes from a signature's /Contents hex
+    /// string, read straight from the on-disk ByteRange gap
+    /// (<c>&lt;hex…&gt;</c> between <paramref name="gapStart"/> and
+    /// <paramref name="gapEnd"/>). Returns null when the gap holds no hex string.</summary>
+    private static byte[]? ExtractContentsFromGap(byte[] pdfData, int gapStart, int gapEnd)
+    {
+        if (gapStart < 0 || gapEnd > pdfData.Length || gapStart >= gapEnd) return null;
+
+        // Locate the '<' … '>' delimiting the hex /Contents within the gap.
+        var open = -1;
+        for (var i = gapStart; i < gapEnd; i++)
+        {
+            if (pdfData[i] == (byte)'<') { open = i + 1; break; }
+        }
+        if (open < 0) return null;
+        var close = -1;
+        for (var i = open; i < gapEnd; i++)
+        {
+            if (pdfData[i] == (byte)'>') { close = i; break; }
+        }
+        if (close < 0) return null;
+
+        // Decode hex nibbles, ignoring whitespace; a signer pads the reserved
+        // space with trailing '0's, which decode to trailing zero bytes that
+        // the CMS parser tolerates (they follow the DER envelope's own length).
+        var nibbles = new System.Collections.Generic.List<byte>(close - open);
+        for (var i = open; i < close; i++)
+        {
+            var c = pdfData[i];
+            int v;
+            if (c >= '0' && c <= '9') v = c - '0';
+            else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+            else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+            else continue; // skip whitespace / EOL
+            nibbles.Add((byte)v);
+        }
+        if (nibbles.Count < 2) return null;
+
+        var bytes = new byte[nibbles.Count / 2];
+        for (var i = 0; i < bytes.Length; i++)
+            bytes[i] = (byte)((nibbles[2 * i] << 4) | nibbles[2 * i + 1]);
+        return bytes;
+    }
+
     private static bool TryVerifyCms(byte[] content, byte[] signature)
         => CmsBuilder.VerifyDetached(content, signature);
+
+    /// <summary>Open PDF bytes, authenticating with <paramref name="password"/>
+    /// when the document is encrypted.</summary>
+    private static Document OpenDoc(byte[] pdfData, string? password)
+        => password is not null ? Document.Open(pdfData, password) : Document.Open(pdfData);
 
     /// <summary>
     /// Sign a PDF document with an X.509 certificate and a visible signature appearance.
@@ -214,13 +378,14 @@ public sealed class PdfSigner
     {
         ArgumentNullException.ThrowIfNull(appearance);
         options ??= new SignatureOptions();
-        var fieldName = options.FieldName ?? "Signature1";
         var contentsSize = options.ContentsSize;
 
-        using var doc = Document.Open(pdfData);
+        using var doc = OpenDoc(pdfData, options.Password);
         var reader = doc.Reader;
         var trailer = reader.Trailer;
         var xref = reader.XRefTable;
+
+        var fieldName = ResolveSignatureFieldName(doc, options.FieldName);
 
         var maxObj = 0;
         foreach (var entry in xref.Entries.Values)
@@ -231,6 +396,7 @@ public sealed class PdfSigner
         var sigFieldObjNum = nextObj++;
         var acroFormObjNum = nextObj++;
         var appearanceStreamObjNum = nextObj++;
+        var dssCertObjNum = options.UseLtv ? nextObj++ : 0;
 
         using var ms = new MemoryStream();
         ms.Write(pdfData);
@@ -240,6 +406,20 @@ public sealed class PdfSigner
             fieldName, sigValObjNum, appearanceStreamObjNum, doc, appearance);
         var acroFormDict = BuildAcroFormDict(doc, sigFieldObjNum);
         var appearanceStreamDict = BuildSignatureAppearanceStream(appearance);
+
+        // When the source document is encrypted, every appended string/stream must
+        // be encrypted with the document's per-object key (only the signature
+        // /Contents is exempt). Otherwise the signature reason/location text and the
+        // visible appearance would leak as plaintext into an encrypted PDF.
+        var appendDecryptor = reader.Decryptor;
+        if (appendDecryptor is not null)
+        {
+            // Encrypt the signer-supplied text (/Reason /Location /ContactInfo /M …)
+            // and the visible appearance content. The field dict's /T is left as-is
+            // because signature-name lookup reads it structurally during verify.
+            EncryptAppendedDict(appendDecryptor, sigValObjNum, sigValDict);
+            EncryptAppendedStream(appendDecryptor, appearanceStreamObjNum, appearanceStreamDict);
+        }
 
         // Write objects
         var offsets = new Dictionary<int, long>();
@@ -264,6 +444,21 @@ public sealed class PdfSigner
         var catalogObjNum = catalogRef?.ObjectNumber ?? 1;
         var catalogDict = CloneDict(reader.Catalog);
         catalogDict.Set("AcroForm", new PdfIndirectRef(acroFormObjNum, 0));
+
+        if (options.DocMdpPermissions is not null)
+        {
+            var perms = new PdfDictionary();
+            perms.Set("DocMDP", new PdfIndirectRef(sigValObjNum, 0));
+            catalogDict.Set("Perms", perms);
+        }
+
+        if (options.UseLtv)
+        {
+            offsets[dssCertObjNum] = ms.Position;
+            WriteStreamObject(ms, dssCertObjNum, BuildCertStreamDict(certificate.CertificateDer));
+            catalogDict.Set("DSS", BuildDssDict(dssCertObjNum));
+        }
+
         offsets[catalogObjNum] = ms.Position;
         WriteIndirectObject(ms, catalogObjNum, catalogDict);
 
@@ -282,15 +477,16 @@ public sealed class PdfSigner
 
         PatchByteRange(fileBytes, byteRange);
 
-        // Hash the two byte ranges with SHA-256
+        // Hash the two byte ranges (SHA-256, or SHA-1 for adbe.pkcs7.sha1 / adbe.x509.rsa_sha1).
+        var digest = DigestForSubFilter(options.SubFilter);
         var hashInput = new byte[(int)byteRange[1] + (int)byteRange[3]];
         Array.Copy(fileBytes, 0, hashInput, 0, (int)byteRange[1]);
         Array.Copy(fileBytes, (int)byteRange[2], hashInput, (int)byteRange[1], (int)byteRange[3]);
-        var hash = ShaDigest.Sha256(hashInput);
+        var hash = HashByteRange(hashInput, digest);
 
         var signatureBytes = options.CustomSignHash is not null
-            ? options.CustomSignHash(hash, DigestHashAlgorithm.Sha256)
-            : CreatePkcs7Signature(hash, certificate);
+            ? options.CustomSignHash(hash, digest)
+            : CreatePkcs7Signature(hash, certificate, digest);
 
         if (signatureBytes.Length > contentsSize)
             throw new InvalidOperationException(
@@ -312,10 +508,10 @@ public sealed class PdfSigner
         var dict = new PdfDictionary();
         dict.Set("Type", new PdfName("Sig"));
         dict.Set("Filter", new PdfName("Adobe.PPKLite"));
-        dict.Set("SubFilter", new PdfName("adbe.pkcs7.detached"));
+        dict.Set("SubFilter", new PdfName(options.SubFilter));
 
-        // Name from certificate
-        var name = cert.SubjectName;
+        // Name from the caller's signer name when supplied, else the certificate subject.
+        var name = string.IsNullOrEmpty(options.SignerName) ? cert.SubjectName : options.SignerName!;
         dict.Set("Name", EncodePdfText(name));
 
         if (options.Reason is not null)
@@ -325,9 +521,11 @@ public sealed class PdfSigner
         if (options.ContactInfo is not null)
             dict.Set("ContactInfo", EncodePdfText(options.ContactInfo));
 
-        // Signing date
-        var now = DateTime.UtcNow;
-        var dateStr = $"D:{now:yyyyMMddHHmmss}+00'00'";
+        // Signing date — honour the caller's date when supplied, else now.
+        // The date components are written verbatim (the reader ignores the
+        // trailing UTC offset), so a caller-supplied local time round-trips.
+        var when = options.SigningDate ?? DateTime.UtcNow;
+        var dateStr = $"D:{when:yyyyMMddHHmmss}+00'00'";
         dict.Set("M", new PdfString(Encoding.Latin1.GetBytes(dateStr)));
 
         // ByteRange placeholder — will be patched later
@@ -338,6 +536,25 @@ public sealed class PdfSigner
         byteRangeArray.Add(new PdfInteger(9999999999)); // placeholder
         byteRangeArray.Add(new PdfInteger(9999999999)); // placeholder
         dict.Set("ByteRange", byteRangeArray);
+
+        // Certifying (author) signature: a /DocMDP transform reference, written
+        // BEFORE signing so it is inside the ByteRange the signature covers.
+        if (options.DocMdpPermissions is int perms)
+        {
+            var transformParams = new PdfDictionary();
+            transformParams.Set("Type", new PdfName("TransformParams"));
+            transformParams.Set("P", new PdfInteger(perms));
+            transformParams.Set("V", new PdfName("1.2"));
+
+            var refDict = new PdfDictionary();
+            refDict.Set("Type", new PdfName("SigRef"));
+            refDict.Set("TransformMethod", new PdfName("DocMDP"));
+            refDict.Set("TransformParams", transformParams);
+
+            var refs = new PdfArray();
+            refs.Add(refDict);
+            dict.Set("Reference", refs);
+        }
 
         // /Contents placeholder — hex string of zeros
         var contentsPlaceholder = new byte[contentsSize];
@@ -384,7 +601,8 @@ public sealed class PdfSigner
         return dict;
     }
 
-    private static PdfDictionary BuildAcroFormDict(Document doc, int sigFieldObjNum)
+    private static PdfDictionary BuildAcroFormDict(Document doc, int sigFieldObjNum,
+        bool appendField = true)
     {
         var dict = new PdfDictionary();
 
@@ -404,8 +622,9 @@ public sealed class PdfSigner
             }
         }
 
-        // Add the new signature field
-        fields.Add(new PdfIndirectRef(sigFieldObjNum, 0));
+        // Add the new signature field (unless we reused a field already listed)
+        if (appendField)
+            fields.Add(new PdfIndirectRef(sigFieldObjNum, 0));
         dict.Set("Fields", fields);
 
         // SigFlags: 1 = SignaturesExist, 2 = AppendOnly → 3
@@ -414,8 +633,97 @@ public sealed class PdfSigner
         return dict;
     }
 
-    private static byte[] CreatePkcs7Signature(byte[] hash, PdfCertificate certificate)
-        => CmsBuilder.CreateDetachedSignature(hash, certificate);
+    /// <summary>Build a stream object dictionary holding a DER certificate, for
+    /// embedding in a /DSS /Certs array (LTV).</summary>
+    private static PdfDictionary BuildCertStreamDict(byte[] certDer)
+    {
+        var d = new PdfDictionary();
+        d.Set("Length", new PdfInteger(certDer.Length));
+        d.Set("__StreamData", new PdfString(certDer));
+        return d;
+    }
+
+    /// <summary>Build the catalog /DSS (Document Security Store) dictionary
+    /// referencing the embedded signer certificate stream (ISO 32000-2 §12.8.4.3).</summary>
+    private static PdfDictionary BuildDssDict(int certObjNum)
+    {
+        var certs = new PdfArray();
+        certs.Add(new PdfIndirectRef(certObjNum, 0));
+        var dss = new PdfDictionary();
+        dss.Set("Type", new PdfName("DSS"));
+        dss.Set("Certs", certs);
+        return dss;
+    }
+
+    /// <summary>Resolve the signature field name to sign into. An explicit name is
+    /// honoured verbatim; when none is given, pick the first <c>SignatureN</c> that is
+    /// either absent or a blank (unsigned) field — so signing a document that already
+    /// carries a signed <c>Signature1</c> adds <c>Signature2</c> rather than overwriting
+    /// it (each signature is preserved as its own incremental revision).</summary>
+    private static string ResolveSignatureFieldName(Document doc, string? explicitName)
+    {
+        if (explicitName is not null) return explicitName;
+        for (var i = 1; i < 10000; i++)
+        {
+            var name = "Signature" + i;
+            var fref = FindTopLevelFieldRef(doc, name);
+            if (fref is null) return name;                 // no such field — fresh name
+            var fdict = doc.Reader.ResolveDict(fref);
+            if (fdict is null || !fdict.ContainsKey("V"))  // blank field — reuse it
+                return name;
+            // field exists and is already signed — try the next index
+        }
+        return "Signature1";
+    }
+
+    /// <summary>Find the indirect reference of a top-level AcroForm field whose
+    /// /T equals <paramref name="fieldName"/>, or null when no such field
+    /// exists. Used to reuse a pre-existing blank signature field rather than
+    /// appending a duplicate one when signing.</summary>
+    private static PdfIndirectRef? FindTopLevelFieldRef(Document doc, string fieldName)
+    {
+        var acroForm = doc.Reader.ResolveDict(doc.Reader.Catalog.Get("AcroForm"));
+        if (acroForm is null) return null;
+        var fields = doc.Reader.Resolve(acroForm.Get("Fields")) as PdfArray;
+        if (fields is null) return null;
+
+        foreach (var f in fields)
+        {
+            if (f is not PdfIndirectRef fieldRef) continue;
+            var fieldDict = doc.Reader.ResolveDict(fieldRef);
+            var name = doc.Reader.Resolve(fieldDict?.Get("T")) as PdfString;
+            if (name is not null && name.ToText() == fieldName)
+                return fieldRef;
+        }
+        return null;
+    }
+
+    /// <summary>Clone an existing signature field dict and point its /V at the
+    /// new signature value object, preserving the field's other entries
+    /// (/Rect, /P, /AP, /MK, /T …) so its visible appearance survives.</summary>
+    private static PdfDictionary BuildUpdatedSignatureFieldDict(PdfDictionary existing,
+        int sigValObjNum)
+    {
+        var dict = CloneDict(existing);
+        dict.Set("FT", new PdfName("Sig"));
+        dict.Set("V", new PdfIndirectRef(sigValObjNum, 0));
+        return dict;
+    }
+
+    private static byte[] CreatePkcs7Signature(byte[] hash, PdfCertificate certificate,
+        DigestHashAlgorithm digest = DigestHashAlgorithm.Sha256)
+        => CmsBuilder.CreateDetachedSignature(hash, certificate, digest);
+
+    /// <summary>The digest algorithm implied by the signature /SubFilter: adbe.pkcs7.sha1
+    /// (and the raw adbe.x509.rsa_sha1 handler) use SHA-1; everything else uses SHA-256.</summary>
+    private static DigestHashAlgorithm DigestForSubFilter(string? subFilter)
+        => subFilter is "adbe.pkcs7.sha1" or "adbe.x509.rsa_sha1"
+            ? DigestHashAlgorithm.Sha1
+            : DigestHashAlgorithm.Sha256;
+
+    /// <summary>Hash the concatenated ByteRange input with the given digest.</summary>
+    private static byte[] HashByteRange(byte[] input, DigestHashAlgorithm digest)
+        => digest == DigestHashAlgorithm.Sha1 ? HmacSha.Sha1Hash(input) : ShaDigest.Sha256(input);
 
     /// <summary>
     /// Serialize an indirect object, tracking the position and length of the /Contents hex string.
@@ -746,12 +1054,18 @@ public sealed class PdfSigner
         dict.Set("BBox", CreateBBoxArray(0, 0, width, height));
         dict.Set("Length", new PdfInteger(streamContent.Length));
 
-        // Resources with a Helvetica font reference
+        // Resources with the appearance font (a custom appearance may request a
+        // specific family, e.g. "Times New Roman" → "TimesNewRoman"). The default is
+        // Arial — the reference signer names the concrete host face rather than the
+        // abstract Helvetica (a signed PDF/A must embed a concrete font, e.g. Arial).
+        var baseFont = string.IsNullOrEmpty(appearance.FontFamily)
+            ? "Arial"
+            : appearance.FontFamily.Replace(" ", "");
         var fontDict = new PdfDictionary();
         var f1Dict = new PdfDictionary();
         f1Dict.Set("Type", new PdfName("Font"));
         f1Dict.Set("Subtype", new PdfName("Type1"));
-        f1Dict.Set("BaseFont", new PdfName("Helvetica"));
+        f1Dict.Set("BaseFont", new PdfName(baseFont));
         fontDict.Set("F1", f1Dict);
         var resources = new PdfDictionary();
         resources.Set("Font", fontDict);
@@ -801,6 +1115,55 @@ public sealed class PdfSigner
         withBom[1] = 0xFF;
         Array.Copy(utf16, 0, withBom, 2, utf16.Length);
         return new PdfString(withBom);
+    }
+
+    /// <summary>Encrypt the string values (recursively) of an object being
+    /// appended to an already-encrypted document, using the document's per-object
+    /// key. The signature CMS envelope (/Contents) is exempt (ISO 32000-1
+    /// §7.6.1); the "__StreamData" marker is handled by
+    /// <see cref="EncryptAppendedStream"/>.</summary>
+    private static void EncryptAppendedDict(PdfDecryptor dec, int objNum, PdfDictionary dict)
+    {
+        foreach (var key in new List<string>(dict.Keys))
+        {
+            if (key is "Contents" or "__StreamData") continue;
+            switch (dict.Get(key))
+            {
+                case PdfString s:
+                    dict.Set(key, new PdfString(dec.EncryptString(s.Value, objNum, 0), isHex: true));
+                    break;
+                case PdfDictionary sub: // inline sub-dictionary: same object
+                    EncryptAppendedDict(dec, objNum, sub);
+                    break;
+                case PdfArray arr:
+                    EncryptAppendedArray(dec, objNum, arr);
+                    break;
+            }
+        }
+    }
+
+    private static void EncryptAppendedArray(PdfDecryptor dec, int objNum, PdfArray arr)
+    {
+        for (var i = 0; i < arr.Count; i++)
+        {
+            switch (arr[i])
+            {
+                case PdfString s:
+                    arr.ReplaceAt(i, new PdfString(dec.EncryptString(s.Value, objNum, 0), isHex: true));
+                    break;
+                case PdfDictionary sub: EncryptAppendedDict(dec, objNum, sub); break;
+                case PdfArray sa: EncryptAppendedArray(dec, objNum, sa); break;
+            }
+        }
+    }
+
+    /// <summary>Encrypt an appended stream object: its raw stream data (stored
+    /// under "__StreamData") and its dictionary strings.</summary>
+    private static void EncryptAppendedStream(PdfDecryptor dec, int objNum, PdfDictionary streamDict)
+    {
+        if (streamDict.Get("__StreamData") is PdfString sd)
+            streamDict.Set("__StreamData", new PdfString(dec.EncryptStream(sd.Value, objNum, 0)));
+        EncryptAppendedDict(dec, objNum, streamDict);
     }
 
     private static void WriteStreamObject(MemoryStream ms, int objNum, PdfDictionary dict)

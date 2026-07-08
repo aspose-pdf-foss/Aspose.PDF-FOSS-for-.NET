@@ -25,11 +25,35 @@ public sealed partial class XmpMetadata
     private readonly Dictionary<string, XmpValue> _structured = new(StringComparer.Ordinal);
     private bool _dirty;
 
+    // When set, mutations are written straight back into the backing /Metadata
+    // stream (used for per-resource XMP — e.g. an image XObject's /Metadata —
+    // which the document save loop serialises verbatim from its object number).
+    // The document-level catalog /Metadata uses a different save path (IsDirty →
+    // ToXmpBytes into a fresh object) and leaves this null.
+    private PdfStream? _backingStream;
+
     internal XmpMetadata(PdfStream metadataStream, PdfReader reader)
     {
         var data = reader.DecodeStream(metadataStream);
         var xml = Encoding.UTF8.GetString(data);
         ParseXmp(xml);
+    }
+
+    /// <summary>Bind this metadata to its source /Metadata stream so that
+    /// subsequent edits are re-serialised back into that stream and persist on the
+    /// next document save. Call once, right after constructing from a stream.</summary>
+    internal void EnableWriteBackTo(PdfStream backingStream) => _backingStream = backingStream;
+
+    /// <summary>Re-serialise into the bound backing stream (no-op when unbound).
+    /// The XMP packet is plaintext, so the stream is written with no /Filter.</summary>
+    private void PersistToBackingStream()
+    {
+        if (_backingStream is null) return;
+        var bytes = ToXmpBytes();
+        _backingStream.ReplaceData(bytes);
+        _backingStream.Dict.Remove("Filter");
+        _backingStream.Dict.Remove("DecodeParms");
+        _backingStream.Dict.Set("Length", new PdfInteger(bytes.Length));
     }
 
     internal XmpMetadata()
@@ -56,10 +80,21 @@ public sealed partial class XmpMetadata
     /// key is absent or is a plain string property.</summary>
     internal XmpValue? GetStructured(string key) => _structured.TryGetValue(key, out var v) ? v : null;
 
+    // When the document has no XMP packet (or a packet that omits a standard
+    // property), the document-level Info dictionary is the source of truth for
+    // keys like xmp:ModifyDate / xmp:CreatorTool. This delegate resolves those
+    // on demand. It is consulted only by the value getters — Keys/Count/
+    // ContainsKey stay packet-only so metadata enumeration is unaffected.
+    private System.Func<string, string?>? _infoFallback;
+
+    /// <summary>Wire a fallback that maps a standard XMP key to its
+    /// document-Info-derived value (e.g. xmp:ModifyDate ← /Info /ModDate).</summary>
+    internal void SetInfoFallback(System.Func<string, string?> fallback) => _infoFallback = fallback;
+
     /// <summary>Indexer access (read/write). Returns string value for backward compatibility.</summary>
     public string? this[string key]
     {
-        get => _properties.TryGetValue(key, out var v) ? v : null;
+        get => _properties.TryGetValue(key, out var v) ? v : _infoFallback?.Invoke(key);
         set
         {
             if (value is null)
@@ -75,7 +110,20 @@ public sealed partial class XmpMetadata
     public void Set(string key, string value)
     {
         _properties[key] = value;
+        _structured.Remove(key);
         _dirty = true;
+        PersistToBackingStream();
+    }
+
+    /// <summary>Store a structured (nested array/struct) value under
+    /// <paramref name="key"/>, replacing any flat string property with the same
+    /// key. Serialised as nested RDF by <see cref="ToXmpBytes"/>.</summary>
+    internal void SetStructured(string key, XmpValue value)
+    {
+        _structured[key] = value;
+        _properties.Remove(key);
+        _dirty = true;
+        PersistToBackingStream();
     }
 
     /// <summary>
@@ -83,18 +131,29 @@ public sealed partial class XmpMetadata
     /// </summary>
     public void Add(string key, XmpValue value)
     {
-        _properties[key] = value.ToStringValue();
+        // A composite value (array/struct/named-values) is kept as a structured
+        // entry so it round-trips; a scalar collapses to its string form.
+        if (value is not null && (value.IsArray || value.IsStructure || value.IsNamedValues))
+        {
+            SetStructured(key, value);
+            return;
+        }
+        _properties[key] = value?.ToStringValue() ?? string.Empty;
+        _structured.Remove(key);
         _dirty = true;
+        PersistToBackingStream();
     }
 
     /// <summary>
     /// Add a metadata property with a string value. Convenience overload that
-    /// matches the Aspose.PDF for .NET XmpMetadata.Add(string, string) public surface.
+    /// matches the Aspose.Pdf XmpMetadata.Add(string, string) public surface.
     /// </summary>
     public void Add(string key, string value)
     {
         _properties[key] = value;
+        _structured.Remove(key);
         _dirty = true;
+        PersistToBackingStream();
     }
 
     /// <summary>
@@ -106,7 +165,7 @@ public sealed partial class XmpMetadata
         return ParseXmpValue(raw);
     }
 
-    private static XmpValue ParseXmpValue(string raw)
+    internal static XmpValue ParseXmpValue(string raw)
     {
         if (int.TryParse(raw, System.Globalization.NumberStyles.Integer,
                 System.Globalization.CultureInfo.InvariantCulture, out var intVal))
@@ -126,7 +185,8 @@ public sealed partial class XmpMetadata
     public bool Remove(string key)
     {
         var removed = _properties.Remove(key);
-        if (removed) _dirty = true;
+        removed |= _structured.Remove(key);
+        if (removed) { _dirty = true; PersistToBackingStream(); }
         return removed;
     }
 
@@ -221,7 +281,11 @@ public sealed partial class XmpMetadata
         sb.AppendLine(" <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">");
         sb.AppendLine("  <rdf:Description rdf:about=\"\"");
 
-        // Collect used namespace prefixes
+        // Collect used namespace prefixes — from flat properties and from every
+        // (recursively nested) key inside the structured properties, so that the
+        // structured RDF emitted below has every prefix declared (an undeclared
+        // prefix makes the reload-time XDocument.Parse throw and silently drop the
+        // whole structured block).
         var usedPrefixes = new HashSet<string>(StringComparer.Ordinal);
         foreach (var key in _properties.Keys)
         {
@@ -229,6 +293,10 @@ public sealed partial class XmpMetadata
             if (colon > 0)
                 usedPrefixes.Add(key[..colon]);
         }
+        foreach (var key in _structured.Keys)
+            AddPrefix(key, usedPrefixes);
+        foreach (var v in _structured.Values)
+            CollectStructuredPrefixes(v, usedPrefixes);
 
         // Emit namespace declarations
         foreach (var prefix in usedPrefixes)
@@ -270,6 +338,14 @@ public sealed partial class XmpMetadata
             }
         }
 
+        // Structured (nested array/struct) properties — e.g. xmpMM:Manifest /
+        // xmpMM:History — serialised as nested RDF so they round-trip.
+        foreach (var (key, value) in _structured.OrderBy(p => p.Key, StringComparer.Ordinal))
+        {
+            if (key.IndexOf(':') <= 0) continue;
+            AppendStructured(sb, key, value, "   ");
+        }
+
         sb.AppendLine("  </rdf:Description>");
 
         // PDF/A extension-schema descriptions (pdfaExtension:schemas). One rdf:li
@@ -307,6 +383,85 @@ public sealed partial class XmpMetadata
         return Encoding.UTF8.GetBytes(sb.ToString());
     }
 
+    // ── Structured (nested array/struct) serialization ──────────────────────
+
+    private static void AddPrefix(string key, HashSet<string> set)
+    {
+        var c = key.IndexOf(':');
+        if (c > 0) set.Add(key[..c]);
+    }
+
+    private static bool IsStructValue(XmpValue v) => v.IsStructure || v.IsNamedValues;
+
+    private static IEnumerable<KeyValuePair<string, XmpValue>> EnumerateStruct(XmpValue v)
+        => v.IsNamedValues ? v.ToNamedValues() : v.ToDictionary();
+
+    private static void CollectStructuredPrefixes(XmpValue v, HashSet<string> set)
+    {
+        if (v.IsArray)
+        {
+            foreach (var item in v.ToArray()) CollectStructuredPrefixes(item, set);
+            return;
+        }
+        if (IsStructValue(v))
+            foreach (var (k, val) in EnumerateStruct(v))
+            {
+                AddPrefix(k, set);
+                CollectStructuredPrefixes(val, set);
+            }
+    }
+
+    // Emit a property (or a struct field — same shape) named <paramref name="key"/>:
+    // an array becomes <key><rdf:Seq>…</rdf:Seq></key>, a struct becomes
+    // <key rdf:parseType="Resource">fields</key>, a scalar becomes <key>value</key>.
+    private void AppendStructured(StringBuilder sb, string key, XmpValue value, string ind)
+    {
+        if (value.IsArray)
+        {
+            sb.AppendLine($"{ind}<{key}>");
+            sb.AppendLine($"{ind} <rdf:Seq>");
+            foreach (var item in value.ToArray())
+                AppendArrayItem(sb, item, ind + "  ");
+            sb.AppendLine($"{ind} </rdf:Seq>");
+            sb.AppendLine($"{ind}</{key}>");
+        }
+        else if (IsStructValue(value))
+        {
+            sb.AppendLine($"{ind}<{key} rdf:parseType=\"Resource\">");
+            foreach (var (fk, fv) in EnumerateStruct(value))
+                AppendStructured(sb, fk, fv, ind + " ");
+            sb.AppendLine($"{ind}</{key}>");
+        }
+        else
+        {
+            sb.AppendLine($"{ind}<{key}>{EscapeXml(value.ToStringValue())}</{key}>");
+        }
+    }
+
+    private void AppendArrayItem(StringBuilder sb, XmpValue item, string ind)
+    {
+        if (IsStructValue(item))
+        {
+            sb.AppendLine($"{ind}<rdf:li rdf:parseType=\"Resource\">");
+            foreach (var (fk, fv) in EnumerateStruct(item))
+                AppendStructured(sb, fk, fv, ind + " ");
+            sb.AppendLine($"{ind}</rdf:li>");
+        }
+        else if (item.IsArray)
+        {
+            sb.AppendLine($"{ind}<rdf:li>");
+            sb.AppendLine($"{ind} <rdf:Seq>");
+            foreach (var sub in item.ToArray())
+                AppendArrayItem(sb, sub, ind + "  ");
+            sb.AppendLine($"{ind} </rdf:Seq>");
+            sb.AppendLine($"{ind}</rdf:li>");
+        }
+        else
+        {
+            sb.AppendLine($"{ind}<rdf:li>{EscapeXml(item.ToStringValue())}</rdf:li>");
+        }
+    }
+
     private string? PrefixToNamespace(string prefix)
     {
         if (_customNamespaces.TryGetValue(prefix, out var custom))
@@ -342,9 +497,26 @@ public sealed partial class XmpMetadata
             var name = m.Groups[2].Value;
             var value = m.Groups[3].Value.Trim();
 
+            // rdf:/x: elements (rdf:li, rdf:value, rdf:Description, …) are RDF
+            // structure, not metadata properties — they must not surface as keys.
+            if (prefix is "rdf" or "x") continue;
+
             var key = $"{prefix}:{name}";
             _properties.TryAdd(key, value);
         }
+
+        // Attribute-form (shorthand) properties: XMP permits serialising a simple
+        // property as an XML attribute of its rdf:Description element —
+        //   <rdf:Description rdf:about="" pdfaid:part="2" pdfaid:conformance="A">
+        // (Acrobat and many producers write pdfaid this way.) Element-form values
+        // win when both exist (TryAdd keeps the first hit).
+        foreach (Match d in DescriptionOpenTagPattern().Matches(xml))
+            foreach (Match a in AttributePropertyPattern().Matches(d.Groups[1].Value))
+            {
+                var prefix = a.Groups[1].Value;
+                if (prefix is "xmlns" or "xml" or "rdf" or "x") continue;
+                _properties.TryAdd($"{prefix}:{a.Groups[2].Value}", a.Groups[3].Value.Trim());
+            }
 
         // Recover namespace prefix → URI bindings (xmlns:prefix="uri") so custom
         // namespaces round-trip through save/reload, not just property values.
@@ -441,10 +613,25 @@ public sealed partial class XmpMetadata
             {
                 if (prop.Name.Namespace == RdfNs) continue;
                 var container = prop.Elements().FirstOrDefault(IsContainer);
-                if (container is null) continue;
-                var items = container.Elements(RdfNs + "li").ToList();
-                if (items.Count == 0 || !items.Any(IsStructLi)) continue; // scalar list — leave to regex pass
-                _structured[QName(prop)] = new XmpValue(items.Select(ParseStructNode).ToArray());
+                if (container is not null)
+                {
+                    var items = container.Elements(RdfNs + "li").ToList();
+                    if (items.Count == 0 || !items.Any(IsStructLi)) continue; // scalar list — leave to regex pass
+                    _structured[QName(prop)] = new XmpValue(items.Select(ParseStructNode).ToArray());
+                    continue;
+                }
+
+                // Plain element-nested struct: the property directly wraps non-rdf child
+                // elements (no rdf:Seq/Bag/Alt container and no rdf:Description wrapper), e.g.
+                //   <ns:group><ns:item>
+                //     <ns:fieldA>…</ns:fieldA> <ns:fieldB>…</ns:fieldB> </ns:item>
+                //   </ns:group>
+                // Parse the whole subtree into a nested struct so callers can traverse it via
+                // ToNamedValues(). The single-rdf:Description struct form is handled by the
+                // regex pass above; this catches the wrapper-less nesting it misses.
+                if (prop.Elements().Any(e => e.Name.Namespace != RdfNs)
+                    && !_structured.ContainsKey(QName(prop)))
+                    _structured[QName(prop)] = ParseStructNode(prop);
             }
         }
     }
@@ -474,7 +661,22 @@ public sealed partial class XmpMetadata
     {
         var dict = new Dictionary<string, XmpValue>(StringComparer.Ordinal);
         CollectFields(el, dict);
-        return dict.Count > 0 ? new XmpValue(dict) : new XmpValue(el.Value.Trim());
+        return dict.Count > 0 ? new XmpValue(dict) : new XmpValue(NormalizeXmpScalar(el.Value.Trim()));
+    }
+
+    // Canonicalise an XMP date-time's timezone offset to a two-digit hour
+    // (e.g. "2013-05-16T14:00:00-7:00" → "2013-05-16T14:00:00-07:00"), matching how
+    // XMP toolkits normalise dates. Non-date strings — and dates whose offset is
+    // already two-digit — are returned unchanged.
+    private static readonly Regex XmpDateTzPattern = new(
+        @"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)([+-])(\d{1,2}):(\d{2})$");
+
+    private static string NormalizeXmpScalar(string value)
+    {
+        var m = XmpDateTzPattern.Match(value);
+        return m.Success
+            ? $"{m.Groups[1].Value}{m.Groups[2].Value}{int.Parse(m.Groups[3].Value):D2}:{m.Groups[4].Value}"
+            : value;
     }
 
     // Merge struct fields (from struct attributes and non-rdf child elements) into
@@ -514,7 +716,7 @@ public sealed partial class XmpMetadata
             || HasStructAttributes(el)
             || el.Elements().Any(e => e.Name == RdfNs + "Description" || e.Name.Namespace != RdfNs))
             return ParseStructNode(el);
-        return new XmpValue(el.Value.Trim());
+        return new XmpValue(NormalizeXmpScalar(el.Value.Trim()));
     }
 
     // <prefix:Name>value</prefix:Name>  — also matches empty values
@@ -532,4 +734,10 @@ public sealed partial class XmpMetadata
 
     [GeneratedRegex(@"<rdf:li[^>]*>([^<]*)</rdf:li>")]
     private static partial Regex ListItemPattern();
+
+    [GeneratedRegex(@"<rdf:Description\b([^>]*)>")]
+    private static partial Regex DescriptionOpenTagPattern();
+
+    [GeneratedRegex("([\\w]+):([\\w.-]+)=\"([^\"]*)\"")]
+    private static partial Regex AttributePropertyPattern();
 }

@@ -35,7 +35,7 @@ internal static class FieldFormatScript
     /// a field with no format action — or one driven by custom JavaScript rather
     /// than a recognised built-in formatter — accepts any value. A recognised
     /// built-in formatter (AFDate/AFTime/AFNumber/AFPercent) rejects a value it
-    /// cannot parse, matching the Aspose.PDF for .NET behaviour of leaving the prior value
+    /// cannot parse, matching the Aspose.Pdf behaviour of leaving the prior value
     /// in place.</summary>
     internal static bool IsValueValid(PdfDictionary fieldDict, PdfReader? reader, string rawValue)
     {

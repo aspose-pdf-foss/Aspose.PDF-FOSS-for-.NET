@@ -56,17 +56,25 @@ public class TextStamp : Stamp
     /// to prefer its <c>MaxRowWidth</c>.</summary>
     protected virtual double WrapWidth => Width;
 
+    /// <summary>When true, the stamp shrinks/grows its font size so the word-wrapped
+    /// text fits the <see cref="Width"/>×<see cref="Height"/> box. Off in the base;
+    /// the compat surface maps it onto <c>AutoAdjustFontSizeToFitStampRectangle</c>.</summary>
+    protected virtual bool AutoFitToBox => false;
+
+    /// <summary>Bisection stop interval (points) for the auto-fit font-size search.</summary>
+    protected virtual double AutoFitPrecision => 0.1;
+
     /// <summary>Height constraint for the stamp box. Stored only — the
     /// renderer auto-sizes around the text.</summary>
     public double Height { get; set; }
 
     /// <summary>When true, the stamp text is scaled to fit
     /// <see cref="Width"/> × <see cref="Height"/>. Stored only; matches
-    /// the Aspose.PDF for .NET public API.</summary>
+    /// the Aspose.Pdf public API.</summary>
     public bool Scale { get; set; }
 
     /// <summary>Zoom factor applied to the stamp. Stored only; matches
-    /// the Aspose.PDF for .NET public API.</summary>
+    /// the Aspose.Pdf public API.</summary>
     public double Zoom { get; set; } = 1.0;
 
     /// <summary>
@@ -90,13 +98,199 @@ public class TextStamp : Stamp
             ? string.Empty
             : string.Join("\n", formattedText.Lines.Select(l => l.Text));
         if (formattedText is not null)
+        {
+            // TextState is the effective source of font/size at render time (its
+            // defaults win over the bare stamp properties), so the FormattedText's
+            // font and size must land there, not only on FontSize/FontName.
             FontSize = (float)formattedText.FontSize;
+            TextState.FontSize = (float)formattedText.FontSize;
+            if (!string.IsNullOrEmpty(formattedText.FontName))
+            {
+                FontName = formattedText.FontName;
+                TextState.FontName = formattedText.FontName;
+            }
+        }
+    }
+
+    /// <summary>The replacement font program (raw TrueType bytes + name) used to render
+    /// glyphs the primary font lacks. Null when no fallback is configured. Overridden by the
+    /// public <c>Aspose.Pdf.TextStamp</c>, which exposes the <c>ReplacementFont</c> property.</summary>
+    protected virtual (byte[] ttf, string name)? ReplacementFontProgram => null;
+
+    /// <summary>True when at least one character of <paramref name="text"/> could not be
+    /// encoded by the primary font (it collapsed to '?' although the source char was not '?').</summary>
+    private static bool HasUnencodableGlyphs(string text, byte[] encoded)
+    {
+        var n = Math.Min(text.Length, encoded.Length);
+        for (var i = 0; i < n; i++)
+            if (text[i] != '?' && encoded[i] == (byte)'?')
+                return true;
+        return false;
+    }
+
+    /// <summary>Standard-14 family → the TrueType face a viewer substitutes for it. A
+    /// non-embedded Standard-14 font can't actually display glyphs outside WinAnsi (the
+    /// viewer's substitute lacks them), so for non-WinAnsi stamp text the matching TrueType
+    /// is embedded instead.</summary>
+    private static readonly Dictionary<string, string> Std14ToTrueType =
+        new(StringComparer.Ordinal)
+        {
+            ["Helvetica"] = "Arial",
+            ["Times-Roman"] = "Times New Roman",
+            ["Times"] = "Times New Roman",
+            ["Courier"] = "Courier New",
+        };
+
+    /// <summary>When the stamp's base font is a non-embedded Standard-14 face, resolve the
+    /// matching TrueType substitute (Arial / Times New Roman / Courier New, honouring
+    /// bold/italic) and return its program, so a stamp carrying glyphs outside WinAnsi can be
+    /// drawn with an embedded Type0 font — the only way those glyphs actually render.</summary>
+    private (byte[] ttf, string name)? TryResolveUnicodeFallback()
+    {
+        var fn = TextState?.FontName ?? FontName ?? "Helvetica";
+        var family = fn;
+        foreach (var suffix in new[] { "-BoldOblique", "-BoldItalic", "-Bold", "-Oblique", "-Italic" })
+            if (family.EndsWith(suffix, StringComparison.Ordinal)) { family = family.Substring(0, family.Length - suffix.Length); break; }
+        if (!Std14ToTrueType.TryGetValue(family, out var ttFamily)) return null;
+
+        var bold = TextState?.IsBold ?? false;
+        var italic = TextState?.IsItalic ?? false;
+        var style = (bold ? FontStyles.Bold : 0) | (italic ? FontStyles.Italic : 0);
+        var font = Aspose.Pdf.Text.FontRepository.FindFont(ttFamily, style, true)
+                   ?? Aspose.Pdf.Text.FontRepository.FindFont(ttFamily, true);
+        if (font is null) return null;
+        var ttf = font.SourceFontData?.TtfData;
+        if (ttf is null || ttf.Length == 0) return null;
+        return (ttf, font.FontName);
+    }
+
+    /// <summary>A plain single-line stamp with no scale / rotation / wrap / background box —
+    /// the shape <see cref="BuildCidStamp"/> renders. Gates the auto Unicode fallback so
+    /// feature-rich stamps keep the single-byte path.</summary>
+    private bool IsPlainBlockStamp()
+    {
+        var wrapping = WordWrap || WordWrapMode != TextFormattingOptions.WordWrapMode.NoWrap;
+        var rot = RotateAngle != 0 ? RotateAngle : (double)Rotate;
+        return !Scale && Math.Abs(rot) < 0.01 && !wrapping
+            && (TextState?.BackgroundColor is null || TextState.BackgroundColor.IsEmpty)
+            && !string.IsNullOrEmpty(Text) && !Text.Contains('\n');
+    }
+
+    /// <summary>Resolve (creating if needed) the page's /Resources /Font dictionary so a new
+    /// font can be registered there; AddStampForm later shares it into the stamp form.</summary>
+    private static PdfDictionary GetPageFontDict(Page page)
+    {
+        var resources = page.Dict.Get("Resources") as PdfDictionary
+            ?? page.Reader.ResolveDict(page.Dict.Get("Resources"));
+        if (resources is null)
+        {
+            resources = new PdfDictionary();
+            page.Dict.Set("Resources", resources);
+        }
+        var fontDict = resources.Get("Font") as PdfDictionary
+            ?? page.Reader.ResolveDict(resources.Get("Font"));
+        if (fontDict is null)
+        {
+            fontDict = new PdfDictionary();
+            resources.Set("Font", fontDict);
+        }
+        return fontDict;
+    }
+
+    /// <summary>The candidate system CJK faces for the script of <paramref name="text"/>,
+    /// resolved to standalone TTF bytes (ttc entries extracted). Null when none load.</summary>
+    private static (byte[] ttf, string name)? TryResolveCjkTtf(string text)
+    {
+        bool kana = false, hangul = false, han = false;
+        foreach (var ch in text)
+        {
+            if (ch is >= '぀' and <= 'ヿ') kana = true;
+            else if (ch is >= '가' and <= '힯' or >= 'ᄀ' and <= 'ᇿ') hangul = true;
+            else if (ch is >= '一' and <= '鿿' or >= '㐀' and <= '䶿') han = true;
+        }
+        if (!kana && !hangul && !han) return null;
+        var candidates = kana
+            ? new[] { "MS-Gothic", "MS Gothic", "Yu Gothic", "Meiryo" }
+            : hangul
+            ? new[] { "Malgun Gothic", "Gulim", "Batang" }
+            : new[] { "SimSun", "MS-Gothic", "Microsoft YaHei" };
+        foreach (var name in candidates)
+        {
+            var ttf = Aspose.Pdf.Text.SystemFontResolver.Resolve(name);
+            if (ttf is { Length: > 12 }) return (ttf, name.Replace("-", " "));
+        }
+        return null;
+    }
+
+    /// <summary>Draw the whole stamp with an embedded Type0 replacement font (Identity-H +
+    /// ToUnicode), so Unicode/CJK text both renders and round-trips through text extraction.
+    /// Handles multi-line text: rows stack downward one em apart, each aligned within the
+    /// block per <see cref="TextAlignment"/>, the block placed per the stamp alignments
+    /// (margins honoured) — measured with the embedded font's /W advances so extraction
+    /// re-measures the exact same widths.</summary>
+    private byte[] BuildCidStamp(Page page, byte[] ttf, string fontName, double fontSize, Color color)
+    {
+        var fontDict = GetPageFontDict(page);
+        var rows = Text.Replace("\r\n", "\n").Split('\n');
+        var resName = "";
+        var hexes = new byte[rows.Length][];
+        var widths = new double[rows.Length];
+        for (var i = 0; i < rows.Length; i++)
+        {
+            (resName, hexes[i]) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
+                fontDict, ttf, fontName, rows[i], stripSpacesInBaseFont: true);
+            widths[i] = Aspose.Pdf.Text.Type0FontEmbedder.MeasureText(
+                fontDict, ttf, fontName, rows[i], fontSize, stripSpacesInBaseFont: true);
+        }
+        var blockW = widths.Length > 0 ? widths.Max() : 0.0;
+
+        // Block placement: alignment when set (margins honoured), else the legacy
+        // XIndent/YIndent (or top-left inset) placement.
+        var x = HorizontalAlignment switch
+        {
+            HorizontalAlignment.Center => (page.Width - blockW) / 2,
+            HorizontalAlignment.Right => page.Width - blockW - XIndent - RightMargin,
+            _ => XIndent > 0 ? XIndent : LeftMargin,
+        };
+        var y = VerticalAlignment switch
+        {
+            VerticalAlignment.Top => page.Height - TopMargin - YIndent - fontSize,
+            VerticalAlignment.Center => (page.Height + rows.Length * fontSize) / 2 - fontSize,
+            VerticalAlignment.Bottom => YIndent + BottomMargin + rows.Length * fontSize - fontSize,
+            _ => YIndent > 0 ? YIndent : page.Height - TopMargin - fontSize,
+        };
+
+        var builder = new ContentStreamBuilder();
+        builder.SaveState();
+        if (Opacity < 1.0)
+        {
+            var gsName = page.AddExtGState(new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
+            builder.SetExtGState(gsName);
+        }
+        builder.BeginText()
+            .SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0)
+            .SetFont(resName, fontSize);
+        for (var i = 0; i < rows.Length; i++)
+        {
+            var rowX = TextAlignment switch
+            {
+                HorizontalAlignment.Right => x + blockW - widths[i],
+                HorizontalAlignment.Center => x + (blockW - widths[i]) / 2,
+                _ => x,
+            };
+            builder.SetTextMatrix(1, 0, 0, 1, rowX, y - i * fontSize)
+                   .ShowTextHex(hexes[i]);
+        }
+        builder
+            .EndText();
+        builder.RestoreState();
+        return builder.Build();
     }
 
     internal override byte[] BuildContentStream(Page page)
     {
         // Pull effective font/size/colour from TextState first (mirrors the
-        // Aspose.PDF for .NET API where setting TextState.* on a stamp wins over the
+        // Aspose.Pdf API where setting TextState.* on a stamp wins over the
         // bare TextStamp.FontSize/Color), falling back to the stamp's own
         // properties for callers that don't touch TextState.
         var baseFontName = ResolveBaseFontName();
@@ -108,22 +302,57 @@ public class TextStamp : Stamp
         // declare via /Differences so non-WinAnsi chars (Polish ę/ą/ś/ł/ń/ź/ż/ć,
         // Czech č, etc.) render instead of falling back to '?'.
         var encoded = EncodeForWinAnsi(Text, out var diffMap);
+
+        // Auto-fit: pick the largest font size at which the word-wrapped text still
+        // fits the Width×Height box (bisection to AutoFitPrecision). Do this before
+        // any layout so the chosen size flows into the render below and is readable
+        // via the FontSize property once the stamp has been added.
+        if (AutoFitToBox && Width > 0 && Height > 0)
+        {
+            fontSize = ComputeAutoFitFontSize(baseFontName, encoded);
+            FontSize = (float)fontSize;
+        }
+
+        // When the primary font can't represent some glyphs (e.g. CJK/Unicode collapses to
+        // '?') and a replacement font program is configured, embed it as a Type0/CIDFontType2
+        // font and draw the whole stamp with it so the text renders and round-trips through
+        // extraction (the recurring non-Latin1 stamp-text path).
+        var replacement = ReplacementFontProgram;
+        if (replacement is { } rf && HasUnencodableGlyphs(Text, encoded))
+            return BuildCidStamp(page, rf.ttf, rf.name, fontSize, color);
+
+        // CJK stamp text with no explicit replacement font: the configured Latin face
+        // has no such glyphs (they collapsed to '?'), so embed a system CJK face as a
+        // Type0 font — mirroring the generator's CJK fallback — so the text renders
+        // and round-trips through extraction.
+        if (replacement is null && HasUnencodableGlyphs(Text, encoded)
+            && TryResolveCjkTtf(Text) is { } cjk)
+            return BuildCidStamp(page, cjk.ttf, cjk.name, fontSize, color);
+
+        // No explicit replacement font, but the text carries glyphs outside WinAnsi (Polish
+        // ę/ą/ś/…, etc.) that a non-embedded Standard-14 base font can't display: embed the
+        // matching TrueType substitute as a Type0 font so the glyphs render and round-trip
+        // through extraction. Gated to a plain single-line stamp (BuildCidStamp's shape).
+        if (replacement is null && diffMap.Count > 0 && IsPlainBlockStamp()
+            && TryResolveUnicodeFallback() is { } auto)
+            return BuildCidStamp(page, auto.ttf, auto.name, fontSize, color);
+
         var fontResName = EnsureFontResource(page, baseFontName, diffMap);
 
         // Wrapping is enabled by the WordWrap bool OR a non-NoWrap WordWrapMode
-        // (Aspose.PDF for .NET exposes both; this sets only the bool).
+        // (Aspose.Pdf exposes both; this sets only the bool).
         var wrapping = WordWrap || WordWrapMode != TextFormattingOptions.WordWrapMode.NoWrap;
 
         // Scale-to-fit: a stamp with Scale=true and an explicit Width×Height box
         // lays its text out at the base font, then non-uniformly scales that block
         // to exactly fill the box, anchored at (XIndent, YIndent) — matching
-        // Aspose.PDF for .NET, which emits `sx 0 0 sy XIndent YIndent cm` over a natural-size
+        // Aspose.Pdf, which emits `sx 0 0 sy XIndent YIndent cm` over a natural-size
         // form. Wrapped text fills width at scale ~1 and stretches
         // vertically; un-wrapped text is laid as a single line and squished to width.
         if (Scale && Width > 0 && Height > 0)
             return BuildScaledToBox(page, encoded, baseFontName, fontResName, fontSize, color, wrapping);
 
-        // Rotated stamp with an explicit Width×Height box: Aspose.PDF for .NET scales the text
+        // Rotated stamp with an explicit Width×Height box: Aspose.Pdf scales the text
         // non-uniformly to fill the box (sx=Width/textW, sy=Height/textH), centres the
         // box per Horizontal/VerticalAlignment, then rotates it about the box centre.
         // The plain path below only applies the horizontal scale and
@@ -131,6 +360,14 @@ public class TextStamp : Stamp
         double rot = RotateAngle != 0 ? RotateAngle : (double)Rotate;
         if (Math.Abs(rot) > 0.01 && Width > 0 && Height > 0)
             return BuildBoxRotated(page, encoded, baseFontName, fontResName, fontSize, color, wrapping, rot);
+
+        // Word-wrapped stamp with a background box and Scale=false: wrap the text to the
+        // inner width (Width minus L/R margins), grow the box to the widest wrapped line,
+        // and emit the box as the leading `q / x y w h re / rg / RG / f*` block that
+        // Aspose.Pdf produces — the text follows inside it.
+        var bgEarly = TextState?.BackgroundColor;
+        if (!Scale && wrapping && Width > 0 && bgEarly is { IsEmpty: false })
+            return BuildWrappedBackgroundBox(page, encoded, baseFontName, fontResName, fontSize, color, bgEarly!);
 
         // Break the text into display rows: wrap to the stamp width when wrapping
         // is on, otherwise split on the explicit '\n' line breaks that a
@@ -147,12 +384,12 @@ public class TextStamp : Stamp
         var blockWidth = rowWidths.Count > 0 ? rowWidths.Max() : 0.0;
 
         // A stamp with an explicit Width stretches/condenses its text horizontally
-        // to fill that width (matches Aspose.PDF for .NET, which scales the whole stamp form
+        // to fill that width (matches Aspose.Pdf, which scales the whole stamp form
         // by Width / naturalWidth). No Width ⇒ draw at natural size.
         var scaleX = (Width > 0 && blockWidth > 0) ? Width / blockWidth : 1.0;
         var scaledBlockWidth = blockWidth * scaleX;
 
-        // Leading of one em (Aspose.PDF for .NET spaces stamp lines by exactly the font size).
+        // Leading of one em (Aspose.Pdf spaces stamp lines by exactly the font size).
         var lineHeight = fontSize;
 
         // Position the block on the page. The block's left/top is derived from the
@@ -180,14 +417,57 @@ public class TextStamp : Stamp
         double rotateDeg = RotateAngle != 0 ? RotateAngle : (double)Rotate;
         var cos = Math.Cos(rotateDeg * Math.PI / 180);
         var sin = Math.Sin(rotateDeg * Math.PI / 180);
+
+        var bgColor = TextState?.BackgroundColor;
+        var hasBg = bgColor is { IsEmpty: false };
+
+        // Multi-line block without a background box: Aspose.Pdf anchors the
+        // block at its BOTTOM — the last row's baseline sits one font-descent above
+        // the block origin and each row's Tm carries the absolute in-block Y
+        // ((N-1-li)·lineHeight + descent). The cm translation is lowered by the same
+        // amount, so the net page placement is unchanged; only the Tm/cm split moves.
+        var bottomAnchor = 0.0;
+        if (rows.Count > 1 && !hasBg)
+        {
+            var d = Aspose.Pdf.Text.Standard14Fonts.GetDescent(baseFontName);
+            var descentInset = (d < 0 ? -d / 1000.0 : 0.2) * fontSize;
+            bottomAnchor = (rows.Count - 1) * lineHeight + descentInset;
+        }
+        var cmY = topBaseline - bottomAnchor;
         if (Math.Abs(rotateDeg) > 0.01)
-            builder.SetMatrix(cos * scaleX, sin * scaleX, -sin, cos, originX, topBaseline);
+            builder.SetMatrix(cos * scaleX, sin * scaleX, -sin, cos, originX, cmY);
         else
-            builder.SetMatrix(scaleX, 0, 0, 1, originX, topBaseline);
+            builder.SetMatrix(scaleX, 0, 0, 1, originX, cmY);
+
+        // Optional background box: when TextState.BackgroundColor is set, fill a
+        // rectangle behind the text in the block-local (already rotated/placed)
+        // space. The box spans the block width and one 1.1-em line box per row;
+        // the text baseline is raised by the descent so the glyphs sit inside it.
+        var bgYOffset = 0.0;
+        if (hasBg)
+        {
+            const double descentFactor = 0.211; // baseline inset from the box bottom
+            const double boxHeightFactor = 1.1; // one line box = 1.1 em
+            bgYOffset = (rows.Count - 1) * lineHeight + descentFactor * fontSize;
+            var boxHeight = (rows.Count - 1) * lineHeight + boxHeightFactor * fontSize;
+            // Inner save so the rectangle's preceding operator is `q`, not the cm.
+            builder.SaveState();
+            builder.Rectangle(0, 0, blockWidth, boxHeight);
+            builder.SetFillColor(bgColor!);
+            builder.SetStrokeColor(bgColor!);
+            builder.FillEvenOdd();
+        }
 
         builder.BeginText()
             .SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0)
             .SetFont(fontResName, fontSize);
+
+        // Apply the stamp's character/word spacing (Tc/Tw) so letter-spaced stamps
+        // render spaced; guarded so default spacing keeps byte-identical output.
+        if (TextState?.CharacterSpacing is { } cs and not 0f)
+            builder.SetCharSpacing(cs);
+        if (TextState?.WordSpacing is { } ws and not 0f)
+            builder.SetWordSpacing(ws);
 
         for (var li = 0; li < rows.Count; li++)
         {
@@ -200,11 +480,13 @@ public class TextStamp : Stamp
                 HorizontalAlignment.Center => pad / 2,
                 _ => 0.0,
             };
-            builder.SetTextMatrix(1, 0, 0, 1, localX, -li * lineHeight)
+            builder.SetTextMatrix(1, 0, 0, 1, localX, -li * lineHeight + bgYOffset + bottomAnchor)
                    .ShowTextBytes(rows[li]);
         }
 
-        builder.EndText().RestoreState();
+        builder.EndText();
+        if (hasBg) builder.RestoreState(); // close the inner save
+        builder.RestoreState();
 
         return builder.Build();
     }
@@ -213,7 +495,7 @@ public class TextStamp : Stamp
     // then emit one cm that non-uniformly scales that block to fill the Width×Height
     // box at (XIndent, YIndent). Wrapped text breaks to Width (so scaleX ≈ 1 and only
     // the height stretches); un-wrapped text is a single line (newlines → spaces) that
-    // is squished horizontally to Width and stretched to Height. Mirrors Aspose.PDF for .NET.
+    // is squished horizontally to Width and stretched to Height. Mirrors Aspose.Pdf.
     private byte[] BuildScaledToBox(Page page, byte[] encoded, string baseFontName,
         string fontResName, double fontSize, Color color, bool wrapping)
     {
@@ -330,6 +612,187 @@ public class TextStamp : Stamp
         return builder.Build();
     }
 
+    // Word-wrapped stamp with a background box (Scale=false). Wrap to the inner width
+    // (Width minus left/right margins), grow the box to the widest wrapped line, and emit:
+    //   q  x y w h re  r g b rg  r g b RG  f*  BT ... ET  Q
+    // so the rectangle is the first painted operator (matching Aspose.Pdf). The box
+    // is placed per the stamp's Horizontal/Vertical alignment; the text fills it top-down.
+    private byte[] BuildWrappedBackgroundBox(Page page, byte[] encoded, string baseFontName,
+        string fontResName, double fontSize, Color color, Color bgColor)
+    {
+        var innerW = Width - LeftMargin - RightMargin;
+        if (innerW <= 0) innerW = Width;
+
+        // Break at spaces only: a word wider than the inner width is NOT hyphenated — it sits on
+        // its own line and overflows, which (with Scale=false) is what grows the box width.
+        var rows = WrapAtSpaces(encoded, baseFontName, fontSize, innerW);
+        var rowWidths = rows.Select(r => MeasureRow(r, baseFontName, fontSize)).ToList();
+        var blockWidth = rowWidths.Count > 0 ? rowWidths.Max() : 0.0;
+        // With Scale=false a word wider than the inner width grows the box rather than being
+        // squeezed, so the box width is the widest wrapped line.
+        var boxW = Math.Max(innerW, blockWidth);
+        var lineHeight = fontSize;
+        var descent = fontSize * 0.1;                 // baseline inset below the last line
+        var boxH = rows.Count * lineHeight + descent;
+
+        double boxX = HorizontalAlignment switch
+        {
+            HorizontalAlignment.Right => page.Width - RightMargin - boxW,
+            HorizontalAlignment.Center => (page.Width - boxW) / 2.0,
+            _ => LeftMargin,
+        };
+        double boxY = VerticalAlignment switch
+        {
+            VerticalAlignment.Bottom => BottomMargin,
+            VerticalAlignment.Center => (page.Height - boxH) / 2.0,
+            _ => page.Height - TopMargin - boxH,       // Top (default)
+        };
+
+        var builder = new ContentStreamBuilder();
+        builder.SaveState();                            // q
+        if (Opacity < 1.0)
+        {
+            var gsName = page.AddExtGState(new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
+            builder.SetExtGState(gsName);
+        }
+        builder.Rectangle(boxX, boxY, boxW, boxH);      // re
+        builder.SetFillColor(bgColor);                  // rg
+        builder.SetStrokeColor(bgColor);                // RG
+        builder.FillEvenOdd();                          // f*
+
+        builder.BeginText()
+            .SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0)
+            .SetFont(fontResName, fontSize);
+        var topBaseline = boxY + boxH - fontSize;       // first line near the box top
+        for (var li = 0; li < rows.Count; li++)
+        {
+            var pad = boxW - rowWidths[li];
+            var localX = TextAlignment switch
+            {
+                HorizontalAlignment.Right => pad,
+                HorizontalAlignment.Center => pad / 2,
+                _ => 0.0,
+            };
+            builder.SetTextMatrix(1, 0, 0, 1, boxX + localX, topBaseline - li * lineHeight)
+                   .ShowTextBytes(rows[li]);
+        }
+        builder.EndText();
+        builder.RestoreState();                         // Q
+        return builder.Build();
+    }
+
+    // Greedy space-only word wrap: pack whole words onto a line until the next word would
+    // exceed maxW; a single word wider than maxW gets its own (overflowing) line. Explicit
+    // '\n' forces a break. Words are measured with the real face metrics (MeasureRow).
+    // Largest font size (bisected to AutoFitPrecision) at which the word-wrapped
+    // text still fits Width×Height. The block is N wrapped lines tall, each line
+    // one em of leading with a 1.1-em box on the single line, so the block height
+    // is (N + 0.1)·fontSize. Width binds only when a single word is itself wider
+    // than the box (an unbreakable word ⇒ the search collapses to 0).
+    private double ComputeAutoFitFontSize(string baseFont, byte[] encoded)
+    {
+        var prec = AutoFitPrecision > 0 ? AutoFitPrecision : 0.1;
+        double lo = 0, hi = 2000;
+        if (!AutoFitFits(hi, baseFont, encoded))
+        {
+            while (hi - lo > prec)
+            {
+                var mid = (lo + hi) / 2;
+                if (AutoFitFits(mid, baseFont, encoded)) lo = mid; else hi = mid;
+            }
+            return lo;
+        }
+        return hi;
+    }
+
+    private bool AutoFitFits(double f, string baseFont, byte[] encoded)
+    {
+        if (f <= 0) return true;
+        var rows = AutoFitWrap(encoded, baseFont, f, Width);
+        double blockWidth = 0;
+        foreach (var r in rows)
+        {
+            var w = MeasureRow(r, baseFont, f);
+            if (w > blockWidth) blockWidth = w;
+        }
+        var blockHeight = (rows.Count + 0.1) * f;
+        return blockWidth <= Width + 1e-6 && blockHeight <= Height + 1e-6;
+    }
+
+    // Greedy word wrap for the auto-fit measurement. Unlike the render-side
+    // WrapAtSpaces, the fit test ignores each line's TRAILING space: a word joins
+    // the current line when (line + inter-word space + word), with no trailing
+    // space, still fits — matching the box-fit rule Aspose.Pdf uses.
+    // Rows are returned already trailing-trimmed so their measured width is exact.
+    private static List<byte[]> AutoFitWrap(byte[] enc, string baseFont, double fontSize, double maxW)
+    {
+        var rows = new List<byte[]>();
+        foreach (var lineSeg in SplitRows(enc))
+        {
+            var words = new List<byte[]>();
+            var w = new List<byte>();
+            foreach (var b in lineSeg)
+            {
+                w.Add(b);
+                if (b == (byte)' ') { words.Add(w.ToArray()); w = new List<byte>(); }
+            }
+            if (w.Count > 0) words.Add(w.ToArray());
+
+            var cur = new List<byte>();
+            foreach (var word in words)
+            {
+                if (cur.Count == 0) { cur.AddRange(word); continue; }
+                var trial = new List<byte>(cur); trial.AddRange(word);
+                if (MeasureRow(TrimTrailingSpace(trial), baseFont, fontSize) > maxW)
+                {
+                    rows.Add(TrimTrailingSpace(cur));
+                    cur = new List<byte>(word);
+                }
+                else cur = trial;
+            }
+            rows.Add(TrimTrailingSpace(cur));
+        }
+        return rows.Count == 0 ? new List<byte[]> { enc } : rows;
+    }
+
+    private static List<byte[]> WrapAtSpaces(byte[] enc, string baseFont, double fontSize, double maxW)
+    {
+        var rows = new List<byte[]>();
+        foreach (var lineSeg in SplitRows(enc))
+        {
+            var words = new List<byte[]>();
+            var w = new List<byte>();
+            foreach (var b in lineSeg)
+            {
+                w.Add(b);
+                if (b == (byte)' ') { words.Add(w.ToArray()); w = new List<byte>(); }
+            }
+            if (w.Count > 0) words.Add(w.ToArray());
+
+            var cur = new List<byte>();
+            foreach (var word in words)
+            {
+                if (cur.Count == 0) { cur.AddRange(word); continue; }
+                var trial = new List<byte>(cur); trial.AddRange(word);
+                if (MeasureRow(trial.ToArray(), baseFont, fontSize) > maxW)
+                {
+                    rows.Add(TrimTrailingSpace(cur));
+                    cur = new List<byte>(word);
+                }
+                else cur = trial;
+            }
+            rows.Add(TrimTrailingSpace(cur));
+        }
+        return rows.Count == 0 ? new List<byte[]> { enc } : rows;
+    }
+
+    private static byte[] TrimTrailingSpace(List<byte> row)
+    {
+        var n = row.Count;
+        while (n > 0 && row[n - 1] == (byte)' ') n--;
+        return row.GetRange(0, n).ToArray();
+    }
+
     // Flatten an encoded buffer to a single line: newlines become spaces.
     private static byte[] JoinToOneLine(byte[] enc)
     {
@@ -357,9 +820,60 @@ public class TextStamp : Stamp
     // Width (points) of one encoded row at the given size, using Standard-14
     // metrics for base-14 fonts and a 0.5-em fallback otherwise (matches the
     // estimate used by the wrapper).
+    // Cache of system TrueType faces (per family) used only to read unrounded
+    // advance widths. The integer /W and AFM tables drop the sub-unit precision
+    // that exact stamp geometry (a background box sized to the text) needs.
+    private static readonly System.Collections.Generic.Dictionary<string, Aspose.Pdf.Text.TrueTypeParser?> _metricParsers = new();
+    private static readonly object _metricParsersLock = new();
+
+    private static Aspose.Pdf.Text.TrueTypeParser? ResolveMetricParser(string family)
+    {
+        lock (_metricParsersLock)
+        {
+            if (_metricParsers.TryGetValue(family, out var cached)) return cached;
+            Aspose.Pdf.Text.TrueTypeParser? parser = null;
+            try
+            {
+                var ttf = Aspose.Pdf.Text.SystemFontResolver.Resolve(family);
+                if (ttf is { Length: > 0 })
+                {
+                    var p = new Aspose.Pdf.Text.TrueTypeParser(ttf);
+                    p.Parse();
+                    if (p.UnitsPerEm > 0 && p.GlyphWidths.Length > 0)
+                        parser = p;
+                }
+            }
+            catch { parser = null; }
+            _metricParsers[family] = parser;
+            return parser;
+        }
+    }
+
     private static double MeasureRow(byte[] row, string baseFont, double fontSize)
     {
+        // Real font families (e.g. Arial — even though it aliases onto Helvetica's
+        // AFM) are measured from the resolved face's unrounded hmtx advances when a
+        // system face is available: the integer-1/1000 path rounds e.g. Arial 'T'
+        // (610.84) to 611, losing the precision an exact text-width assertion needs.
+        // Genuine Core-14 names (Helvetica/Times/Courier) keep their AFM table.
         var std14 = Aspose.Pdf.Text.Standard14Fonts.IsStandard14(baseFont);
+        if (!Aspose.Pdf.Text.Standard14Fonts.IsCoreName(baseFont))
+        {
+            var parser = ResolveMetricParser(baseFont);
+            if (parser is not null)
+            {
+                var text = Aspose.Pdf.Text.Cp1252.GetString(row);
+                double units = 0;
+                foreach (var ch in text)
+                {
+                    if (parser.CMap.TryGetValue(ch, out var gid) && gid >= 0 && gid < parser.GlyphWidths.Length)
+                        units += parser.GlyphWidths[gid];
+                    else
+                        units += parser.UnitsPerEm * 0.5;
+                }
+                return units * fontSize / parser.UnitsPerEm;
+            }
+        }
         double w = 0;
         foreach (var b in row)
             w += (std14 ? Aspose.Pdf.Text.Standard14Fonts.GetWidth(baseFont, b) : 500) / 1000.0 * fontSize;
@@ -622,7 +1136,18 @@ public class TextStamp : Stamp
                 (false, true) => "Courier-Oblique",
                 _ => "Courier",
             },
-            _ => fn,
+            // Non-standard-14 families (e.g. Arial): qualify the BaseFont with a
+            // comma-separated style suffix so the requested style is reflected in
+            // the font's reported name. Font.FontName strips the comma
+            // ("Arial,Bold" → "ArialBold"), matching the style-qualified name a
+            // styled text stamp is expected to carry.
+            _ => (bold, italic) switch
+            {
+                (true, true) => family + ",BoldItalic",
+                (true, false) => family + ",Bold",
+                (false, true) => family + ",Italic",
+                _ => fn,
+            },
         };
     }
 
@@ -735,7 +1260,7 @@ public class TextStamp : Stamp
         var originX = HorizontalAlignment switch
         {
             HorizontalAlignment.Center => (pageWidth - scaledBlockWidth) / 2,
-            HorizontalAlignment.Right => pageWidth - scaledBlockWidth - XIndent,
+            HorizontalAlignment.Right => pageWidth - scaledBlockWidth - XIndent - RightMargin,
             _ => XIndent,
         };
 

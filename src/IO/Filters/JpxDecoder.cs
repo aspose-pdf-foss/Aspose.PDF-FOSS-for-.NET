@@ -680,7 +680,12 @@ internal static class JpxDecoder
                 // decoded full precision, so q already integer at LSB. Use delta directly.
                 int prec = _comps.Length > 0 ? _comps[0].Prec : 8;
                 int Rb = prec + band.Gain;
-                double delta = (1.0 + band.Mant / 2048.0) * Math.Pow(2.0, Rb - band.Expn);
+                // The 9/7 synthesis filter bank has a non-unit DC gain; the inverse lifting
+                // here reproduces the standard's normalised transform whose reconstructed
+                // coefficients must be scaled by K² (the squared low-pass gain) to land in
+                // the sample range. Without it every irreversible image decodes ~1/K² too
+                // dark (verified against the OpenJPEG reference: white 255 → 211).
+                double delta = (1.0 + band.Mant / 2048.0) * Math.Pow(2.0, Rb - band.Expn) * (K * K);
                 for (int i = 0; i < coeffs.Length; i++)
                 {
                     int q = coeffs[i];

@@ -79,7 +79,7 @@ public sealed class PdfConverter : IDisposable
     }
 
     /// <summary>
-    /// Construct with a PDF document already bound. Matches Aspose.PDF for .NET's
+    /// Construct with a PDF document already bound. Matches Aspose.Pdf's
     /// <c>new PdfConverter(Document)</c> convenience constructor.
     /// </summary>
     public PdfConverter(Document document) : this()
@@ -93,7 +93,7 @@ public sealed class PdfConverter : IDisposable
     public void BindPdf(Document srcDoc)
     {
         // A null document is tolerated here (it surfaces later at conversion time)
-        // rather than throwing — matching the Aspose.PDF for .NET facade, which does not
+        // rather than throwing — matching the Aspose.Pdf facade, which does not
         // reject the bind itself.
         _document = srcDoc;
         EndPage = srcDoc?.PageCount ?? 0;
@@ -140,7 +140,7 @@ public sealed class PdfConverter : IDisposable
 
     /// <summary>
     /// Check if there is another page available for conversion. Auto-initializes
-    /// the iterator like the Aspose.PDF for .NET API does — callers don't need to call
+    /// the iterator like the Aspose.Pdf API does — callers don't need to call
     /// DoConvert() explicitly. Setting <see cref="StartPage"/> after iteration
     /// has begun also moves the cursor.
     /// </summary>
@@ -169,7 +169,7 @@ public sealed class PdfConverter : IDisposable
         return device.Process(page);
     }
 
-    // Aspose.PDF for .NET implicitly initialises the iterator inside GetNextImage
+    // Aspose.Pdf implicitly initialises the iterator inside GetNextImage
     // when BindPdf → GetNextImage is called without an explicit DoConvert. Mirror that.
     private void EnsureConverted()
     {
@@ -412,24 +412,28 @@ public sealed class PdfConverter : IDisposable
         => SaveAsTIFF(outputStream, settings: null);
 
     /// <summary>
-    /// Save all bound pages as a multi-page TIFF using the supplied settings.
+    /// Save the bound page range (<see cref="StartPage"/>…<see cref="EndPage"/>)
+    /// as a multi-page TIFF using the supplied settings.
     /// </summary>
     public void SaveAsTIFF(string outputFile, TiffSettings? settings)
     {
         if (_document is null) throw new InvalidOperationException("No document bound. Call BindPdf first.");
         var devRes = new Resolution(Resolution.X, Resolution.Y);
         var device = new TiffDevice(devRes, settings ?? new TiffSettings());
-        device.Process(_document, outputFile);
+        device.Process(_document, StartPage, EffectiveEndPage, outputFile);
     }
 
-    /// <summary>Save all bound pages as TIFF to a stream using the supplied settings.</summary>
+    /// <summary>Save the bound page range as TIFF to a stream using the supplied settings.</summary>
     public void SaveAsTIFF(Stream outputStream, TiffSettings? settings)
     {
         if (_document is null) throw new InvalidOperationException("No document bound. Call BindPdf first.");
         var devRes = new Resolution(Resolution.X, Resolution.Y);
         var device = new TiffDevice(devRes, settings ?? new TiffSettings());
-        device.Process(_document, outputStream);
+        device.Process(_document, StartPage, EffectiveEndPage, outputStream);
     }
+
+    /// <summary>EndPage, defaulted to the last page when unset (0).</summary>
+    private int EffectiveEndPage => EndPage > 0 ? EndPage : (_document?.PageCount ?? 0);
 
     /// <summary>
     /// Save all bound pages as TIFF to a stream using the supplied settings.
@@ -476,7 +480,7 @@ public sealed class PdfConverter : IDisposable
         if (_document is null) throw new InvalidOperationException("No document bound. Call BindPdf first.");
         var devRes = new Resolution(Resolution.X, Resolution.Y);
         var device = new TiffDevice(imageWidth, imageHeight, devRes, settings ?? new TiffSettings());
-        device.Process(_document, outputStream);
+        device.Process(_document, StartPage, EffectiveEndPage, outputStream);
     }
 
     public void SaveAsTIFF(string outputFile, int imageWidth, int imageHeight, CompressionType compressionType)
@@ -657,7 +661,7 @@ public sealed class PdfConverter : IDisposable
 
             var ms = new MemoryStream();
             // For JPEG output, encode at quality 100 to minimise the
-            // recompression delta against the reference templates (which
+            // recompression delta against the expected templates (which
             // ship as 600-dpi JPEGs encoded at near-maximum quality). Other
             // formats save with default encoder parameters.
             if (outputImageFormat == Aspose.Pdf.Drawing.ImageFormat.Jpeg)

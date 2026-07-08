@@ -5,7 +5,7 @@ namespace Aspose.Pdf;
 /// (BT, ET, GSave, GRestore, SelectFont, SetRGBColor, MoveTo, LineTo, …);
 /// this base sits at the public-API namespace so callers and facade
 /// signatures can pass <c>Aspose.Pdf.Operator</c> through (matches the
-/// Aspose.PDF for .NET reflection surface).</summary>
+/// Aspose.Pdf reflection surface).</summary>
 public abstract class Operator
 {
     /// <summary>Serialize this operator to PDF syntax.</summary>
@@ -36,7 +36,7 @@ public abstract class Operator
         => v.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>Format a colour component (rg/RG/g/G/k/K operand) with more
-    /// precision than geometry — Aspose.PDF for .NET writes e.g. 119/255 as "0.4666666667"
+    /// precision than geometry — Aspose.Pdf writes e.g. 119/255 as "0.4666666667"
     /// (10 fractional digits), and round-tripping such an operator must preserve it.
     /// 10 fractional digits, no exponent, trailing zeros trimmed.</summary>
     protected static string FmtColor(double v)
@@ -71,7 +71,7 @@ public abstract class Operator
 /// Implementors override the relevant <c>Visit(SubType)</c> overloads to
 /// filter operators by concrete type. Visit dispatch itself is not currently
 /// invoked by the FOSS OperatorCollection — the methods are declared so
-/// callers (and reflection) match the Aspose.PDF for .NET signature.</summary>
+/// callers (and reflection) match the Aspose.Pdf signature.</summary>
 public interface IOperatorSelector
 {
     void Visit(Aspose.Pdf.Operators.BDC BDC);

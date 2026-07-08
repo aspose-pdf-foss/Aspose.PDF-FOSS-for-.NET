@@ -97,6 +97,13 @@ internal sealed class FontMetrics
         _cidWidths is not null && _cidWidths.TryGetValue(cid, out var w) ? w : null;
 
     /// <summary>
+    /// True for composite (Type0/CID) fonts, where character codes are read as
+    /// two bytes rather than one. Lets callers iterate a show string code-by-code
+    /// with the same code width unit <see cref="MeasureString(byte[], double)"/> uses.
+    /// </summary>
+    public bool IsCid => _isCid;
+
+    /// <summary>
     /// Get the width of a character code in 1/1000 text space units.
     /// </summary>
     public int GetWidth(int charCode)
@@ -122,6 +129,26 @@ internal sealed class FontMetrics
 
         // 4. Default width
         return _defaultWidth;
+    }
+
+    /// <summary>True when the font carries an explicit width for the character code —
+    /// from the /Widths array, the CIDFont /W table, or Standard-14 built-ins. False
+    /// means <see cref="GetWidth"/> would fall back to the default width, i.e. the code
+    /// is (almost certainly) outside a subset's glyph coverage.</summary>
+    public bool HasExplicitWidth(int charCode)
+    {
+        if (_simpleWidths is not null)
+        {
+            var idx = charCode - _firstChar;
+            if (idx >= 0 && idx < _simpleWidths.Length && _simpleWidths[idx] > 0)
+                return true;
+        }
+        if (_cidWidths is not null && _cidWidths.ContainsKey(charCode))
+            return true;
+        if (_isStandard14 && _baseFontName is not null &&
+            Standard14Fonts.GetWidth(_baseFontName, charCode) >= 0)
+            return true;
+        return false;
     }
 
     /// <summary>

@@ -339,7 +339,12 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
     {
         if (!_tables.TryGetValue("head", out var t) || t.offset + 54 > _data.Length) return;
         UnitsPerEm = ReadUInt16(t.offset + 18);
-        _isLongLoca = ReadInt16(t.offset + 50) == 1;
+        // indexToLocFormat: 0 = short (2-byte) loca, anything else = long (4-byte).
+        // The spec only defines 0/1, but some subsetters emit a non-standard value such
+        // as 0x0100; FreeType/fontTools treat any non-zero as long, so a strict `== 1`
+        // wrongly falls back to short loca and reads every glyph at the wrong offset
+        // (outlines come out as .notdef boxes or empty).
+        _isLongLoca = ReadInt16(t.offset + 50) != 0;
     }
 
     private void ParseMaxp()

@@ -10,7 +10,7 @@ namespace Aspose.Pdf.Facades;
 /// <summary>
 /// Façade for viewing / printing a PDF document. Wraps a bound
 /// <see cref="Aspose.Pdf.Document"/>; the configuration surface mirrors the
-/// Aspose.PDF for .NET public API but printing methods reject calls because the FOSS
+/// Aspose.Pdf public API but printing methods reject calls because the FOSS
 /// build does not depend on a print spooler. Page rasterisation
 /// (<see cref="DecodePage"/>, <see cref="DecodeAllPages"/>) is left to
 /// <see cref="ImageDevice"/> + SkiaSharp; the Bitmap-returning surface here
@@ -211,7 +211,7 @@ public class PdfViewer : IFacade, System.IDisposable
 
     private static void ThrowPrintingNotSupported()
         => throw new System.PlatformNotSupportedException(
-            "PdfViewer printing is not implemented in FOSS. Use Aspose.PDF for .NET for spooler-backed printing.");
+            "PdfViewer spooler-backed printing is not implemented. Render pages with ImageDevice and print the resulting images instead.");
 
     // Keep the compiler from complaining about unused events (no FOSS code raises them).
     private void _suppressEventWarnings()

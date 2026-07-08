@@ -34,13 +34,44 @@ public sealed class TextBuilder
     public void AppendText(List<TextFragment> textFragments)
     {
         if (textFragments is null) return;
-        foreach (var f in textFragments) AppendText(f);
+        // When two consecutive fragments sit on the same baseline separated by a
+        // genuine word-sized gap (e.g. per-word fragments copied out of a glyph-by-glyph
+        // OCR overlay), the horizontal gap alone does not always survive the round-trip:
+        // the glyphs are re-emitted at the appending font's natural advances, which can
+        // close the gap below the extractor's word-space threshold. Emit an explicit space
+        // glyph on the earlier fragment so the copied text re-extracts with its word
+        // boundaries intact. Fragments on different lines, abutting fragments (no gap), and
+        // over-wide column jumps are left untouched.
+        for (var idx = 0; idx < textFragments.Count; idx++)
+        {
+            var f = textFragments[idx];
+            var addSpace = false;
+            if (idx + 1 < textFragments.Count)
+                addSpace = SameLineWordGap(f, textFragments[idx + 1]);
+            AppendText(f, addSpace);
+        }
     }
 
-    public void AppendText(TextFragment textFragment)
+    /// <summary>True when <paramref name="next"/> follows <paramref name="cur"/> on the same
+    /// baseline after a positive, word-sized horizontal gap (not an abutting glyph and not a
+    /// wide column jump).</summary>
+    private static bool SameLineWordGap(TextFragment cur, TextFragment next)
+    {
+        var cp = cur.Position; var np = next.Position;
+        if (cp is null || np is null) return false;
+        var fs = cur.TextState.FontSize > 0 ? cur.TextState.FontSize : 12.0;
+        if (Math.Abs(np.YIndent - cp.YIndent) > 0.3 * fs) return false; // not same line
+        var curEndX = cur.Rectangle is { } r ? r.URX : cp.XIndent;
+        var gap = np.XIndent - curEndX;
+        return gap > 0.2 * fs && gap < 3.0 * fs;
+    }
+
+    public void AppendText(TextFragment textFragment) => AppendText(textFragment, false);
+
+    private void AppendText(TextFragment textFragment, bool addTrailingSpace)
     {
         var fragment = textFragment;
-        var text = fragment.Text;
+        var text = fragment.Text + (addTrailingSpace ? " " : "");
 
         // If FontData was set via implicit FontData→FontInfo conversion on TextState.Font,
         // propagate it to FontData so the font gets embedded properly.
@@ -48,7 +79,7 @@ public sealed class TextBuilder
             fragment.TextState.FontData = srcFd;
 
         // Route every embedded-TTF fragment through the CIDFont (Type0 /
-        // Identity-H) path so glyph advances align with the Aspose.PDF for .NET metrics.
+        // Identity-H) path so glyph advances align with the Aspose.Pdf metrics.
         // The earlier attempt at this regressed two distinct-position tests
         // because the multi-segment branch below emitted ShowText(literal)
         // against the Identity-H font, producing nonsense glyph IDs from each
@@ -74,6 +105,15 @@ public sealed class TextBuilder
         if (needsCid)
         {
             var fontData = fragment.TextState.FontData!;
+            // Reference behaviour: a font whose cmap lacks glyphs for the text is
+            // silently substituted with a covering host face (Thai → Tahoma, Han →
+            // SimSun, …) — otherwise every missing char writes glyph 0 and the
+            // duplicate ToUnicode entries garble extraction.
+            if (!FontRepository.CoversText(fontData.TtfData, text))
+            {
+                var substitute = FontRepository.SubstituteForMissingGlyphs(text, fragment.TextState.Font);
+                if (substitute?.TtfData is not null) fontData = substitute;
+            }
             (fontResName, hexGlyphIds) = EnsureEmbeddedCIDFont(fontData, text);
         }
         else if (fragment.TextState.FontData is { TtfData: not null } fontData2)
@@ -175,6 +215,27 @@ public sealed class TextBuilder
                 }
                 builder.EndText();
             }
+            // Per-segment (glyph-by-glyph) fragments write each segment separately, so the
+            // trailing word-space appended to `text` above is never rendered. Emit it as its
+            // own space glyph just past the fragment's right edge so the copied word keeps a
+            // word boundary on re-extraction.
+            if (addTrailingSpace)
+            {
+                var endX = fragment.Rectangle is { } rr ? rr.URX : x;
+                builder.BeginText();
+                builder.SetFont(fontResName, fontSize);
+                builder.MoveTextPosition(endX, y - descentComp);
+                if (segGlyphParser is not null)
+                {
+                    var gid = segGlyphParser.CMap.TryGetValue(' ', out var g) ? g : 0;
+                    builder.ShowTextHex(new[] { (byte)(gid >> 8), (byte)(gid & 0xFF) });
+                }
+                else
+                {
+                    builder.ShowText(" ");
+                }
+                builder.EndText();
+            }
         }
         else
         {
@@ -194,6 +255,17 @@ public sealed class TextBuilder
             builder.SetFont(fontResName, fontSize);
             if (fragment.TextState.RenderingMode != Aspose.Pdf.Text.TextRenderingMode.FillText)
                 builder.SetTextRenderingMode((int)fragment.TextState.RenderingMode);
+            // Emit Tc/Tw so the requested character/word spacing is actually applied when
+            // the page is rendered or re-parsed (without these operators the run renders at
+            // default spacing). The fragment's own q/Q scope confines them to this run.
+            if (fragment.TextState.CharacterSpacing != 0)
+                builder.SetCharSpacing(fragment.TextState.CharacterSpacing);
+            if (fragment.TextState.WordSpacing != 0)
+                builder.SetWordSpacing(fragment.TextState.WordSpacing);
+            // Horizontal scaling (Tz): stretch/compress the run's glyph advances. Without
+            // this the renderer draws at 100% regardless of TextState.HorizontalScaling.
+            if (Math.Abs(fragment.TextState.HorizontalScaling - 100) > 1e-9)
+                builder.SetHorizontalScaling(fragment.TextState.HorizontalScaling);
 
             // \n inside the fragment text needs explicit T* breaks: PDF's Tj
             // operator renders the whole string on one line (newline chars are
@@ -286,15 +358,23 @@ public sealed class TextBuilder
         {
             if (i > 0) builder.NextLine();
             if (lines[i].Length == 0) continue;
-            var bytes = new byte[lines[i].Length * 2];
-            for (var k = 0; k < lines[i].Length; k++)
+            // Iterate by codepoint so surrogate pairs (emoji, CJK Ext-B) map to ONE glyph.
+            var line = lines[i];
+            var bytes = new System.Collections.Generic.List<byte>(line.Length * 2);
+            for (var k = 0; k < line.Length; k++)
             {
+                int cp = line[k];
+                if (char.IsHighSurrogate(line[k]) && k + 1 < line.Length && char.IsLowSurrogate(line[k + 1]))
+                {
+                    cp = char.ConvertToUtf32(line[k], line[k + 1]);
+                    k++;
+                }
                 int gid = 0;
-                if (glyphParser.CMap.TryGetValue(lines[i][k], out var mapped)) gid = mapped;
-                bytes[k * 2] = (byte)(gid >> 8);
-                bytes[k * 2 + 1] = (byte)(gid & 0xFF);
+                if (glyphParser.CMap.TryGetValue(cp, out var mapped)) gid = mapped;
+                bytes.Add((byte)(gid >> 8));
+                bytes.Add((byte)(gid & 0xFF));
             }
-            builder.ShowTextHex(bytes);
+            builder.ShowTextHex(bytes.ToArray());
         }
     }
 
@@ -309,7 +389,7 @@ public sealed class TextBuilder
         string fontResName, double fontSize, double defaultX, double defaultY)
     {
         // Check fragment-level background first, then per-segment.
-        // Aspose.PDF for .NET: segment-level overrides fragment-level.
+        // Aspose.Pdf: segment-level overrides fragment-level.
         var fragBg = fragment.TextState.BackgroundColor;
         double curX = defaultX;
         double curY = defaultY;
@@ -323,22 +403,21 @@ public sealed class TextBuilder
                 var segY = seg.Position?.YIndent ?? curY;
                 var segFs = seg.TextState.FontSize > 0 ? seg.TextState.FontSize : fontSize;
 
-                // Estimate segment width from char count × avg glyph width.
-                // Use Standard14Fonts metrics when available for better accuracy.
-                double segW;
+                // Per-line width from Standard-14 glyph metrics when available, else proportional.
                 var fontName = seg.TextState.FontName ?? fragment.TextState.FontName;
-                if (!string.IsNullOrEmpty(fontName) && Standard14Fonts.IsStandard14(fontName!))
+                double LineWidth(string s)
                 {
-                    segW = 0;
-                    foreach (var ch in seg.Text)
+                    if (!string.IsNullOrEmpty(fontName) && Standard14Fonts.IsStandard14(fontName!))
                     {
-                        var cw = Standard14Fonts.GetWidth(fontName!, ch < 256 ? ch : '?');
-                        segW += (cw >= 0 ? cw : 500) * segFs / 1000.0;
+                        double w = 0;
+                        foreach (var ch in s)
+                        {
+                            var cw = Standard14Fonts.GetWidth(fontName!, ch < 256 ? ch : '?');
+                            w += (cw >= 0 ? cw : 500) * segFs / 1000.0;
+                        }
+                        return w;
                     }
-                }
-                else
-                {
-                    segW = seg.Text.Length * segFs * 0.5; // proportional fallback
+                    return s.Length * segFs * 0.5; // proportional fallback
                 }
 
                 // Rectangle Y = baseline − descent (bottom of text box).
@@ -346,6 +425,10 @@ public sealed class TextBuilder
                 var descent = Standard14Fonts.GetDescent(fontName ?? "Helvetica");
                 var descentPt = descent * segFs / 1000.0; // negative
                 var rectH = segFs;
+                // Line pitch for a multi-line (\n-joined) chunk — matches the AppendText render.
+                var bgLineHeight = seg.TextState.LineSpacing > 0 ? segFs + seg.TextState.LineSpacing
+                    : fragment.TextState.LineSpacing > 0 ? segFs + fragment.TextState.LineSpacing
+                    : segFs * 1.2;
 
                 // Rotate the background box with the text. A non-zero rotation maps
                 // the box through a cm about the text origin so the highlight stays
@@ -359,11 +442,22 @@ public sealed class TextBuilder
                     var rad = rotation * Math.PI / 180.0;
                     double cos = Math.Cos(rad), sin = Math.Sin(rad);
                     builder.SetMatrix(cos, sin, -sin, cos, segX, segY);
-                    builder.Rectangle(0, descentPt, segW, rectH);
+                    builder.Rectangle(0, descentPt, LineWidth(seg.Text.Replace("\r", "").Replace("\n", "")), rectH);
                 }
                 else
                 {
-                    builder.Rectangle(segX, segY + descentPt, segW, rectH);
+                    // One filled rectangle behind each rendered line (a chunk from the paginator
+                    // arrives as its wrapped lines joined by \n), at that line's baseline − descent.
+                    // A multi-line block tiles its rectangles at the full line pitch so the highlight
+                    // is continuous (no gaps between lines); a single line uses the tight em box.
+                    var segLines = seg.Text.Replace("\r\n", "\n").Split('\n');
+                    var rh = segLines.Length > 1 ? bgLineHeight : rectH;
+                    for (var li = 0; li < segLines.Length; li++)
+                    {
+                        var lw = LineWidth(segLines[li]);
+                        if (lw > 0)
+                            builder.Rectangle(segX, (segY - li * bgLineHeight) + descentPt, lw, rh);
+                    }
                 }
                 builder.Fill();
                 builder.RestoreState();
@@ -486,6 +580,21 @@ public sealed class TextBuilder
             return "Symbol";
         if (lower is "zapfdingbats" or "dingbats")
             return "ZapfDingbats";
+
+        // Prefix fallback for PostScript / subset / suffixed family names the exact
+        // aliases above miss — e.g. "TimesNewRomanPSMT", "ArialMT", "CourierNewPSMT",
+        // "ABCDEF+TimesNewRoman". Strip a subset prefix, then match the family stem so
+        // a preserved Times/Arial/Courier font keeps its family instead of collapsing
+        // to the Helvetica fallback.
+        var stem = lower;
+        var plus = stem.IndexOf('+');
+        if (plus >= 0 && plus + 1 < stem.Length) stem = stem.Substring(plus + 1);
+        if (stem.StartsWith("times", StringComparison.Ordinal))
+            return PickTimesVariant(state);
+        if (stem.StartsWith("arial", StringComparison.Ordinal) || stem.StartsWith("helvetica", StringComparison.Ordinal))
+            return PickVariant("Helvetica", state);
+        if (stem.StartsWith("courier", StringComparison.Ordinal))
+            return PickCourierVariant(state);
 
         // Fallback: Helvetica
         return PickVariant("Helvetica", state);
@@ -631,133 +740,10 @@ public sealed class TextBuilder
         // Walks /Parent for inherited /Resources and clones into the page's own
         // dict so the new font lives locally — see GetOrCreateOwnResources.
         var fontDict = GetOrCreateOwnFontDict();
-
-        var tag = GenerateSubsetTag();
-        var baseFontName = $"{tag}+{fontData.FontName}";
-
-        var name = "F1";
-        var counter = 1;
-        while (fontDict.ContainsKey(name))
-            name = $"F{++counter}";
-
-        var ttfData = fontData.TtfData!;
-        var glyphParser = new GlyphOutlineParser(ttfData);
-        var (ascent, descent, flags, _) = FontRepository.ReadTtfMetrics(ttfData);
-
-        // Map text characters to glyph IDs and build the hex string
-        var usedGlyphs = new Dictionary<int, int>(); // charCode → glyphId
-        var hexBytes = new List<byte>();
-        foreach (var ch in text)
-        {
-            int gid = 0;
-            if (glyphParser.CMap.TryGetValue(ch, out var mapped))
-                gid = mapped;
-            usedGlyphs.TryAdd(ch, gid);
-            // CIDFont uses 2-byte glyph IDs
-            hexBytes.Add((byte)(gid >> 8));
-            hexBytes.Add((byte)(gid & 0xFF));
-        }
-
-        // Build /W (per-glyph advance widths) from the TTF's hmtx. Without this,
-        // every emitted glyph rendered at the default 500/1000 em advance, so
-        // non-ASCII text (e.g. Hindi / Japanese / Korean / Tamil bands)
-        // drifted progressively to the right of where Aspose.PDF for .NET
-        // placed it. Widths are in CIDFont units (1000/em); scale the raw TTF
-        // advance from the font's own unitsPerEm. Format: [startCID [w0 w1 ...]]
-        // -- we emit one [gid [width]] entry per used glyph for simplicity; the
-        // viewer is required to support that form.
-        var wArray = new PdfArray();
-        var upm = glyphParser.UnitsPerEm > 0 ? glyphParser.UnitsPerEm : 1000;
-        foreach (var (_, gid) in usedGlyphs)
-        {
-            var rawAdvance = glyphParser.GetAdvanceWidth(gid);
-            var pdfWidth = (int)Math.Round(rawAdvance * 1000.0 / upm);
-            var widthArr = new PdfArray();
-            widthArr.Add(new PdfInteger(pdfWidth));
-            wArray.Add(new PdfInteger(gid));
-            wArray.Add(widthArr);
-        }
-
-        // Build ToUnicode CMap
-        var toUnicode = BuildToUnicodeCMap(usedGlyphs);
-
-        // FontDescriptor
-        var descriptorDict = new PdfDictionary();
-        descriptorDict.Set("Type", new PdfName("FontDescriptor"));
-        descriptorDict.Set("FontName", new PdfName(baseFontName));
-        descriptorDict.Set("Flags", new PdfInteger(flags | 4)); // Symbolic
-        descriptorDict.Set("Ascent", new PdfInteger(ascent));
-        descriptorDict.Set("Descent", new PdfInteger(descent));
-        descriptorDict.Set("ItalicAngle", new PdfInteger(0));
-        descriptorDict.Set("CapHeight", new PdfInteger((int)(ascent * 0.8)));
-        descriptorDict.Set("StemV", new PdfInteger(80));
-        var bboxArr = new PdfArray();
-        bboxArr.Add(new PdfInteger(0)); bboxArr.Add(new PdfInteger(descent));
-        bboxArr.Add(new PdfInteger(1000)); bboxArr.Add(new PdfInteger(ascent));
-        descriptorDict.Set("FontBBox", bboxArr);
-
-        var fontFileStream = new PdfStream(new PdfDictionary(), ttfData);
-        fontFileStream.Dict.Set("Length1", new PdfInteger(ttfData.Length));
-        descriptorDict.Set("FontFile2", fontFileStream);
-
-        // CIDFont dictionary (DescendantFont)
-        var cidFont = new PdfDictionary();
-        cidFont.Set("Type", new PdfName("Font"));
-        cidFont.Set("Subtype", new PdfName("CIDFontType2"));
-        cidFont.Set("BaseFont", new PdfName(baseFontName));
-        var cidSystemInfo = new PdfDictionary();
-        cidSystemInfo.Set("Registry", new PdfString(System.Text.Encoding.ASCII.GetBytes("Adobe")));
-        cidSystemInfo.Set("Ordering", new PdfString(System.Text.Encoding.ASCII.GetBytes("Identity")));
-        cidSystemInfo.Set("Supplement", new PdfInteger(0));
-        cidFont.Set("CIDSystemInfo", cidSystemInfo);
-        cidFont.Set("FontDescriptor", descriptorDict);
-        cidFont.Set("DW", new PdfInteger(500));
-        if (wArray.Count > 0)
-            cidFont.Set("W", wArray);
-        // CIDToGIDMap: Identity mapping
-        cidFont.Set("CIDToGIDMap", new PdfName("Identity"));
-
-        // Type0 (composite) font
-        var type0Font = new PdfDictionary();
-        type0Font.Set("Type", new PdfName("Font"));
-        type0Font.Set("Subtype", new PdfName("Type0"));
-        type0Font.Set("BaseFont", new PdfName(baseFontName));
-        type0Font.Set("Encoding", new PdfName("Identity-H"));
-        var descendantFonts = new PdfArray();
-        descendantFonts.Add(cidFont);
-        type0Font.Set("DescendantFonts", descendantFonts);
-        type0Font.Set("ToUnicode", new PdfStream(new PdfDictionary(),
-            System.Text.Encoding.ASCII.GetBytes(toUnicode)));
-
-        fontDict.Set(name, type0Font);
-        return (name, hexBytes.ToArray());
-    }
-
-    /// <summary>Build a ToUnicode CMap for character→glyph mappings.</summary>
-    private static string BuildToUnicodeCMap(Dictionary<int, int> usedGlyphs)
-    {
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine("/CIDInit /ProcSet findresource begin");
-        sb.AppendLine("12 dict begin");
-        sb.AppendLine("begincmap");
-        sb.AppendLine("/CIDSystemInfo");
-        sb.AppendLine("<< /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def");
-        sb.AppendLine("/CMapName /Adobe-Identity-UCS def");
-        sb.AppendLine("/CMapType 2 def");
-        sb.AppendLine("1 begincodespacerange");
-        sb.AppendLine("<0000> <FFFF>");
-        sb.AppendLine("endcodespacerange");
-        sb.AppendLine($"{usedGlyphs.Count} beginbfchar");
-        foreach (var (charCode, gid) in usedGlyphs)
-        {
-            sb.AppendLine($"<{gid:X4}> <{charCode:X4}>");
-        }
-        sb.AppendLine("endbfchar");
-        sb.AppendLine("endcmap");
-        sb.AppendLine("CMapName currentdict /CMap defineresource pop");
-        sb.AppendLine("end");
-        sb.AppendLine("end");
-        return sb.ToString();
+        // Delegate the Type0/CIDFontType2 construction to the shared embedder. Pass the
+        // font name through unchanged (stripSpaces:false) so the generator's /BaseFont
+        // stays byte-for-byte as before.
+        return Type0FontEmbedder.Embed(fontDict, fontData.TtfData!, fontData.FontName, text);
     }
 
     private static string GenerateSubsetTag()

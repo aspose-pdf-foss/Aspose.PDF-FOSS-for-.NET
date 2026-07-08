@@ -33,12 +33,24 @@ internal static class XmlBinding
 
         var imageFiles = new List<string>();
 
+        // The document-level <PageInfo><DefaultTextState LineSpacing=…> supplies the
+        // inter-line leading used when laying out page text (per-paragraph the reference
+        // engine reserves an empty leading line at font size + this leading).
+        double docLineSpacing = 0;
+        foreach (XmlNode node in root.ChildNodes)
+        {
+            if (node.NodeType == XmlNodeType.Element && node.LocalName == "PageInfo")
+                foreach (XmlNode ic in node.ChildNodes)
+                    if (ic.NodeType == XmlNodeType.Element && ic.LocalName == "DefaultTextState")
+                        docLineSpacing = GetAttrLength(ic, "LineSpacing", 0);
+        }
+
         // Process <Page> elements
         foreach (XmlNode node in root.ChildNodes)
         {
             if (node.NodeType != XmlNodeType.Element) continue;
             if (node.LocalName == "Page")
-                ProcessPage(document, node, imageFiles, baseDir);
+                ProcessPage(document, node, imageFiles, baseDir, docLineSpacing);
             // Skip PageInfo at document level (used for defaults)
         }
 
@@ -91,7 +103,7 @@ internal static class XmlBinding
         _ => false,
     };
 
-    private static void ProcessPage(Document document, XmlNode pageNode, List<string> imageFiles, string? baseDir)
+    private static void ProcessPage(Document document, XmlNode pageNode, List<string> imageFiles, string? baseDir, double docLineSpacing = 0)
     {
         var page = document.Pages.Add();
 
@@ -99,14 +111,14 @@ internal static class XmlBinding
         foreach (XmlNode child in pageNode.ChildNodes)
         {
             if (child.NodeType != XmlNodeType.Element) continue;
-            ProcessPageChild(page, child, imageFiles, baseDir);
+            ProcessPageChild(page, child, imageFiles, baseDir, docLineSpacing);
         }
     }
 
     // Dispatch one child of <Page> (or equivalently one child of a container such
     // as <FloatingBox> that participates in the page's flow). Kept as a separate
     // method so FloatingBox/FootNote flattening can reuse it.
-    private static void ProcessPageChild(Page page, XmlNode child, List<string> imageFiles, string? baseDir)
+    private static void ProcessPageChild(Page page, XmlNode child, List<string> imageFiles, string? baseDir, double docLineSpacing = 0)
     {
         switch (child.LocalName)
         {
@@ -121,7 +133,7 @@ internal static class XmlBinding
                 ProcessTable(page, child, imageFiles, baseDir);
                 break;
             case "TextFragment":
-                ProcessTextFragment(page, child);
+                ProcessTextFragment(page, child, docLineSpacing);
                 break;
             case "Image":
                 CollectImageFile(child, imageFiles, baseDir);
@@ -131,13 +143,13 @@ internal static class XmlBinding
                 break;
             case "Heading":
                 // Headings here are styled paragraph text, not TOC entries.
-                ProcessTextFragment(page, child);
+                ProcessTextFragment(page, child, docLineSpacing);
                 break;
             case "FootNote":
                 // Inline the footnote body as flow text; a true footnote pass
                 // would anchor it at the page foot, but getting the text onto
                 // *some* page is the correct baseline for pagination.
-                ProcessTextFragment(page, child);
+                ProcessTextFragment(page, child, docLineSpacing);
                 break;
         }
     }
@@ -213,8 +225,37 @@ internal static class XmlBinding
     private static Table BuildTable(XmlNode tableNode, List<string> imageFiles, string? baseDir)
     {
         var table = new Table();
+        ConfigureTable(table, tableNode, imageFiles, baseDir);
+        return table;
+    }
+
+    // Shared table parsing: attributes (column widths, repeating header, column
+    // adjustment, alignment) plus the table-level styling children (Border,
+    // DefaultCellBorder, DefaultCellPadding) and rows. Used by both the page-level
+    // ProcessTable and the nested BuildTable so styling is applied consistently.
+    private static void ConfigureTable(Table table, XmlNode tableNode, List<string> imageFiles, string? baseDir)
+    {
         var colWidths = GetAttr(tableNode, "ColumnWidths");
         if (colWidths is not null) table.ColumnWidths = colWidths;
+
+        // Repeat the first row(s) at the top of every continuation page.
+        var repeat = GetAttr(tableNode, "RepeatingRowsCount");
+        if (repeat is not null && int.TryParse(repeat, out var rc) && rc > 0)
+            table.RepeatingRowsCount = rc;
+        if (table.RepeatingRowsCount == 0 &&
+            string.Equals(GetAttr(tableNode, "IsFirstRowRepeated"), "true", StringComparison.OrdinalIgnoreCase))
+            table.RepeatingRowsCount = 1;
+
+        switch (GetAttr(tableNode, "ColumnAdjustment"))
+        {
+            case "AutoFitToWindow": table.ColumnAdjustment = ColumnAdjustment.AutoFitToWindow; break;
+            case "AutoFitToContent": table.ColumnAdjustment = ColumnAdjustment.AutoFitToContent; break;
+        }
+        switch (GetAttr(tableNode, "Alignment"))
+        {
+            case "Center": table.Alignment = HorizontalAlignment.Center; break;
+            case "Right": table.Alignment = HorizontalAlignment.Right; break;
+        }
 
         foreach (XmlNode child in tableNode.ChildNodes)
         {
@@ -227,40 +268,51 @@ internal static class XmlBinding
                 case "Margin":
                     table.Margin = ParseMargin(child);
                     break;
+                case "Border":
+                    table.Border = ParseBorder(child);
+                    break;
+                case "DefaultCellBorder":
+                    table.DefaultCellBorder = ParseBorder(child);
+                    break;
+                case "DefaultCellPadding":
+                    table.DefaultCellPadding = ParseMargin(child);
+                    break;
+                case "DefaultCellTextState":
+                    table.DefaultCellTextState = ParseTextState(child, table.DefaultCellTextState);
+                    break;
             }
         }
-        return table;
     }
 
     private static void ApplyPageInfo(Page page, XmlNode node)
     {
-        var h = GetAttrDouble(node, "Height");
-        var w = GetAttrDouble(node, "Width");
+        var h = GetAttrLength(node, "Height");
+        var w = GetAttrLength(node, "Width");
         if (h > 0 && w > 0)
             page.SetPageSize(w, h);
+
+        // IsLandscape swaps the page dimensions so the wider side becomes the
+        // width (matching Aspose.Pdf's PageInfo), which the generator
+        // paginator then lays content across.
+        if (string.Equals(GetAttr(node, "IsLandscape"), "true", StringComparison.OrdinalIgnoreCase))
+            page.PageInfo.IsLandscape = true;
+
+        // A nested <Margin> sets the page's content margins so the flow layout
+        // insets the table/text rather than starting at the page edge.
+        foreach (XmlNode child in node.ChildNodes)
+        {
+            if (child.NodeType == XmlNodeType.Element && child.LocalName == "Margin")
+            {
+                page.PageInfo.Margin = ParseMargin(child);
+                break;
+            }
+        }
     }
 
     private static void ProcessTable(Page page, XmlNode tableNode, List<string> imageFiles, string? baseDir)
     {
         var table = new Table();
-        var colWidths = GetAttr(tableNode, "ColumnWidths");
-        if (colWidths is not null)
-            table.ColumnWidths = colWidths;
-
-        foreach (XmlNode child in tableNode.ChildNodes)
-        {
-            if (child.NodeType != XmlNodeType.Element) continue;
-            switch (child.LocalName)
-            {
-                case "Row":
-                    ProcessRow(table, child, imageFiles, baseDir);
-                    break;
-                case "Margin":
-                    table.Margin = ParseMargin(child);
-                    break;
-                // Border, DefaultCellBorder, DefaultCellPadding — parsed but not deeply applied
-            }
-        }
+        ConfigureTable(table, tableNode, imageFiles, baseDir);
 
         // Add to Paragraphs so it flows with preceding TextFragments and uses
         // BuildMultiPage — AddTable renders single-page only, so long tables get clipped.
@@ -271,12 +323,88 @@ internal static class XmlBinding
     {
         var row = table.Rows.Add();
 
+        var bg = ParseColorValue(GetAttr(rowNode, "BackgroundColor"));
+        if (bg is not null) row.BackgroundColor = bg;
+        var minH = GetAttrLength(rowNode, "MinRowHeight");
+        if (minH > 0) row.MinRowHeight = minH;
+        var fixedH = GetAttrLength(rowNode, "FixedRowHeight");
+        if (fixedH > 0) row.FixedRowHeight = fixedH;
+        if (ParseVerticalAlignment(GetAttr(rowNode, "VerticalAlignment")) is { } rva)
+            row.VerticalAlignment = rva;
+
         foreach (XmlNode child in rowNode.ChildNodes)
         {
             if (child.NodeType != XmlNodeType.Element) continue;
-            if (child.LocalName == "Cell")
-                ProcessCell(row, child, imageFiles, baseDir);
+            switch (child.LocalName)
+            {
+                case "Cell":
+                    ProcessCell(row, child, imageFiles, baseDir);
+                    break;
+                case "Border":
+                    row.Border = ParseBorder(child);
+                    break;
+                case "DefaultCellBorder":
+                    row.DefaultCellBorder = ParseBorder(child);
+                    break;
+                case "DefaultCellPadding":
+                    row.DefaultCellPadding = ParseMargin(child);
+                    break;
+                case "DefaultCellTextState":
+                    row.DefaultCellTextState = ParseTextState(child, row.DefaultCellTextState);
+                    break;
+            }
         }
+
+        // Some templates (typically XSLT-produced) put a cell's text on its own line
+        // with the stylesheet's indentation, e.g. "\n    *Gauge placeholder*\n  ". The
+        // layout engine renders those leading/trailing blank lines as extra rows of
+        // cell height, so the whole table row grows. Size the row to match: base
+        // (one text line + padding) plus the max blank-line count across the row's cells,
+        // each blank line at the cell line pitch. Rows whose cells carry no such
+        // whitespace (the common case) are unaffected.
+        var blank = MaxCellBlankLines(rowNode);
+        if (blank > 0 && row.FixedRowHeight <= 0)
+        {
+            // Resolve the effective cell font size from the table's DefaultCellTextState
+            // (its authored size). The row's auto-initialised DefaultCellTextState defaults
+            // to 10 pt whether or not the XML set it, so it can't be trusted to override.
+            var fs = table.DefaultCellTextState?.FontSize > 0 ? table.DefaultCellTextState!.FontSize : 10f;
+            var pad = row.DefaultCellPadding ?? table.DefaultCellPadding;
+            var padV = (pad?.Top ?? 0) + (pad?.Bottom ?? 0);
+            // Each blank line adds one cell line pitch; the reference's measured cell
+            // leading is ≈ 1.14 × fontSize (vs the 1.2 the flow uses for body text).
+            var pitch = fs * 1.14;
+            row.MinRowHeight = Math.Max(row.MinRowHeight, fs + padV + blank * pitch);
+        }
+    }
+
+    // Count the largest number of leading + trailing blank lines across a row's cell
+    // texts (blank = a run separated by '\n' that holds only whitespace, before the first
+    // / after the last non-blank line). Reproduces the reference's rendering of a
+    // stylesheet-indented cell literal as extra blank rows.
+    private static int MaxCellBlankLines(XmlNode rowNode)
+    {
+        var max = 0;
+        foreach (XmlNode cell in rowNode.ChildNodes)
+        {
+            if (cell.NodeType != XmlNodeType.Element || cell.LocalName != "Cell") continue;
+            foreach (XmlNode frag in cell.ChildNodes)
+            {
+                if (frag.NodeType != XmlNodeType.Element || frag.LocalName != "TextFragment") continue;
+                foreach (XmlNode seg in frag.ChildNodes)
+                {
+                    if (seg.NodeType != XmlNodeType.Element || seg.LocalName != "TextSegment") continue;
+                    var raw = seg.InnerText ?? "";
+                    if (raw.Trim().Length == 0) continue;
+                    var lines = raw.Split('\n');
+                    int lead = 0, trail = 0;
+                    for (var i = 0; i < lines.Length && lines[i].Trim().Length == 0; i++) lead++;
+                    for (var i = lines.Length - 1; i >= 0 && lines[i].Trim().Length == 0; i--) trail++;
+                    max = Math.Max(max, lead + trail);
+                }
+            }
+        }
+        return max;
     }
 
     private static void ProcessCell(Row row, XmlNode cellNode, List<string> imageFiles, string? baseDir)
@@ -286,16 +414,39 @@ internal static class XmlBinding
         if (colSpan is not null && int.TryParse(colSpan, out var cs) && cs > 0)
             cell.ColSpan = cs;
 
+        var bg = ParseColorValue(GetAttr(cellNode, "BackgroundColor"));
+        if (bg is not null) cell.BackgroundColor = bg;
+        switch (GetAttr(cellNode, "Alignment"))
+        {
+            case "Center": cell.Alignment = HorizontalAlignment.Center; break;
+            case "Right": cell.Alignment = HorizontalAlignment.Right; break;
+        }
+        if (ParseVerticalAlignment(GetAttr(cellNode, "VerticalAlignment")) is { } cva)
+            cell.VerticalAlignment = cva;
+
         foreach (XmlNode child in cellNode.ChildNodes)
         {
             if (child.NodeType != XmlNodeType.Element) continue;
             switch (child.LocalName)
             {
-                case "TextFragment":
-                    var text = ExtractTextFromFragment(child);
-                    if (!string.IsNullOrEmpty(text))
-                        cell.Paragraphs.Add(new TextFragment(text));
+                case "Border":
+                    cell.Border = ParseBorder(child);
                     break;
+                case "TextFragment":
+                {
+                    // A cell TextFragment carries its own styling (font/size/colour
+                    // via a nested <TextState>) and a HorizontalAlignment attribute
+                    // that drives the cell's text alignment.
+                    var frag = BuildStyledTextFragment(child);
+                    if (frag is not null)
+                        cell.Paragraphs.Add(frag);
+                    switch (GetAttr(child, "HorizontalAlignment"))
+                    {
+                        case "Center": cell.Alignment = HorizontalAlignment.Center; break;
+                        case "Right": cell.Alignment = HorizontalAlignment.Right; break;
+                    }
+                    break;
+                }
                 case "HtmlFragment":
                 {
                     // <HtmlFragment><HtmlContent>…</HtmlContent></HtmlFragment>
@@ -335,32 +486,123 @@ internal static class XmlBinding
         }
     }
 
-    private static void ProcessTextFragment(Page page, XmlNode fragNode)
+    private static void ProcessTextFragment(Page page, XmlNode fragNode, double docLineSpacing = 0)
     {
         var text = ExtractTextFromFragment(fragNode);
         if (string.IsNullOrEmpty(text)) return;
 
-        double fontSize = 12;
+        // Aspose's generator default body size is 10 pt (the document-level
+        // <DefaultTextState> is a descriptor, not applied to these fragments).
+        double fontSize = 10;
         string? fontName = null;
+        Color? fg = null;
+        MarginInfo? margin = null;
 
-        // Check TextState at fragment level
+        // Fragment-level <TextState> (font/size/colour) and <Margin> (paragraph
+        // spacing). A per-<TextSegment> <TextState FontSize=…> overrides the size
+        // (e.g. the title's 20 pt sits on the segment, not the fragment).
         foreach (XmlNode child in fragNode.ChildNodes)
         {
             if (child.NodeType != XmlNodeType.Element) continue;
-            if (child.LocalName == "TextState")
+            switch (child.LocalName)
             {
-                fontSize = GetAttrDouble(child, "FontSize", 12);
-                fontName = GetAttr(child, "Font");
+                case "TextState":
+                    if (GetAttr(child, "FontSize") is not null) fontSize = GetAttrLength(child, "FontSize", fontSize);
+                    fontName ??= GetAttr(child, "Font");
+                    fg ??= ParseColorValue(GetAttr(child, "ForegroundColor"));
+                    break;
+                case "Margin":
+                    margin = ParseMargin(child);
+                    break;
+                case "TextSegment":
+                    foreach (XmlNode sc in child.ChildNodes)
+                    {
+                        if (sc.NodeType == XmlNodeType.Element && sc.LocalName == "TextState")
+                        {
+                            if (GetAttr(sc, "FontSize") is not null) fontSize = GetAttrLength(sc, "FontSize", fontSize);
+                            fontName ??= GetAttr(sc, "Font");
+                            fg ??= ParseColorValue(GetAttr(sc, "ForegroundColor"));
+                        }
+                    }
+                    break;
             }
         }
 
+        // The layout engine reserves an empty leading line per paragraph (the implicit
+        // empty segment the parameterless TextFragment ctor creates) at the paragraph's
+        // line height, on top of the paragraph's top margin. Reserve the same space before
+        // the text so multi-paragraph flow occupies the same vertical extent — the total
+        // text height is what decides where a following table paginates. Two line heights
+        // (empty + text seating) at (fontSize + docLineSpacing) reproduce the reference's
+        // per-paragraph advance to within the pagination tolerance.
+        // Per-paragraph vertical reservation calibrated to the layout engine's
+        // per-paragraph advance (an empty leading line plus text seating): 1.85 line
+        // heights at the paragraph font size, plus the document line spacing.
+        var leadReserve = 1.85 * fontSize + docLineSpacing;
+        var mTop = (margin?.Top ?? 0) + leadReserve;
+
         var tf = new TextFragment(text);
+        tf.Margin = new MarginInfo { Top = mTop };
         tf.TextState.FontSize = (float)fontSize;
         if (fontName is not null)
             tf.TextState.FontName = fontName;
+        if (fg is not null)
+            tf.TextState.ForegroundColor = fg;
 
         page.Paragraphs.Add(tf);
     }
+
+    // Build a TextFragment for a cell from its <TextFragment> node, applying a
+    // nested <TextState> (font / size / colour) and any per-segment font size.
+    // Returns null when the fragment carries no text (an empty header cell).
+    private static TextFragment? BuildStyledTextFragment(XmlNode fragNode)
+    {
+        var text = ExtractTextFromFragment(fragNode);
+        if (string.IsNullOrEmpty(text)) return null;
+        var tf = new TextFragment(text);
+        foreach (XmlNode child in fragNode.ChildNodes)
+        {
+            if (child.NodeType == XmlNodeType.Element && child.LocalName == "TextState")
+            {
+                ApplyTextState(child, tf.TextState);
+                break;
+            }
+        }
+        return tf;
+    }
+
+    // Parse a <TextState>/<DefaultCellTextState> element into a new TextState,
+    // seeded from an existing one so unspecified properties are preserved.
+    private static TextState ParseTextState(XmlNode node, TextState? seed)
+    {
+        var ts = seed ?? new TextState();
+        ApplyTextState(node, ts);
+        return ts;
+    }
+
+    private static void ApplyTextState(XmlNode node, TextState ts)
+    {
+        var font = GetAttr(node, "Font");
+        if (!string.IsNullOrEmpty(font))
+        {
+            ts.FontName = font;
+            if (font.Contains("Bold", StringComparison.OrdinalIgnoreCase)) ts.IsBold = true;
+        }
+        var size = GetAttrLength(node, "FontSize");
+        if (size > 0) ts.FontSize = (float)size;
+        var fg = ParseColorValue(GetAttr(node, "ForegroundColor"));
+        if (fg is not null) ts.ForegroundColor = fg;
+        var ls = GetAttrLength(node, "LineSpacing", -1);
+        if (ls >= 0) ts.LineSpacing = (float)ls;
+    }
+
+    private static VerticalAlignment? ParseVerticalAlignment(string? value) => value switch
+    {
+        "Center" => VerticalAlignment.Center,
+        "Bottom" => VerticalAlignment.Bottom,
+        "Top" => VerticalAlignment.Top,
+        _ => null,
+    };
 
     private static string ExtractTextFromFragment(XmlNode fragNode)
     {
@@ -379,7 +621,12 @@ internal static class XmlBinding
                 }
             }
         }
-        return sb.ToString();
+        // Normalise display whitespace the way the layout engine does: an
+        // XSLT-produced literal (e.g. "\n   *Gauge placeholder*\n ") carries the
+        // stylesheet's indentation, which would otherwise render as a leading
+        // blank line / trailing space line and knock the cell text out of
+        // vertical alignment with its neighbours. Collapse runs to one space.
+        return System.Text.RegularExpressions.Regex.Replace(sb.ToString(), @"\s+", " ").Trim();
     }
 
     // The Aspose XML schema stores an HtmlFragment's body two ways: as a
@@ -420,11 +667,79 @@ internal static class XmlBinding
     {
         return new MarginInfo
         {
-            Left = GetAttrDouble(node, "Left"),
-            Right = GetAttrDouble(node, "Right"),
-            Top = GetAttrDouble(node, "Top"),
-            Bottom = GetAttrDouble(node, "Bottom"),
+            Left = GetAttrLength(node, "Left"),
+            Right = GetAttrLength(node, "Right"),
+            Top = GetAttrLength(node, "Top"),
+            Bottom = GetAttrLength(node, "Bottom"),
         };
+    }
+
+    // Parse a <Border>/<DefaultCellBorder> element. Its children name the sides
+    // (All/Box or Top/Bottom/Left/Right), each carrying a LineWidth and optional
+    // Color. The result feeds BorderInfo.Side (which sides to draw) plus per-side
+    // widths when the sides differ.
+    private static BorderInfo ParseBorder(XmlNode node)
+    {
+        var border = new BorderInfo { Side = BorderSide.None };
+        foreach (XmlNode child in node.ChildNodes)
+        {
+            if (child.NodeType != XmlNodeType.Element) continue;
+            var width = GetAttrLength(child, "LineWidth", 1);
+            var color = ParseColorValue(GetAttr(child, "Color"));
+            switch (child.LocalName)
+            {
+                case "All":
+                case "Box":
+                    border.Side |= BorderSide.Box;
+                    border.Width = width;
+                    if (color is not null) border.Color = color;
+                    break;
+                case "Top":
+                    border.Side |= BorderSide.Top;
+                    border.Width = width;
+                    border.Top = new GraphInfo { LineWidth = (float)width, Color = color };
+                    if (color is not null) border.Color = color;
+                    break;
+                case "Bottom":
+                    border.Side |= BorderSide.Bottom;
+                    border.Width = width;
+                    border.Bottom = new GraphInfo { LineWidth = (float)width, Color = color };
+                    if (color is not null) border.Color = color;
+                    break;
+                case "Left":
+                    border.Side |= BorderSide.Left;
+                    border.Width = width;
+                    border.Left = new GraphInfo { LineWidth = (float)width, Color = color };
+                    if (color is not null) border.Color = color;
+                    break;
+                case "Right":
+                    border.Side |= BorderSide.Right;
+                    border.Width = width;
+                    border.Right = new GraphInfo { LineWidth = (float)width, Color = color };
+                    if (color is not null) border.Color = color;
+                    break;
+            }
+        }
+        return border;
+    }
+
+    // Parse a colour attribute: a #rrggbb / #aarrggbb hex string, or a named
+    // colour (Aspose XML also allows names like "Black"/"Gray"). Returns null
+    // when the attribute is absent so callers leave the property unset.
+    private static Color? ParseColorValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        value = value.Trim();
+        if (value.StartsWith('#'))
+            return Color.Parse(value);
+        try
+        {
+            var named = System.Drawing.Color.FromName(value);
+            if (named.A != 0 || string.Equals(value, "Transparent", StringComparison.OrdinalIgnoreCase))
+                return Color.FromRgb(named.R, named.G, named.B);
+        }
+        catch { /* fall through */ }
+        return null;
     }
 
     private static string? GetAttr(XmlNode node, string name)
@@ -434,5 +749,32 @@ internal static class XmlBinding
     {
         var val = GetAttr(node, name);
         return val is not null && double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : defaultValue;
+    }
+
+    // Length attribute parser that honours Aspose XML unit suffixes
+    // (cm/mm/in/pt/px). A bare number is points. Used for page/table dimensions
+    // and margins so e.g. Top="2.6cm" converts to 73.7 pt rather than parsing
+    // to 0 (double.TryParse fails on the suffix).
+    private static double GetAttrLength(XmlNode node, string name, double defaultValue = 0)
+        => ParseLength(GetAttr(node, name), defaultValue);
+
+    private static double ParseLength(string? val, double defaultValue = 0)
+    {
+        if (string.IsNullOrWhiteSpace(val)) return defaultValue;
+        val = val.Trim();
+        double factor = 1.0; // points
+        string num = val;
+        foreach (var (suffix, f) in new[] { ("cm", 72.0 / 2.54), ("mm", 72.0 / 25.4), ("in", 72.0), ("pt", 1.0), ("px", 1.0) })
+        {
+            if (val.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                factor = f;
+                num = val[..^suffix.Length].Trim();
+                break;
+            }
+        }
+        return double.TryParse(num, NumberStyles.Float, CultureInfo.InvariantCulture, out var d)
+            ? d * factor
+            : defaultValue;
     }
 }

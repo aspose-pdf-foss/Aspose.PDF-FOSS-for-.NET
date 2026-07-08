@@ -1,3 +1,6 @@
+using System.Collections.Generic;
+using System.Linq;
+
 namespace Aspose.Pdf.Devices;
 
 /// <summary>
@@ -99,5 +102,88 @@ internal static class TiffPaletteQuantizer
             indexed[i] = (byte)((rBits << 5) | (gBits << 2) | bBits);
         }
         return indexed;
+    }
+
+    /// <summary>
+    /// Quantize a 24-bit RGB buffer to a 16-colour palette for TIFF
+    /// <see cref="ColorDepth.Format4bpp"/>. Returns one palette index per
+    /// pixel (each 0..15) and a 3 × 16-short /ColorMap in TIFF 6.0 layout
+    /// (<c>R0..R15 G0..G15 B0..B15</c>).
+    ///
+    /// Like the 8bpp path this is adaptive: when the image uses ≤ 16 distinct
+    /// colours (typical for vector PDFs) the palette captures every one with
+    /// zero loss. Otherwise the 16 most frequent colours become the palette
+    /// and every other pixel maps to its nearest entry by squared RGB
+    /// distance.
+    /// </summary>
+    public static (byte[] indices, ushort[] colorMap) QuantizeTo4bpp(byte[] rgb, int width, int height)
+    {
+        var total = width * height;
+
+        // Tally colour frequencies (24-bit RGB key fits in int).
+        var freq = new Dictionary<int, int>();
+        var src = 0;
+        for (var i = 0; i < total; i++, src += 3)
+        {
+            var key = (rgb[src] << 16) | (rgb[src + 1] << 8) | rgb[src + 2];
+            freq.TryGetValue(key, out var c);
+            freq[key] = c + 1;
+        }
+
+        // Palette: every colour if ≤ 16 (lossless), else the 16 most frequent.
+        var palette = freq.Count <= 16
+            ? freq.Keys.ToList()
+            : freq.OrderByDescending(k => k.Value).Take(16).Select(k => k.Key).ToList();
+
+        // /ColorMap is 3 × 16 shorts; unused slots stay 0 (black) but are never
+        // indexed. Scale each 0..255 sample to 0..65535 by ×257 so it round-trips.
+        var colorMap = new ushort[3 * 16];
+        for (var p = 0; p < palette.Count; p++)
+        {
+            var key = palette[p];
+            colorMap[p] = (ushort)(((key >> 16) & 0xFF) * 257);       // R block
+            colorMap[p + 16] = (ushort)(((key >> 8) & 0xFF) * 257);   // G block
+            colorMap[p + 32] = (ushort)((key & 0xFF) * 257);          // B block
+        }
+
+        // Exact lookup for palette colours; nearest-match (cached) for the rest.
+        var exact = new Dictionary<int, byte>(palette.Count);
+        for (var p = 0; p < palette.Count; p++) exact[palette[p]] = (byte)p;
+
+        var indices = new byte[total];
+        var nearestCache = new Dictionary<int, byte>();
+        src = 0;
+        for (var i = 0; i < total; i++, src += 3)
+        {
+            var key = (rgb[src] << 16) | (rgb[src + 1] << 8) | rgb[src + 2];
+            if (exact.TryGetValue(key, out var idx))
+            {
+                indices[i] = idx;
+                continue;
+            }
+            if (!nearestCache.TryGetValue(key, out idx))
+            {
+                idx = NearestIndex(palette, rgb[src], rgb[src + 1], rgb[src + 2]);
+                nearestCache[key] = idx;
+            }
+            indices[i] = idx;
+        }
+        return (indices, colorMap);
+    }
+
+    private static byte NearestIndex(List<int> palette, byte r, byte g, byte b)
+    {
+        var best = 0;
+        var bestDist = int.MaxValue;
+        for (var p = 0; p < palette.Count; p++)
+        {
+            var key = palette[p];
+            var dr = r - ((key >> 16) & 0xFF);
+            var dg = g - ((key >> 8) & 0xFF);
+            var db = b - (key & 0xFF);
+            var d = dr * dr + dg * dg + db * db;
+            if (d < bestDist) { bestDist = d; best = p; }
+        }
+        return (byte)best;
     }
 }

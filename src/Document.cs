@@ -1,4 +1,4 @@
-﻿using System.Linq;
+using System.Linq;
 using System.Text;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
@@ -35,7 +35,18 @@ public sealed partial class Document : IDisposable
     private bool _linearize;
     private bool _isNewDocument;
 #pragma warning restore CS0414
+
+    // File name of the in-progress Save(string) — read by save-time appearance generation
+    // (PageInformationAnnotation prints it). Null during Save(Stream) (no file name known).
+    private string? _pendingSaveFileName;
     private Stream? _sourceStream;
+
+    /// <summary>True when this document was opened from a writable+seekable stream, i.e. a
+    /// no-arg <see cref="Save()"/> will do an incremental (append-only) update. Only then do
+    /// page edits need to register their new content/form streams as indirect objects (an
+    /// append writes only registered new/dirty objects); a full save promotes inline streams,
+    /// so a document being written to a fresh output keeps the compact inline layout.</summary>
+    internal bool HasWritableSourceStream => _sourceStream is { CanWrite: true };
 
     private Document(byte[] data, string? password = null)
     {
@@ -47,7 +58,15 @@ public sealed partial class Document : IDisposable
         // silently producing garbled content. When a password was supplied,
         // FromBytes already called InitDecryptor(password).
         if (password is null)
+        {
             _reader.InitDecryptor();
+            // A document carrying a real (non-empty) user password must not open
+            // without one — strings/streams would decode to garbage. Owner-only
+            // encryption (empty user password) authenticates above and opens fine.
+            if (_reader.RequiresPassword)
+                throw new InvalidPasswordException(
+                    "The document is password protected. A password is required to open this document.");
+        }
         // Eagerly validate the catalog so corrupt PDFs fail at construction time
         // (matches .NET public API behavior)
         _ = _reader.Catalog;
@@ -182,6 +201,44 @@ public sealed partial class Document : IDisposable
     /// </summary>
     public Document(Stream stream, TxtLoadOptions options)
         : this(Converters.TxtToPdfConverter.Convert(ReadStreamToBytes(stream), options)) { }
+
+    /// <summary>
+    /// Open a Markdown file and convert it to PDF using the given options.
+    /// Matches the public API constructor: new Document(path, MdLoadOptions).
+    /// </summary>
+    public Document(string path, Converters.MdLoadOptions options)
+        : this(Converters.MarkdownToPdfConverter.Convert(path, options).ToArray()) { }
+
+    /// <summary>
+    /// Open a Markdown stream and convert it to PDF using the given options.
+    /// </summary>
+    public Document(Stream stream, Converters.MdLoadOptions options)
+        : this(Converters.MarkdownToPdfConverter.Convert(ReadStreamToBytes(stream), options).ToArray()) { }
+
+    /// <summary>
+    /// Open an SVG file and convert it to PDF using the given options.
+    /// Matches the public API constructor: new Document(path, SvgLoadOptions).
+    /// More specific than the <see cref="LoadOptions"/> catch-all, so it wins
+    /// overload resolution and the SVG is parsed as SVG (not as PDF).
+    /// </summary>
+    public Document(string path, Converters.SvgLoadOptions options)
+        : this(SvgConvertToPdfBytes(Converters.SvgToPdfConverter.Convert(path, options))) { }
+
+    /// <summary>
+    /// Open an SVG stream and convert it to PDF using the given options.
+    /// </summary>
+    public Document(Stream stream, Converters.SvgLoadOptions options)
+        : this(SvgConvertToPdfBytes(Converters.SvgToPdfConverter.Convert(ReadStreamToBytes(stream), options))) { }
+
+    /// <summary>Serialise a freshly converted SVG-&gt;PDF <see cref="Document"/> to
+    /// bytes so it can be re-opened through the normal PDF constructor chain
+    /// (keeps the converted document's reader/xref consistent).</summary>
+    private static byte[] SvgConvertToPdfBytes(Document converted)
+    {
+        using var ms = new MemoryStream();
+        converted.Save(ms);
+        return ms.ToArray();
+    }
 
     /// <summary>
     /// Create a new empty PDF document.
@@ -422,8 +479,9 @@ public sealed partial class Document : IDisposable
         {
             if (_info is null)
             {
-                var infoDict = _reader.ResolveDict(_reader.Trailer.Get("Info"));
-                _info = new DocumentInfo(infoDict, _reader, this);
+                // ResolveExistingInfoDict also reaches a pending /Info dict another
+                // DocumentInfo instance created before save.
+                _info = new DocumentInfo(ResolveExistingInfoDict(), _reader, this);
             }
             return _info;
         }
@@ -562,7 +620,19 @@ public sealed partial class Document : IDisposable
     /// Returns true if this PDF file is linearized (optimized for fast web viewing).
     /// Linearized PDFs have a linearization dictionary as the first object in the file body.
     /// </summary>
-    public bool IsLinearized { get => _reader.IsLinearized; set { /* setter for API parity — linearization on save not implemented */ } }
+    /// <summary>
+    /// Backing override for <see cref="IsLinearized"/>. Null means "inherit the source
+    /// file's state"; a non-null value is an explicit request (<c>IsLinearized = false</c>
+    /// to de-linearize on save, <c>true</c> to linearize). <see cref="LinearizeDocument"/>
+    /// also requests linearization.
+    /// </summary>
+    private bool? _isLinearized;
+
+    public bool IsLinearized
+    {
+        get => _isLinearized ?? _reader.IsLinearized;
+        set => _isLinearized = value;
+    }
 
     /// <summary>When true (default), the writer scrubs invalid signature
     /// references during save. Stored only; the writer behaves as if always false.</summary>
@@ -608,22 +678,63 @@ public sealed partial class Document : IDisposable
         //   doc.Validate(f, fmt);
         //   f = new FileStream(path, Create);   // <-- IOException without dispose here
         // because the previous FileStream is still open under the old reference.
-        // Aspose.PDF for .NET disposes the stream on return, so callers can re-open
+        // Aspose.Pdf disposes the stream on return, so callers can re-open
         // the same path immediately. Mirror that contract.
         if (logStream is not null)
         {
             try
             {
                 using var writer = new StreamWriter(logStream, System.Text.Encoding.UTF8);
-                writer.WriteLine("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
-                writer.WriteLine($"<ValidationLog Format=\"{GetVersionString(format)}\">");
-                foreach (var issue in result.Issues)
-                    writer.WriteLine($"  <Issue>{EscapeXml(issue.ToString() ?? string.Empty)}</Issue>");
-                writer.WriteLine("</ValidationLog>");
+                WriteValidationLogXml(writer, format, result);
             }
             catch { }
         }
         return result.IsValid;
+    }
+
+    /// <summary>Serialise a validation result in the reference log schema:
+    /// <c>&lt;Compliance&gt;&lt;File&gt;…&lt;Fonts&gt;&lt;Problem Severity Clause&gt;</c> —
+    /// font problems nest under &lt;Fonts&gt;, everything else sits directly under
+    /// &lt;File&gt; alongside the empty section markers.</summary>
+    private void WriteValidationLogXml(TextWriter writer, PdfFormat format,
+        Optimization.PdfAValidationResult result)
+    {
+        static string ClauseFor(string rule) => rule switch
+        {
+            "FontCmap" => "7.21.4.2",
+            "FontEmbedding" or "FontNotEmbedded" => "6.2.11.4",
+            "MetadataPdfAId" or "MetadataPdfAConformance" or "Metadata" => "6.6.4",
+            "TaggedPdf" or "StructureTree" => "6.7.3.3",
+            "DocumentTitle" => "7.1",
+            _ => "",
+        };
+        static string Problem(Optimization.PdfAViolation v)
+        {
+            var clause = ClauseFor(v.Rule);
+            var page = v.PageNumber is int p ? $" Page=\"{p}\"" : "";
+            return $"<Problem Severity=\"Error\" Clause=\"{clause}\" Code=\"{clause}\" Convertable=\"False\"{page}>{EscapeXml(v.Description)}</Problem>";
+        }
+
+        var fontProblems = new System.Text.StringBuilder();
+        var otherProblems = new System.Text.StringBuilder();
+        foreach (var v in result.Violations)
+        {
+            if (v.Rule.StartsWith("Font", StringComparison.Ordinal)) fontProblems.Append(Problem(v));
+            else otherProblems.Append(Problem(v));
+        }
+
+        int pages;
+        try { pages = Pages.Count; } catch { pages = 0; }
+        writer.Write(
+            $"<Compliance Name=\"Log\" Operation=\"Validation\" Target=\"{EscapeXml(GetVersionString(format))}\">" +
+            "<Version>1.0</Version>" +
+            $"<Date>{DateTime.Now}</Date>" +
+            $"<File Version=\"{EscapeXml(PdfVersion ?? string.Empty)}\" Name=\"{EscapeXml(Path.GetFileName(FileName ?? string.Empty))}\" Pages=\"{pages}\">" +
+            "<Security /><Catalog /><Header /><Annotations />" +
+            (fontProblems.Length > 0 ? $"<Fonts>{fontProblems}</Fonts>" : "<Fonts />") +
+            "<trailer />" + otherProblems +
+            "<Metadata /><objects /><xObjects /><actions /><xmpmeta /><EmbeddedFiles />" +
+            "</File></Compliance>");
     }
 
     /// <summary>
@@ -648,7 +759,8 @@ public sealed partial class Document : IDisposable
         {
             try
             {
-                File.WriteAllText(outputLogFileName, string.Join(Environment.NewLine, result.Issues));
+                using var writer = new StreamWriter(outputLogFileName, append: false, System.Text.Encoding.UTF8);
+                WriteValidationLogXml(writer, format, result);
             }
             catch
             {
@@ -930,7 +1042,11 @@ public sealed partial class Document : IDisposable
         {
             var doc = new System.Xml.XmlDocument();
             doc.LoadXml(xml);
-            const string tplNs = "http://www.xfa.org/schema/xfa-template/2.6/";
+            // Use the template packet's actual xfa-template namespace version (2.6 / 2.8 /
+            // 3.0 / …) rather than a hard-coded 2.6, otherwise the button XPath matches
+            // nothing on a non-2.6 form and no field is marked hidden.
+            var tplNs = doc.DocumentElement?.NamespaceURI;
+            if (string.IsNullOrEmpty(tplNs)) return;
             var nsm = new System.Xml.XmlNamespaceManager(doc.NameTable);
             nsm.AddNamespace("tpl", tplNs);
             var buttons = doc.SelectNodes("//tpl:field/tpl:ui/tpl:button", nsm);
@@ -1022,7 +1138,35 @@ public sealed partial class Document : IDisposable
         if (stream is not null)
             _metadata = new XmpMetadata(stream, _reader);
         _metadata ??= new XmpMetadata();
+        // Standard XMP properties fall back to the document Info dictionary when
+        // the packet is absent or omits them (per the XMP↔DocInfo mapping).
+        _metadata.SetInfoFallback(ResolveInfoDerivedXmp);
         return _metadata;
+    }
+
+    /// <summary>Map a standard XMP key to its /Info-dictionary equivalent, or
+    /// null when Info carries no such value. Used as the XMP value fallback so
+    /// e.g. <c>Metadata["xmp:ModifyDate"]</c> resolves from /ModDate on documents
+    /// that have no XMP packet.</summary>
+    private string? ResolveInfoDerivedXmp(string key)
+    {
+        static string? NonEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
+        static string? XmpDate(DateTime dt)
+            => dt == DateTime.MinValue ? null : dt.ToString("yyyy-MM-ddTHH:mm:ss");
+
+        var info = Info;
+        return key switch
+        {
+            "xmp:CreatorTool" => NonEmpty(info.Creator),
+            "pdf:Producer" => NonEmpty(info.Producer),
+            "dc:title" => NonEmpty(info.Title),
+            "dc:creator" => NonEmpty(info.Author),
+            "dc:description" => NonEmpty(info.Subject),
+            "pdf:Keywords" => NonEmpty(info.Keywords),
+            "xmp:CreateDate" => XmpDate(info.CreationDate),
+            "xmp:ModifyDate" => XmpDate(info.ModDate),
+            _ => null,
+        };
     }
 
     /// <summary>
@@ -1449,8 +1593,31 @@ public sealed partial class Document : IDisposable
         // Hybrid-reference PDFs have 2 %%EOF markers (one for the traditional xref table,
         // one for the xref stream) but are NOT incrementally updated.
         bool isHybrid = _reader.Trailer.GetInt("XRefStm", -1) >= 0;
-        int threshold = isHybrid ? 2 : 1;
+
+        // A linearized ("fast web view") PDF likewise has 2 %%EOF markers — the first-page
+        // cross-reference section and the main one, linked by a /Prev — yet it is a single
+        // generation file produced by Optimize(), not an incremental update. Its
+        // linearization parameter dictionary (/Linearized) is the first body object, so
+        // detect it near the start of the raw data (which is what the %%EOF count reflects).
+        bool isLinearized = ContainsMarker(_data, "/Linearized"u8,
+            System.Math.Min(_data.Length, 2048));
+
+        int threshold = (isHybrid || isLinearized) ? 2 : 1;
         return eofCount > threshold;
+    }
+
+    /// <summary>Whether <paramref name="marker"/> occurs in the first <paramref name="limit"/>
+    /// bytes of <paramref name="data"/> (a small forward scan; used for header-region markers).</summary>
+    private static bool ContainsMarker(byte[] data, System.ReadOnlySpan<byte> marker, int limit)
+    {
+        for (int i = 0; i <= limit - marker.Length; i++)
+        {
+            bool match = true;
+            for (int j = 0; j < marker.Length; j++)
+                if (data[i + j] != marker[j]) { match = false; break; }
+            if (match) return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -1515,6 +1682,27 @@ public sealed partial class Document : IDisposable
     internal PdfDictionary ImportDict(PdfDictionary source, PdfReader sourceReader,
         Dictionary<int, int> cloneMap)
         => DeepCloneDict(source, sourceReader, cloneMap);
+
+    // Per-source-reader clone maps so repeated imports from the SAME source document into
+    // this one share already-imported objects (a font/image referenced by several source
+    // pages is cloned once, not once per import). Keyed by source reader identity.
+    private Dictionary<PdfReader, Dictionary<int, int>>? _importCloneMaps;
+
+    /// <summary>
+    /// A clone map shared across all imports from <paramref name="sourceReader"/> into this
+    /// document, so objects shared between several imported source pages (fonts, images,
+    /// colour spaces) are imported only once. See <see cref="ImportDict"/>.
+    /// </summary>
+    internal Dictionary<int, int> GetSharedImportCloneMap(PdfReader sourceReader)
+    {
+        _importCloneMaps ??= new Dictionary<PdfReader, Dictionary<int, int>>();
+        if (!_importCloneMaps.TryGetValue(sourceReader, out var map))
+        {
+            map = new Dictionary<int, int>();
+            _importCloneMaps[sourceReader] = map;
+        }
+        return map;
+    }
 
     /// <summary>
     /// Deep-clone a PdfDictionary, recursively cloning all referenced objects.
@@ -2141,9 +2329,13 @@ public sealed partial class Document : IDisposable
         {
             switch (p)
             {
+                // RadioButtonOptionField is now a RadioButtonField, so its cases MUST precede
+                // both the RadioButtonField and the general Field case: an option registers
+                // its OWNER radio group (not itself) in the AcroForm.
+                case Forms.RadioButtonOptionField { OwnerRadio: { } owner }: radios.Add(owner); break;
+                case Forms.RadioButtonOptionField: break;
                 case Forms.RadioButtonField rb: radios.Add(rb); break;
                 case Forms.Field f: fields.Add(f); break;
-                case Forms.RadioButtonOptionField { OwnerRadio: { } owner }: radios.Add(owner); break;
                 case Table t:
                     foreach (var row in t.Rows)
                         foreach (var cell in row.Cells)
@@ -2190,6 +2382,60 @@ public sealed partial class Document : IDisposable
     }
 
     /// <summary>
+    /// Read the type-shadowed IsInNewPage flag. TextFragment and HtmlFragment redeclare it with
+    /// <c>new</c>, so a BaseParagraph-typed read would miss the value the caller set on the
+    /// concrete type (mirrors the IsInLineParagraph shadowing).
+    private static bool ParagraphIsInNewPage(BaseParagraph p) => p switch
+    {
+        Text.TextFragment tf => tf.IsInNewPage,
+        HtmlFragment hf => hf.IsInNewPage,
+        _ => p.IsInNewPage,
+    };
+
+    /// <summary>
+    /// <summary>
+    /// Shape a generator <see cref="Text.TextFragment"/> that carries Arabic/RTL text: replace
+    /// each segment's base letters with their contextual presentation forms in visual
+    /// right-to-left order, and route the fragment through an Arabic-capable embedded font
+    /// (Arial covers Arabic Presentation Forms-B). Without this the default Standard-14 font has
+    /// no Arabic glyphs and the renderer applies no OpenType shaping, so Arabic rendered as
+    /// disconnected isolated letters in left-to-right order (or missing glyphs).
+    /// </summary>
+    private static void ShapeArabicForGenerator(Text.TextFragment tf)
+    {
+        if (!Text.ArabicTextShaper.ContainsArabic(tf.Text)) return;
+        var font = Text.FontRepository.FindFont("Arial");
+        if (font?.SourceFontData?.TtfData is null) return;
+
+        // Collect each segment's display text (shape Arabic segments to visual order; keep
+        // non-Arabic segments as-is) and the effective size. Segment-level bidi: a fragment
+        // whose first content segment is Arabic lays out right-to-left, so the segments are
+        // emitted in reverse order (the reference treats each segment as a directional unit,
+        // which keeps e.g. a leading "." attached to its Latin segment rather than migrating
+        // to the adjacent Arabic run as a per-character bidi pass would).
+        var size = tf.TextState.FontSize;
+        var displays = new List<string>();
+        var firstArabic = (bool?)null;
+        if (tf.Segments is { Count: > 0 })
+        {
+            foreach (var s in tf.Segments)
+            {
+                if (string.IsNullOrEmpty(s.Text)) continue;
+                var arabic = Text.ArabicTextShaper.ContainsArabic(s.Text);
+                firstArabic ??= arabic;
+                if (s.TextState.FontSize > 0 && size <= 0) size = s.TextState.FontSize;
+                displays.Add(arabic ? Text.ArabicTextShaper.Shape(s.Text) : s.Text);
+            }
+        }
+        if (displays.Count == 0) displays.Add(Text.ArabicTextShaper.Shape(tf.Text));
+        if (firstArabic == true) displays.Reverse();
+
+        tf.TextState.Font = font;
+        if (size > 0) tf.TextState.FontSize = size;
+        tf.Text = string.Concat(displays);
+    }
+
+    /// <summary>
     /// Apply page-level Paragraphs, Headers, and Footers to each page's content stream.
     /// Called automatically before save.
     /// </summary>
@@ -2226,7 +2472,7 @@ public sealed partial class Document : IDisposable
             // paragraphs/header/footer rendered below. The fill is wrapped in a
             // /Background marked-content block so re-applying a background replaces
             // the previous one instead of stacking, and Color.White means "remove
-            // the background" (the Aspose.PDF for .NET semantics).
+            // the background" (the Aspose.Pdf semantics).
             if (page.Background is { } pageBg && !page.BackgroundApplied)
             {
                 page.BackgroundApplied = true;
@@ -2267,8 +2513,8 @@ public sealed partial class Document : IDisposable
             if (!page.HeaderFooterApplied && (page.Header is not null || page.Footer is not null))
             {
                 page.HeaderFooterApplied = true;
-                page.Header?.RenderToPage(page, isHeader: true, page.Number);
-                page.Footer?.RenderToPage(page, isHeader: false, page.Number);
+                page.Header?.RenderToPage(page, isHeader: true, page.Number, this);
+                page.Footer?.RenderToPage(page, isHeader: false, page.Number, this);
             }
 
             if (page.LayoutApplied) continue;
@@ -2284,10 +2530,10 @@ public sealed partial class Document : IDisposable
                 // breathing room at all.
                 var m = page.PageInfo?.Margin;
                 // Respect user-set margins verbatim (including explicit zeros); fall back
-                // to Aspose.PDF for .NET's Generator defaults (90 pt L/R, 72 pt T/B) when
+                // to Aspose.Pdf's Generator defaults (90 pt L/R, 72 pt T/B) when
                 // MarginInfo was never touched. With the matching default page size A4
                 // (595x842), GoTo destinations land at x=90 y=770 = 842-72.
-                // Fall back to Aspose.PDF for .NET's Generator defaults per side: a caller
+                // Fall back to Aspose.Pdf's Generator defaults per side: a caller
                 // that sets only some sides (e.g. Left/Right for a multi-column box)
                 // leaves the others at the default rather than at an unintended zero.
                 var marginTop    = m?.TopTouched    == true ? m!.Top    : 72;
@@ -2468,7 +2714,7 @@ public sealed partial class Document : IDisposable
                     // Y cursor (Heading.Build draws at the supplied Y verbatim, so
                     // just resetting the cursor would leave the heading on the
                     // current page).
-                    if (para.IsInNewPage && para != page.Paragraphs[0])
+                    if (ParagraphIsInNewPage(para) && para != page.Paragraphs[0])
                         flow.ForceNewPage();
 
                     // Record this paragraph's starting position so a later
@@ -2479,6 +2725,16 @@ public sealed partial class Document : IDisposable
 
                     if (para is Text.TextFragment tf)
                     {
+                        // NoCharacterAction.ReplaceFonts (explicit): substitute a glyph-covering
+                        // face before layout when the fragment's font can't show its text —
+                        // registered sources first, then host Arial, then a system CJK face.
+                        if (tf.HasExplicitReplaceFonts &&
+                            Text.FontRepository.SubstituteForMissingGlyphs(tf.Text, tf.TextState.Font) is { } replaceFace)
+                            tf.TextState.Font = replaceFace;
+                        // Arabic/RTL text: shape into contextual presentation forms and route
+                        // through an Arabic-capable embedded font (the default Standard-14 font
+                        // has no Arabic coverage and the renderer applies no OpenType shaping).
+                        ShapeArabicForGenerator(tf);
                         // Replace page number macros
                         if (tf.Text.Contains("$p") || tf.Text.Contains("$P"))
                         {
@@ -2495,9 +2751,12 @@ public sealed partial class Document : IDisposable
                         if (!flow.WriteTextFragment(tf))
                         {
                             // Flow layout declined (e.g. explicit Position or embedded font) —
-                            // fall back to the legacy fixed-position writer.
-                            tf.Position ??= new Text.Position(
-                                marginLeft, page.Height - marginTop - (tf.TextState.FontSize > 0 ? tf.TextState.FontSize : 12));
+                            // fall back to the legacy fixed-position writer. Assign a default
+                            // layout position only when the caller didn't set one (the Position
+                            // getter is never null now, so test HasExplicitPosition, not `??=`).
+                            if (!tf.HasExplicitPosition)
+                                tf.Position = new Text.Position(
+                                    marginLeft, page.Height - marginTop - (tf.TextState.FontSize > 0 ? tf.TextState.FontSize : 12));
                             tb.AppendText(tf);
                         }
                         var tfBottomMargin = tf.Margin?.Bottom ?? 0;
@@ -2516,14 +2775,68 @@ public sealed partial class Document : IDisposable
                     else if (para is HtmlFragment html)
                     {
                         var htmlContent = html.HtmlContent ?? "";
-                        if (Converters.HtmlToPdfConverter.HasBlockStructure(htmlContent))
+                        var htmlColor = html.TextState?.ForegroundColor;
+
+                        // Render a real HTML <table> as a generator Table at the flow cursor,
+                        // paginating like a page-level Table paragraph (same logic as the
+                        // `para is Table` branch below).
+                        void RenderHtmlTable(Table t)
                         {
-                            // Block-structured HTML (lists, paragraphs, headings): lay
-                            // each block out at its own left indent through the flow so
-                            // list-item indentation is honoured and persists across page
-                            // breaks. Reuses the HtmlToPdfConverter block parser.
-                            var blocks = Converters.HtmlToPdfConverter.ParseHtmlBlocks(htmlContent);
-                            var htmlColor = html.TextState?.ForegroundColor;
+                            var tablePage = flow.CurrentPage;
+                            t.FlowLeftOffset = marginLeft;
+                            var spillTopMargin = PageInfo?.Margin is { TopTouched: true } dm ? dm.Top : marginTop;
+
+                            // Page-break-before: if the whole table doesn't fit in the space left
+                            // on the current page but would fit on a fresh one, move it to the next
+                            // page (keeps a table together — the common HTML expectation). Measure
+                            // its single-page height from the content top first.
+                            t.BuildMultiPage(tablePage, flow.ContentTop, flow.BottomMargin);
+                            var tableH = t.LastRenderedHeight;
+                            var avail = flow.CurrentY - flow.BottomMargin;
+                            var pageBudget = flow.ContentTop - flow.BottomMargin;
+                            if (tableH > avail + 0.5 && tableH <= pageBudget + 0.5
+                                && flow.CurrentY < flow.ContentTop - 0.5)
+                                flow.ForceNewPage();
+
+                            var pageContents = t.BuildMultiPage(tablePage, flow.CurrentY, flow.BottomMargin, spillTopMargin);
+                            var tableImages = t.LastImageDraws;
+                            var tableGraphs = t.LastGraphDraws;
+                            // Inject the first slice at the flow's CURRENT page position (the start
+                            // page, or the current overflow buffer once the flow has page-broken) —
+                            // NOT directly on the start page, which is where the cursor no longer is.
+                            flow.InjectContentAtCursor(pageContents[0]);
+                            if (tableGraphs.Count > 0)
+                                foreach (var gc in tableGraphs[0])
+                                    flow.InjectContentAtCursor(gc);
+                            // Cell images: drawn on the live start page (only correct before the flow
+                            // overflows — overflowed cell images are rare and out of scope here).
+                            if (!flow.HasOverflowed && tableImages.Count > 0)
+                                foreach (var (data, rect) in tableImages[0])
+                                    tablePage.AddImage(data, rect);
+                            if (pageContents.Count == 1)
+                            {
+                                flow.AdvanceY(t.LastRenderedHeight);
+                            }
+                            else
+                            {
+                                for (var pi = 1; pi < pageContents.Count - 1; pi++)
+                                {
+                                    if (pi < tableImages.Count && tableImages[pi].Count > 0)
+                                        overflowImages[overflowPages.Count] = tableImages[pi];
+                                    overflowPages.Add((pageContents[pi], tablePage.Width, tablePage.Height));
+                                }
+                                var lastIdx = pageContents.Count - 1;
+                                var lastSlot = flow.ContinueOnPrebuiltSpill(pageContents[lastIdx], t.LastPageEndY);
+                                if (lastIdx < tableImages.Count && tableImages[lastIdx].Count > 0)
+                                    overflowImages[lastSlot] = tableImages[lastIdx];
+                            }
+                        }
+
+                        // Render a run of block-structured HTML (paragraphs/headings/lists)
+                        // through the flow at the current cursor, then any <img> in that chunk.
+                        void RenderHtmlBlocks(string chunk)
+                        {
+                            var blocks = Converters.HtmlToPdfConverter.ParseHtmlBlocks(chunk);
                             foreach (var b in blocks)
                             {
                                 var fontSize = b.FontSize > 0 ? b.FontSize : 11.0;
@@ -2532,6 +2845,29 @@ public sealed partial class Document : IDisposable
                                 // tracks a browser/CSS layout rather than packing tight.
                                 var topMargin = b.MarginTop + (b.IsListItem ? fontSize * 0.5 : 0);
                                 if (topMargin > 0) flow.AdvanceY(topMargin);
+                                if (b.IsInputField)
+                                {
+                                    // <input>/<textarea> inside an in-page HtmlFragment: place an
+                                    // interactive AcroForm TextBoxField at the flow cursor, named
+                                    // from the HTML name/id so callers can find it by FullName.
+                                    var ifPage = flow.CurrentPage;
+                                    var ifLlx = marginLeft + b.LeftIndent;
+                                    var ifContentW = ifPage.Width - marginLeft - marginRight - b.LeftIndent;
+                                    var ifW = b.InputWidth > 0 ? System.Math.Min(b.InputWidth, ifContentW) : ifContentW;
+                                    var ifH = b.InputHeight > 0 ? b.InputHeight : fontSize * 1.3;
+                                    var ifTop = flow.CurrentY;
+                                    var ifField = new Aspose.Pdf.Forms.TextBoxField(ifPage,
+                                        new Aspose.Pdf.Rectangle(ifLlx, ifTop - ifH, ifLlx + ifW, ifTop))
+                                    {
+                                        Multiline = b.InputMultiline,
+                                        ReadOnly = b.InputReadOnly,
+                                    };
+                                    if (!string.IsNullOrEmpty(b.InputName)) ifField.PartialName = b.InputName;
+                                    if (!string.IsNullOrEmpty(b.InputValue)) ifField.Value = b.InputValue;
+                                    Form.Add(ifField, ifPage.Number);
+                                    flow.AdvanceY(ifH + b.MarginBottom);
+                                    continue;
+                                }
                                 if (b.IsHorizontalRule)
                                 {
                                     // Draw the <hr> as a thin filled bar across the
@@ -2562,6 +2898,11 @@ public sealed partial class Document : IDisposable
                                 bf.TextState.IsBold = b.FontRes == "F2";
                                 bf.TextState.IsItalic = b.FontRes == "F3";
                                 if (htmlColor is not null) bf.TextState.ForegroundColor = htmlColor;
+                                // Split the block into segments so inline <a href> ranges carry a
+                                // WebHyperlink — the layout engine turns hyperlinked segments into
+                                // Link annotations over their rendered run.
+                                if (b.Anchors is { Count: > 0 })
+                                    ApplyHtmlAnchorSegments(bf, b.Text, b.Anchors);
                                 flow.LeftIndent = b.LeftIndent;
                                 var wrote = flow.WriteTextFragment(bf);
                                 flow.LeftIndent = 0;
@@ -2573,38 +2914,55 @@ public sealed partial class Document : IDisposable
                                 }
                                 if (b.MarginBottom > 0) flow.AdvanceY(b.MarginBottom);
                             }
+                            // Draw this chunk's <img> elements in-flow (per segment), so a
+                            // logo lands at its position rather than after all content.
+                            RenderHtmlImages(chunk, flow, marginLeft, marginRight);
+                        }
+
+                        if (Converters.HtmlToPdfConverter.ContainsTable(htmlContent))
+                        {
+                            // Mixed content (text blocks + real column tables): render each
+                            // top-level segment in document order so an HTML <table> flows as
+                            // columns instead of a flat tag-stripped stack.
+                            foreach (var (isTable, chunk) in Converters.HtmlToPdfConverter.SegmentHtmlTables(htmlContent))
+                            {
+                                if (isTable)
+                                {
+                                    var t = Converters.HtmlToPdfConverter.BuildTableFromHtml(chunk);
+                                    if (t is not null) RenderHtmlTable(t);
+                                }
+                                else RenderHtmlBlocks(chunk);
+                            }
+                        }
+                        else if (Converters.HtmlToPdfConverter.HasBlockStructure(htmlContent))
+                        {
+                            RenderHtmlBlocks(htmlContent);
                         }
                         else
                         {
-                        var plainText = HtmlFragment.StripHtmlTags(htmlContent);
-                        if (!string.IsNullOrWhiteSpace(plainText))
-                        {
-                            var frag = new Text.TextFragment(plainText);
-                            // Honor HtmlFragment.TextState (Font/FontSize/colour) on
-                            // the rendered TextFragment so an absorber picking the
-                            // saved-and-reloaded text fragment surfaces the same
-                            // size the caller assigned. Without this the HTML
-                            // path silently dropped TextState assignments.
-                            if (html.TextState is { } htmlTs)
+                            var plainText = HtmlFragment.StripHtmlTags(htmlContent);
+                            if (!string.IsNullOrWhiteSpace(plainText))
                             {
-                                if (htmlTs.Font is not null) frag.TextState.Font = htmlTs.Font;
-                                if (htmlTs.FontData is not null) frag.TextState.FontData = htmlTs.FontData;
-                                if (htmlTs.FontSize > 0) frag.TextState.FontSize = htmlTs.FontSize;
-                                if (htmlTs.ForegroundColor is not null) frag.TextState.ForegroundColor = htmlTs.ForegroundColor;
-                                frag.TextState.IsBold = htmlTs.IsBold;
-                                frag.TextState.IsItalic = htmlTs.IsItalic;
+                                var frag = new Text.TextFragment(plainText);
+                                if (html.TextState is { } htmlTs)
+                                {
+                                    if (htmlTs.Font is not null) frag.TextState.Font = htmlTs.Font;
+                                    if (htmlTs.FontData is not null) frag.TextState.FontData = htmlTs.FontData;
+                                    if (htmlTs.FontSize > 0) frag.TextState.FontSize = htmlTs.FontSize;
+                                    if (htmlTs.ForegroundColor is not null) frag.TextState.ForegroundColor = htmlTs.ForegroundColor;
+                                    frag.TextState.IsBold = htmlTs.IsBold;
+                                    frag.TextState.IsItalic = htmlTs.IsItalic;
+                                }
+                                if (!flow.WriteTextFragment(frag))
+                                {
+                                    frag.Position = new Text.Position(marginLeft, page.Height - marginTop - frag.TextState.FontSize);
+                                    tb.AppendText(frag);
+                                }
+                                if (frag.Rectangle is { } r)
+                                    html.Rectangle = new System.Drawing.RectangleF(
+                                        (float)r.LLX, (float)r.LLY, (float)r.Width, (float)r.Height);
                             }
-                            if (!flow.WriteTextFragment(frag))
-                            {
-                                frag.Position = new Text.Position(marginLeft, page.Height - marginTop - frag.TextState.FontSize);
-                                tb.AppendText(frag);
-                            }
-                            if (frag.Rectangle is { } r)
-                            {
-                                html.Rectangle = new System.Drawing.RectangleF(
-                                    (float)r.LLX, (float)r.LLY, (float)r.Width, (float)r.Height);
-                            }
-                        }
+                            RenderHtmlImages(htmlContent, flow, marginLeft, marginRight);
                         }
                     }
                     else if (para is Table table)
@@ -2860,6 +3218,13 @@ public sealed partial class Document : IDisposable
                         }
                         if (imgData is null) continue;
 
+                        // An SVG source rasterises through the built-in SVG converter first —
+                        // the raster embed path below can't decode vector data and the image
+                        // would drop silently from the flow.
+                        if (XImageCollection.IsSvg(imgData)
+                            && ImageRasterizer.RasterizeSvg(imgData) is { } svgPng)
+                            imgData = svgPng;
+
                         // IsBlackWhite fast path: a bilevel Group 4 TIFF embeds its existing
                         // CCITT strips directly (no re-encode), giving the compact 1-bit output
                         // the property promises instead of a bulky re-rasterised copy.
@@ -2923,10 +3288,23 @@ public sealed partial class Document : IDisposable
                         var isJpeg = hdr0 == 0xFF && hdr1 == 0xD8 && !IsProgressiveJpeg(imgData);
                         var isPng = imgData.Length >= 4 && hdr0 == 0x89 && hdr1 == 0x50
                                     && imgData[2] == 0x4E && imgData[3] == 0x47;
-                        var frames = isJpeg || isPng
+                        // JPEG 2000 (.jp2/.jpx) — the platform codec can't decode it, so keep the
+                        // raw bytes and let Page.AddImage route them through the built-in JPXDecode
+                        // decoder (System.Drawing returns null for these, which used to drop the image).
+                        var isJpx = (imgData.Length >= 12 && hdr0 == 0x00 && hdr1 == 0x00
+                                     && imgData[2] == 0x00 && imgData[3] == 0x0C && imgData[4] == 0x6A
+                                     && imgData[5] == 0x50 && imgData[6] == 0x20 && imgData[7] == 0x20)
+                                    || (imgData.Length >= 4 && hdr0 == 0xFF && hdr1 == 0x4F
+                                        && imgData[2] == 0xFF && imgData[3] == 0x51);
+                        var frames = isJpeg || isPng || isJpx
                             ? new System.Collections.Generic.List<byte[]> { imgData }
                             : TryDecodeImageFramesAsPng(imgData);
                         if (frames is null || frames.Count == 0) continue;
+
+                        // A genuinely bilevel source embeds losslessly as a compact 1-bit
+                        // image instead of an 8-bit re-encode (a scanned/fax page would
+                        // otherwise balloon the output).
+                        var embedBlackWhite = img.IsBlackWhite || ImageStamp.IsBilevelSource(imgData);
 
                         var availW = page.Width - marginLeft - marginRight;
                         var availH = page.Height - marginTop - marginBottom;
@@ -2950,7 +3328,7 @@ public sealed partial class Document : IDisposable
                                 if (img.IsApplyResolution)
                                 {
                                     // Resolution-aware: fit to the content width preserving the
-                                    // aspect ratio (Aspose.PDF for .NET behaviour for IsApplyResolution).
+                                    // aspect ratio (Aspose.Pdf behaviour for IsApplyResolution).
                                     if (imgW > availW && imgW > 0)
                                     {
                                         imgH *= availW / imgW;
@@ -2961,7 +3339,7 @@ public sealed partial class Document : IDisposable
                                 {
                                     // Default: an oversized image is fitted into the content area by
                                     // clamping each axis independently to the available width/height
-                                    // -- matching Aspose.PDF for .NET's layout (no aspect preservation).
+                                    // -- matching Aspose.Pdf's layout (no aspect preservation).
                                     imgW = Math.Min(imgW, availW);
                                     imgH = Math.Min(imgH, availH);
                                 }
@@ -3001,7 +3379,7 @@ public sealed partial class Document : IDisposable
                                                      imgX + imgW, yTop);
                             try
                             {
-                                targetPage.AddImage(frameData, rect, img.IsBlackWhite);
+                                targetPage.AddImage(frameData, rect, embedBlackWhite);
                             }
                             catch (ArgumentException)
                             {
@@ -3068,15 +3446,17 @@ public sealed partial class Document : IDisposable
                 page.Paragraphs.Clear();
             }
 
-            // Apply Header
-            page.Header?.ApplyAsHeader([page], substitutePageNumbers: true);
+            // Header/Footer are already rendered once per page by the self-guarding
+            // RenderToPage block above (which uses page.Number for '#' substitution).
+            // Re-applying them here stamped a second copy onto every freshly laid-out
+            // page, so it is intentionally not repeated.
 
-            // Apply Footer
-            page.Footer?.ApplyAsFooter([page], substitutePageNumbers: true);
-
-            // Apply page Watermark as an artifact (image or text).
-            if (page.Watermark is { Available: true } wm)
-                new WatermarkArtifact { SourceImage = wm.Image }.AddToPage(page);
+            // Apply a watermark set through Page.Watermark as an artifact. Use the
+            // set-only PendingWatermark (not the Watermark getter, which now *detects*
+            // an already-present watermark from the content) so re-saving a document
+            // that already carries a watermark doesn't stamp a second copy.
+            if (page.PendingWatermark is { Available: true, Image: { } wmImage })
+                new WatermarkArtifact { SourceImage = wmImage }.AddToPage(page);
 
             page.LayoutApplied = true;
         }
@@ -3113,9 +3493,22 @@ public sealed partial class Document : IDisposable
             flow.FinaliseNotifications(pageRange);
             flow.FinaliseAnnotations(pageRange);
             // A page watermark repeats on the overflow pages its content spilled onto.
-            if (flow.CurrentPage.Watermark is { Available: true } fwm)
+            if (flow.CurrentPage.PendingWatermark is { Available: true, Image: { } fwmImage })
                 foreach (var op in pageRange)
-                    new WatermarkArtifact { SourceImage = fwm.Image }.AddToPage(op);
+                    new WatermarkArtifact { SourceImage = fwmImage }.AddToPage(op);
+
+            // A running Header/Footer likewise repeats on every overflow page of the flow, not
+            // just the originating page (which was stamped in the main loop). Freshly-materialised
+            // overflow pages carry no Header/Footer of their own, so render the source page's.
+            var hfSource = flow.CurrentPage;
+            if (hfSource.Header is not null || hfSource.Footer is not null)
+                foreach (var op in pageRange)
+                {
+                    if (op.HeaderFooterApplied) continue;
+                    op.HeaderFooterApplied = true;
+                    hfSource.Header?.RenderToPage(op, isHeader: true, op.Number, this);
+                    hfSource.Footer?.RenderToPage(op, isHeader: false, op.Number, this);
+                }
         }
     }
 
@@ -3196,6 +3589,118 @@ public sealed partial class Document : IDisposable
     }
 
     /// <summary>
+    /// Split an HTML block's TextFragment into segments so each inline &lt;a href&gt;
+    /// range carries a <see cref="WebHyperlink"/>. The fragment text is unchanged
+    /// (segment texts concatenate back to it); the layout engine emits a Link
+    /// annotation over each hyperlinked segment's rendered run.
+    /// </summary>
+    private static void ApplyHtmlAnchorSegments(Text.TextFragment bf, string text,
+        System.Collections.Generic.List<(int Start, int Length, string Url)> anchors)
+    {
+        var ordered = new System.Collections.Generic.List<(int Start, int Length, string Url)>();
+        foreach (var a in anchors)
+            if (a.Start >= 0 && a.Length > 0 && a.Start < text.Length && !string.IsNullOrEmpty(a.Url))
+                ordered.Add(a);
+        ordered.Sort((x, y) => x.Start.CompareTo(y.Start));
+        if (ordered.Count == 0) return;
+
+        var parts = new System.Collections.Generic.List<(string Txt, string? Url)>();
+        int pos = 0;
+        foreach (var (start, len, url) in ordered)
+        {
+            var s = Math.Max(start, pos);
+            if (s >= text.Length) break;
+            if (s > pos) parts.Add((text.Substring(pos, s - pos), null));
+            var end = Math.Min(start + len, text.Length);
+            if (end > s) parts.Add((text.Substring(s, end - s), url));
+            pos = Math.Max(pos, end);
+        }
+        if (pos < text.Length) parts.Add((text.Substring(pos), null));
+        if (parts.Count == 0) return;
+
+        bf.Segments.Clear();
+        foreach (var (txt, url) in parts)
+        {
+            if (txt.Length == 0) continue;
+            var seg = new Text.TextSegment(txt);
+            seg.TextState.FontSize = bf.TextState.FontSize;
+            seg.TextState.IsBold = bf.TextState.IsBold;
+            seg.TextState.IsItalic = bf.TextState.IsItalic;
+            if (bf.TextState.Font is not null) seg.TextState.Font = bf.TextState.Font;
+            if (bf.TextState.ForegroundColor is not null) seg.TextState.ForegroundColor = bf.TextState.ForegroundColor;
+            if (url is not null) seg.Hyperlink = new WebHyperlink(url);
+            bf.Segments.Add(seg);
+        }
+    }
+
+    /// Render every &lt;img&gt; element whose source resolves to a readable local file
+    /// (a <c>file://</c> URI or a plain path) as an image XObject in the flowing HTML
+    /// content. Remote (http/https) sources are skipped — they are not fetched — leaving
+    /// the existing alt-text fallback in place. Each image is placed at the current flow
+    /// cursor, scaled to its HTML width/height attributes (falling back to the intrinsic
+    /// size and aspect ratio), and clamped to the content width.
+    /// </summary>
+    private void RenderHtmlImages(string htmlContent, FlowLayout flow, double marginLeft, double marginRight)
+    {
+        if (string.IsNullOrEmpty(htmlContent)) return;
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+                     htmlContent, @"<img\b[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+        {
+            var tag = m.Value;
+            var srcM = System.Text.RegularExpressions.Regex.Match(tag,
+                @"\bsrc\s*=\s*['""]?([^'""\s>]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (!srcM.Success) continue;
+            var bytes = LoadHtmlImageBytes(srcM.Groups[1].Value);
+            if (bytes is null) continue;
+
+            double natW = 0, natH = 0;
+            TryGetImageNaturalSizePt(bytes, out natW, out natH);
+            var w = ParseHtmlImgDimension(tag, "width");
+            var h = ParseHtmlImgDimension(tag, "height");
+            if (w <= 0 && h <= 0) { w = natW > 0 ? natW : 72; h = natH > 0 ? natH : 72; }
+            else if (h <= 0) h = (natW > 0 && natH > 0) ? w * natH / natW : w;
+            else if (w <= 0) w = (natW > 0 && natH > 0) ? h * natW / natH : h;
+
+            var availW = flow.CurrentPage.Width - marginLeft - marginRight;
+            if (availW > 0 && w > availW) { h *= availW / w; w = availW; }
+
+            var topY = flow.CurrentY;
+            flow.CurrentPage.AddImage(bytes, new Rectangle(marginLeft, topY - h, marginLeft + w, topY));
+            flow.AdvanceY(h);
+        }
+    }
+
+    /// <summary>Load the bytes for an &lt;img&gt; source if it is a readable local file
+    /// (file:// URI or a path on disk). Returns null for remote or unreadable sources.</summary>
+    private static byte[]? LoadHtmlImageBytes(string src)
+    {
+        if (string.IsNullOrWhiteSpace(src)) return null;
+        try
+        {
+            if (src.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                || src.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+                || src.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                return null;
+            var path = src;
+            if (src.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+                && Uri.TryCreate(src, UriKind.Absolute, out var uri) && uri.IsFile)
+                path = uri.LocalPath;
+            return File.Exists(path) ? File.ReadAllBytes(path) : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Parse a numeric width/height attribute (px) from an &lt;img&gt; tag; 0 if absent.</summary>
+    private static double ParseHtmlImgDimension(string tag, string name)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(tag,
+            @"\b" + name + @"\s*=\s*['""]?(\d+(?:\.\d+)?)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return m.Success && double.TryParse(m.Groups[1].Value,
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v)
+            ? v : 0;
+    }
+
+    /// <summary>
     /// Read an image's intrinsic size in PDF points from its PNG/JPEG header without
     /// decoding pixels: point size = pixels * 72 / DPI, with DPI taken from the PNG
     /// pHYs chunk or JPEG JFIF density (defaulting to 72 when absent). Returns false
@@ -3230,6 +3735,14 @@ public sealed partial class Document : IDisposable
     private static System.Collections.Generic.List<byte[]>? TryDecodeImageFramesAsPng(byte[] data)
     {
         if (data is null || data.Length < 4) return null;
+        // TIFF decodes with the built-in managed decoder — platform-independent,
+        // and resilient to damaged multi-frame files (corrupt frames are skipped,
+        // the rest still paginate). The platform codec below remains the fallback
+        // for TIFF flavours the managed decoder declines (e.g. JPEG-in-TIFF) and
+        // for the other raster formats (BMP / GIF / ...).
+        if (IO.TiffDecoder.IsTiff(data)
+            && IO.TiffDecoder.DecodeFramesAsPng(data) is { Count: > 0 } tiffFrames)
+            return tiffFrames;
 #pragma warning disable CA1416 // platform-guarded: System.Drawing image codecs (Windows)
         try
         {
@@ -3242,19 +3755,29 @@ public sealed partial class Document : IDisposable
             if (frameCount < 1) frameCount = 1;
             for (int fr = 0; fr < frameCount; fr++)
             {
-                if (frameCount > 1) img.SelectActiveFrame(System.Drawing.Imaging.FrameDimension.Page, fr);
-                using var bmp = new System.Drawing.Bitmap(img.Width, img.Height,
-                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-                bmp.SetResolution(img.HorizontalResolution > 0 ? img.HorizontalResolution : 96f,
-                                  img.VerticalResolution > 0 ? img.VerticalResolution : 96f);
-                using (var g = System.Drawing.Graphics.FromImage(bmp))
+                // A corrupt frame in a multi-frame file (SelectActiveFrame or the
+                // decode throws) is skipped rather than dropping the whole image —
+                // the remaining frames still paginate, matching the reference
+                // engine's page count for such files.
+                try
                 {
-                    g.Clear(System.Drawing.Color.White);
-                    g.DrawImage(img, 0, 0, img.Width, img.Height);
+                    if (frameCount > 1) img.SelectActiveFrame(System.Drawing.Imaging.FrameDimension.Page, fr);
+                    using var bmp = new System.Drawing.Bitmap(img.Width, img.Height,
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    bmp.SetResolution(img.HorizontalResolution > 0 ? img.HorizontalResolution : 96f,
+                                      img.VerticalResolution > 0 ? img.VerticalResolution : 96f);
+                    using (var g = System.Drawing.Graphics.FromImage(bmp))
+                    {
+                        g.Clear(System.Drawing.Color.White);
+                        g.DrawImage(img, 0, 0, img.Width, img.Height);
+                    }
+                    using var outMs = new System.IO.MemoryStream();
+                    bmp.Save(outMs, System.Drawing.Imaging.ImageFormat.Png);
+                    frames.Add(outMs.ToArray());
                 }
-                using var outMs = new System.IO.MemoryStream();
-                bmp.Save(outMs, System.Drawing.Imaging.ImageFormat.Png);
-                frames.Add(outMs.ToArray());
+                catch when (frameCount > 1)
+                {
+                }
             }
             return frames.Count > 0 ? frames : null;
         }
@@ -3275,6 +3798,31 @@ public sealed partial class Document : IDisposable
         if (d is null || d.Length < 24) return false;
         int BE16(int o) => (d[o] << 8) | d[o + 1];
         int BE32(int o) => (d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3];
+
+        // JPEG 2000 box file (.jp2/.jpx): dimensions live in the 'ihdr' box (height@0,
+        // width@4 of its data). One pixel maps to one point (JP2 carries DPI only in the
+        // optional 'res' box, which we ignore for parity with unsized generator images).
+        if (d.Length >= 12 && d[0] == 0x00 && d[1] == 0x00 && d[2] == 0x00 && d[3] == 0x0C
+            && d[4] == 0x6A && d[5] == 0x50 && d[6] == 0x20 && d[7] == 0x20)
+        {
+            for (int i = 8; i + 16 <= d.Length; i++)
+            {
+                if (d[i] == 'i' && d[i + 1] == 'h' && d[i + 2] == 'd' && d[i + 3] == 'r')
+                {
+                    int ph = BE32(i + 4), pw = BE32(i + 8);
+                    if (pw > 0 && ph > 0) { widthPt = pw; heightPt = ph; return true; }
+                    break;
+                }
+            }
+            return false;
+        }
+        // Raw JPEG 2000 codestream: SOC (FF4F) then SIZ (FF51); Xsiz@8, Ysiz@12.
+        if (d.Length >= 16 && d[0] == 0xFF && d[1] == 0x4F && d[2] == 0xFF && d[3] == 0x51)
+        {
+            long xs = (uint)BE32(8), ys = (uint)BE32(12);
+            if (xs > 0 && ys > 0) { widthPt = xs; heightPt = ys; return true; }
+            return false;
+        }
 
         // PNG: 8-byte signature, then IHDR (width@16, height@20). pHYs gives DPI.
         if (d[0] == 0x89 && d[1] == 0x50 && d[2] == 0x4E && d[3] == 0x47)
@@ -3423,12 +3971,12 @@ public sealed partial class Document : IDisposable
 
         // Running baseline of the last body line emitted on the current region,
         // used to give the full-size / explicit line-spacing modes the
-        // Aspose.PDF for .NET "leading above the line" rule: the next line's baseline
+        // Aspose.Pdf "leading above the line" rule: the next line's baseline
         // sits one of *its own* line heights below the previous baseline, so a
         // size change between adjacent paragraphs spaces by the lower
         // paragraph's metrics (not the upper one's). Null at the top of every
         // region/page so the first line there drops by its font size, matching
-        // Aspose.PDF for .NET's first-line placement. Footnotes bypass this (they queue
+        // Aspose.Pdf's first-line placement. Footnotes bypass this (they queue
         // an explicit baseline of their own).
         private double? _lastBodyBaseline;
 
@@ -3675,6 +4223,10 @@ public sealed partial class Document : IDisposable
                 // Carry the leading so a multi-line chunk renders on the same pitch
                 // the paginator reserved (fontSize + LineSpacing), not a default 1.2x.
                 sub.TextState.LineSpacing = textState.LineSpacing;
+                // Carry the highlight so TextBuilder draws the per-line background rectangle
+                // (the non-embedded path passes it through BuildWrappedTextStream; the embedded
+                // path must copy it here or the highlight is silently dropped).
+                sub.TextState.BackgroundColor = textState.BackgroundColor;
                 var tb = new Text.TextBuilder(target);
                 tb.AppendText(sub);
             }
@@ -3732,6 +4284,29 @@ public sealed partial class Document : IDisposable
         public Page CurrentPage => _startPage;
 
         public void AdvanceY(double delta) => _curY -= delta;
+
+        /// <summary>Bottom content margin (points) — the Y below which the flow page-breaks.</summary>
+        public double BottomMargin => _marginBottom;
+
+        /// <summary>Top of the content area on the current page (points).</summary>
+        public double ContentTop => _startPageHeight - _marginTop;
+
+        /// <summary>Inject a pre-built content stream (e.g. a Table slice rendered by
+        /// BuildMultiPage at <see cref="CurrentY"/>) at the flow's CURRENT page position.
+        /// While still on the start page this appends to it directly; once the flow has
+        /// page-broken into an overflow buffer it appends to that buffer instead, so the
+        /// content lands on the page the cursor is actually on (not the original start page).
+        /// The caller advances <see cref="CurrentY"/> afterwards.</summary>
+        public void InjectContentAtCursor(byte[] content)
+        {
+            if (content is null || content.Length == 0) return;
+            if (_overflowBuffer is null) _startPage.AddContentStream(content);
+            else _overflowBuffer.Add(content);
+        }
+
+        /// <summary>True once the flow has page-broken off the start page (subsequent
+        /// content lives in an overflow buffer, not on a live Page yet).</summary>
+        public bool HasOverflowed => _overflowBuffer is not null;
 
         /// <summary>Extra left indent (points) added to the write region for the next
         /// fragment — used for HTML block / list-item indentation. Reset by the caller
@@ -3872,8 +4447,10 @@ public sealed partial class Document : IDisposable
         /// </summary>
         public bool WriteTextFragment(Text.TextFragment tf)
         {
-            // Caller-specified Position overrides flow layout.
-            if (tf.Position is not null) return false;
+            // Caller-specified Position overrides flow layout. Use HasExplicitPosition,
+            // not "Position != null": the getter now auto-materialises a (0,0) Position,
+            // so a fragment the caller never positioned must still flow here.
+            if (tf.HasExplicitPosition) return false;
             // Promote a segment-level font/size up to the fragment when the
             // fragment itself didn't set one. Generator-style tests build the
             // fragment with `new TextFragment()` then attach a TextSegment that
@@ -3939,7 +4516,7 @@ public sealed partial class Document : IDisposable
             if (contentWidth <= 0) return false;
 
             // WordWrapMode.NoWrap → each \n-delimited input line becomes one
-            // output line, regardless of width. Aspose.PDF for .NET honors this so a
+            // output line, regardless of width. Aspose.Pdf honors this so a
             // long line stays on one rendered line that overflows the page
             // horizontally; only vertical pagination still applies. Default
             // (ByWords / Undefined / null) flows through the width-aware wrap.
@@ -3954,10 +4531,11 @@ public sealed partial class Document : IDisposable
             // lines.
             var subsequentLinesIndent = (double)(tf.TextState.FormattingOptions?.SubsequentLinesIndent ?? 0f);
             var rawText = tf.Text ?? string.Empty;
+            var charSpacing = tf.TextState.CharacterSpacing;
             var allLines = noWrap
                 ? new List<string>(rawText.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
                 : Text.TextPaginator.WrapToWidth(rawText, baseFont, fontSize, contentWidth,
-                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData, firstLineIndent);
+                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData, firstLineIndent, charSpacing);
             // When notification logging is on, trace each wrapped line's width and
             // break reason (aligned 1:1 with allLines) so the loop below can record
             // where every line finished.
@@ -3965,7 +4543,7 @@ public sealed partial class Document : IDisposable
                 ? Text.TextPaginator.TraceLines(rawText, baseFont, fontSize, contentWidth,
                     tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData, firstLineIndent)
                 : null;
-            // lineHeight resolution order, mirroring Aspose.PDF for .NET:
+            // lineHeight resolution order, mirroring Aspose.Pdf:
             //   1. fragment.TextState.LineSpacing -- explicit float override
             //      in points, set by callers like
             //      `seg.TextState.LineSpacing = fontSize + 3f`.
@@ -3978,7 +4556,7 @@ public sealed partial class Document : IDisposable
                            == Text.TextFormattingOptions.LineSpacingMode.FullSize;
             double lineHeight;
             if (tf.TextState.LineSpacing > 0)
-                // Aspose.PDF for .NET treats an explicit LineSpacing as extra leading added on
+                // Aspose.Pdf treats an explicit LineSpacing as extra leading added on
                 // top of the glyph height: the line pitch is fontSize + LineSpacing
                 // (verified against reference renders — a 10pt font with LineSpacing 13
                 // lays out on a 23pt pitch, not 13). LineSpacing == 0 degenerates to the
@@ -3987,7 +4565,7 @@ public sealed partial class Document : IDisposable
             else if (fullSize && fontTtf is { Length: > 12 })
                 lineHeight = ComputeFullSizeLineHeight(fontTtf, fontSize);
             else
-                // Default LineSpacingMode is FontSize (Aspose.PDF for .NET parity): the line
+                // Default LineSpacingMode is FontSize (Aspose.Pdf parity): the line
                 // advance equals the font size, not an inflated 1.2x leading.
                 lineHeight = fontSize;
             EnsureRoom(lineHeight);
@@ -3998,13 +4576,12 @@ public sealed partial class Document : IDisposable
             var fragSlot = _currentSlot;
             var fragTop = _curY;
 
-            // Per-segment hyperlinks: each TextSegment with a Hyperlink emits its
-            // own LinkAnnotation, sized to the segment's run within the line. Only
-            // emitted when no wrap happens (the whole fragment fits on one line) --
-            // multi-line cases need cross-line rect splitting which we don't yet
-            // model. Empty segments don't contribute.
+            // Per-segment hyperlinks: each TextSegment with a Hyperlink emits a
+            // LinkAnnotation sized to the segment's run. Char offsets are into the
+            // fragment's full text; the emission below maps them onto each wrapped
+            // line (a hyperlink that wraps gets one rect per line it covers).
             var segHyperlinks = (List<(int charStart, int charEnd, Hyperlink hyperlink)>?)null;
-            if (allLines.Count == 1 && tf.Segments is { Count: > 0 } segs)
+            if (tf.Segments is { Count: > 0 } segs)
             {
                 List<(int, int, Hyperlink)>? collected = null;
                 var cursor = 0;
@@ -4032,7 +4609,7 @@ public sealed partial class Document : IDisposable
                     // SetLeading(lineHeight), so joining chunk lines with \n gets
                     // us multi-line rendering on the target page.
                     // The first line at the top of a region drops by the font size
-                    // (Aspose.PDF for .NET first-line placement); every following body line
+                    // (Aspose.Pdf first-line placement); every following body line
                     // sits one of its own line heights below the previous baseline,
                     // so a size change between adjacent paragraphs is spaced by the
                     // lower line's metrics. Same-size runs are unaffected.
@@ -4069,7 +4646,7 @@ public sealed partial class Document : IDisposable
                         CurLeft, _curY, lineHeight, tf.TextState.ForegroundColor,
                         tf.TextState.IsStrikeOut, tf.TextState.IsUnderline, baseFont, alphaGsName,
                         idx == 0 ? firstLineIndent : 0, subsequentLinesIndent, idx == 0,
-                        bgColor, bgAlphaGsName);
+                        bgColor, bgAlphaGsName, tf.TextState.Rotation);
                     WriteContent(content);
                     // The non-embedded path positions baselines independently;
                     // don't let a following embedded paragraph chain onto a
@@ -4078,7 +4655,7 @@ public sealed partial class Document : IDisposable
                 }
 
                 // Record where each line in this chunk finished. The line "slot"
-                // baseline that Aspose.PDF for .NET reports is one line-height below the
+                // baseline that Aspose.Pdf reports is one line-height below the
                 // band top per line (curY is the band top for this chunk); the X is
                 // the left margin plus the line's width including its trailing space.
                 if (lineTrace is not null)
@@ -4110,17 +4687,37 @@ public sealed partial class Document : IDisposable
 
             if (segHyperlinks is { Count: > 0 })
             {
-                var line = allLines[0];
+                // Locate each wrapped line's character span within the fragment text so a
+                // segment range [a,b) can be split across the lines it covers (wrapping
+                // drops the break space, so lines are matched sequentially by content).
+                var lineStart = new int[allLines.Count];
+                var lineEnd = new int[allLines.Count];
+                int scan = 0;
+                for (int li = 0; li < allLines.Count; li++)
+                {
+                    var ln = allLines[li];
+                    int at = ln.Length == 0 ? scan : rawText.IndexOf(ln, Math.Min(scan, rawText.Length), StringComparison.Ordinal);
+                    if (at < 0) at = scan;
+                    lineStart[li] = at;
+                    lineEnd[li] = at + ln.Length;
+                    scan = lineEnd[li];
+                }
                 foreach (var (a, b, h) in segHyperlinks)
                 {
-                    if (a >= line.Length) continue;
-                    var clampB = Math.Min(b, line.Length);
-                    var prefix = line.Substring(0, a);
-                    var run = line.Substring(a, clampB - a);
-                    var x0 = CurLeft + MeasureText(prefix, baseFont, fontSize);
-                    var w = MeasureText(run, baseFont, fontSize);
-                    _pendingLinks.Add((fragSlot,
-                        new Rectangle(x0, fragTop - lineHeight, x0 + w, fragTop), h));
+                    for (int li = 0; li < allLines.Count; li++)
+                    {
+                        var ln = allLines[li];
+                        int ov0 = Math.Max(a, lineStart[li]);
+                        int ov1 = Math.Min(b, lineEnd[li]);
+                        if (ov1 <= ov0) continue;
+                        var prefix = ln.Substring(0, ov0 - lineStart[li]);
+                        var run = ln.Substring(ov0 - lineStart[li], ov1 - ov0);
+                        var x0 = CurLeft + MeasureText(prefix, baseFont, fontSize);
+                        var w = MeasureText(run, baseFont, fontSize);
+                        var yTop = fragTop - lineHeight * li;
+                        _pendingLinks.Add((fragSlot,
+                            new Rectangle(x0, yTop - lineHeight, x0 + w, yTop), h));
+                    }
                 }
             }
             return true;
@@ -4128,7 +4725,7 @@ public sealed partial class Document : IDisposable
 
         /// <summary>Compute the per-line vertical advance for
         /// <see cref="Text.TextFormattingOptions.LineSpacingMode.FullSize"/>.
-        /// Aspose.PDF for .NET uses the embedded font's full vertical extent (ascent
+        /// Aspose.Pdf uses the embedded font's full vertical extent (ascent
         /// minus descent, since descent is negative) scaled to the requested
         /// font size, so multi-script content with tall ascent glyphs (CJK
         /// fonts, Arial Unicode MS) advances by the right amount per line
@@ -4238,7 +4835,8 @@ public sealed partial class Document : IDisposable
             bool strikeOut = false, bool underline = false, string? fontName = null,
             string? alphaGsName = null, double firstLineIndent = 0,
             double subsequentLinesIndent = 0, bool chunkStartsParagraph = true,
-            Color? background = null, string? bgAlphaGsName = null)
+            Color? background = null, string? bgAlphaGsName = null,
+            double rotation = 0)
         {
             // The left indent of this chunk's first rendered line: the paragraph's
             // own first line uses FirstLineIndent; a chunk that continues the
@@ -4252,7 +4850,7 @@ public sealed partial class Document : IDisposable
                 b.SetFillColor(foreground.R / 255.0, foreground.G / 255.0, foreground.B / 255.0);
             // startY is the top of the text band. Drop the first baseline by the
             // font ascent (cap height) so the glyph tops align with the top margin,
-            // matching Aspose.PDF for .NET's first-line placement. Subsequent lines advance
+            // matching Aspose.Pdf's first-line placement. Subsequent lines advance
             // by lineHeight, so the whole block shifts down uniformly.
             var capHeight = fontName is not null ? Text.Standard14Fonts.GetCapHeight(fontName) : 0;
             var ascent = capHeight > 0 ? capHeight / 1000.0 * fontSize : fontSize * 0.7;
@@ -4288,7 +4886,19 @@ public sealed partial class Document : IDisposable
             // The first line starts indented by firstLineIndent; line 2 shifts back
             // to startX via a relative Td (Td is relative to the current line start,
             // so a plain T* would otherwise carry the indent down to every line).
-            b.MoveTextPosition(startX + firstIndent, firstBaseline);
+            // TextState.Rotation rotates the whole block around its first baseline
+            // origin via the text matrix (Td/T* then advance in rotated text space).
+            if (rotation != 0)
+            {
+                var rad = rotation * Math.PI / 180.0;
+                var cos = Math.Round(Math.Cos(rad), 10);
+                var sin = Math.Round(Math.Sin(rad), 10);
+                b.SetTextMatrix(cos, sin, -sin, cos, startX + firstIndent, firstBaseline);
+            }
+            else
+            {
+                b.MoveTextPosition(startX + firstIndent, firstBaseline);
+            }
             for (var i = 0; i < lines.Count; i++)
             {
                 if (i == 1)
@@ -4763,6 +5373,15 @@ public sealed partial class Document : IDisposable
     public void Encrypt(string userPassword, string ownerPassword,
         DocumentPrivilege? permissions = null, CryptoAlgorithm algorithm = Aspose.Pdf.CryptoAlgorithm.AESx128)
     {
+        // Encryption is gated on the SIGNATURE TYPE, not the mere
+        // presence of a signature (verified by black-box probe of Aspose.PDF 26.6):
+        // a DocMDP CERTIFICATION signature refuses encryption (it would break the
+        // certification), while an ordinary APPROVAL signature encrypts normally.
+        // So an approval signature succeeds; a certified (DocMDP) one throws.
+        if (HasCertificationSignature())
+            throw new PdfException(
+                "You cannot change this document because it is certified.");
+
         var p = permissions is not null
             ? GetPermissionFlags(permissions)
             : -4; // all permissions
@@ -4775,6 +5394,26 @@ public sealed partial class Document : IDisposable
             Aspose.Pdf.CryptoAlgorithm.AESx256 => PdfEncryptor.CreateAES256(userPassword, ownerPassword, p),
             _ => PdfEncryptor.CreateAES128(userPassword, ownerPassword, p),
         };
+    }
+
+    /// <summary>True when the document carries a DocMDP certification (author) signature.
+    /// A certification is recorded in the catalog as <c>/Perms &lt;&lt; /DocMDP &lt;sigref&gt; &gt;&gt;</c>
+    /// (PDF 32000-1 §12.8.2.2), so it is detected by a direct catalog lookup rather than by
+    /// enumerating the AcroForm fields — the latter can recurse on a pathological field tree.
+    /// Ordinary approval signatures leave /Perms absent, so they are not blocked.</summary>
+    private bool HasCertificationSignature()
+    {
+        try
+        {
+            var perms = _reader.ResolveDict(_reader.Catalog?.Get("Perms"));
+            return perms is not null && perms.Get("DocMDP") is not null;
+        }
+        catch
+        {
+            // A malformed catalog must not turn encryption into a crash — treat it as
+            // "not certified" and let encryption proceed (the pre-enforcement behaviour).
+            return false;
+        }
     }
 
     /// <summary>
@@ -4871,7 +5510,14 @@ public sealed partial class Document : IDisposable
     /// Linearize the document for fast web view (mirrors the public API
     /// <c>Document.Optimize()</c>). Default optimization is applied.
     /// </summary>
-    public void Optimize() => OptimizeResources();
+    public void Optimize()
+    {
+        OptimizeResources();
+        // Optimize() also enables fast-web-view (linearization) on the next save,
+        // so that Document.Optimize() produces a
+        // linearized output. LinearizeDocument() sets the same flag.
+        _linearize = true;
+    }
 
     /// <summary>
     /// Process paragraphs in the document (layout step before save).
@@ -4988,6 +5634,7 @@ public sealed partial class Document : IDisposable
 
     private Aspose.Pdf.Optimization.OptimizationOptions? _optimizationOptions;
     private HashSet<int>? _reachableObjects;
+    private bool _prunedFontsThisSave;
 
 
     private void CollectReachable(PdfObject? root, HashSet<int> visited)
@@ -5088,6 +5735,155 @@ public sealed partial class Document : IDisposable
             AddReferencedXObjectNames(resources, used);
             PruneResourceCategories(resources, used);
         }
+    }
+
+    /// <summary>Drop /Font resource entries no longer referenced by any content after a
+    /// <see cref="Text.TextEditOptions.FontReplace.RemoveUnusedFonts"/> text edit. Walks
+    /// the page content and every invoked form XObject, pruning each scope's OWN /Font
+    /// dictionary against the fonts its content selects with <c>Tf</c>.</summary>
+    private void PruneUnusedFontsForPage(Page page)
+    {
+        var resources = _reader.ResolveDict(page.Dict.Get("Resources"));
+        var visited = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        var rewritten = PruneFontsInScope(page.GetContentStreamBytes(), resources, visited);
+        if (rewritten is not null) page.SetContentStream(rewritten);
+    }
+
+    /// <summary>Prune unused /Font entries in a content scope and rename the replacement
+    /// fonts to sequential F0, F1, … keys (matching Aspose.Pdf, which names a
+    /// replacement font "F0"). Returns the rewritten content when a rename changed it,
+    /// else null. Form XObject scopes are rewritten in place.</summary>
+    private byte[]? PruneFontsInScope(byte[]? content, PdfDictionary? resources,
+        HashSet<PdfDictionary> visitedForms)
+    {
+        if (content is null || content.Length == 0 || resources is null) return null;
+
+        // Collect the fonts a `Tf` selects that actually SHOW text, and the form
+        // XObjects a `Do` invokes. A font selected only by an empty run (`/F Tf`
+        // followed by `[] TJ` with no glyphs, then another `Tf`) is not really used —
+        // counting it would keep an orphan font after a full RemoveUnusedFonts replace.
+        var usedFonts = new HashSet<string>(StringComparer.Ordinal);
+        var formNames = new List<string>();
+        var lexer = new IO.PdfLexer(content);
+        string? lastName = null;      // most recent /Name operand (font for Tf, form for Do)
+        string? currentFont = null;   // font selected by the last Tf
+        bool sawGlyphs = false;       // a non-empty string appeared since the last operator
+        while (true)
+        {
+            var token = lexer.NextToken();
+            if (token.Kind == IO.TokenKind.Eof) break;
+            switch (token.Kind)
+            {
+                case IO.TokenKind.Name when token.StringValue is { } n:
+                    lastName = n;
+                    break;
+                case IO.TokenKind.LiteralString:
+                case IO.TokenKind.HexString:
+                    if (token.BytesValue is { Length: > 0 }) sawGlyphs = true;
+                    break;
+                case IO.TokenKind.Keyword:
+                    var kw = token.StringValue;
+                    if (kw == "BI") { SkipInlineImage(lexer, usedFonts); break; }
+                    if (kw == "Tf") currentFont = lastName;
+                    else if (kw == "Do" && lastName is not null) formNames.Add(lastName);
+                    else if ((kw == "Tj" || kw == "TJ" || kw == "'" || kw == "\"")
+                             && sawGlyphs && currentFont is not null)
+                        usedFonts.Add(currentFont);
+                    sawGlyphs = false; // operator boundary resets the operand scan
+                    break;
+            }
+        }
+
+        byte[]? rewritten = null;
+        var fontDict = _reader.ResolveDict(resources.Get("Font"));
+        if (fontDict is not null)
+        {
+            foreach (var key in fontDict.Keys.ToList())
+                if (!usedFonts.Contains(key))
+                    fontDict.Remove(key);
+
+            // Rename the replacement fonts (registered under an "AsRp…" key) to F0, F1, …,
+            // avoiding collision with any surviving original font, and patch the content's
+            // Tf operands to match.
+            var survivors = fontDict.Keys.ToList();
+            var taken = new HashSet<string>(survivors.Where(k => !k.StartsWith("AsRp", StringComparison.Ordinal)),
+                StringComparer.Ordinal);
+            var renameMap = new Dictionary<string, string>(StringComparer.Ordinal);
+            var n = 0;
+            foreach (var rk in survivors.Where(k => k.StartsWith("AsRp", StringComparison.Ordinal)))
+            {
+                string fn;
+                do { fn = "F" + n++; } while (taken.Contains(fn));
+                taken.Add(fn);
+                renameMap[rk] = fn;
+            }
+            if (renameMap.Count > 0)
+            {
+                foreach (var (oldKey, newKey) in renameMap)
+                {
+                    var val = fontDict.Get(oldKey);
+                    fontDict.Remove(oldKey);
+                    if (val is not null) fontDict.Set(newKey, val);
+                }
+                rewritten = RenameFontNamesInContent(content, renameMap);
+            }
+        }
+
+        var xobjects = _reader.ResolveDict(resources.Get("XObject"));
+        if (xobjects is not null)
+        {
+            foreach (var name in formNames)
+            {
+                var xstream = _reader.ResolveStream(xobjects.Get(name));
+                if (xstream is null || xstream.Dict.GetName("Subtype") != "Form") continue;
+                if (!visitedForms.Add(xstream.Dict)) continue; // cycle / shared-form guard
+                var formRes = _reader.ResolveDict(xstream.Dict.Get("Resources"));
+                // Only prune a form's OWN /Font dict — a form inheriting the page's
+                // resources shares that dict, handled at the page scope.
+                if (formRes is not null && !ReferenceEquals(formRes, resources))
+                {
+                    var newForm = PruneFontsInScope(_reader.DecodeStream(xstream), formRes, visitedForms);
+                    if (newForm is not null)
+                    {
+                        xstream.Dict.Remove("Filter");
+                        xstream.Dict.Remove("DecodeParms");
+                        xstream.Dict.Set("Length", new PdfInteger(newForm.Length));
+                        xstream.ReplaceData(newForm);
+                    }
+                }
+            }
+        }
+        return rewritten;
+    }
+
+    /// <summary>Rewrite a content stream, replacing every /Name token that is a key of
+    /// <paramref name="renameMap"/> with its mapped name (used to repoint Tf font
+    /// operands after a resource-key rename).</summary>
+    private static byte[] RenameFontNamesInContent(byte[] content, Dictionary<string, string> renameMap)
+    {
+        var lexer = new IO.PdfLexer(content);
+        var patches = new List<(int start, int end, string nw)>();
+        while (true)
+        {
+            var startPos = (int)lexer.Position;
+            var token = lexer.NextToken();
+            if (token.Kind == IO.TokenKind.Eof) break;
+            if (token.Kind == IO.TokenKind.Name && token.StringValue is { } nm
+                && renameMap.TryGetValue(nm, out var nw))
+                patches.Add((startPos, (int)lexer.Position, nw));
+        }
+        // Apply right-to-left so earlier offsets stay valid.
+        patches.Sort((a, b) => b.start.CompareTo(a.start));
+        foreach (var (s, e, nw) in patches)
+        {
+            var nameBytes = System.Text.Encoding.ASCII.GetBytes("/" + nw);
+            var result = new byte[content.Length - (e - s) + nameBytes.Length];
+            Array.Copy(content, 0, result, 0, s);
+            Array.Copy(nameBytes, 0, result, s, nameBytes.Length);
+            Array.Copy(content, e, result, s + nameBytes.Length, content.Length - e);
+            content = result;
+        }
+        return content;
     }
 
     /// <summary>Expand <paramref name="used"/> with the /XObject names that a used
@@ -5327,6 +6123,11 @@ public sealed partial class Document : IDisposable
 
     private Aspose.Pdf.PdfFormat? _lastConvertedFormat;
 
+    /// <summary>True once a PDF/A conversion succeeded on this instance. Validation
+    /// of file-structure rules that conversion repairs on save (e.g. the PDF/A-1
+    /// xref-stream prohibition) treats the document as already fixed.</summary>
+    internal bool PdfAConversionApplied => _lastConvertedFormat is not null;
+
     /// <summary>
     /// Convert the document to a specific PDF/A format with a log file.
     /// </summary>
@@ -5369,7 +6170,7 @@ public sealed partial class Document : IDisposable
         return Convert(options);
     }
 
-    // The 4 Aspose.PDF for .NET static Convert(src, LoadOptions, dst, SaveOptions)
+    // The 4 Aspose.Pdf static Convert(src, LoadOptions, dst, SaveOptions)
     // overloads are deferred: in this FOSS branch HtmlLoadOptions /
     // MdLoadOptions / SvgLoadOptions don't derive from LoadOptions, so a
     // typed `LoadOptions` parameter can't compile-time dispatch into the
@@ -5410,10 +6211,117 @@ public sealed partial class Document : IDisposable
     /// <summary>
     /// Internal conversion implementation.
     /// </summary>
+    /// <summary>Round content-stream real literals whose magnitude exceeds the PDF/A-1
+    /// implementation limit (32767) and that carry a fractional part, to plain integers.
+    /// String (…), hex &lt;…&gt; and comment regions are left untouched. Returns the
+    /// rewritten bytes, or null when nothing needed changing.</summary>
+    private static byte[]? RoundOutOfRangeReals(byte[] content)
+    {
+        var outBytes = new List<byte>(content.Length + 16);
+        bool changed = false;
+        int i = 0, n = content.Length;
+        void CopyRange(int from, int to) { for (var k = from; k < to; k++) outBytes.Add(content[k]); }
+        while (i < n)
+        {
+            byte b = content[i];
+            if (b == (byte)'(')
+            {
+                // literal string: copy verbatim honouring escapes + nesting
+                int depth = 0, start = i;
+                while (i < n)
+                {
+                    byte sc = content[i];
+                    if (sc == (byte)'\\' && i + 1 < n) { i += 2; continue; }
+                    if (sc == (byte)'(') depth++;
+                    else if (sc == (byte)')' && --depth == 0) { i++; break; }
+                    i++;
+                }
+                CopyRange(start, i);
+                continue;
+            }
+            if (b == (byte)'<' && i + 1 < n && content[i + 1] != (byte)'<')
+            {
+                int start = i;
+                while (i < n && content[i] != (byte)'>') i++;
+                if (i < n) i++;
+                CopyRange(start, i);
+                continue;
+            }
+            if (b == (byte)'%')
+            {
+                int start = i;
+                while (i < n && content[i] != (byte)'\n' && content[i] != (byte)'\r') i++;
+                CopyRange(start, i);
+                continue;
+            }
+            // Inline image: copy BI … EI verbatim — the raw sample bytes after ID
+            // must never be scanned as tokens.
+            if (b == (byte)'B' && i + 1 < n && content[i + 1] == (byte)'I'
+                && (i == 0 || IsPdfDelimiterOrWs(content[i - 1]))
+                && (i + 2 >= n || IsPdfDelimiterOrWs(content[i + 2])))
+            {
+                int start = i;
+                i += 2;
+                while (i + 1 < n
+                       && !(content[i] == (byte)'E' && content[i + 1] == (byte)'I'
+                            && (i + 2 >= n || IsPdfDelimiterOrWs(content[i + 2]))
+                            && IsPdfDelimiterOrWs(content[i - 1])))
+                    i++;
+                i = Math.Min(n, i + 2);
+                CopyRange(start, i);
+                continue;
+            }
+            if (b == (byte)'-' || b == (byte)'+' || b == (byte)'.' || (b >= (byte)'0' && b <= (byte)'9'))
+            {
+                int start = i;
+                bool hasDot = false;
+                if (b == (byte)'-' || b == (byte)'+') i++;
+                while (i < n)
+                {
+                    byte nc = content[i];
+                    if (nc >= (byte)'0' && nc <= (byte)'9') { i++; continue; }
+                    if (nc == (byte)'.' && !hasDot) { hasDot = true; i++; continue; }
+                    break;
+                }
+                if (hasDot)
+                {
+                    var token = System.Text.Encoding.ASCII.GetString(content, start, i - start);
+                    if (double.TryParse(token, System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out var v)
+                        && Math.Abs(v) >= 32767 && v != Math.Truncate(v))
+                    {
+                        var repl = Math.Round(v).ToString("0", System.Globalization.CultureInfo.InvariantCulture);
+                        foreach (var rb in System.Text.Encoding.ASCII.GetBytes(repl)) outBytes.Add(rb);
+                        changed = true;
+                        continue;
+                    }
+                }
+                CopyRange(start, i);
+                continue;
+            }
+            outBytes.Add(b);
+            i++;
+        }
+        return changed ? outBytes.ToArray() : null;
+    }
+
+    private static bool IsPdfDelimiterOrWs(byte c) =>
+        c is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n' or (byte)'\f' or 0
+          or (byte)'(' or (byte)')' or (byte)'<' or (byte)'>' or (byte)'[' or (byte)']'
+          or (byte)'/' or (byte)'%';
+
     private bool ConvertInternal(PdfFormatConversionOptions options)
     {
         var format = options.TargetFormat;
-        var fix = options.ErrorAction == ConvertErrorAction.Delete;
+        // The standard PDF/A transformations (embed fonts, write the XMP pdfaid, add an
+        // OutputIntent, normalise the version) are applied for every ErrorAction — that
+        // applies structural fixes only (a None-conversion still embeds fonts and writes
+        // metadata) and is the only way the output can validate structurally.
+        var fix = true;
+        // Removing prohibited CONTENT (catalog/AA actions, non-compliant annotations) is what
+        // ConvertErrorAction governs: Delete strips it, None only logs the violation and leaves
+        // the content in place. The structural fixes above are applied regardless.
+        var strip = options.ErrorAction == ConvertErrorAction.Delete;
 
         if (format == PdfFormat.v_1_7)
         {
@@ -5449,6 +6357,38 @@ public sealed partial class Document : IDisposable
             return true;
         }
 
+        // PDF/UA-1 (ISO 14289-1) accessibility: tag the document, give it a title + natural
+        // language, set /ViewerPreferences /DisplayDocTitle, the pdfuaid:part identifier, the
+        // XMP dates and a file /ID. The tagged-metadata stamp on save finalises the rest.
+        if (format == PdfFormat.PDF_UA_1)
+        {
+            if (!fix) return CheckFontEmbedding(options);
+            if (string.IsNullOrEmpty(Info.Title)) Info.Title = "Untitled";
+            if (string.IsNullOrEmpty(Language)) Language = "en-US";
+            DisplayDocTitle = true;
+            var uaMeta = GetOrCreateMetadata();
+            if (string.IsNullOrEmpty(uaMeta.Get("pdfuaid:part"))) uaMeta.Set("pdfuaid:part", "1");
+            if (string.IsNullOrEmpty(uaMeta.Get("dc:title"))) uaMeta.Set("dc:title", Info.Title);
+            if (string.IsNullOrEmpty(uaMeta.Get("pdf:Producer"))) uaMeta.Set("pdf:Producer", "Aspose.PDF FOSS for .NET");
+            if (string.IsNullOrEmpty(uaMeta.Get("xmp:CreateDate")) && Info.CreationDate != DateTime.MinValue)
+                uaMeta.Set("xmp:CreateDate", FormatXmpDate(Info.CreationDate, Info.CreationTimeZone));
+            if (string.IsNullOrEmpty(uaMeta.Get("xmp:ModifyDate")) && Info.ModDate != DateTime.MinValue)
+                uaMeta.Set("xmp:ModifyDate", FormatXmpDate(Info.ModDate, Info.ModTimeZone));
+            if (_reader.Trailer.Get("ID") is null)
+            {
+                _forceWriteId = true;
+                var feId = Security.CryptoRandom.GetBytes(16);
+                var feIdArr = new PdfArray();
+                feIdArr.Add(new PdfString(feId, isHex: true));
+                feIdArr.Add(new PdfString(feId, isHex: true));
+                _reader.Trailer.Set("ID", feIdArr);
+            }
+            EmbedNonEmbeddedFonts(options, includeStandard14: true);
+            if (options.AutoTaggingSettings is { EnableAutoTagging: true })
+                Tagged.AutoTagger.Apply(this, options.AutoTaggingSettings);
+            return CheckFontEmbedding(options);
+        }
+
         var isPdfX = format is PdfFormat.PDF_X_1A or PdfFormat.PDF_X_3;
 
         // Determine PDF/A part and conformance from format
@@ -5462,6 +6402,9 @@ public sealed partial class Document : IDisposable
             PdfFormat.PDF_A_3A => ("3", "A"),
             PdfFormat.PDF_A_3B => ("3", "B"),
             PdfFormat.PDF_A_3U => ("3", "U"),
+            // ZUGFeRD (factur-x) electronic invoices are PDF/A-3 documents that carry the
+            // invoice XML as an associated file. Convert as PDF/A-3B, then attach the AF tagging.
+            PdfFormat.ZUGFeRD => ("3", "B"),
             PdfFormat.PDF_A_4 => ("4", ""),
             PdfFormat.PDF_X_1A => ("X-1", "a"),
             PdfFormat.PDF_X_3 => ("X-3", ""),
@@ -5499,6 +6442,18 @@ public sealed partial class Document : IDisposable
             {
                 SetVersion("1.4");
             }
+        }
+        // PDF/A-2 and PDF/A-3 are based on ISO 32000-1 (PDF 1.7): the header version
+        // upgrades to 1.7 (Aspose.Pdf does this on Convert; the saved file
+        // reports Version == "1.7"). The catalog /Version — which takes precedence
+        // over the header when reading — must follow, or a stale /Version 1.4 from
+        // the source would mask the upgraded header.
+        if (fix && part is "2" or "3"
+            && string.Compare(PdfVersion ?? "1.0", "1.7", StringComparison.Ordinal) < 0)
+        {
+            SetVersion("1.7");
+            if (_reader.Catalog.Get("Version") is not null)
+                _reader.Catalog.Set("Version", new PdfName("1.7"));
         }
 
         // 3. Add/fix XMP metadata
@@ -5570,6 +6525,22 @@ public sealed partial class Document : IDisposable
                 meta.Set("xmp:ModifyDate", FormatXmpDate(Info.ModDate, Info.ModTimeZone));
             if (string.IsNullOrEmpty(meta.Get("xmp:MetadataDate")) && Info.ModDate != DateTime.MinValue)
                 meta.Set("xmp:MetadataDate", FormatXmpDate(Info.ModDate, Info.ModTimeZone));
+
+            // ISO 19005 6.6.3 analog of the date sync above for the remaining
+            // /Info↔XMP pairs: the XMP packet the conversion writes must mirror
+            // the document-information strings (Keywords → pdf:Keywords, etc.) —
+            // reloading the output and reading Metadata["pdf:Keywords"] must see
+            // the value the caller put in DocumentInfo. NOTE: guarded with the
+            // packet-only ContainsKey — Get() consults the Info fallback, which
+            // would report the value "present" without it ever being serialised.
+            if (!meta.ContainsKey("pdf:Keywords") && !string.IsNullOrEmpty(Info.Keywords))
+                meta.Set("pdf:Keywords", Info.Keywords);
+            if (!meta.ContainsKey("dc:creator") && !string.IsNullOrEmpty(Info.Author))
+                meta.Set("dc:creator", Info.Author);
+            if (!meta.ContainsKey("dc:description") && !string.IsNullOrEmpty(Info.Subject))
+                meta.Set("dc:description", Info.Subject);
+            if (!meta.ContainsKey("xmp:CreatorTool") && !string.IsNullOrEmpty(Info.Creator))
+                meta.Set("xmp:CreatorTool", Info.Creator);
         }
 
         // 4. Ensure file ID exists. Materialise /ID into the in-memory
@@ -5596,13 +6567,13 @@ public sealed partial class Document : IDisposable
             }
         }
 
-        // 5. Remove prohibited actions from catalog
-        RemoveProhibitedCatalogActions(options, fix);
+        // 5. Remove prohibited actions from catalog (only when ErrorAction strips)
+        RemoveProhibitedCatalogActions(options, strip);
 
-        // 6. Fix annotations (per page)
+        // 6. Fix annotations (per page) — print-flag fixes always, removal only when stripping
         foreach (var page in Pages)
         {
-            FixAnnotationsForPdfA(page, options, fix);
+            FixAnnotationsForPdfA(page, options, fix, strip);
         }
 
         // 6b. Remove page-level transparency groups — PDF/A-1 (ISO 19005-1)
@@ -5626,6 +6597,23 @@ public sealed partial class Document : IDisposable
                 if (fix) page.Dict.Remove("Group");
             }
 
+            // ConvertTransparencyAction.Mask: preserve the visual appearance of images that
+            // are painted under a constant fill-alpha (/ca < 1). PDF/A-1 forbids ExtGState
+            // alpha, so the neutralisation below would zero it and make such an image render
+            // opaquely. Before that, bake the alpha into a constant DeviceGray soft mask on
+            // the image XObject itself (an image /SMask is NOT stripped by this conversion),
+            // so the image keeps compositing at the requested opacity while the prohibited
+            // ExtGState alpha is removed. The Default action leaves the neutralisation opaque.
+            if (fix && options.TransparencyAction == ConvertTransparencyAction.Mask)
+                foreach (var page in Pages)
+                {
+                    var res = _reader.ResolveDict(page.Dict.Get("Resources"));
+                    var content = page.GetContentStreamBytes();
+                    if (res is not null && content is { Length: > 0 })
+                        MaskConstantAlphaImages(content, res, 1.0,
+                            new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance));
+                }
+
             // ExtGState soft masks, constant alpha (ca/CA < 1) and non-Normal blend modes
             // are equally prohibited by PDF/A-1. Neutralise them in every graphics-state
             // dictionary reachable from the pages (including nested Form XObjects) so the
@@ -5633,6 +6621,29 @@ public sealed partial class Document : IDisposable
             foreach (var page in Pages)
                 NeutralizeExtGStateTransparency(page.Dict, options, page.Number, fix,
                     new HashSet<PdfDictionary>());
+
+            // PDF/A-1 implementation limits (ISO 19005-1 / PDF 1.4 Annex C): real numbers
+            // must stay within ±32767. Round out-of-range FRACTIONAL reals in the page
+            // content to integers (integral magnitudes beyond the limit are tolerated by
+            // the target validators, and rounding keeps far-off-page geometry harmless).
+            if (fix)
+                foreach (var page in Pages)
+                {
+                    // Defensive: an undecodable content stream must not abort the
+                    // whole conversion — skip the range fix for that page.
+                    try
+                    {
+                        var content = page.GetContentStreamBytes();
+                        if (content is not { Length: > 0 }) continue;
+                        var rounded = RoundOutOfRangeReals(content);
+                        if (rounded is not null)
+                            page.SetContentStream(rounded);
+                    }
+                    catch
+                    {
+                        // leave the page content untouched
+                    }
+                }
         }
 
         // 7. Add OutputIntent
@@ -5641,7 +6652,7 @@ public sealed partial class Document : IDisposable
             // PDF/X requires an OutputIntent with ICC profile
             AddPdfXOutputIntent(options);
         }
-        else if (!HasOutputIntent())
+        else if (!HasPdfAOutputIntentInCatalog())
         {
             // Detect device-dependent colours either already emitted as
             // page XObjects OR queued as DOM paragraphs (Image, ImageStamp)
@@ -5662,10 +6673,13 @@ public sealed partial class Document : IDisposable
                     Rule = "ColorSpace",
                     Description = "Device-dependent color space without OutputIntent.",
                 });
-                if (fix)
-                {
-                    AddSrgbOutputIntent();
-                }
+            }
+            // A PDF/A output always carries a GTS_PDFA1 OutputIntent (the reference
+            // validator gates on its presence), not only when device-dependent
+            // colours were detected — the violation above is logged for those only.
+            if (fix)
+            {
+                AddSrgbOutputIntent();
             }
         }
 
@@ -5687,30 +6701,322 @@ public sealed partial class Document : IDisposable
             }
         }
 
-        // 9. Remove interactive form fields — PDF/A prohibits non-signature widgets.
-        // Signature fields are valid in PDF/A and must be preserved.
+        // 9. Interactive form fields: PDF/A prohibits non-signature widgets. The
+        // the conversion FLATTENS them — the field's appearance (its value
+        // text) is baked into the page content and must survive extraction
+        // rather than deleting them. Signature fields are valid
+        // in PDF/A and stay; when signatures are present only the non-signature
+        // widgets are dropped (flattening around a live signature would break it).
         if (fix && !isPdfX)
-            RemoveNonSignatureFormFields();
+            FlattenOrRemoveFormFieldsForPdfA();
 
         // 10. Embed glyph-bearing fonts that the source left unembedded (PDF/A requires
-        // every font to be embedded): resolve the real face, fall back to Arial for an
+        // every font to be embedded — including the Standard-14 faces, which a viewer would
+        // otherwise substitute): resolve the real face, fall back to Arial for an
         // unresolvable family, and report each replacement via FontSubstitution.
         if (fix && !isPdfX)
-            EmbedNonEmbeddedFonts(options);
+            EmbedNonEmbeddedFonts(options, includeStandard14: true);
 
         // 11. Verify all non-embedded non-Standard14 fonts can be resolved.
         // PDF/A requires every glyph-bearing font to be embedded; if a font is
         // unembedded AND FontRepository can't find it, conversion fails.
         var fontsResolved = CheckFontEmbedding(options);
 
+        // 11b. Auto-tagging: synthesise a logical-structure tree from the page content so the
+        // output carries a /StructTreeRoot. This is mandatory for the accessible A-levels
+        // (which require a tagged, titled document), and otherwise runs when the caller opts in
+        // (AutoTaggingSettings.Default enables it) for tagged PDF/A / PDF/UA output.
+        var autoTag = options.AutoTaggingSettings is { EnableAutoTagging: true } || conformance == "A";
+        if (fix && autoTag)
+        {
+            // A-level PDF/A also requires a document title (ISO 19005 §6.7.3); mirror the XMP
+            // dc:title onto /Info so the validator's title check is satisfied.
+            if (conformance == "A" && string.IsNullOrEmpty(Info.Title))
+                Info.Title = string.IsNullOrEmpty(meta.Get("dc:title")) ? "Untitled" : meta.Get("dc:title");
+            Tagged.AutoTagger.Apply(this, options.AutoTaggingSettings ?? AutoTaggingSettings.Default);
+        }
+
+        // 12. ZUGFeRD (factur-x): mark the embedded invoice XML as an associated file —
+        // /AFRelationship /Alternative + MIME type text/xml — and reference every embedded
+        // file from the catalog /AF array, per the ZUGFeRD/PDF-A-3 associated-files profile.
+        if (fix && format == PdfFormat.ZUGFeRD)
+            ApplyZugferdAssociatedFiles();
+
+        // 12b. PDF/A-2 (ISO 19005-2 §6.9): an embedded file must itself be a PDF/A
+        // document. Convert every embedded PDF attachment to PDF/A-2B in place —
+        // so the output attachments then claim 2B
+        // (so a Validate(PDF_A_2B) of the extracted attachment passes and a
+        // Validate(PDF_A_3B) fails the claim gate).
+        if (fix && part == "2")
+            ConvertEmbeddedPdfAttachmentsToPdfA2B();
+
+        // 13. Size optimization (OptimizeFileSize): subset every embedded TrueType program to
+        // the glyphs the document actually uses. Font embedding (step 10) is the dominant cost
+        // of PDF/A conversion — a source that referenced but did not embed several system
+        // faces gains a full WinAnsi program for each. Subsetting those (and any already-
+        // embedded faces) to the used glyphs is what keeps the converted file at or below the
+        // source size. The just-embedded /FontFile2 programs are still pending objects, so the
+        // subsetter is given a resolver that reaches them. Non-destructive (glyph outlines only).
+        if (options.OptimizeFileSize)
+            Optimization.FontSubsetter.SubsetFonts(_reader, subsetEmbedded: true,
+                resolveNewStream: ResolvePendingStream);
+        else if (fix)
+            // Output growth is kept bounded (capped near +10%), so the programs
+            // THIS conversion just embedded are
+            // subset to the used glyphs. The source's own embedded fonts are left
+            // alone — re-subsetting a foreign subset (Word symbol cmaps etc.) has
+            // stripped used glyphs into tofu.
+            Optimization.FontSubsetter.SubsetEmbeddedFonts(_reader, ResolvePendingStream,
+                newlyEmbeddedOnly: true);
+
+        // 14. PDF/A-1 content-stream normalisation:
+        //  - every page's content is bracketed in a q…Q pair so graphics state left
+        //    open by the original stream can't leak into content the conversion
+        //    appends (observable as exactly +2 operators per page);
+        //  - ISO 19005-1 §6.1.13 implementation limits: a real value must fit ±32767,
+        //    so an out-of-range path coordinate is rounded to an integer (sub-unit
+        //    precision that far off the page is meaningless).
+        if (fix && part == "1")
+        {
+            foreach (var page in Pages)
+                try { NormalizePdfA1PageContent(page); }
+                catch { /* undecodable content (e.g. exotic LZW): leave the page as-is */ }
+            // Rewriting /Contents leaves each page's original stream object(s)
+            // orphaned — have the save reachability-prune them, or every edited
+            // page's content bytes are carried over twice.
+            _reader.MayHaveOrphansOnSave = true;
+        }
+
         return fontsResolved;
+    }
+
+    /// <summary>Bracket <paramref name="page"/>'s content in q…Q and round
+    /// path coordinates beyond the PDF/A-1 ±32767 real-value limit to integers.
+    /// A page with inline images is wrapped at the byte level and its
+    /// coordinates left untouched: materialising such a stream through the
+    /// typed operator list would drop the inline-image binary payload.</summary>
+    private void NormalizePdfA1PageContent(Page page)
+    {
+        const double limit = short.MaxValue; // 32767
+        static bool OutOfRange(double v) => Math.Abs(v) >= limit && v != Math.Truncate(v);
+        static double Clamp(double v) => OutOfRange(v) ? Math.Round(v) : v;
+
+        // Pre-scan: does any path coordinate exceed the PDF/A-1 real limit? Pages
+        // with inline images must not be re-serialised through the typed operator
+        // list at all (its BI token carries no binary payload).
+        var needsCoordFix = false;
+        var hasInline = false;
+        var ops = page.Contents;
+        foreach (var op in ops)
+        {
+            switch (op)
+            {
+                case Operators.BI:
+                    hasInline = true;
+                    break;
+                case Operators.MoveTo m when OutOfRange(m.X) || OutOfRange(m.Y):
+                case Operators.LineTo l when OutOfRange(l.X) || OutOfRange(l.Y):
+                case Operators.CurveTo c when OutOfRange(c.X1) || OutOfRange(c.Y1)
+                    || OutOfRange(c.X2) || OutOfRange(c.Y2) || OutOfRange(c.X3) || OutOfRange(c.Y3):
+                    needsCoordFix = true;
+                    break;
+            }
+            if (hasInline) break;
+        }
+
+        if (hasInline || !needsCoordFix)
+        {
+            // Byte-level wrap: keeps the original stream bytes verbatim (their
+            // operator text usually compresses tighter than a re-serialisation,
+            // and inline-image payloads survive untouched).
+            var bytes = page.GetContentStreamBytes() ?? [];
+            var head = Encoding.ASCII.GetBytes("q\n");
+            var tail = Encoding.ASCII.GetBytes("\nQ");
+            var merged = new byte[head.Length + bytes.Length + tail.Length];
+            head.CopyTo(merged, 0);
+            bytes.CopyTo(merged, head.Length);
+            tail.CopyTo(merged, head.Length + bytes.Length);
+            page.SetContentStream(merged);
+            return;
+        }
+
+        ops.Insert(1, new Operators.GSave());
+        ops.Add(new Operators.GRestore());
+        // The collection is materialised by the insert above, so the enumerator
+        // yields the live operator instances; coordinate edits persist through
+        // the flush-on-save.
+        foreach (var op in ops)
+            switch (op)
+            {
+                case Operators.MoveTo m:
+                    m.X = Clamp(m.X); m.Y = Clamp(m.Y);
+                    break;
+                case Operators.LineTo l:
+                    l.X = Clamp(l.X); l.Y = Clamp(l.Y);
+                    break;
+                case Operators.CurveTo c:
+                    c.X1 = Clamp(c.X1); c.Y1 = Clamp(c.Y1);
+                    c.X2 = Clamp(c.X2); c.Y2 = Clamp(c.Y2);
+                    c.X3 = Clamp(c.X3); c.Y3 = Clamp(c.Y3);
+                    break;
+            }
+    }
+
+    /// <summary>Resolve a stream that a preceding conversion step allocated but has not yet
+    /// serialised — these live in <see cref="_newObjects"/> and are not reachable through the
+    /// reader's xref. Returns null when the object number is unknown or not a stream.</summary>
+    private PdfStream? ResolvePendingStream(int objNum)
+    {
+        foreach (var (num, obj) in _newObjects)
+            if (num == objNum)
+                return obj as PdfStream;
+        return null;
+    }
+
+    /// <summary>Move a FileAttachment annotation's embedded PDF payload into the
+    /// document's EmbeddedFiles name tree (used when PDF/A-4 conversion strips the
+    /// annotation itself). Non-PDF payloads are ignored.</summary>
+    private void MigrateFileAttachmentToEmbeddedFiles(PdfDictionary annotDict)
+    {
+        var fs = _reader.ResolveDict(annotDict.Get("FS"));
+        var ef = fs is null ? null : _reader.ResolveDict(fs.Get("EF"));
+        var stream = ef is null ? null : _reader.ResolveStream(ef.Get("F"));
+        if (fs is null || stream is null) return;
+        byte[] data;
+        try { data = _reader.DecodeStream(stream, stream.ObjectNumber, stream.Generation); }
+        catch { return; }
+        if (data.Length < 5 || data[0] != (byte)'%' || data[1] != (byte)'P'
+            || data[2] != (byte)'D' || data[3] != (byte)'F') return;
+        var name = (_reader.Resolve(fs.Get("UF")) as PdfString)?.ToText()
+            ?? (_reader.Resolve(fs.Get("F")) as PdfString)?.ToText() ?? "attachment.pdf";
+        var desc = (_reader.Resolve(annotDict.Get("Contents")) as PdfString)?.ToText();
+        try
+        {
+            AddEmbeddedFile(name, data, desc);
+            _embeddedFiles = null; // collection re-materialises from the tree
+        }
+        catch { /* best-effort */ }
+    }
+
+    /// <summary>Convert every embedded PDF attachment to PDF/A-2B in place (ISO 19005-2
+    /// §6.9 allows only PDF/A attachments). Non-PDF attachments and attachments whose
+    /// conversion fails are left untouched. The embedded-file stream keeps its object;
+    /// only its bytes (and /Params /Size) are replaced.</summary>
+    private void ConvertEmbeddedPdfAttachmentsToPdfA2B()
+    {
+        var names = _reader.ResolveDict(_reader.Catalog.Get("Names"));
+        var efTree = names is not null ? _reader.ResolveDict(names.Get("EmbeddedFiles")) : null;
+        var arr = efTree is not null ? _reader.Resolve(efTree.Get("Names")) as PdfArray : null;
+        if (arr is null) return;
+
+        for (var i = arr.Count - 2; i >= 0; i -= 2)
+        {
+            var fsDict = _reader.ResolveDict(arr[i + 1]);
+            var ef = fsDict is null ? null : _reader.ResolveDict(fsDict.Get("EF"));
+            var stream = ef is null ? null : _reader.ResolveStream(ef.Get("F"));
+            if (stream is null) continue;
+
+            byte[] data;
+            try { data = _reader.DecodeStream(stream, stream.ObjectNumber, stream.Generation); }
+            catch { continue; }
+            if (data.Length < 5 || data[0] != (byte)'%' || data[1] != (byte)'P'
+                || data[2] != (byte)'D' || data[3] != (byte)'F')
+            {
+                // ISO 19005-2 §6.9 allows only PDF/A attachments; a non-PDF payload
+                // (image, data file, …) can't be made compliant, so under
+                // ConvertErrorAction.Delete it is removed
+                // from the name tree (2 array slots: name string + filespec).
+                arr.RemoveAt(i + 1);
+                arr.RemoveAt(i);
+                _embeddedFiles = null; // collection re-materialises from the tree
+                continue;
+            }
+
+            try
+            {
+                using var src = new MemoryStream(data);
+                using var child = new Document(src);
+                var childOpts = new PdfFormatConversionOptions(
+                    Stream.Null, PdfFormat.PDF_A_2B, ConvertErrorAction.Delete);
+                if (!child.Convert(childOpts)) continue;
+                using var outMs = new MemoryStream();
+                child.Save(outMs);
+                var newBytes = outMs.ToArray();
+
+                stream.ReplaceData(newBytes);
+                stream.Dict.Remove("Filter");
+                stream.Dict.Remove("DecodeParms");
+                stream.Dict.Set("Length", new PdfInteger(newBytes.Length));
+                stream.DoNotCompress = true;
+                var prms = _reader.ResolveDict(stream.Dict.Get("Params"));
+                prms?.Set("Size", new PdfInteger(newBytes.Length));
+                prms?.Remove("CheckSum");
+            }
+            catch { /* best-effort: leave the attachment as-is */ }
+        }
+    }
+
+    /// <summary>Tag the document's embedded files as ZUGFeRD/factur-x associated files: the
+    /// invoice XML gets <c>/AFRelationship /Alternative</c> and the <c>text/xml</c> MIME
+    /// subtype, and every embedded-file spec is referenced from the catalog <c>/AF</c> array
+    /// (PDF 2.0 §7.11.3 associated files).</summary>
+    private void ApplyZugferdAssociatedFiles()
+    {
+        // The public EmbeddedFiles collection holds FileSpecification objects that are
+        // decoupled from the on-disk spec dictionaries (Add() copies the bytes in), so tag
+        // those instances too — callers read MIMEType/AFRelationship back through them.
+        var embedded = EmbeddedFiles;
+        for (var i = 1; i <= embedded.Count; i++)
+        {
+            var spec = embedded[i];
+            if (spec.Name is { } n && n.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrEmpty(spec.MIMEType)) spec.MIMEType = "text/xml";
+                if (spec.AFRelationship == AFRelationship.None)
+                    spec.AFRelationship = AFRelationship.Alternative;
+            }
+        }
+
+        var names = _reader.ResolveDict(_reader.Catalog.Get("Names"));
+        var efTree = names is not null ? _reader.ResolveDict(names.Get("EmbeddedFiles")) : null;
+        var arr = efTree is not null ? _reader.Resolve(efTree.Get("Names")) as PdfArray : null;
+        if (arr is null) return;
+
+        var afArray = _reader.Resolve(_reader.Catalog.Get("AF")) as PdfArray ?? new PdfArray();
+        var present = new HashSet<int>();
+        foreach (var item in afArray)
+            if (item is PdfIndirectRef r) present.Add(r.ObjectNumber);
+
+        for (var i = 0; i + 1 < arr.Count; i += 2)
+        {
+            var key = (_reader.Resolve(arr[i]) as PdfString)?.ToText() ?? string.Empty;
+            var fsRef = arr[i + 1];
+            var fsDict = _reader.ResolveDict(fsRef);
+            if (fsDict is null) continue;
+
+            // The invoice XML is the alternative representation of the document's content.
+            if (key.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+            {
+                fsDict.Set("AFRelationship", new PdfName("Alternative"));
+                var ef = _reader.ResolveDict(fsDict.Get("EF"));
+                var stream = ef is not null ? _reader.ResolveStream(ef.Get("F")) : null;
+                stream?.Dict.Set("Subtype", new PdfName("text/xml"));
+            }
+
+            if (fsRef is PdfIndirectRef fr && present.Add(fr.ObjectNumber))
+                afArray.Add(fsRef);
+        }
+
+        if (afArray.Count > 0)
+            _reader.Catalog.Set("AF", afArray);
     }
 
     /// <summary>Embed every non-embedded simple (Type1/TrueType) font referenced by the
     /// pages, substituting a system face. The real family is used when it resolves;
     /// otherwise the text is re-mapped to Arial. The existing font dictionary is rewritten
     /// in place so the page's resource reference is preserved.</summary>
-    private void EmbedNonEmbeddedFonts(PdfFormatConversionOptions? options = null)
+    private void EmbedNonEmbeddedFonts(PdfFormatConversionOptions? options = null,
+        bool includeStandard14 = false)
     {
         // Records (once per BaseFont) that the source left a glyph-bearing font
         // unembedded — a PDF/A violation that this pass then fixes by embedding.
@@ -5725,49 +7031,257 @@ public sealed partial class Document : IDisposable
         var done = new HashSet<PdfDictionary>();
         // Shared across every dictionary so identical font programs are embedded once.
         var fontFileCache = new Dictionary<string, (int objNum, string embedName)>();
+        var visitedRes = new HashSet<PdfDictionary>();
+
+        // Embed one simple, glyph-bearing, non-embedded font dict in place, substituting a
+        // resolved system face (Helvetica→Arial, etc.) when the named font has none.
+        void EmbedOne(PdfDictionary fontDict)
+        {
+            if (!done.Add(fontDict)) return;
+            // Consume the transient "embed full, don't subset" marker (set by
+            // Font.IsSubset = false). Removed here so it never reaches the output.
+            var embedFull = fontDict.GetBool("AsposeEmbedFull");
+            fontDict.Remove("AsposeEmbedFull");
+            var subtype = fontDict.GetName("Subtype");
+            if (subtype == "Type0")
+            {
+                EmbedNonEmbeddedCidFont(fontDict, options, reported, fontFileCache);
+                return;
+            }
+            if (subtype is not ("Type1" or "TrueType")) return;   // simple fonts only
+            if (IsSimpleFontEmbedded(fontDict)) return;
+            var baseFont = fontDict.GetName("BaseFont") ?? "";
+            if (baseFont.Length > 7 && baseFont[6] == '+') return; // subset = embedded
+            if (!includeStandard14 &&
+                new HashSet<string>(Text.FontRepository.Standard14Names, StringComparer.Ordinal).Contains(baseFont))
+                return; // standard-14 stay as-is unless the caller opts in (Document.EmbedStandardFonts)
+
+            // The source carries this glyph-bearing font without an embedded
+            // program — log it (once per name) as a PDF/A violation before the
+            // pass below embeds a resolved face.
+            if (options is not null && reported.Add(baseFont))
+                options.ConversionLog.Add(new PdfAViolation
+                {
+                    Rule = "FontEmbedding",
+                    Description = $"Font '{baseFont}' is not embedded.",
+                });
+
+            var resolved = Text.SystemFontResolver.Resolve(baseFont);
+            string newName;
+            byte[]? ttf;
+            if (resolved is not null) { ttf = resolved; newName = baseFont; }
+            else { ttf = Text.SystemFontResolver.Resolve("Arial"); newName = "Arial"; }
+            if (ttf is null || ttf.Length == 0) return;
+
+            // A Standard-14 font carries no program of its own, so the resolver returns a
+            // host substitute (Helvetica→Arial, Times→Times New Roman, …). Name the embedded
+            // font after the face actually embedded — read from its name table — so the output
+            // reflects what was embedded rather than the abstract standard name (matching
+            // the Aspose.Pdf surface). Host-dependent by nature.
+            if (new HashSet<string>(Text.FontRepository.Standard14Names, StringComparer.Ordinal).Contains(baseFont))
+            {
+                try
+                {
+                    var ttp = new Text.TrueTypeParser(ttf);
+                    ttp.Parse();
+                    var fam = ttp.FamilyName;
+                    if (!string.IsNullOrWhiteSpace(fam) && fam != "Unknown")
+                        newName = fam.Replace(" ", "");
+                }
+                catch { /* keep the standard name if the face can't be parsed */ }
+            }
+
+            try
+            {
+                Text.FontEmbedder.EmbedIntoFontDict(this, ttf, fontDict, newName, fontFileCache, subset: !embedFull);
+                RaiseFontSubstitution(new Text.Font(baseFont, "Type1"), new Text.Font(newName, "TrueType"));
+            }
+            catch { /* best-effort: leave the font as-is if embedding fails */ }
+        }
+
         foreach (var page in Pages)
         {
             PdfDictionary? resources;
             try { resources = Reader.ResolveDict(page.Dict.Get("Resources")); } catch { continue; }
-            var fontRes = resources is null ? null : Reader.ResolveDict(resources.Get("Font"));
-            if (fontRes is null) continue;
+            // Walk the page resources and any nested Form XObject resources — a font
+            // used only inside a form/appearance stream (not the page's own /Font) must
+            // be embedded too.
+            if (resources is not null)
+                foreach (var fontDict in CollectFontDictsRecursive(resources, visitedRes))
+                    EmbedOne(fontDict);
+
+            // Annotation appearance (/AP) streams are NOT reachable from the page
+            // /Resources, so their fonts (e.g. a FreeText appearance regenerated with a
+            // non-embedded standard /Helvetica) must be walked separately for PDF/A.
+            foreach (var apRes in CollectAnnotationAppearanceResources(page))
+                foreach (var fontDict in CollectFontDictsRecursive(apRes, visitedRes))
+                    EmbedOne(fontDict);
+        }
+    }
+
+    /// <summary>Embed a system face into a non-embedded composite (Type0/CID) font.
+    /// Unlike the simple-font path there is NO Arial fallback: under an Identity
+    /// encoding the content stream's CIDs are the ORIGINAL face's glyph ids, so only
+    /// the same-named real face keeps them valid — an unresolvable family is left
+    /// unembedded (the conversion log still records the violation). A CJK-mojibake
+    /// /BaseFont (its legacy-codepage bytes read as Latin-1, e.g. "ËÎÌå" = 宋体) is
+    /// decoded through the font's CMap codepage and mapped to the host family.</summary>
+    private void EmbedNonEmbeddedCidFont(PdfDictionary type0Dict, PdfFormatConversionOptions? options,
+        HashSet<string> reported, Dictionary<string, (int objNum, string embedName)> fontFileCache)
+    {
+        var descArr = _reader.Resolve(type0Dict.Get("DescendantFonts")) as PdfArray;
+        var cidFont = descArr is { Count: > 0 } ? _reader.ResolveDict(descArr[0]) : null;
+        if (cidFont is null) return;
+        var descriptor = _reader.ResolveDict(cidFont.Get("FontDescriptor"));
+        if (descriptor is not null &&
+            (descriptor.Get("FontFile") ?? descriptor.Get("FontFile2") ?? descriptor.Get("FontFile3")) is not null)
+            return; // already embedded
+        var baseFont = type0Dict.GetName("BaseFont") ?? cidFont.GetName("BaseFont") ?? "";
+        if (baseFont.Length > 7 && baseFont[6] == '+') return; // subset = embedded
+
+        if (options is not null && reported.Add(baseFont))
+            options.ConversionLog.Add(new PdfAViolation
+            {
+                Rule = "FontEmbedding",
+                Description = $"Font '{baseFont}' is not embedded.",
+            });
+
+        var ttf = Text.SystemFontResolver.Resolve(baseFont);
+        if (ttf is null or { Length: 0 })
+        {
+            var decoded = DecodeCjkBaseFontName(baseFont, type0Dict, cidFont);
+            if (decoded != baseFont)
+                ttf = Text.SystemFontResolver.Resolve(decoded);
+        }
+        if (ttf is null or { Length: 0 }) return;
+
+        try
+        {
+            Text.FontEmbedder.EmbedIntoCidFontDict(this, ttf, type0Dict, cidFont, fontFileCache);
+            RaiseFontSubstitution(new Text.Font(baseFont, "Type0"), new Text.Font(baseFont, "Type0"));
+        }
+        catch { /* best-effort: leave the font as-is if embedding fails */ }
+    }
+
+    /// <summary>Decode a legacy-codepage-mojibake /BaseFont ("ËÎÌå") to its script-native
+    /// name (宋体) via the font's CMap codepage, then map the common CJK display names to
+    /// their host font families (宋体 → SimSun). Returns the input unchanged when it has no
+    /// high bytes or no codepage applies.</summary>
+    private string DecodeCjkBaseFontName(string baseFont, PdfDictionary type0Dict, PdfDictionary cidFont)
+    {
+        var hasHigh = false;
+        foreach (var c in baseFont)
+            if (c > 0x7F) { hasHigh = true; break; }
+        if (!hasHigh) return baseFont;
+
+        var cp = Text.CidFontInfo.CodepageForCMapName(type0Dict.GetName("Encoding"));
+        if (cp == 0)
+        {
+            var csi = _reader.ResolveDict(cidFont.Get("CIDSystemInfo"));
+            var orderingObj = csi?.Get("Ordering");
+            var ordering = orderingObj is PdfString os ? os.ToText()
+                : (orderingObj is PdfName on ? on.Value : null);
+            cp = ordering switch { "CNS1" => 950, "GB1" => 936, "Japan1" => 932, "Korea1" or "KR" => 949, _ => 0 };
+        }
+        if (cp == 0) return baseFont;
+
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < baseFont.Length; i++)
+        {
+            var c = baseFont[i];
+            if (c <= 0x7F || i + 1 >= baseFont.Length) { sb.Append(c); continue; }
+            var code = (c << 8) | (baseFont[i + 1] & 0xFF);
+            if (Text.CidFontInfo.LegacyLookup(cp, code) is int u)
+            {
+                sb.Append(char.ConvertFromUtf32(u));
+                i++;
+            }
+            else sb.Append(c);
+        }
+        var native = sb.ToString();
+        return native switch
+        {
+            "宋体" => "SimSun",
+            "新宋体" => "NSimSun",
+            "黑体" => "SimHei",
+            "楷体" or "楷体_GB2312" => "KaiTi",
+            "仿宋" or "仿宋_GB2312" => "FangSong",
+            "微软雅黑" => "Microsoft YaHei",
+            "ＭＳ ゴシック" or "ＭＳゴシック" => "MS Gothic",
+            "ＭＳ 明朝" or "ＭＳ明朝" => "MS Mincho",
+            "標楷體" => "DFKai-SB",
+            "細明體" => "MingLiU",
+            "新細明體" => "PMingLiU",
+            "굴림" => "Gulim",
+            "바탕" => "Batang",
+            _ => native,
+        };
+    }
+
+    /// <summary>Yield the /Resources dict of every appearance (/AP /N, /D, /R) stream of
+    /// every annotation on <paramref name="page"/>, descending state-keyed appearance
+    /// sub-dictionaries. Used so PDF/A font embedding reaches fonts that live only inside
+    /// an annotation's appearance stream.</summary>
+    private IEnumerable<PdfDictionary> CollectAnnotationAppearanceResources(Page page)
+    {
+        PdfArray? annots;
+        try { annots = Reader.Resolve(page.Dict.Get("Annots")) as PdfArray; } catch { yield break; }
+        if (annots is null) yield break;
+        foreach (var annotObj in annots)
+        {
+            var annot = Reader.ResolveDict(annotObj);
+            var ap = annot is null ? null : Reader.ResolveDict(annot.Get("AP"));
+            if (ap is null) continue;
+            foreach (var apKey in new[] { "N", "D", "R" })
+            {
+                var entry = Reader.Resolve(ap.Get(apKey));
+                if (entry is PdfStream stream)
+                {
+                    var res = Reader.ResolveDict(stream.Dict.Get("Resources"));
+                    if (res is not null) yield return res;
+                }
+                else if (entry is PdfDictionary stateDict) // state-keyed appearances
+                {
+                    foreach (var stateKey in new List<string>(stateDict.Keys))
+                    {
+                        var s = Reader.ResolveStream(stateDict.Get(stateKey));
+                        var res = s is null ? null : Reader.ResolveDict(s.Dict.Get("Resources"));
+                        if (res is not null) yield return res;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>Yield every <c>/Font</c> child dictionary reachable from a <c>/Resources</c>
+    /// dict, recursing through Form XObject (<c>/Subtype /Form</c>) resources so a font used
+    /// only inside a form/appearance stream is reached too. <paramref name="visitedRes"/>
+    /// guards against resource-dict cycles.</summary>
+    private IEnumerable<PdfDictionary> CollectFontDictsRecursive(PdfDictionary resources,
+        HashSet<PdfDictionary> visitedRes)
+    {
+        if (!visitedRes.Add(resources)) yield break;
+
+        var fontRes = Reader.ResolveDict(resources.Get("Font"));
+        if (fontRes is not null)
             foreach (var key in new List<string>(fontRes.Keys))
             {
                 var fontDict = Reader.ResolveDict(fontRes.Get(key));
-                if (fontDict is null || !done.Add(fontDict)) continue;
-                var subtype = fontDict.GetName("Subtype");
-                if (subtype is not ("Type1" or "TrueType")) continue;   // simple fonts only
-                if (IsSimpleFontEmbedded(fontDict)) continue;
-                var baseFont = fontDict.GetName("BaseFont") ?? "";
-                if (baseFont.Length > 7 && baseFont[6] == '+') continue; // subset = embedded
-                if (new HashSet<string>(Text.FontRepository.Standard14Names, StringComparer.Ordinal).Contains(baseFont))
-                    continue; // standard-14 stay as-is (renderers map them to system faces)
-
-                // The source carries this glyph-bearing font without an embedded
-                // program — log it (once per name) as a PDF/A violation before the
-                // pass below embeds a resolved face.
-                if (options is not null && reported.Add(baseFont))
-                    options.ConversionLog.Add(new PdfAViolation
-                    {
-                        Rule = "FontEmbedding",
-                        Description = $"Font '{baseFont}' is not embedded.",
-                    });
-
-                var resolved = Text.SystemFontResolver.Resolve(baseFont);
-                string newName;
-                byte[]? ttf;
-                if (resolved is not null) { ttf = resolved; newName = baseFont; }
-                else { ttf = Text.SystemFontResolver.Resolve("Arial"); newName = "Arial"; }
-                if (ttf is null || ttf.Length == 0) continue;
-
-                try
-                {
-                    Text.FontEmbedder.EmbedIntoFontDict(this, ttf, fontDict, newName, fontFileCache);
-                    RaiseFontSubstitution(new Text.Font(baseFont, "Type1"), new Text.Font(newName, "TrueType"));
-                }
-                catch { /* best-effort: leave the font as-is if embedding fails */ }
+                if (fontDict is not null) yield return fontDict;
             }
-        }
+
+        var xobjs = Reader.ResolveDict(resources.Get("XObject"));
+        if (xobjs is not null)
+            foreach (var key in new List<string>(xobjs.Keys))
+            {
+                var xobj = Reader.Resolve(xobjs.Get(key));
+                var xdict = xobj is PdfStream s ? s.Dict : xobj as PdfDictionary;
+                if (xdict is null || xdict.GetName("Subtype") != "Form") continue;
+                var subRes = Reader.ResolveDict(xdict.Get("Resources"));
+                if (subRes is not null)
+                    foreach (var fd in CollectFontDictsRecursive(subRes, visitedRes))
+                        yield return fd;
+            }
     }
 
     private bool IsSimpleFontEmbedded(PdfDictionary fontDict)
@@ -5817,6 +7331,43 @@ public sealed partial class Document : IDisposable
     /// Signature fields (/FT=Sig) are preserved because they are valid in PDF/A.
     /// Walks each page's /Annots, then prunes /AcroForm/Fields to match.
     /// </summary>
+    /// <summary>PDF/A form-field handling: flatten the whole form into page
+    /// content when it has no signature fields (the reference behaviour — field
+    /// values stay visible and extractable); with signatures present, fall back
+    /// to dropping just the non-signature widgets.</summary>
+    private void FlattenOrRemoveFormFieldsForPdfA()
+    {
+        var acroForm = _reader.ResolveDict(_reader.Catalog.Get("AcroForm"));
+        if (acroForm is null) return;
+
+        bool hasSig = false, hasNonSig = false;
+        foreach (var page in Pages)
+        {
+            if (_reader.Resolve(page.Dict.Get("Annots")) is not Core.PdfArray annots) continue;
+            foreach (var annotRef in annots)
+            {
+                var d = _reader.ResolveDict(annotRef);
+                if (d?.GetName("Subtype") != "Widget") continue;
+                var ft = d.GetName("FT") ?? _reader.ResolveDict(d.Get("Parent"))?.GetName("FT");
+                if (ft == "Sig") hasSig = true;
+                else hasNonSig = true;
+            }
+        }
+        if (!hasNonSig) return;
+
+        if (!hasSig)
+        {
+            try
+            {
+                Form?.Flatten(this);
+                _form = null;
+                return;
+            }
+            catch { /* fall through to removal */ }
+        }
+        RemoveNonSignatureFormFields();
+    }
+
     private void RemoveNonSignatureFormFields()
     {
         var acroForm = _reader.ResolveDict(_reader.Catalog.Get("AcroForm"));
@@ -5984,7 +7535,114 @@ public sealed partial class Document : IDisposable
         _ => false,
     };
 
-    private void RemoveProhibitedCatalogActions(PdfFormatConversionOptions options, bool fix)
+    private static double AlphaValue(PdfObject? value) => value switch
+    {
+        PdfReal r => r.Value,
+        PdfInteger i => i.Value,
+        _ => 1.0,
+    };
+
+    /// <summary>Walk a content stream tracking the current fill alpha (set by <c>/GS gs</c>
+    /// against the resources' ExtGState /ca, saved/restored by q/Q) and, for every image
+    /// XObject drawn while that alpha is below 1, bake the alpha into a constant DeviceGray
+    /// soft mask on the image (unless it already carries a mask). This preserves the image's
+    /// composited appearance once the prohibited ExtGState alpha is neutralised for PDF/A-1.
+    /// Recurses into invoked Form XObjects, carrying the alpha active at their draw.</summary>
+    private void MaskConstantAlphaImages(byte[] content, PdfDictionary resources,
+        double initialAlpha, HashSet<PdfDictionary> visitedForms)
+    {
+        var extg = _reader.ResolveDict(resources.Get("ExtGState"));
+        var xobjects = _reader.ResolveDict(resources.Get("XObject"));
+
+        var lexer = new IO.PdfLexer(content);
+        var stack = new Stack<double>();
+        var curAlpha = initialAlpha;
+        string? lastName = null;
+        // Form name -> the alpha active where it was invoked (last wins; a form drawn only
+        // opaquely stays opaque). Recursed after the scan so lexer state is untouched.
+        var formAlpha = new Dictionary<string, double>(StringComparer.Ordinal);
+
+        while (true)
+        {
+            var t = lexer.NextToken();
+            if (t.Kind == IO.TokenKind.Eof) break;
+            if (t.Kind == IO.TokenKind.Keyword && t.StringValue == "BI")
+            {
+                SkipInlineImage(lexer, new HashSet<string>());
+                lastName = null;
+                continue;
+            }
+            if (t.Kind == IO.TokenKind.Name) { lastName = t.StringValue; continue; }
+            if (t.Kind != IO.TokenKind.Keyword) continue;
+
+            switch (t.StringValue)
+            {
+                case "q":
+                    stack.Push(curAlpha);
+                    break;
+                case "Q":
+                    if (stack.Count > 0) curAlpha = stack.Pop();
+                    break;
+                case "gs":
+                    if (lastName is not null && extg is not null &&
+                        _reader.ResolveDict(extg.Get(lastName)) is { } gs)
+                        curAlpha = AlphaValue(gs.Get("ca"));
+                    break;
+                case "Do":
+                    if (lastName is not null && xobjects is not null &&
+                        _reader.ResolveStream(xobjects.Get(lastName)) is { } xs)
+                    {
+                        var sub = xs.Dict.GetName("Subtype");
+                        if (sub == "Image")
+                        {
+                            if (curAlpha < 1.0 - 1e-6) AttachConstantSoftMask(xs.Dict, curAlpha);
+                        }
+                        else if (sub == "Form" && curAlpha < 1.0 - 1e-6)
+                        {
+                            formAlpha[lastName] = curAlpha;
+                        }
+                    }
+                    break;
+            }
+            lastName = null;
+        }
+
+        if (xobjects is null) return;
+        foreach (var (name, alpha) in formAlpha)
+        {
+            var xs = _reader.ResolveStream(xobjects.Get(name));
+            if (xs is null || xs.Dict.GetName("Subtype") != "Form") continue;
+            if (!visitedForms.Add(xs.Dict)) continue;
+            var formContent = _reader.DecodeStream(xs);
+            if (formContent.Length == 0) continue;
+            var formRes = _reader.ResolveDict(xs.Dict.Get("Resources")) ?? resources;
+            MaskConstantAlphaImages(formContent, formRes, alpha, visitedForms);
+        }
+    }
+
+    /// <summary>Attach a 1×1 constant DeviceGray <c>/SMask</c> of value <paramref name="alpha"/>
+    /// to an image XObject so it composites at that opacity. No-op if the image already carries
+    /// a soft mask or stencil mask (its existing transparency is preserved as-is).</summary>
+    private void AttachConstantSoftMask(PdfDictionary imgDict, double alpha)
+    {
+        if (imgDict.Get("SMask") is not null || imgDict.Get("Mask") is not null) return;
+
+        var smDict = new PdfDictionary();
+        smDict.Set("Type", new PdfName("XObject"));
+        smDict.Set("Subtype", new PdfName("Image"));
+        smDict.Set("Width", new PdfInteger(1));
+        smDict.Set("Height", new PdfInteger(1));
+        smDict.Set("ColorSpace", new PdfName("DeviceGray"));
+        smDict.Set("BitsPerComponent", new PdfInteger(8));
+        var data = new byte[] { (byte)Math.Round(Math.Clamp(alpha, 0.0, 1.0) * 255.0) };
+        smDict.Set("Length", new PdfInteger(data.Length));
+
+        var objNum = AllocateObjectNumber();
+        AddNewObject(objNum, new PdfStream(smDict, data));
+        imgDict.Set("SMask", new PdfIndirectRef(objNum, 0));
+    }
+
+    private void RemoveProhibitedCatalogActions(PdfFormatConversionOptions options, bool strip)
     {
         // Check OpenAction
         var openActionObj = _reader.Catalog.Get("OpenAction");
@@ -6001,7 +7659,7 @@ public sealed partial class Document : IDisposable
                         Rule = "ActionType",
                         Description = $"Action type '{actionType}' is not allowed in PDF/A",
                     });
-                    if (fix)
+                    if (strip)
                     {
                         _reader.Catalog.Remove("OpenAction");
                     }
@@ -6029,7 +7687,7 @@ public sealed partial class Document : IDisposable
                     keysToRemove.Add(key);
                 }
             }
-            if (fix)
+            if (strip)
             {
                 foreach (var key in keysToRemove)
                     aa.Remove(key);
@@ -6039,7 +7697,7 @@ public sealed partial class Document : IDisposable
         }
     }
 
-    private void FixAnnotationsForPdfA(Page page, PdfFormatConversionOptions options, bool fix)
+    private void FixAnnotationsForPdfA(Page page, PdfFormatConversionOptions options, bool fix, bool strip)
     {
         var annotsObj = _reader.Resolve(page.Dict.Get("Annots"));
         if (annotsObj is not PdfArray annotsArr) return;
@@ -6067,8 +7725,14 @@ public sealed partial class Document : IDisposable
                     Description = $"Annotation type '{subtype}' is not allowed in PDF/A",
                     PageNumber = page.Number,
                 });
-                if (fix)
+                if (strip)
                 {
+                    // PDF/A-4: a stripped FileAttachment's PDF payload survives as a
+                    // document embedded file (the conversion migrates the
+                    // attachments there; non-PDF payloads drop with the annotation).
+                    if (subtype == "FileAttachment"
+                        && options.Format is PdfFormat.PDF_A_4 or PdfFormat.PDF_A_4E or PdfFormat.PDF_A_4F)
+                        MigrateFileAttachmentToEmbeddedFiles(annotDict);
                     indicesToRemove.Add(i);
                 }
                 continue;
@@ -6106,7 +7770,7 @@ public sealed partial class Document : IDisposable
                         Description = $"Action type '{actionType}' is not allowed in PDF/A",
                         PageNumber = page.Number,
                     });
-                    if (fix)
+                    if (strip)
                     {
                         annotDict.Remove("A");
                     }
@@ -6134,7 +7798,7 @@ public sealed partial class Document : IDisposable
                         });
                     }
                 }
-                if (fix && hasProhibited)
+                if (strip && hasProhibited)
                 {
                     annotDict.Remove("AA");
                 }
@@ -6142,7 +7806,7 @@ public sealed partial class Document : IDisposable
         }
 
         // Remove prohibited annotations (reverse order to preserve indices)
-        if (fix && indicesToRemove.Count > 0)
+        if (strip && indicesToRemove.Count > 0)
         {
             for (var i = indicesToRemove.Count - 1; i >= 0; i--)
             {
@@ -6157,6 +7821,19 @@ public sealed partial class Document : IDisposable
     {
         var outputIntents = _reader.Resolve(_reader.Catalog.Get("OutputIntents"));
         return outputIntents is PdfArray { Count: > 0 };
+    }
+
+    /// <summary>True when /OutputIntents already carries a /GTS_PDFA1 intent.
+    /// The PDF/A conversion must add one otherwise — a source with only a PDF/X
+    /// (GTS_PDFX) intent still fails the validator's PDF/A output-intent gate.</summary>
+    private bool HasPdfAOutputIntentInCatalog()
+    {
+        if (_reader.Resolve(_reader.Catalog.Get("OutputIntents")) is not PdfArray arr)
+            return false;
+        foreach (var item in arr)
+            if (_reader.ResolveDict(item)?.GetName("S") == "GTS_PDFA1")
+                return true;
+        return false;
     }
 
     private static bool PageHasDeviceDependentParagraphs(Page page)
@@ -6255,16 +7932,16 @@ public sealed partial class Document : IDisposable
         outputIntentDict.Set("RegistryName",
             new PdfString(Encoding.Latin1.GetBytes("http://www.color.org")));
 
-        var objNum = AllocateObjectNumber();
-        AddNewObject(objNum, outputIntentDict);
-
         var outputIntents = _reader.Resolve(_reader.Catalog.Get("OutputIntents")) as PdfArray;
         if (outputIntents is null)
         {
             outputIntents = new PdfArray();
             _reader.Catalog.Set("OutputIntents", outputIntents);
         }
-        outputIntents.Add(new PdfIndirectRef(objNum, 0));
+        // Held DIRECT in the array (spec-valid) so an in-memory validation right
+        // after Convert can see the /S /GTS_PDFA1 intent — a pending indirect
+        // object isn't reachable through the reader until the document is saved.
+        outputIntents.Add(outputIntentDict);
     }
 
     /// <summary>
@@ -6293,8 +7970,13 @@ public sealed partial class Document : IDisposable
             return;
         }
 
-        throw new InvalidOperationException(
-            "Document was not opened from a writable source — pass a path or stream to Save(), or call ToArray().");
+        // A document created in memory (no source path/stream) still supports
+        // a bare Save(): the reference finalizes the document in place —
+        // paragraph processing, stamp materialisation into page annotations —
+        // without a destination. Serialize into a scratch buffer to run the
+        // same pipeline; the bytes are discarded, the object-model effects stay.
+        using var scratch = new MemoryStream();
+        Save(scratch);
     }
 
     /// <summary>
@@ -6426,10 +8108,17 @@ public sealed partial class Document : IDisposable
     /// </summary>
     public void Save(string outputFileName)
     {
-        using (var fs = new FileStream(outputFileName, FileMode.Create, FileAccess.Write))
+        // Expose the output file name so save-time appearance generation that needs it
+        // (e.g. PageInformationAnnotation, which prints the file name + date) can read it.
+        _pendingSaveFileName = System.IO.Path.GetFileName(outputFileName);
+        try
         {
-            Save(fs);
+            using (var fs = new FileStream(outputFileName, FileMode.Create, FileAccess.Write))
+            {
+                Save(fs);
+            }
         }
+        finally { _pendingSaveFileName = null; }
         // Update internal state so HasIncrementalUpdate() reflects the saved content
         var fileInfo = new FileInfo(outputFileName);
         if (fileInfo.Length <= int.MaxValue)
@@ -6450,8 +8139,12 @@ public sealed partial class Document : IDisposable
             case SaveFormat.Html:
                 Save(outputFileName, new HtmlSaveOptions());
                 break;
+            case SaveFormat.Markdown:
+                System.IO.File.WriteAllText(outputFileName,
+                    new Converters.PdfToMarkdownConverter().SaveAsMarkdown(this), System.Text.Encoding.UTF8);
+                break;
             default:
-                throw new System.NotSupportedException($"Only SaveFormat.Pdf and SaveFormat.Html are supported; requested {format}.");
+                throw new System.NotSupportedException($"Only SaveFormat.Pdf, SaveFormat.Html and SaveFormat.Markdown are supported; requested {format}.");
         }
     }
 
@@ -6469,8 +8162,13 @@ public sealed partial class Document : IDisposable
             case SaveFormat.Html:
                 Save(outputStream, new HtmlSaveOptions());
                 break;
+            case SaveFormat.Markdown:
+                var mdBytes = System.Text.Encoding.UTF8.GetBytes(
+                    new Converters.PdfToMarkdownConverter().SaveAsMarkdown(this));
+                outputStream.Write(mdBytes, 0, mdBytes.Length);
+                break;
             default:
-                throw new System.NotSupportedException($"Only SaveFormat.Pdf and SaveFormat.Html are supported; requested {format}.");
+                throw new System.NotSupportedException($"Only SaveFormat.Pdf, SaveFormat.Html and SaveFormat.Markdown are supported; requested {format}.");
         }
     }
 
@@ -6481,6 +8179,15 @@ public sealed partial class Document : IDisposable
     public void Save(Stream output, HtmlSaveOptions options)
     {
         var converter = new Converters.PdfToHtmlConverter();
+
+        // AsEmbeddedPartsOfPngPageBackground: flatten each page to a single raster PNG
+        // embedded as the page background (rather than embedding source images
+        // individually) for this saving mode.
+        if (options.RasterImagesSavingMode == HtmlSaveOptions.RasterImagesSavingModes.AsEmbeddedPartsOfPngPageBackground)
+        {
+            converter.SaveAsHtmlWithPngBackground(this, output);
+            return;
+        }
 
         if (options.ExplicitListOfSavedPages is { Length: > 0 } pages)
         {
@@ -6516,6 +8223,13 @@ public sealed partial class Document : IDisposable
     /// </summary>
     public void Save(Stream outputStream, SaveOptions options)
     {
+        if (options is SvgSaveOptions)
+        {
+            var svg = new Converters.PdfToSvgConverter().SavePageAsSvg(this, 1);
+            var bytes = System.Text.Encoding.UTF8.GetBytes(svg);
+            outputStream.Write(bytes, 0, bytes.Length);
+            return;
+        }
         ApplyPdfSaveOptions(options);
         Save(outputStream);
     }
@@ -6525,6 +8239,14 @@ public sealed partial class Document : IDisposable
     /// </summary>
     public void Save(string outputFileName, SaveOptions options)
     {
+        if (options is SvgSaveOptions)
+        {
+            // Render the first page to real SVG markup instead of writing a PDF to
+            // the .svg path (the historic no-op that made round-trip tests pass by a
+            // compensating load-side bug).
+            new Converters.PdfToSvgConverter().SavePageToFile(this, 1, outputFileName);
+            return;
+        }
         ApplyPdfSaveOptions(options);
         using var fs = File.Create(outputFileName);
         Save(fs);
@@ -6705,6 +8427,12 @@ public sealed partial class Document : IDisposable
     /// </summary>
     public void Save(Stream output)
     {
+        // When the caller opts into strict signature handling, refuse to re-save a
+        // signed document — rewriting it would invalidate the existing signature.
+        if (HandleSignatureChange && Form.SignaturesExist)
+            throw new PdfException(
+                "The document contains a digital signature and HandleSignatureChange is enabled; saving would invalidate the signature.");
+
         // Validate deferred XML image file references
         if (PendingXmlImageFiles is { Count: > 0 } imageFiles)
         {
@@ -6742,14 +8470,39 @@ public sealed partial class Document : IDisposable
         // Apply page-level paragraphs, headers, and footers before saving
         ApplyPageContent();
 
+        // Persist document-level /AA additional actions to the catalog. Save()/
+        // ToArray() do this via FireBeforePageGenerateEvents, but the Save(string)
+        // → Save(Stream) funnel bypasses that, so /AA would otherwise be dropped.
+        // WriteToCatalog is idempotent, so a redundant call is harmless.
+        _actions?.WriteToCatalog();
+
         // Sync any attached text fragments modified after AppendText
         foreach (var page in Pages)
         {
             page.FlushBgColorRectangles();
             page.FlushUnderlineRectangles();
+            page.FlushUnderlineRemovals();
             page.FlushStrikeOutRectangles();
+            page.FlushHyperlinkAnnotations();
+            // PageInformationAnnotation prints the output file name + date; generate its
+            // appearance here, when the save file name is known.
+            if (_pendingSaveFileName is not null)
+                page.FlushPageInfoAnnotations(_pendingSaveFileName, DateTime.Today);
             page.SyncAttachedFragments();
+            if (page.PruneUnusedFontsOnSave) { PruneUnusedFontsForPage(page); _prunedFontsThisSave = true; }
             page.FlushPendingLayers();
+        }
+
+        // A RemoveUnusedFonts edit orphaned the replaced fonts' objects (dictionaries,
+        // descriptors, /FontFile programs). Recompute reachability so the serializer drops
+        // them from the saved file instead of carrying them over — otherwise the file keeps
+        // the (now unused) embedded font programs and never shrinks.
+        if (_prunedFontsThisSave && _reachableObjects is null)
+        {
+            var reachable = new HashSet<int>();
+            CollectReachable(_reader.Trailer, reachable);
+            if (reachable.Count > 0) _reachableObjects = reachable;
+            _prunedFontsThisSave = false;
         }
 
         // Sync AcroForm field values into the XFA datasets for static XFA forms,
@@ -6781,6 +8534,14 @@ public sealed partial class Document : IDisposable
         if (_pageLabels is { IsDirty: true })
             _pageLabels.Serialize(this);
 
+        // EmbedStandardFonts opts the page fonts — including the Standard-14 faces a
+        // viewer would otherwise substitute — into a real embedded program, resolving a
+        // system face (Helvetica→Arial, Courier→Courier New, …) per the existing embed
+        // pass. Without this the property is inert and a re-read still reports the
+        // Standard-14 fonts as non-embedded.
+        if (EmbedStandardFonts)
+            EmbedNonEmbeddedFonts(includeStandard14: true);
+
         // If the source was encrypted but we're saving without re-encryption, materialize
         // every stream's raw bytes in plaintext now. The writer's pass-through path would
         // otherwise copy ciphertext into a trailer with no /Encrypt, leaving a PDF whose
@@ -6790,18 +8551,42 @@ public sealed partial class Document : IDisposable
             _reader.EnsurePlaintextStreams();
         }
 
-        var writer = new PdfWriter(output, _encryptor);
+        // Linearize ("optimize for fast web view", PDF 32000 Annex F) when the document was
+        // explicitly linearized (Optimize()/LinearizeDocument()) or was loaded from a linearized
+        // source. The body is serialized to a buffer with a traditional cross-reference table —
+        // no object streams — so PdfLinearizer can re-lay-out the object bytes; the linearized
+        // result is then written to the real output.
+        //
+        // OptimizeSize wins over linearization: a linearized file repeats the first-page
+        // objects up front, carries a hint stream, and cannot pack objects into compressed
+        // object streams — so it is always LARGER than the plain object-stream save. When the
+        // caller asked to minimise size, skip linearization and keep the compact form
+        // (a font-unembed + OptimizeSize save is 8.4 KB unlinearized vs 16 KB
+        // linearized).
+        bool doLinearize = (_linearize || IsLinearized) && !OptimizeSize && _encryptor is null;
+        var writeTarget = doLinearize ? new MemoryStream() : output;
+        var writer = new PdfWriter(writeTarget, _encryptor);
 
         var xref = _reader.XRefTable;
         var trailer = _reader.Trailer;
 
         // Enable object streams when the original PDF used them (reduces output size significantly).
         // Objects with inline PdfStream values are excluded from ObjStm packing by the writer.
+        // Linearization needs each object at a top-level file offset, so it stays off there.
         var hasCompressedObjects = xref.Entries.Values.Any(e => e.IsCompressed);
-        if (hasCompressedObjects && _encryptor is null)
+        // PDF/A-1 (ISO 19005-1 §6.1.4) prohibits cross-reference streams — and object
+        // streams require one — so a document converted to PDF/A-1 saves with a
+        // classic xref table even when the source used compressed objects.
+        bool pdfA1Target = _lastConvertedFormat
+            is Aspose.Pdf.PdfFormat.PDF_A_1A or Aspose.Pdf.PdfFormat.PDF_A_1B;
+        if (hasCompressedObjects && _encryptor is null && !doLinearize && !pdfA1Target)
         {
             writer.UseObjectStreams = true;
         }
+        // The classic-xref PDF/A-1 output loses the object-stream packing win;
+        // recover the size by re-deflating weakly-compressed source streams,
+        // as the conversion save does.
+        if (pdfA1Target) writer.RecompressFlateStreams = true;
 
         // The source file's cross-reference infrastructure — object streams (/Type /ObjStm)
         // and cross-reference streams (/Type /XRef) — is regenerated from scratch by the
@@ -6869,6 +8654,35 @@ public sealed partial class Document : IDisposable
         // back-references survive a round-trip instead of being dropped at the write cycle.
         writer.MarkSharedDicts(_reader.Catalog);
 
+        // Map each existing page's source object number to its authoritative
+        // in-memory dictionary. The page renderer clears the reader's object cache
+        // to free decoded streams, so re-resolving a page below would re-parse a
+        // pristine dict and silently drop in-memory edits made after rendering
+        // (e.g. an hOCR invisible-text overlay added via Convert). Writing the live
+        // Page.Dict for these object numbers preserves those edits.
+        var livePageDicts = new Dictionary<int, PdfDictionary>();
+        if (_pages is not null)
+        {
+            foreach (var p in _pages)
+                if (p.SourceObjectNumber > 0)
+                    livePageDicts[p.SourceObjectNumber] = p.Dict;
+        }
+
+        // An in-place image replacement supersedes the original image object but leaves it
+        // in the xref, so without a reachability pass the write loop below would emit both
+        // the old and the new image and the file would never shrink.
+        // Compute reachability once here (only when nothing else already did) so the
+        // orphaned original falls out. Runs only when such an edit actually happened.
+        if (_reader.MayHaveOrphansOnSave && _reachableObjects is null)
+        {
+            var reachable = new HashSet<int>();
+            CollectReachable(_reader.Trailer, reachable);
+            if (_pages is not null)
+                foreach (var pending in _pages.PendingAdds)
+                    CollectReachable(pending.Dict, reachable);
+            if (reachable.Count > 0) _reachableObjects = reachable;
+        }
+
         // Write all existing objects (skipping unreachable ones if optimized).
         // Iterate in ascending object-number order rather than the dictionary's
         // insertion order, which reflects the source file's physical layout and so
@@ -6898,6 +8712,11 @@ public sealed partial class Document : IDisposable
 
             // Skip the source file's cross-reference infrastructure (see infraObjNums above).
             if (infraObjNums.Contains(entry.ObjectNumber)) continue;
+
+            // Prefer the live in-memory page dictionary over a (possibly stale,
+            // post-ClearCache re-parsed) reader resolution. See livePageDicts above.
+            if (livePageDicts.TryGetValue(entry.ObjectNumber, out var liveDict))
+                obj = liveDict;
 
             writer.WriteIndirectObject(entry.ObjectNumber, obj);
         }
@@ -6979,6 +8798,13 @@ public sealed partial class Document : IDisposable
         }
 
         writer.WriteXRefAndTrailer(newTrailer);
+
+        if (doLinearize)
+        {
+            var normal = ((MemoryStream)writeTarget).ToArray();
+            var linearized = IO.PdfLinearizer.Linearize(normal);
+            output.Write(linearized, 0, linearized.Length);
+        }
     }
 
     private void RebuildPagesTree(PdfWriter writer)
@@ -6987,12 +8813,30 @@ public sealed partial class Document : IDisposable
         var pagesRef = _reader.Catalog.Get("Pages");
         var pagesObjNum = pagesRef is PdfIndirectRef pr ? pr.ObjectNumber : 2;
 
+        // Reserve the writer's number space above every cross-document import slot so a
+        // writer-allocated page number can't collide with a slot — including slots for
+        // destination-only pages that are referenced but never written.
+        if (_pages is not null)
+            writer.ReserveObjectNumber(_pages.ImportSlotHighWater);
+
         // Build a new /Pages dict with all current pages as kids
         var kids = new PdfArray();
         foreach (var page in Pages)
         {
-            // Each page needs to be an indirect reference
-            var objNum = writer.AllocateObjectNumber();
+            // Choose each page's object number:
+            //  - an imported page is written at its reserved slot so GoTo/Link destinations
+            //    that target it (and point at that slot) resolve to this copy;
+            //  - a page loaded from THIS document keeps its original object number, so the
+            //    document's own internal links (bookmarks, link annotations, named
+            //    destinations) — which reference pages by object number — still resolve
+            //    after pages are deleted or reordered (imported pages carry
+            //    SourceObjectNumber = -1, so they never take this branch);
+            //  - a newly created page takes a fresh writer-allocated number.
+            int objNum;
+            if (page.ImportSlotObjNum > 0) objNum = page.ImportSlotObjNum;
+            else if (page.SourceObjectNumber > 0) objNum = page.SourceObjectNumber;
+            else objNum = writer.AllocateObjectNumber();
+
             page.Dict.Set("Parent", new PdfIndirectRef(pagesObjNum, 0));
             writer.WriteIndirectObject(objNum, page.Dict);
             kids.Add(new PdfIndirectRef(objNum, 0));
@@ -7049,6 +8893,83 @@ public sealed partial class Document : IDisposable
             inMemKids.Add(dictToRef.TryGetValue(page.Dict, out var r) ? r : page.Dict);
         inMemPages.Set("Kids", inMemKids);
         inMemPages.Set("Count", new PdfInteger(Pages.Count));
+    }
+
+    /// <summary>
+    /// After pages have been removed (e.g. by <see cref="Facades.PdfFileEditor.Extract(byte[],int,int)"/>,
+    /// which deletes every page outside the requested range), drop the objects that only the
+    /// removed pages kept alive. A plain save writes every object still reachable from the
+    /// trailer, and an outline bookmark, article thread, or link annotation that pointed at a
+    /// removed page keeps that page — and its (often large) images — reachable, so an
+    /// extracted file stays as big as the whole source. Recompute reachability treating each
+    /// removed page as a cut point so the save writes only what the surviving pages still use.
+    /// </summary>
+    internal void CompactAfterPageRemoval()
+    {
+        if (_pages is null || !_pages.IsModified) return;
+
+        // Flatten /Kids to the surviving pages so a removed page is no longer reachable
+        // through the page tree itself.
+        SyncInMemoryPageTree();
+
+        var survivingPages = new HashSet<int>();
+        foreach (var page in Pages)
+            if (page.SourceObjectNumber > 0) survivingPages.Add(page.SourceObjectNumber);
+
+        // Compute reachability but treat every removed page as a cut point: don't traverse a
+        // /Type /Page object that isn't one of the survivors. This drops each removed page
+        // and everything only it references (its images can be the bulk of the file) no
+        // matter what still points at it — a bookmark, an article-thread bead's /P, a link
+        // annotation on a surviving page. Those references simply dangle, resolving to
+        // "no page" on reopen (matching Aspose.Pdf), which never keeps the page.
+        var reachable = new HashSet<int>();
+        CollectReachableExcludingRemovedPages(_reader.Trailer, reachable, survivingPages);
+        if (reachable.Count > 0) _reachableObjects = reachable;
+    }
+
+    /// <summary>Reachability variant used after page removal: identical to
+    /// <see cref="CollectReachable"/> except a <c>/Type /Page</c> object whose number is not
+    /// in <paramref name="survivingPages"/> is neither marked reachable nor traversed, so a
+    /// removed page (and any object only it kept alive) falls out of the saved file.</summary>
+    private void CollectReachableExcludingRemovedPages(PdfObject? root, HashSet<int> visited, HashSet<int> survivingPages)
+    {
+        if (root is null or PdfNull) return;
+        var stack = new Stack<PdfObject>();
+        stack.Push(root);
+        var seenDicts = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+
+        while (stack.Count > 0)
+        {
+            var obj = stack.Pop();
+            if (obj is null or PdfNull) continue;
+
+            if (obj is PdfIndirectRef iref)
+            {
+                if (visited.Contains(iref.ObjectNumber)) continue;
+                var resolved = _reader.Resolve(iref);
+                // Cut removed pages: don't record or traverse them.
+                if (resolved is PdfDictionary pd && pd.GetName("Type") == "Page"
+                    && !survivingPages.Contains(iref.ObjectNumber))
+                    continue;
+                visited.Add(iref.ObjectNumber);
+                if (resolved is not null) stack.Push(resolved);
+                continue;
+            }
+            if (obj is PdfStream stream) { stack.Push(stream.Dict); continue; }
+            if (obj is PdfDictionary dict)
+            {
+                if (!seenDicts.Add(dict)) continue;
+                foreach (var key in dict.Keys)
+                {
+                    var val = dict.Get(key);
+                    if (val is not null) stack.Push(val);
+                }
+                continue;
+            }
+            if (obj is PdfArray arr)
+                foreach (var item in arr)
+                    if (item is not null) stack.Push(item);
+        }
     }
 
     /// <summary>Map each leaf page dictionary in a /Pages subtree to the indirect
@@ -7166,6 +9087,19 @@ public sealed partial class Document : IDisposable
         // /StructTreeRoot — element dicts are already in their parents' /K).
         ((Tagged.ITaggedContent)_taggedContent).Save();
 
+        // Render the authored structure (headers/paragraphs) onto a page when the
+        // document was built purely through TaggedContent and has no page content
+        // yet. A from-scratch tagged document otherwise saves with a blank canvas.
+        if (_isNewDocument && Pages.Count == 0)
+        {
+            var root = ((Tagged.ITaggedContent)_taggedContent).RootElement;
+            Tagged.TaggedContentRenderer.TryRender(this, root);
+            // Structure content that can't be laid out as text (e.g. a table) still
+            // needs a page so the authored document doesn't save with zero pages.
+            if (Pages.Count == 0 && root.ChildElements.Count > 0)
+                Pages.Add();
+        }
+
         var title = Info.Title;
         if (!string.IsNullOrEmpty(title))
         {
@@ -7185,6 +9119,19 @@ public sealed partial class Document : IDisposable
             _reader.Trailer.Set("ID", idArray);
             _forceWriteId = true;
         }
+    }
+
+    /// <summary>Serialize as an incremental update (original bytes verbatim +
+    /// appended modified/new objects + a new xref section). Unlike
+    /// <see cref="ToArray"/>'s full rewrite, this preserves every original byte,
+    /// so an existing digital signature's /ByteRange stays valid. Used when
+    /// editing a signed document (e.g. filling a form field).</summary>
+    internal byte[] ToArrayIncremental()
+    {
+        FireBeforePageGenerateEvents();
+        using var ms = new MemoryStream();
+        SaveIncremental(ms);
+        return ms.ToArray();
     }
 
     private void SaveIncremental(Stream output)
@@ -7211,6 +9158,21 @@ public sealed partial class Document : IDisposable
         // Include objects explicitly marked as dirty (e.g., form field value changes)
         foreach (var (objNum, obj) in _dirtyObjects)
             modified.Add((objNum, obj));
+
+        // Persist page-tree structural changes (page insert/delete) incrementally.
+        // Pages.Insert/Delete update only the in-memory page list; without rewriting
+        // the /Pages node the appended xref still points at the original /Kids, so a
+        // reopened document shows the pre-edit page count. SyncInMemoryPageTree rebuilds
+        // the catalog's /Pages dict (/Kids + /Count) to the current order — keeping each
+        // surviving page's original indirect reference — and we emit it as a modified
+        // object so the incremental update reflects the deletion/insertion.
+        if (_pages is not null && _pages.IsModified)
+        {
+            SyncInMemoryPageTree();
+            if (_reader.Catalog.Get("Pages") is PdfIndirectRef pagesRef
+                && _reader.ResolveDict(pagesRef) is { } pagesDict)
+                modified.Add((pagesRef.ObjectNumber, pagesDict));
+        }
 
         // Use the real incremental writer
         var xref = _reader.XRefTable;
@@ -7239,7 +9201,7 @@ public sealed partial class Document : IDisposable
     /// <summary>Default page-tree branching factor (PDF table 30 /Count vs /Kids ratio).</summary>
     public const byte DefaultNodesNumInSubtrees = 10;
 
-    // ── Stored-only flag props (Aspose.PDF for .NET parity; no behaviour) ──
+    // ── Stored-only flag props (Aspose.Pdf parity; no behaviour) ──
 
     /// <summary>Whether the saver may reuse identical page-content streams. Stored only.</summary>
     public bool AllowReusePageContent { get; set; }
@@ -7437,7 +9399,7 @@ public sealed partial class Document : IDisposable
         FileName = filename;
     }
 
-    /// <summary>Single-arg ctor named <paramref name="filename"/> matching Aspose.PDF for .NET param name.</summary>
+    /// <summary>Single-arg ctor named <paramref name="filename"/> matching Aspose.Pdf param name.</summary>
     public Document(string filename, bool isManagedStream) : this(filename) { _ = isManagedStream; }
 
     /// <summary>Stream ctor with managed-stream flag.</summary>
@@ -7525,6 +9487,13 @@ public sealed partial class Document : IDisposable
             {
                 if (objNum > max) max = objNum;
             }
+            // Cross-document page-import reserves destination-slot object numbers
+            // (Page.ImportSlotObjNum, up to ImportSlotHighWater) that are written at
+            // their reserved numbers during save — including destination-only slots
+            // not yet in ImportedObjects. An allocation here must sit above them, or a
+            // page slot overwrites e.g. the /Outlines root that OutlineCollection.Finalize
+            // allocates during the same save.
+            if (_pages.ImportSlotHighWater > max) max = _pages.ImportSlotHighWater;
         }
         return max + 1;
     }
@@ -7553,8 +9522,21 @@ public sealed partial class Document : IDisposable
     /// <summary>Resolve the existing /Info dictionary without creating one. Returns null
     /// when the document has no Info dict. Used by DocumentInfo read access so a
     /// <c>new DocumentInfo(doc)</c> reflects on-disk metadata without side effects.</summary>
+    /// <summary>The /Info dict a DocumentInfo setter created for a document that had
+    /// none. It lives in the pending-object list (not reachable through the reader
+    /// until save), so in-memory readers — Document.Info, the PDF/A conversion's
+    /// Info↔XMP sync — resolve it through here.</summary>
+    private PdfDictionary? _pendingInfoDict;
+
     internal PdfDictionary? ResolveExistingInfoDict()
-        => _reader.ResolveDict(_reader.Trailer.Get("Info"));
+        => _reader.ResolveDict(_reader.Trailer.Get("Info")) ?? _pendingInfoDict;
+
+    /// <summary>True when this document was created from scratch (<c>new Document()</c>)
+    /// rather than loaded from existing bytes. A from-scratch document seeds the standard
+    /// document-information text entries as empty strings the first time its /Info dict is
+    /// materialised (see <see cref="DocumentInfo"/>), so unset fields round-trip through
+    /// save/reopen as empty rather than absent — matching Aspose.Pdf.</summary>
+    internal bool IsNewDocument => _isNewDocument;
 
     internal (PdfDictionary dict, int objNum) EnsureInfoDict()
     {
@@ -7572,11 +9554,14 @@ public sealed partial class Document : IDisposable
             }
         }
 
-        // No Info dict — create one
+        // No Info dict — create one. Cached on the document so every other
+        // DocumentInfo instance materialised before save shares it (the pending
+        // object is not reachable through the reader yet).
         var newDict = new PdfDictionary();
         var objNum = AllocateObjectNumber();
         _newInfoObjNum = objNum;
         AddNewObject(objNum, newDict);
+        _pendingInfoDict = newDict;
         return (newDict, objNum);
     }
 

@@ -88,16 +88,152 @@ internal sealed class TrueTypeSubsetter
         tables["glyf"] = newGlyf;
         tables["cmap"] = newCmap;
 
-        // Copy optional tables that don't reference glyph IDs
-        foreach (var tag in new[] { "OS/2", "name", "post", "cvt ", "fpgm", "prep" })
+        // Copy optional tables that don't reference glyph IDs. Hinting tables
+        // (cvt/fpgm/prep, ~7 KB per MS face) are dropped: neither the FOSS
+        // renderer nor the common PDF rasterizers execute TrueType hinting, and
+        // an embedded subset shipping them bloats every converted document.
+        foreach (var tag in new[] { "OS/2" })
         {
             if (_tables.TryGetValue(tag, out var t))
                 tables[tag] = CopyBytes(t.offset, t.length);
         }
+        if (TrimmedName() is { } nm) tables["name"] = nm;
+        else if (_tables.TryGetValue("name", out var nt)) tables["name"] = CopyBytes(nt.offset, nt.length);
+        // post shrinks to a version-3.0 stub: the glyph-name array (~40 KB in the
+        // common system faces) serves no purpose in an embedded PDF subset.
+        if (StubPost() is { } post) tables["post"] = post;
 
         // 5. Assemble the final font file
         var result = AssembleFont(tables);
         return (result, glyphMap);
+    }
+
+    /// <summary>The original post table's 32-byte header re-versioned to 3.0
+    /// (no glyph names). Null when the font has no post table.</summary>
+    private byte[]? StubPost()
+    {
+        if (!_tables.TryGetValue("post", out var t) || t.length < 32) return null;
+        var post = CopyBytes(t.offset, 32);
+        post[0] = 0x00; post[1] = 0x03; post[2] = 0x00; post[3] = 0x00;
+        return post;
+    }
+
+    /// <summary>The name table reduced to its Windows (3,1) en-US core records
+    /// (name IDs 0–6) — the full multi-language table of a system face runs to
+    /// ~8 KB per font, pure dead weight in an embedded subset. Null when the
+    /// table is absent or carries no such records (caller copies the original).</summary>
+    private byte[]? TrimmedName()
+    {
+        if (!_tables.TryGetValue("name", out var t) || t.length < 6) return null;
+        var baseOff = t.offset;
+        int count = ReadUInt16(baseOff + 2);
+        int strOff = ReadUInt16(baseOff + 4);
+        var keep = new List<(int nameId, int len, int off)>();
+        for (var i = 0; i < count; i++)
+        {
+            var r = baseOff + 6 + i * 12;
+            if (r + 12 > _data.Length) break;
+            int pid = ReadUInt16(r), eid = ReadUInt16(r + 2), lang = ReadUInt16(r + 4);
+            int nameId = ReadUInt16(r + 6), len = ReadUInt16(r + 8), off = ReadUInt16(r + 10);
+            if (pid == 3 && eid == 1 && lang == 0x409 && nameId <= 6
+                && baseOff + strOff + off + len <= _data.Length)
+                keep.Add((nameId, len, off));
+        }
+        if (keep.Count == 0) return null;
+
+        var header = 6 + keep.Count * 12;
+        using var strings = new MemoryStream();
+        using var table = new MemoryStream();
+        void U16(MemoryStream ms, int v) { ms.WriteByte((byte)(v >> 8)); ms.WriteByte((byte)v); }
+        U16(table, 0);                // format
+        U16(table, keep.Count);       // count
+        U16(table, header);           // stringOffset
+        foreach (var (nameId, len, off) in keep)
+        {
+            U16(table, 3); U16(table, 1); U16(table, 0x409); U16(table, nameId);
+            U16(table, len); U16(table, (int)strings.Position);
+            strings.Write(_data, baseOff + strOff + off, len);
+        }
+        strings.Position = 0;
+        strings.CopyTo(table);
+        return table.ToArray();
+    }
+
+    /// <summary>
+    /// GID-preserving sparse subset for CID-keyed (Type0) fonts: the glyph
+    /// numbering is UNCHANGED — content-stream CIDs stay valid — and unused
+    /// glyphs simply lose their outlines (zero-length loca entries). Composite
+    /// dependencies of kept glyphs are kept. Returns the original data when the
+    /// font carries no loca/glyf to rebuild.
+    /// </summary>
+    public byte[] SubsetSparse(IEnumerable<int> glyphIds)
+    {
+        var needed = new SortedSet<int> { 0 };
+        foreach (var gid in glyphIds)
+            if (gid > 0 && gid < _numGlyphs)
+                needed.Add(gid);
+
+        var locaOffsets = ParseLoca();
+        if (locaOffsets is null || !_tables.TryGetValue("glyf", out var glyfTable))
+            return _data;
+        ResolveCompositeGlyphs(needed, locaOffsets);
+
+        // Glyphs ABOVE the highest kept id can be dropped outright — the table
+        // simply ends there. For a CJK face whose used glyphs sit low, this
+        // collapses the per-glyph loca/hmtx overhead (22k slots → a few hundred).
+        var keptGlyphCount = Math.Min(_numGlyphs, needed.Max + 1);
+
+        using var glyfMs = new MemoryStream();
+        var newLoca = new int[keptGlyphCount + 1];
+        for (var gid = 0; gid < keptGlyphCount && gid + 1 < locaOffsets.Length; gid++)
+        {
+            newLoca[gid] = (int)glyfMs.Position;
+            if (!needed.Contains(gid)) continue;
+            var start = glyfTable.offset + locaOffsets[gid];
+            var len = locaOffsets[gid + 1] - locaOffsets[gid];
+            if (len <= 0 || start + len > _data.Length) continue;
+            glyfMs.Write(_data, start, len);
+            if ((glyfMs.Position & 1) == 1) glyfMs.WriteByte(0); // 2-byte align
+        }
+        for (var gid = keptGlyphCount; gid < newLoca.Length; gid++)
+            newLoca[gid] = (int)glyfMs.Position;
+
+        var locaBytes = new byte[newLoca.Length * 4];
+        for (var i = 0; i < newLoca.Length; i++)
+        {
+            locaBytes[i * 4] = (byte)(newLoca[i] >> 24);
+            locaBytes[i * 4 + 1] = (byte)(newLoca[i] >> 16);
+            locaBytes[i * 4 + 2] = (byte)(newLoca[i] >> 8);
+            locaBytes[i * 4 + 3] = (byte)newLoca[i];
+        }
+
+        var tables = new Dictionary<string, byte[]>
+        {
+            ["head"] = BuildHead(useLongLoca: true),
+            ["loca"] = locaBytes,
+            ["glyf"] = glyfMs.ToArray(),
+        };
+        // NOTE: no cmap — a CID-keyed font is addressed via CIDs (+ CIDToGIDMap),
+        // never through the program's cmap, and a CJK face's cmap alone runs to
+        // ~100 KB. No hinting either (nothing in the pipeline executes it).
+        // hmtx/maxp/hhea are rebuilt at the truncated glyph count with one long
+        // entry per glyph (advance + LSB 0, as the renumbering subsetter does).
+        var hmtx = new byte[keptGlyphCount * 4];
+        for (var gid = 0; gid < keptGlyphCount; gid++)
+        {
+            var width = gid < _parser.GlyphWidths.Length ? _parser.GlyphWidths[gid] : 0;
+            hmtx[gid * 4] = (byte)(width >> 8);
+            hmtx[gid * 4 + 1] = (byte)width;
+        }
+        tables["hmtx"] = hmtx;
+        tables["maxp"] = BuildMaxp(keptGlyphCount);
+        tables["hhea"] = BuildHhea(keptGlyphCount);
+        if (_tables.TryGetValue("OS/2", out var os2))
+            tables["OS/2"] = CopyBytes(os2.offset, os2.length);
+        if (TrimmedName() is { } nm) tables["name"] = nm;
+        else if (_tables.TryGetValue("name", out var nt)) tables["name"] = CopyBytes(nt.offset, nt.length);
+        if (StubPost() is { } post) tables["post"] = post;
+        return AssembleFont(tables);
     }
 
     #region Table parsing

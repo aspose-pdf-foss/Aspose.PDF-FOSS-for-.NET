@@ -40,6 +40,11 @@ namespace Aspose.Pdf
 
         internal OptionalContentGroup Ocg => _ocg;
         internal bool IsBound => _ocg is not null;
+        // Deleted/flattened layers are marked rather than removed from the owning
+        // facade list immediately, so that `foreach (var l in page.Layers) l.Flatten()`
+        // does not invalidate the enumerator. The stale entries are purged the next
+        // time the Layers collection is accessed.
+        internal bool IsRemoved { get; private set; }
         internal DefaultState PendingDefaultState => _defaultState;
         internal bool PendingLocked => _locked;
 
@@ -88,20 +93,25 @@ namespace Aspose.Pdf
         /// <summary>Unlock this layer. Persists on save.</summary>
         public void Unlock() { if (_ocg is not null) _ocg.Unlock(); else _locked = false; }
 
-        /// <summary>Remove this layer and its content from the page.</summary>
+        /// <summary>Remove this layer and its content from the page. The layer is
+        /// removed from the owning <see cref="Page.Layers"/> collection immediately.</summary>
         public void Delete()
         {
             if (_ocg is null) return;
             _ocg.Delete();
+            IsRemoved = true;
             _owner?.Remove(this);
         }
 
-        /// <summary>Flatten this layer's content into the unconditional page content.</summary>
+        /// <summary>Flatten this layer's content into the unconditional page content.
+        /// The layer is marked removed but not pulled from the owning
+        /// <see cref="Page.Layers"/> list until that list is next accessed, so
+        /// <c>foreach (var l in page.Layers) l.Flatten(...)</c> stays valid.</summary>
         public void Flatten(bool cleanupContentStream)
         {
             if (_ocg is null) return;
             _ocg.Flatten(cleanupContentStream);
-            _owner?.Remove(this);
+            IsRemoved = true;
         }
 
         /// <summary>Save this layer's content as a standalone single-page PDF stream.</summary>

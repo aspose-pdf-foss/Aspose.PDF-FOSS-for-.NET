@@ -48,12 +48,15 @@ public class PageFeatureTests
     }
 
     [Fact]
-    public void AddGraphics_Throws()
+    public void AddGraphics_AppendsWithoutThrowing_DeleteGraphics_Throws()
     {
         using var doc = Document.Open(PdfBuilder.BuildMinimal());
         var page = doc.Pages[1];
+        // AddGraphics is implemented (vector-path copy) — it must not throw.
+        page.AddGraphics(new Vector.GraphicElementCollection(), new Rectangle(0, 0, 100, 100));
+        // DeleteGraphics is not wired yet — it still reports NotSupported.
         Assert.Throws<System.NotSupportedException>(
-            () => page.AddGraphics(new Vector.GraphicElementCollection(), new Rectangle(0, 0, 100, 100)));
+            () => page.DeleteGraphics(new Vector.GraphicElementCollection()));
     }
 
     [Fact]

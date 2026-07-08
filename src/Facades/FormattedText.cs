@@ -102,15 +102,26 @@ public sealed class FormattedText
 {
     private readonly List<TextLine> _lines = new();
 
+    // The parameterless ctor seeds an empty placeholder line so Text/TextWidth behave;
+    // the first AddNewLineText must replace it (not append after it), or stamps built
+    // from `new FormattedText()` + AddNewLineText start with a spurious blank line.
+    private bool _seedLineIsPlaceholder;
+
     /// <summary>The first line text content.</summary>
     public string Text => _lines.Count > 0 ? _lines[0].Text : "";
 
-    /// <summary>Font size in points. Defaults to 10 to match the Aspose.PDF for .NET
+    /// <summary>Font size in points. Defaults to 10 to match the Aspose.Pdf
     /// simple-constructor default (e.g. <c>new FormattedText("text")</c>).</summary>
     public double FontSize { get; set; } = 10;
 
     /// <summary>Font name (PDF base font name).</summary>
     public string FontName { get; set; } = "Helvetica";
+
+    /// <summary>The font name exactly as the caller passed it, before
+    /// <see cref="NormalizeFontName"/> folded it to a Standard-14 base name
+    /// (e.g. "Arial" → Helvetica). Consumers that measure with the real system
+    /// face (facade stamp form BBox) need the original name.</summary>
+    internal string? RequestedFontName { get; private set; }
 
     /// <summary>Foreground (text) color.</summary>
     public Color ForegroundColor { get; set; } = Color.Black;
@@ -172,6 +183,7 @@ public sealed class FormattedText
     public FormattedText()
     {
         _lines.Add(new TextLine("", 0));
+        _seedLineIsPlaceholder = true;
     }
 
     /// <summary>
@@ -259,6 +271,7 @@ public sealed class FormattedText
     {
         ForegroundColor = textColor;
         BackgroundColor = backColor;
+        RequestedFontName = fontName;
         FontName = NormalizeFontName(fontName);
         IsEmbedded = embedded;
         FontSize = fontSize;
@@ -304,7 +317,7 @@ public sealed class FormattedText
     {
     }
 
-    // ── System.Drawing.Color forwarders (Aspose.PDF for .NET declares these as
+    // ── System.Drawing.Color forwarders (Aspose.Pdf declares these as
     //    distinct overloads alongside the Aspose.Pdf.Color ones). ──────────
 
     /// <summary>System.Drawing.Color foreground + foreground/background pair.</summary>
@@ -357,6 +370,7 @@ public sealed class FormattedText
         }
         else
         {
+            RequestedFontName = fontName;
             FontName = fontName;
         }
         IsEmbedded = embedded;
@@ -379,7 +393,7 @@ public sealed class FormattedText
 
     /// <summary>
     /// Create a FormattedText with Aspose.Pdf.Color foreground/background and a line spacing.
-    /// (Matches the Aspose.PDF for .NET 7-arg <c>(text, textColor, textFont, textEncoding, embedded,
+    /// (Matches the Aspose.Pdf 7-arg <c>(text, textColor, textFont, textEncoding, embedded,
     /// textSize, lineSpacing)</c> overload.)
     /// </summary>
     public FormattedText(string text, Color textColor, FontStyle textFont,
@@ -401,7 +415,7 @@ public sealed class FormattedText
     /// </summary>
     public void AddNewLineText(string newLineText)
     {
-        _lines.Add(new TextLine(newLineText, 0));
+        AddNewLineText(newLineText, 0);
     }
 
     /// <summary>
@@ -409,6 +423,12 @@ public sealed class FormattedText
     /// </summary>
     public void AddNewLineText(string newLineText, float lineSpacing)
     {
+        if (_seedLineIsPlaceholder)
+        {
+            _lines[0] = new TextLine(newLineText, lineSpacing);
+            _seedLineIsPlaceholder = false;
+            return;
+        }
         _lines.Add(new TextLine(newLineText, lineSpacing));
     }
 
@@ -463,6 +483,9 @@ public sealed class FormattedText
         FontStyle.Symbol => "Symbol",
         FontStyle.ZapfDingbats => "ZapfDingbats",
         FontStyle.CjkFont => "MS-Gothic",
+        // Aspose.Pdf resolves FontStyle.Unknown to Times-Roman (a plain
+        // Standard-14 Type1 with WinAnsi — the EncodingType is not honoured for it).
+        FontStyle.Unknown => "Times-Roman",
         _ => "Helvetica",
     };
 

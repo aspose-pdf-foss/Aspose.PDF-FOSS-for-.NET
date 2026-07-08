@@ -48,8 +48,13 @@ public class Watermark
         Position = rect;
     }
 
-    /// <summary>The watermark image.</summary>
-    public System.Drawing.Image Image { get; }
+    /// <summary>Creates an unavailable watermark (no image). Returned by
+    /// <see cref="Page.Watermark"/> when the page carries no watermark, so callers
+    /// can test <see cref="Available"/> without a null check.</summary>
+    internal Watermark() { }
+
+    /// <summary>The watermark image (null when the watermark is unavailable).</summary>
+    public System.Drawing.Image? Image { get; }
 
     /// <summary>Position rectangle on the page (null = whole page).</summary>
     public Rectangle? Position { get; }

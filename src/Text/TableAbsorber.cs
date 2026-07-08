@@ -56,7 +56,7 @@ public sealed class AbsorbedRow : IComparable<AbsorbedRow>
 {
     public IReadOnlyList<AbsorbedCell> Cells { get; init; } = [];
 
-    /// <summary>Mutable cell list (Aspose.PDF for .NET-shape).</summary>
+    /// <summary>Mutable cell list (Aspose.Pdf-shape).</summary>
     public IList<AbsorbedCell> CellList
     {
         get
@@ -104,7 +104,7 @@ public sealed class AbsorbedTable : IComparable<AbsorbedTable>
 {
     public IReadOnlyList<AbsorbedRow> Rows { get; init; } = [];
 
-    /// <summary>Mutable row list (Aspose.PDF for .NET-shape).</summary>
+    /// <summary>Mutable row list (Aspose.Pdf-shape).</summary>
     public IList<AbsorbedRow> RowList
     {
         get
@@ -151,7 +151,7 @@ public sealed class TableAbsorber
     /// <summary>Detected tables.</summary>
     public IReadOnlyList<AbsorbedTable> Tables => _tables;
 
-    /// <summary>Detected tables (Aspose.PDF for .NET-parity surface — returns the mutable backing list).</summary>
+    /// <summary>Detected tables (Aspose.Pdf-parity surface — returns the mutable backing list).</summary>
     public IList<AbsorbedTable> TableList => _tables;
 
     /// <summary>Search options controlling case sensitivity, regex use, and bounded-search rectangle. Stored only.</summary>
@@ -234,6 +234,111 @@ public sealed class TableAbsorber
     // ── Detection pipeline (matches TypeScript algorithm) ────────────────
 
     private static List<AbsorbedTable> DetectTables(List<TextRun> runs, List<HEdge> hEdges, List<VEdge> vEdges)
+    {
+        if (hEdges.Count < 2 || vEdges.Count < 2)
+            return DetectTablesFromText(runs);
+
+        // Detect over the whole page first. A page can carry two tables with DIFFERENT
+        // column counts stacked with a tall vertical gap between them (e.g. a 3-column
+        // ingredients list above a 6-column nutrition grid). A single global colBounds is
+        // the union of both column sets, so one table's cells straddle the other's interior
+        // boundaries, fail the CountSides validity test, and that table is either dropped or
+        // recovered only as a degenerate fragment. To recover it, split the h-edges into
+        // Y-bands separated by large gaps and re-run detection with each band's OWN edges;
+        // where a band's local grid yields a better (more-cell) table than whatever the
+        // global pass produced there, use the band-local result. Single-table pages have one
+        // band, so the global result is returned verbatim — no behavioural change for them.
+        var tables = DetectTablesInRegion(runs, hEdges, vEdges);
+
+        var bands = ComputeYBands(hEdges);
+        if (bands.Count > 1)
+        {
+            foreach (var (bandMin, bandMax) in bands)
+            {
+                var bandH = hEdges.Where(e => e.Y >= bandMin - EdgeTol && e.Y <= bandMax + EdgeTol).ToList();
+                var bandV = vEdges.Where(e =>
+                    e.Y2 >= bandMin - EdgeTol && e.Y1 <= bandMax + EdgeTol).ToList();
+                if (bandH.Count < 2 || bandV.Count < 2) continue;
+                var bandRuns = runs.Where(r =>
+                    r.Y >= bandMin - EdgeTol && r.Y <= bandMax + EdgeTol).ToList();
+
+                var bandTables = DetectTablesInRegion(bandRuns, bandH, bandV);
+                if (bandTables.Count == 0) continue;
+
+                // Global tables whose vertical span OVERLAPS this band. Overlap (not
+                // centre-in-band) is essential: a table's h-edges can occupy only part of
+                // its full height, so the band derived from those edges is narrower than the
+                // table — a centre test would miss it and the band grid would be wrongly
+                // added as a phantom second table over the same rows.
+                var globalOverlap = tables.Where(t => t.Rect is { } rc &&
+                    rc.LLY <= bandMax + EdgeTol && rc.URY >= bandMin - EdgeTol).ToList();
+
+                int bandCells = bandTables.Sum(CellCount);
+                int globalCells = globalOverlap.Sum(CellCount);
+                // Prefer the band-local grid only when it strictly recovers more cell
+                // content than everything the global pass managed in that band's Y-range.
+                if (bandCells <= globalCells) continue;
+
+                // Replace: drop the global tables CONTAINED in this band (a table that
+                // extends beyond the band is left alone so we never delete rows outside it),
+                // then add the band tables that don't overlap a surviving global table.
+                foreach (var g in globalOverlap)
+                    if (g.Rect is { } rc && rc.LLY >= bandMin - EdgeTol && rc.URY <= bandMax + EdgeTol)
+                        tables.Remove(g);
+                foreach (var bt in bandTables)
+                {
+                    if (bt.Rect is not { } br) continue;
+                    bool overlaps = tables.Any(t => t.Rect is { } rc &&
+                        rc.LLY <= br.URY && rc.URY >= br.LLY &&
+                        rc.LLX <= br.URX && rc.URX >= br.LLX);
+                    if (!overlaps) tables.Add(bt);
+                }
+            }
+
+            // Re-establish top-to-bottom ordering after swapping band tables.
+            tables.Sort((a, b) => (b.Rect?.URY ?? 0).CompareTo(a.Rect?.URY ?? 0));
+        }
+
+        return tables;
+    }
+
+    /// <summary>Total number of populated (non-empty) cells across a table's rows —
+    /// used to compare a band-local detection against the global pass.</summary>
+    private static int CellCount(AbsorbedTable t) =>
+        t.Rows.Sum(r => r.Cells.Count(c => c.TextFragments.Count > 0));
+
+    /// <summary>
+    /// Cluster horizontal-edge Y positions into bands separated by large vertical gaps.
+    /// Two tables stacked with a wide blank strip between them fall into separate bands;
+    /// a single table's inter-row gaps stay within one band. Returns each band's
+    /// (minY, maxY) span. A gap threshold well above normal row spacing keeps a single
+    /// table (even one with a tall row) intact — only genuine table-to-table gaps split.
+    /// </summary>
+    private static List<(double Min, double Max)> ComputeYBands(List<HEdge> hEdges)
+    {
+        var ys = hEdges.Select(e => e.Y).Distinct().ToList();
+        ys.Sort();
+        var bands = new List<(double Min, double Max)>();
+        if (ys.Count == 0) return bands;
+
+        // A band break is a blank vertical strip much larger than typical row spacing.
+        const double BandGap = 40;
+        double start = ys[0];
+        double prev = ys[0];
+        for (var i = 1; i < ys.Count; i++)
+        {
+            if (ys[i] - prev > BandGap)
+            {
+                bands.Add((start, prev));
+                start = ys[i];
+            }
+            prev = ys[i];
+        }
+        bands.Add((start, prev));
+        return bands;
+    }
+
+    private static List<AbsorbedTable> DetectTablesInRegion(List<TextRun> runs, List<HEdge> hEdges, List<VEdge> vEdges)
     {
         if (hEdges.Count < 2 || vEdges.Count < 2)
             return DetectTablesFromText(runs);
@@ -1247,6 +1352,7 @@ public sealed class TableAbsorber
     {
         var lexer = new PdfLexer(stream); var operands = new List<PdfObject>();
         Dictionary<int, string>? toUnicode = null; PdfDictionary? fontDict = null;
+        FontMetrics? curMetrics = null;
         double fontSize = 12, tx = 0, ty = 0, txLine = 0, tyLine = 0;
         double tmA = 1, tmB = 0, tmC = 0, tmD = 1, leading = 0;
         double curX = 0, curY = 0, moveX = 0, moveY = 0;
@@ -1283,7 +1389,7 @@ public sealed class TableAbsorber
                         case "BT": tx=txLine=0;ty=tyLine=0;tmA=1;tmB=0;tmC=0;tmD=1;leading=0; break;
                         case "TL": if (operands.Count>=1) leading=Num(operands[0]); break;
                         case "Tf":
-                            if (operands.Count>=1&&operands[0] is PdfName fn&&fonts.TryGetValue(fn.Value,out var fd)){fontDict=fd;toUnicode=TextAbsorber.ParseToUnicodeFromDict(fd,reader);}
+                            if (operands.Count>=1&&operands[0] is PdfName fn&&fonts.TryGetValue(fn.Value,out var fd)){fontDict=fd;toUnicode=TextAbsorber.ParseToUnicodeFromDict(fd,reader);curMetrics=null;try{curMetrics=FontMetrics.FromFontDict(fd,reader);}catch{}}
                             if (operands.Count>=2) fontSize=Math.Abs(Num(operands[1])); break;
                         case "Td": if (operands.Count>=2){var tdX=Num(operands[0]);var tdY=Num(operands[1]);txLine=tmA*tdX+tmC*tdY+txLine;tyLine=tmB*tdX+tmD*tdY+tyLine;tx=txLine;ty=tyLine;} break;
                         case "TD": if (operands.Count>=2){var tdX=Num(operands[0]);var tdY=Num(operands[1]);leading=-tdY;txLine=tmA*tdX+tmC*tdY+txLine;tyLine=tmB*tdX+tmD*tdY+tyLine;tx=txLine;ty=tyLine;} break;
@@ -1292,7 +1398,51 @@ public sealed class TableAbsorber
                         case "Tj":
                             if (operands.Count>=1&&operands[0] is PdfString s){var text=Decode(s.Value,toUnicode,fontDict);var(px,py)=ApplyMatrix(tx,ty,ctmA,ctmB,ctmC,ctmD,ctmE,ctmF);textRuns.Add(new TextRun(text,px,py,text.Length*fontSize*0.5,fontSize));} break;
                         case "TJ":
-                            if (operands.Count>=1&&operands[0] is PdfArray arr){var sb=new StringBuilder();foreach(var item in arr)if(item is PdfString ps)sb.Append(Decode(ps.Value,toUnicode,fontDict));if(sb.Length>0){var(px,py)=ApplyMatrix(tx,ty,ctmA,ctmB,ctmC,ctmD,ctmE,ctmF);textRuns.Add(new TextRun(sb.ToString(),px,py,sb.Length*fontSize*0.5,fontSize));}} break;
+                            if (operands.Count>=1&&operands[0] is PdfArray arr)
+                            {
+                                // Walk the array element-by-element accumulating a text-space pen
+                                // offset. A large NEGATIVE adjustment (a rightward jump ≫ kerning,
+                                // e.g. the multi-em gaps a single TJ uses to lay out columns) is a
+                                // column boundary: flush the run so far and start a new run at the
+                                // jumped-to X. Without this, a header/row drawn as one TJ across
+                                // several columns collapses into the first column.
+                                var sb=new StringBuilder();
+                                double pen=0;          // text-space advance from (tx,ty)
+                                double runStartPen=0;  // pen at the current sub-run's first glyph
+                                // Gap threshold: 1.5 em. Normal inter-glyph kerning is <0.05 em;
+                                // an inter-word space char is a real glyph (not an adjustment).
+                                double gapTU=fontSize*1.5;
+                                void FlushSub()
+                                {
+                                    if (sb.Length==0) return;
+                                    var txx=tx+tmA*runStartPen; var tyy=ty+tmB*runStartPen;
+                                    var(px2,py2)=ApplyMatrix(txx,tyy,ctmA,ctmB,ctmC,ctmD,ctmE,ctmF);
+                                    textRuns.Add(new TextRun(sb.ToString(),px2,py2,sb.Length*fontSize*0.5,fontSize));
+                                    sb.Clear();
+                                }
+                                foreach(var item in arr)
+                                {
+                                    if (item is PdfString ps)
+                                    {
+                                        var t=Decode(ps.Value,toUnicode,fontDict);
+                                        sb.Append(t);
+                                        // Advance the pen by the true glyph run width when the font
+                                        // metrics are available (falling back to a crude 0.5-em/char
+                                        // estimate). Accurate widths keep each post-gap sub-run's X
+                                        // inside its real column — a 0.5-em guess undershoots caps
+                                        // headers and slides text into the wrong cell.
+                                        pen+=curMetrics is not null ? curMetrics.MeasureString(t,fontSize) : t.Length*fontSize*0.5;
+                                    }
+                                    else if (item is PdfInteger or PdfReal)
+                                    {
+                                        var adv=-Num(item)/1000.0*fontSize; // +ve = rightward
+                                        if (adv>gapTU) { FlushSub(); pen+=adv; runStartPen=pen; }
+                                        else pen+=adv;
+                                    }
+                                }
+                                FlushSub();
+                            }
+                            break;
                         case "m":
                             if (operands.Count>=2){var(px,py)=ApplyMatrix(Num(operands[0]),Num(operands[1]),ctmA,ctmB,ctmC,ctmD,ctmE,ctmF);curX=moveX=px;curY=moveY=py;} break;
                         case "l":

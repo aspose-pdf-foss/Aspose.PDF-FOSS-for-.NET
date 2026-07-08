@@ -1,6 +1,7 @@
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Xml;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
@@ -58,9 +59,12 @@ public sealed partial class PdfFileEditor
     public bool CloseConcatenatedStreams { get; set; }
 
     /// <summary>When true, Concatenate renames colliding form-field names
-    /// in the inputs so the output has unique field names. Stored only;
-    /// name-uniquification is not currently performed.</summary>
-    public bool KeepFieldsUnique { get; set; }
+    /// in the inputs so the output has unique field names. The public default
+    /// is false (colliding AcroForm widgets are merged). Backed by a nullable
+    /// so the XFA merge can tell an explicit <c>false</c> (keep duplicate top
+    /// subforms as occurrences) from the unset default (disambiguate them).</summary>
+    public bool KeepFieldsUnique { get => _keepFieldsUnique ?? false; set => _keepFieldsUnique = value; }
+    private bool? _keepFieldsUnique;
 
     /// <summary>When true, identical outline entries from the inputs are
     /// merged in the output instead of duplicated. Stored only; Concatenate
@@ -105,7 +109,9 @@ public sealed partial class PdfFileEditor
             using (var output = File.Create(tempPath))
             {
                 var writer = new PdfWriter(output);
-                writer.WriteHeader("1.4");
+                // Aspose.Pdf writes concatenated output as PDF 1.7 regardless
+                // of the input versions.
+                writer.WriteHeader("1.7");
 
                 // Reserve obj 1 (catalog) and obj 2 (pages) — written last once all pages known.
                 // All resource/page/content objects are allocated from 3 upwards.
@@ -117,7 +123,7 @@ public sealed partial class PdfFileEditor
                 var inputReaders = new List<PdfReader>();
                 var inputPageCounts = new List<int>();
                 // Retain the first input's reader + object map so its catalog-level
-                // /OpenAction can be preserved (Aspose.PDF for .NET behaviour) and remapped through
+                // /OpenAction can be preserved (Aspose.Pdf behaviour) and remapped through
                 // the same map — the open-action destination then still points at its
                 // (already-written) page rather than a duplicate.
                 PdfReader? firstReader = null;
@@ -208,27 +214,199 @@ public sealed partial class PdfFileEditor
                     catalogDict.Set("Names", new PdfIndirectRef(namesObjNum, 0));
                 }
 
-                // Merge AcroForm fields from all input documents
-                var allFieldRefs = new PdfArray();
-                foreach (var reader in inputReaders)
-                {
-                    var cat = reader.Catalog;
-                    var acroForm = reader.ResolveDict(cat.Get("AcroForm"));
-                    if (acroForm is null) continue;
-                    var fieldsArr = reader.Resolve(acroForm.Get("Fields")) as PdfArray;
-                    if (fieldsArr is null) continue;
+                // Merge AcroForm fields from all input documents. Two top-level fields
+                // that share a fully-qualified name denote the same field: with
+                // KeepFieldsUnique the later one is renamed via UniqueSuffix (%NUM% →
+                // incrementing counter); otherwise their widgets are merged under one field.
+                PdfDictionary? acroFormDict = null;
 
-                    var acroRemap = new Dictionary<int, int>();
-                    foreach (var fieldRef in fieldsArr)
+                // When two or more inputs carry an XFA template, their AcroForm fields form a
+                // hierarchical tree (top subform node → page-subform nodes → leaf widgets).
+                // Re-parent each input's top-level field nodes under one synthetic "root" field,
+                // applying the SAME name disambiguation as the /XFA template merge
+                // (BuildMergedXfaArray) so FindByName("root[0].eApp[0]") resolves and the node
+                // /Kids counts match. The flat per-widget merge (else branch) would both drop the
+                // subtree (MergeFieldWidgets keeps only widget keys) and lose the /Parent chain
+                // (RemapObject strips /Parent → bare leaf FullNames), so it is used only for
+                // non-XFA / single-XFA concatenations.
+                var xfaRenames = ComputeXfaTopSubformRenames(inputReaders);
+                if (xfaRenames is not null)
+                {
+                    int rootNum = writer.AllocateObjectNumber();
+                    // Group each input's top-level field nodes by their merged name. Same merged
+                    // name → one output node whose /Kids are the union of all members' kids
+                    // (KeepFieldsUnique=false → a single eApp[0] carrying every source's pages);
+                    // differing subtrees rename to eApp1[0]/eApp2[0] and stay separate.
+                    var groupOrder = new List<string>();
+                    var groupMembers = new Dictionary<string, List<(PdfReader rdr, PdfDictionary dict)>>();
+                    for (int i = 0; i < inputReaders.Count; i++)
                     {
-                        var cloned = RemapObject(fieldRef, reader, acroRemap, writer);
-                        allFieldRefs.Add(cloned);
+                        var reader = inputReaders[i];
+                        var acroForm = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
+                        var fieldsArr = acroForm is null ? null : reader.Resolve(acroForm.Get("Fields")) as PdfArray;
+                        if (fieldsArr is null) continue;
+                        var map = i < xfaRenames.Count ? xfaRenames[i] : new Dictionary<string, string>();
+                        foreach (var fieldRef in fieldsArr)
+                        {
+                            var fdict = reader.ResolveDict(fieldRef);
+                            if (fdict is null) continue;
+                            var t = (reader.Resolve(fdict.Get("T")) as PdfString)?.ToText() ?? "";
+                            var (baseName, idx) = SplitFieldNameIndex(t);
+                            var newName = (map.TryGetValue(baseName, out var nb) ? nb : baseName) + idx;
+                            if (!groupMembers.TryGetValue(newName, out var lst))
+                            {
+                                lst = new List<(PdfReader, PdfDictionary)>();
+                                groupMembers[newName] = lst;
+                                groupOrder.Add(newName);
+                            }
+                            lst.Add((reader, fdict));
+                        }
+                    }
+
+                    var rootKids = new PdfArray();
+                    foreach (var newName in groupOrder)
+                    {
+                        var members = groupMembers[newName];
+                        int nodeNum = writer.AllocateObjectNumber();
+                        // /Kids = the union of every member node's child field-nodes, deep-cloned
+                        // with their /Parent chain rewired (so BuildFullName / CollectGroupFields
+                        // surface this node and compute the root[0].<name> full names).
+                        var nodeKids = new PdfArray();
+                        foreach (var (rdr, dict) in members)
+                        {
+                            var memberKids = rdr.Resolve(dict.Get("Kids")) as PdfArray;
+                            if (memberKids is null) continue;
+                            var remap = new Dictionary<int, int>();
+                            foreach (var kid in memberKids)
+                            {
+                                var kd = rdr.ResolveDict(kid);
+                                if (kd is null) continue;
+                                nodeKids.Add(new PdfIndirectRef(CloneFieldNode(kd, rdr, remap, writer, nodeNum), 0));
+                            }
+                        }
+                        // Build the node dict from the first member's own attributes (minus the
+                        // tree/parent/name keys we set explicitly).
+                        var (firstRdr, firstDict) = members[0];
+                        var nodeDict = new PdfDictionary();
+                        var nodeRemap = new Dictionary<int, int>();
+                        foreach (var key in firstDict.Keys)
+                        {
+                            if (key is "Kids" or "Parent" or "T" or "P") continue;
+                            var v = firstDict.Get(key);
+                            if (v is not null) nodeDict.Set(key, RemapObject(v, firstRdr, nodeRemap, writer));
+                        }
+                        nodeDict.Set("T", new PdfString(System.Text.Encoding.UTF8.GetBytes(newName)));
+                        nodeDict.Set("Parent", new PdfIndirectRef(rootNum, 0));
+                        nodeDict.Set("Kids", nodeKids);
+                        writer.WriteIndirectObject(nodeNum, nodeDict);
+                        rootKids.Add(new PdfIndirectRef(nodeNum, 0));
+                    }
+
+                    if (rootKids.Count > 0)
+                    {
+                        var rootDict = new PdfDictionary();
+                        rootDict.Set("T", new PdfString(System.Text.Encoding.UTF8.GetBytes("root[0]")));
+                        rootDict.Set("Kids", rootKids);
+                        writer.WriteIndirectObject(rootNum, rootDict);
+                        acroFormDict = new PdfDictionary();
+                        var rootFields = new PdfArray();
+                        rootFields.Add(new PdfIndirectRef(rootNum, 0));
+                        acroFormDict.Set("Fields", rootFields);
                     }
                 }
-                if (allFieldRefs.Count > 0)
+                else
                 {
-                    var acroFormDict = new PdfDictionary();
-                    acroFormDict.Set("Fields", allFieldRefs);
+                    // Rename mode = KeepFieldsUnique set OR an explicit UniqueSuffix: every input
+                    // field is KEPT (duplicate top-level names disambiguated), so the output field
+                    // count equals the sum of the inputs'. Deep-clone each top-level field with its
+                    // whole /Kids subtree and /Parent chain rewired (CloneTopFieldNode), so nested
+                    // fields keep their hierarchical FullNames instead of collapsing to bare leaf
+                    // names (RemapObject strips /Parent). Merge mode (the plain default) keeps the
+                    // legacy per-widget merge, where colliding fields fold their widgets together.
+                    // An explicit KeepFieldsUnique=false forces merge even when a UniqueSuffix is
+                    // set (the suffix only names duplicates when renaming is
+                    // actually requested); an unset KeepFieldsUnique with a suffix still renames.
+                    var renameMode = _keepFieldsUnique == true
+                        || (_keepFieldsUnique is null && _uniqueSuffixSet);
+                    var nameCounts = new Dictionary<string, int>();
+                    var seenNames = new HashSet<string>();
+                    var allFieldRefs = new PdfArray();
+                    var outFields = new List<(PdfDictionary dict, int objNum)>();
+                    var byName = new Dictionary<string, int>();
+
+                    foreach (var reader in inputReaders)
+                    {
+                        var cat = reader.Catalog;
+                        var acroForm = reader.ResolveDict(cat.Get("AcroForm"));
+                        if (acroForm is null) continue;
+                        var fieldsArr = reader.Resolve(acroForm.Get("Fields")) as PdfArray;
+                        if (fieldsArr is null) continue;
+
+                        var acroRemap = new Dictionary<int, int>();
+                        foreach (var fieldRef in fieldsArr)
+                        {
+                            var srcDict = reader.ResolveDict(fieldRef);
+                            if (srcDict is null) continue;
+                            var name = (reader.Resolve(srcDict.Get("T")) as PdfString)?.ToText();
+
+                            if (renameMode)
+                            {
+                                string? finalName = name;
+                                if (name is not null && !seenNames.Add(name))
+                                {
+                                    nameCounts.TryGetValue(name, out var n);
+                                    nameCounts[name] = ++n;
+                                    finalName = name + ApplyUniqueSuffix(_uniqueSuffix, n);
+                                    seenNames.Add(finalName);
+                                }
+                                var num = CloneTopFieldNode(srcDict, reader, acroRemap, writer,
+                                    finalName == name ? null : finalName);
+                                allFieldRefs.Add(new PdfIndirectRef(num, 0));
+                                continue;
+                            }
+
+                            // Merge mode (legacy): pre-allocate, flat-clone, merge colliding widgets.
+                            int outNum = writer.AllocateObjectNumber();
+                            if (fieldRef is PdfIndirectRef fr) acroRemap[fr.ObjectNumber] = outNum;
+                            var cloned = (PdfDictionary)RemapObject(srcDict, reader, acroRemap, writer);
+                            if (name is not null && byName.TryGetValue(name, out var existingIdx))
+                                MergeFieldWidgets(outFields[existingIdx].dict, cloned);
+                            else
+                            {
+                                if (name is not null) byName[name] = outFields.Count;
+                                outFields.Add((cloned, outNum));
+                            }
+                        }
+                    }
+
+                    if (!renameMode)
+                        foreach (var (fld, num) in outFields)
+                        {
+                            writer.WriteIndirectObject(num, fld);
+                            allFieldRefs.Add(new PdfIndirectRef(num, 0));
+                        }
+
+                    if (allFieldRefs.Count > 0)
+                    {
+                        acroFormDict = new PdfDictionary();
+                        acroFormDict.Set("Fields", allFieldRefs);
+                    }
+                }
+
+                // Merge XFA packets (dynamic/static XFA forms). When two or more inputs
+                // carry an XFA template, re-parent each input's top-level subform(s) under
+                // a single synthetic "root" subform (datasets in parallel), disambiguating
+                // colliding names. A pure dynamic XFA form has no AcroForm widget fields, so
+                // the AcroForm dict may hold only /XFA (no /Fields).
+                var xfaArr = BuildMergedXfaArray(inputReaders);
+                if (xfaArr is not null)
+                {
+                    acroFormDict ??= new PdfDictionary();
+                    acroFormDict.Set("XFA", xfaArr);
+                }
+
+                if (acroFormDict is not null)
+                {
                     var acroObjNum = writer.AllocateObjectNumber();
                     writer.WriteIndirectObject(acroObjNum, acroFormDict);
                     catalogDict.Set("AcroForm", new PdfIndirectRef(acroObjNum, 0));
@@ -238,6 +416,12 @@ public sealed partial class PdfFileEditor
                 MergeOutlines(inputReaders, inputPageCounts, catalogDict, writer);
                 if (CopyLogicalStructure)
                     MergeStructTrees(inputReaders, catalogDict, writer);
+
+                // Merge /PageLabels: when any source carries page labels, emit a
+                // merged number tree so every concatenated page keeps the label it
+                // had in its source (or a sequential default), with page indices
+                // offset by the preceding inputs' page counts.
+                MergePageLabels(inputReaders, inputPageCounts, catalogDict, writer);
 
                 // Preserve the first document's catalog /OpenAction (keep the
                 // leading document's open action; the result opens at its start). Remap it
@@ -328,6 +512,9 @@ public sealed partial class PdfFileEditor
         for (var i = startPage - 1; i >= 1; i--)
             doc.Pages.Delete(i);
 
+        // Drop the removed pages' now-orphaned objects (their images can be the bulk of the
+        // file) instead of carrying the whole source into the extracted output.
+        doc.CompactAfterPageRemoval();
         return doc.ToArray();
     }
 
@@ -368,11 +555,23 @@ public sealed partial class PdfFileEditor
     {
         if (pageNumbers.Length == 0) return Concatenate(new byte[0][]);
 
-        var parts = new List<byte[]>();
+        // Extract all requested pages from ONE document (delete the complement), not by
+        // extracting each page separately and concatenating. A single pass keeps
+        // cross-page links inside the kept set resolvable (a GoTo from one kept page to
+        // another stays valid) and doesn't duplicate resources shared between kept pages,
+        // which per-page concatenation would copy once per page.
+        using var doc = Document.Open(inputPdf);
+        var total = doc.PageCount;
+        var keep = new HashSet<int>();
         foreach (var pn in pageNumbers)
-            parts.Add(Extract(inputPdf, pn, pn));
+            if (pn >= 1 && pn <= total) keep.Add(pn);
+        if (keep.Count == 0) return Concatenate(new byte[0][]);
 
-        return parts.Count == 1 ? parts[0] : Concatenate(parts.ToArray());
+        for (var i = total; i >= 1; i--)
+            if (!keep.Contains(i)) doc.Pages.Delete(i);
+
+        doc.CompactAfterPageRemoval();
+        return doc.ToArray();
     }
 
     /// <summary>
@@ -565,20 +764,29 @@ public sealed partial class PdfFileEditor
     /// <param name="startPage">Start page in source (1-based, inclusive).</param>
     /// <param name="endPage">End page in source (1-based, inclusive).</param>
     public byte[] Append(byte[] inputPdf, byte[] portPdf, int startPage, int endPage)
-    {
-        var extracted = Extract(portPdf, startPage, endPage);
-        return Concatenate(inputPdf, extracted);
-    }
+        => Append(inputPdf, new[] { portPdf }, startPage, endPage);
 
     /// <summary>
     /// Append pages from multiple source PDFs to an input PDF.
     /// </summary>
     public byte[] Append(byte[] inputPdf, byte[][] portPdfs, int startPage, int endPage)
     {
-        var parts = new List<byte[]> { inputPdf };
-        foreach (var src in portPdfs)
-            parts.Add(Extract(src, startPage, endPage));
-        return Concatenate(parts.ToArray());
+        // Open the destination document and import the requested source pages onto it via
+        // the cross-doc Pages.Add path, then save. Unlike the byte-level Concatenate this
+        // keeps the destination's own catalog (AcroForm/outlines) intact, remaps the added
+        // pages' intra-document links onto the imported pages, and — because it writes
+        // through the normal document serializer instead of expanding every object into a
+        // plain indirect entry — produces a compact file (a 10-page
+        // image-heavy append is ~3 MB, not the ~4.6 MB Concatenate emitted).
+        using var destDoc = Document.Open(inputPdf);
+        foreach (var portData in portPdfs)
+        {
+            using var portDoc = Document.Open(portData);
+            var last = Math.Min(endPage, portDoc.PageCount);
+            for (var i = Math.Max(1, startPage); i <= last; i++)
+                destDoc.Pages.Add(portDoc.Pages[i]);
+        }
+        return destDoc.ToArray();
     }
 
     /// <summary>
@@ -630,26 +838,26 @@ public sealed partial class PdfFileEditor
     {
         if (pageNumbers.Length == 0) return inputPdf;
 
-        // Extract the requested pages by extracting ranges
-        // Build a document from just those pages
-        var parts = new List<byte[]>();
-        foreach (var pn in pageNumbers)
-            parts.Add(Extract(portPdf, pn, pn));
-
-        var extracted = parts.Count == 1 ? parts[0] : Concatenate(parts.ToArray());
-
         using var destDoc = Document.Open(inputPdf);
+        using var portDoc = Document.Open(portPdf);
+        var portTotal = portDoc.PageCount;
+
+        var portPages = new List<Page>();
+        foreach (var pn in pageNumbers)
+            if (pn >= 1 && pn <= portTotal) portPages.Add(portDoc.Pages[pn]);
+        if (portPages.Count == 0) return inputPdf;
+
+        // Insert the port pages directly through the document's page collection so shared
+        // resources are imported once (the clone cache dedupes them) instead of duplicated
+        // by a byte-level concatenation. Map the facade's insert location — which clamps to
+        // [0, destCount] and appends when it reaches the last page — to the 1-based
+        // "insert before" index the page collection expects.
         var destCount = destDoc.PageCount;
         var pos = Math.Max(0, Math.Min(insertLocation, destCount));
+        int insertBefore = pos <= 0 ? 1 : pos >= destCount ? destCount + 1 : pos + 1;
 
-        if (pos == 0)
-            return Concatenate(extracted, inputPdf);
-        if (pos >= destCount)
-            return Concatenate(inputPdf, extracted);
-
-        var before = Extract(inputPdf, 1, pos);
-        var after = Extract(inputPdf, pos + 1, destCount);
-        return Concatenate(before, extracted, after);
+        destDoc.Pages.Insert(insertBefore, portPages.ToArray());
+        return destDoc.ToArray();
     }
 
     // ── ResizeContents ────────────────────────────────────────────────────────
@@ -710,6 +918,11 @@ public sealed partial class PdfFileEditor
         // transform above doesn't reach them. Apply the same affine to their
         // geometry so ink strokes / rects / quadpoints track the resized content.
         TransformAnnotationGeometry(page, sx, sy, tx, ty);
+
+        // Normalize degenerate shape-annotation appearances (mirrors Aspose.PDF's
+        // resize-with-normalization): a Square/Circle that ships a missing or empty /N
+        // appearance stream gets a freshly regenerated /AP /N.
+        NormalizeDegenerateShapeAppearances(page);
 
         // The margins plus content span the new page box. When that differs from
         // the current media box (e.g. fixed-zero margins shrinking the page to the
@@ -914,7 +1127,18 @@ public sealed partial class PdfFileEditor
     public bool Concatenate(string[] inputFiles, string outputFile)
     {
         _corrupted.Clear();
-        var named = inputFiles.Select(f => (File.ReadAllBytes(f), (string?)f)).ToList();
+        List<(byte[], string?)> named;
+        try
+        {
+            named = inputFiles.Select(f => (File.ReadAllBytes(f), (string?)f)).ToList();
+        }
+        catch (IOException ex)
+        {
+            // Aspose.Pdf surfaces missing/unreadable inputs as a PdfException
+            // WRAPPING the IO error — callers (and TryConcatenate's LastException)
+            // pattern-match on InnerException being e.g. FileNotFoundException.
+            throw new PdfException(ex.Message, ex);
+        }
         var inputs = FilterCorruptedInputs(named).ToArray();
         var result = Concatenate(inputs);
         File.WriteAllBytes(outputFile, result);
@@ -1035,6 +1259,9 @@ public sealed partial class PdfFileEditor
         var inputs = inputStream.Select(ReadStream).ToArray();
         var result = Concatenate(inputs);
         outputStream.Write(result, 0, result.Length);
+        // Aspose.Pdf leaves a seekable output rewound so callers can read
+        // the concatenated bytes back without seeking.
+        if (outputStream.CanSeek) outputStream.Position = 0;
         if (CloseConcatenatedStreams)
         {
             foreach (var s in inputStream) s.Dispose();
@@ -1048,6 +1275,9 @@ public sealed partial class PdfFileEditor
     {
         var result = Concatenate(ReadStream(firstInputStream), ReadStream(secInputStream));
         outputStream.Write(result, 0, result.Length);
+        // Aspose.Pdf leaves a seekable output rewound so callers can read
+        // the concatenated bytes back without seeking.
+        if (outputStream.CanSeek) outputStream.Position = 0;
         if (CloseConcatenatedStreams)
         {
             firstInputStream.Dispose();
@@ -1067,6 +1297,9 @@ public sealed partial class PdfFileEditor
             ReadStream(secInputStream),
         });
         outputStream.Write(result, 0, result.Length);
+        // Aspose.Pdf leaves a seekable output rewound so callers can read
+        // the concatenated bytes back without seeking.
+        if (outputStream.CanSeek) outputStream.Position = 0;
         if (CloseConcatenatedStreams)
         {
             firstInputStream.Dispose();
@@ -1284,6 +1517,30 @@ public sealed partial class PdfFileEditor
         _ => 0.0,
     };
 
+    /// <summary>Regenerate the normal appearance of Square/Circle annotations whose
+    /// existing /AP /N is missing or carries no drawing operators (a degenerate stream,
+    /// e.g. an empty body with a NaN BBox). Aspose.PDF's resize-with-normalization rebuilds
+    /// such appearances; FOSS otherwise leaves the figure with a degenerate/absent /N.
+    /// Scoped to <see cref="Annotations.CommonFigureAnnotation"/> with an already-degenerate
+    /// appearance so valid appearances and other annotation types are left untouched.</summary>
+    private static void NormalizeDegenerateShapeAppearances(Page page)
+    {
+        foreach (var annot in page.Annotations)
+        {
+            if (annot is not Annotations.CommonFigureAnnotation figure) continue;
+
+            bool degenerate;
+            try
+            {
+                var na = annot.NormalAppearance;
+                degenerate = na is null || na.Contents.Count == 0;
+            }
+            catch { degenerate = true; }
+
+            if (degenerate) figure.EnsureNormalizedAppearance();
+        }
+    }
+
     /// <summary>Stream overload of <see cref="AddPageBreak(Document, Document, PageBreak[])"/>.
     /// Reads <paramref name="src"/> into a <see cref="Document"/>, runs the page-break
     /// logic, and writes the result to <paramref name="dest"/>.</summary>
@@ -1375,8 +1632,12 @@ public sealed partial class PdfFileEditor
     /// <summary>Read a stream fully into a byte array.</summary>
     private static byte[] ReadStream(Stream s)
     {
-        if (s is MemoryStream ms && ms.TryGetBuffer(out var buf))
-            return buf.Count == ms.Length ? buf.Array! : ms.ToArray();
+        // ToArray() returns exactly the logical content (Length bytes from offset 0)
+        // regardless of the stream's Position or spare capacity. The previous
+        // TryGetBuffer fast-path returned the whole backing array — which includes
+        // trailing unused-capacity zero bytes when Capacity > Length — corrupting the
+        // PDF (trailing garbage after %%EOF → "root object missing" on re-read).
+        if (s is MemoryStream ms) return ms.ToArray();
         if (s.CanSeek) s.Position = 0;
         using var copy = new MemoryStream();
         s.CopyTo(copy);
@@ -1492,6 +1753,419 @@ public sealed partial class PdfFileEditor
     /// once per input PDF (deduplicated via <paramref name="objRemap"/>).
     /// Inline dicts/arrays/streams have their contents recursively remapped.
     /// </summary>
+    /// <summary>Apply the unique-suffix template to a counter: replace the <c>%NUM%</c>
+    /// placeholder with <paramref name="n"/>, or append it when no placeholder is present.</summary>
+    private static string ApplyUniqueSuffix(string suffix, int n)
+        => suffix.Contains("%NUM%") ? suffix.Replace("%NUM%", n.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                                    : suffix + n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    // ── XFA form merge ──────────────────────────────────────────────────────
+    // When a Concatenate combines two or more XFA forms, each input's top-level
+    // template subform(s) are re-parented under one synthetic "root" subform (with
+    // the datasets data nodes wrapped in a matching <root> element), disambiguating
+    // colliding names. This mirrors Aspose.Pdf's XFA merge:
+    //   • KeepFieldsUnique explicitly false      → keep duplicate names as occurrences
+    //   • UniqueSuffix explicitly set             → rename duplicates with that suffix
+    //   • otherwise (default)                     → identical subtree kept as an
+    //                                               occurrence, differing subtree renamed
+    //                                               name → name+N (plain occurrence index)
+
+    /// <summary>Compute, per input, the rename map (original top-subform name → merged
+    /// name) that <see cref="BuildMergedXfaArray"/> applies to the /XFA template, so the
+    /// AcroForm field tree can be re-parented under the same synthetic "root" with matching
+    /// names. Returns null when fewer than two inputs carry an XFA template (no XFA merge
+    /// happens — the flat AcroForm merge is used instead). Mirrors the disambiguation policy
+    /// in <see cref="BuildMergedXfaArray"/> exactly.</summary>
+    private List<Dictionary<string, string>>? ComputeXfaTopSubformRenames(List<PdfReader> readers)
+    {
+        var tplRoots = new List<XmlElement?>();
+        int withTemplate = 0;
+        foreach (var r in readers)
+        {
+            TryGetXfaPackets(r, out var tplXml, out _);
+            var doc = LoadXmlOrNull(tplXml);
+            tplRoots.Add(doc?.DocumentElement);
+            if (doc?.DocumentElement is not null) withTemplate++;
+        }
+        if (withTemplate < 2) return null;
+
+        var result = new List<Dictionary<string, string>>();
+        var firstXmlByName = new Dictionary<string, string>();
+        var dupCount = new Dictionary<string, int>();
+        foreach (var tRoot in tplRoots)
+        {
+            var map = new Dictionary<string, string>();
+            result.Add(map);
+            if (tRoot is null) continue;
+            foreach (var sf in TopContainerChildren(tRoot))
+            {
+                var orig = sf.GetAttribute("name");
+                string newName;
+                if (!firstXmlByName.ContainsKey(orig))
+                {
+                    newName = orig;
+                    firstXmlByName[orig] = sf.OuterXml;
+                }
+                else
+                {
+                    dupCount.TryGetValue(orig, out var n); n++; dupCount[orig] = n;
+                    if (_uniqueSuffixSet)
+                        newName = orig + ApplyUniqueSuffix(_uniqueSuffix, n);
+                    else if (_keepFieldsUnique == false)
+                        newName = orig;
+                    else
+                        newName = sf.OuterXml == firstXmlByName[orig]
+                            ? orig
+                            : orig + n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
+                if (!map.ContainsKey(orig)) map[orig] = newName;
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Split an AcroForm field /T like "eApp[0]" into its base name ("eApp") and
+    /// trailing occurrence index ("[0]"). The XFA rename map is keyed by the base name; the
+    /// index is preserved so a renamed field becomes e.g. "eApp1[0]".</summary>
+    private static (string baseName, string indexSuffix) SplitFieldNameIndex(string t)
+    {
+        int b = t.LastIndexOf('[');
+        if (b > 0 && t.EndsWith("]", StringComparison.Ordinal))
+            return (t.Substring(0, b), t.Substring(b));
+        return (t, string.Empty);
+    }
+
+    /// <summary>Deep-clone an AcroForm field node (and its whole /Kids subtree) into the
+    /// output, wiring each node's /Parent to its new parent so <c>BuildFullName</c> and
+    /// <c>CollectGroupFields</c> can reconstruct the hierarchical names. Unlike
+    /// <see cref="RemapObject"/> (which strips /Parent), this rebuilds the parent chain;
+    /// /P (page back-ref) is dropped to avoid cloning entire pages. Returns the new object
+    /// number of the cloned node.</summary>
+    private static int CloneFieldNode(PdfDictionary src, PdfReader reader,
+        Dictionary<int, int> remap, PdfWriter writer, int parentNum)
+    {
+        int myNum = writer.AllocateObjectNumber();
+        var clone = new PdfDictionary();
+        foreach (var key in src.Keys)
+        {
+            if (key is "Parent" or "Kids" or "P") continue;
+            var v = src.Get(key);
+            if (v is not null) clone.Set(key, RemapObject(v, reader, remap, writer));
+        }
+        clone.Set("Parent", new PdfIndirectRef(parentNum, 0));
+        var kids = reader.Resolve(src.Get("Kids")) as PdfArray;
+        if (kids is not null)
+        {
+            var outKids = new PdfArray();
+            foreach (var kid in kids)
+            {
+                var kd = reader.ResolveDict(kid);
+                if (kd is null) continue;
+                outKids.Add(new PdfIndirectRef(CloneFieldNode(kd, reader, remap, writer, myNum), 0));
+            }
+            clone.Set("Kids", outKids);
+        }
+        writer.WriteIndirectObject(myNum, clone);
+        return myNum;
+    }
+
+    /// <summary>Deep-clone a TOP-LEVEL AcroForm field (a root of the /Fields array) with its
+    /// whole /Kids subtree, preserving the /Parent chain on descendants so their hierarchical
+    /// FullNames survive. The root itself gets no /Parent (top-level fields have none), and its
+    /// /T is replaced by <paramref name="overrideName"/> when non-null (duplicate-name rename).
+    /// /P (page back-ref) is dropped to avoid cloning entire pages. Returns the new object number.</summary>
+    private static int CloneTopFieldNode(PdfDictionary src, PdfReader reader,
+        Dictionary<int, int> remap, PdfWriter writer, string? overrideName)
+    {
+        int myNum = writer.AllocateObjectNumber();
+        var clone = new PdfDictionary();
+        foreach (var key in src.Keys)
+        {
+            if (key is "Parent" or "Kids" or "P") continue;
+            if (key == "T" && overrideName is not null) continue;
+            var v = src.Get(key);
+            if (v is not null) clone.Set(key, RemapObject(v, reader, remap, writer));
+        }
+        if (overrideName is not null)
+            clone.Set("T", new PdfString(System.Text.Encoding.UTF8.GetBytes(overrideName)));
+        var kids = reader.Resolve(src.Get("Kids")) as PdfArray;
+        if (kids is not null)
+        {
+            var outKids = new PdfArray();
+            foreach (var kid in kids)
+            {
+                var kd = reader.ResolveDict(kid);
+                if (kd is null) continue;
+                outKids.Add(new PdfIndirectRef(CloneFieldNode(kd, reader, remap, writer, myNum), 0));
+            }
+            clone.Set("Kids", outKids);
+        }
+        writer.WriteIndirectObject(myNum, clone);
+        return myNum;
+    }
+
+    /// <summary>Build the merged /XFA array, or null when fewer than two inputs carry
+    /// an XFA template (nothing to merge).</summary>
+    private PdfArray? BuildMergedXfaArray(List<PdfReader> readers)
+    {
+        var parts = new List<(XmlDocument? tpl, XmlDocument? ds)>();
+        int withTemplate = 0;
+        foreach (var r in readers)
+        {
+            TryGetXfaPackets(r, out var tplXml, out var dsXml);
+            var tplDoc = LoadXmlOrNull(tplXml);
+            var dsDoc = LoadXmlOrNull(dsXml);
+            parts.Add((tplDoc, dsDoc));
+            if (tplDoc is not null) withTemplate++;
+        }
+        if (withTemplate < 2) return null;
+
+        // ── Merged template ──
+        XmlDocument? mergedTpl = null;
+        XmlElement? tplRootSub = null;                       // synthetic <subform name="root">
+        var renameByInput = new Dictionary<int, Dictionary<string, string>>();
+        var firstXmlByName = new Dictionary<string, string>();   // origName → first occurrence's subtree
+        var dupCount = new Dictionary<string, int>();
+
+        for (int i = 0; i < parts.Count; i++)
+        {
+            var tRoot = parts[i].tpl?.DocumentElement;
+            if (tRoot is null) continue;
+            var subforms = TopContainerChildren(tRoot);
+            if (subforms.Count == 0) continue;
+
+            if (mergedTpl is null)
+            {
+                mergedTpl = parts[i].tpl;
+                tplRootSub = mergedTpl!.CreateElement(tRoot.Prefix, "subform", tRoot.NamespaceURI);
+                tplRootSub.SetAttribute("name", "root");
+            }
+
+            var map = new Dictionary<string, string>();
+            renameByInput[i] = map;
+            foreach (var sf in subforms)
+            {
+                var orig = sf.GetAttribute("name");
+                string newName;
+                if (!firstXmlByName.ContainsKey(orig))
+                {
+                    newName = orig;
+                    firstXmlByName[orig] = sf.OuterXml;
+                }
+                else
+                {
+                    dupCount.TryGetValue(orig, out var n); n++; dupCount[orig] = n;
+                    if (_uniqueSuffixSet)
+                        newName = orig + ApplyUniqueSuffix(_uniqueSuffix, n);
+                    else if (_keepFieldsUnique == false)
+                        newName = orig;
+                    else
+                        newName = sf.OuterXml == firstXmlByName[orig]
+                            ? orig
+                            : orig + n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
+                if (!map.ContainsKey(orig)) map[orig] = newName;
+
+                var imported = (XmlElement)mergedTpl!.ImportNode(sf, deep: true);
+                imported.SetAttribute("name", newName);
+                tplRootSub!.AppendChild(imported);
+            }
+        }
+        if (mergedTpl?.DocumentElement is null || tplRootSub is null) return null;
+        RemoveTopContainerChildren(mergedTpl.DocumentElement);
+        mergedTpl.DocumentElement.AppendChild(tplRootSub);
+        var mergedTemplateXml = mergedTpl.DocumentElement.OuterXml;
+
+        // ── Merged datasets ──
+        XmlDocument? mergedDs = null;
+        XmlElement? dsRootEl = null;                         // synthetic <root>
+        XmlElement? dataEl = null;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            var dRoot = parts[i].ds?.DocumentElement;
+            if (dRoot is null) continue;
+            var thisData = FindDataElement(dRoot);
+            if (thisData is null) continue;
+            var map = renameByInput.TryGetValue(i, out var m) ? m : new Dictionary<string, string>();
+
+            if (mergedDs is null)
+            {
+                mergedDs = parts[i].ds;
+                dataEl = thisData;
+                dsRootEl = mergedDs!.CreateElement("root");
+            }
+            foreach (var dc in ElementChildren(thisData))
+            {
+                var imported = (XmlElement)mergedDs!.ImportNode(dc, deep: true);
+                if (map.TryGetValue(dc.LocalName, out var nn) && nn != dc.LocalName)
+                    imported = RenameElement(mergedDs, imported, nn);
+                dsRootEl!.AppendChild(imported);
+            }
+        }
+        string? mergedDatasetsXml = null;
+        if (mergedDs?.DocumentElement is not null && dsRootEl is not null && dataEl is not null)
+        {
+            RemoveElementChildren(dataEl);
+            dataEl.AppendChild(dsRootEl);
+            mergedDatasetsXml = mergedDs.DocumentElement.OuterXml;
+        }
+
+        // ── Emit /XFA array ──
+        var arr = new PdfArray();
+        arr.Add(new PdfString(Encoding.Latin1.GetBytes("template")));
+        arr.Add(new PdfStream(new PdfDictionary(), Encoding.UTF8.GetBytes(mergedTemplateXml)));
+        if (mergedDatasetsXml is not null)
+        {
+            arr.Add(new PdfString(Encoding.Latin1.GetBytes("datasets")));
+            arr.Add(new PdfStream(new PdfDictionary(), Encoding.UTF8.GetBytes(mergedDatasetsXml)));
+        }
+        return arr;
+    }
+
+    /// <summary>Read the template / datasets XML from an input's /XFA (array of
+    /// named parts, or a single-stream XDP).</summary>
+    private static void TryGetXfaPackets(PdfReader reader, out string? templateXml, out string? datasetsXml)
+    {
+        templateXml = null; datasetsXml = null;
+        var acro = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
+        if (acro is null) return;
+        var xfa = reader.Resolve(acro.Get("XFA"));
+        if (xfa is PdfArray arr)
+        {
+            for (int i = 0; i + 1 < arr.Count; i += 2)
+            {
+                if (arr[i] is not PdfString s) continue;
+                var part = Encoding.Latin1.GetString(s.Value);
+                if (reader.Resolve(arr[i + 1]) is not PdfStream stream) continue;
+                var txt = StripXfaBom(Encoding.UTF8.GetString(reader.DecodeStream(stream)));
+                if (part == "template") templateXml = txt;
+                else if (part == "datasets") datasetsXml = txt;
+            }
+        }
+        else if (xfa is PdfStream single)
+        {
+            var xdp = StripXfaBom(Encoding.UTF8.GetString(reader.DecodeStream(single)));
+            var doc = LoadXmlOrNull(xdp);
+            if (doc?.DocumentElement is not null)
+            {
+                var tpl = FindDescendantByLocalName(doc.DocumentElement, "template");
+                var ds = FindDescendantByLocalName(doc.DocumentElement, "datasets");
+                templateXml = tpl?.OuterXml;
+                datasetsXml = ds?.OuterXml;
+            }
+        }
+    }
+
+    private static XmlDocument? LoadXmlOrNull(string? xml)
+    {
+        if (string.IsNullOrEmpty(xml)) return null;
+        var doc = new XmlDocument { PreserveWhitespace = false };
+        try { doc.LoadXml(xml); } catch { return null; }
+        return doc.DocumentElement is null ? null : doc;
+    }
+
+    /// <summary>Top-level container children (subform / exclGroup) of a template root.</summary>
+    private static List<XmlElement> TopContainerChildren(XmlElement templateRoot)
+    {
+        var list = new List<XmlElement>();
+        foreach (XmlNode ch in templateRoot.ChildNodes)
+            if (ch is XmlElement el && (el.LocalName == "subform" || el.LocalName == "exclGroup"))
+                list.Add(el);
+        return list;
+    }
+
+    private static void RemoveTopContainerChildren(XmlElement templateRoot)
+    {
+        foreach (var el in TopContainerChildren(templateRoot))
+            templateRoot.RemoveChild(el);
+    }
+
+    /// <summary>Find the &lt;data&gt; element (xfa-data packet content) under a datasets root.</summary>
+    private static XmlElement? FindDataElement(XmlElement datasetsRoot)
+    {
+        if (datasetsRoot.LocalName == "data") return datasetsRoot;
+        foreach (XmlNode ch in datasetsRoot.ChildNodes)
+            if (ch is XmlElement el && el.LocalName == "data") return el;
+        return null;
+    }
+
+    private static List<XmlElement> ElementChildren(XmlElement node)
+    {
+        var list = new List<XmlElement>();
+        foreach (XmlNode ch in node.ChildNodes)
+            if (ch is XmlElement el) list.Add(el);
+        return list;
+    }
+
+    private static void RemoveElementChildren(XmlElement node)
+    {
+        foreach (var el in ElementChildren(node))
+            node.RemoveChild(el);
+    }
+
+    /// <summary>Return a copy of <paramref name="el"/> renamed to <paramref name="newName"/>,
+    /// preserving its namespace, attributes and children.</summary>
+    private static XmlElement RenameElement(XmlDocument doc, XmlElement el, string newName)
+    {
+        var ne = doc.CreateElement(el.Prefix, newName, el.NamespaceURI);
+        foreach (XmlAttribute a in el.Attributes)
+            ne.SetAttributeNode((XmlAttribute)a.CloneNode(true));
+        while (el.FirstChild is not null)
+            ne.AppendChild(el.FirstChild);
+        return ne;
+    }
+
+    private static XmlElement? FindDescendantByLocalName(XmlElement root, string localName)
+    {
+        if (root.LocalName == localName) return root;
+        foreach (XmlNode ch in root.ChildNodes)
+        {
+            if (ch is not XmlElement el) continue;
+            var found = FindDescendantByLocalName(el, localName);
+            if (found is not null) return found;
+        }
+        return null;
+    }
+
+    private static string StripXfaBom(string s) =>
+        s.Length > 0 && s[0] == '﻿' ? s.Substring(1) : s;
+
+    /// <summary>Widget-level dictionary keys (the visual annotation) that are moved off a
+    /// field dict into a /Kids entry when two same-named fields are merged; field-level keys
+    /// (/T, /FT, /V, /DA, /Ff, …) stay on the parent.</summary>
+    private static readonly HashSet<string> s_widgetKeys = new()
+    { "Rect", "AP", "AS", "MK", "BS", "Border", "F", "H" };
+
+    /// <summary>Merge a second same-named field into <paramref name="parent"/> by demoting
+    /// each field's own widget into a /Kids entry, so the result is one field with both
+    /// visual widgets (matching Concatenate with KeepFieldsUnique = false).</summary>
+    private static void MergeFieldWidgets(PdfDictionary parent, PdfDictionary second)
+    {
+        PdfDictionary ExtractWidget(PdfDictionary src)
+        {
+            var w = new PdfDictionary();
+            foreach (var k in src.Keys)
+                if (s_widgetKeys.Contains(k) && src.Get(k) is { } v)
+                    w.Set(k, v);
+            w.Set("Type", new PdfName("Annot"));
+            w.Set("Subtype", new PdfName("Widget"));
+            return w;
+        }
+
+        var kids = parent.Get("Kids") as PdfArray;
+        if (kids is null)
+        {
+            // First merge: move the parent's own widget into a first kid and strip the
+            // widget keys off the (now non-terminal) parent field.
+            kids = new PdfArray();
+            kids.Add(ExtractWidget(parent));
+            foreach (var k in new List<string>(s_widgetKeys))
+                parent.Remove(k);
+            parent.Set("Kids", kids);
+        }
+        kids.Add(ExtractWidget(second));
+    }
+
     private static PdfObject RemapObject(PdfObject obj, PdfReader reader,
         Dictionary<int, int> objRemap, PdfWriter writer, int depth = 0)
     {
@@ -1567,6 +2241,76 @@ public sealed partial class PdfFileEditor
     /// Collects top-level outline items from each source and writes them as a flat
     /// linked list under a single /Outlines dictionary in the output.
     /// </summary>
+    /// <summary>Merge the /PageLabels number trees of all inputs into the concatenated
+    /// output. No-op unless at least one source carries page labels; when it does, every
+    /// output page gets a label entry — the label it had in its source (page index offset
+    /// by the preceding inputs' page counts), or a sequential decimal default for pages
+    /// from a source without labels — so the concatenation never leaves a page unlabelled.</summary>
+    private static void MergePageLabels(List<PdfReader> readers, List<int> pageCounts,
+        PdfDictionary catalogDict, PdfWriter writer)
+    {
+        var perReaderLabels = new List<PageLabelCollection?>();
+        var any = false;
+        foreach (var r in readers)
+        {
+            var tree = r.ResolveDict(r.Catalog.Get("PageLabels"));
+            if (tree is not null) { any = true; perReaderLabels.Add(new PageLabelCollection(tree, r)); }
+            else perReaderLabels.Add(null);
+        }
+        if (!any) return;
+
+        var nums = new PdfArray();
+        var outIdx = 0;
+        for (var i = 0; i < readers.Count; i++)
+        {
+            var labels = perReaderLabels[i];
+            var count = i < pageCounts.Count ? pageCounts[i] : 0;
+            for (var local = 0; local < count; local++, outIdx++)
+            {
+                var active = labels?.GetLabel(local);
+                NumberingStyle style;
+                string? prefix;
+                int st;
+                if (active is not null)
+                {
+                    style = active.Style;
+                    prefix = active.Prefix;
+                    st = active.Start + (local - active.StartPage);
+                }
+                else
+                {
+                    style = NumberingStyle.Decimal;
+                    prefix = null;
+                    st = outIdx + 1;
+                }
+
+                nums.Add(new PdfInteger(outIdx));
+                var dict = new PdfDictionary();
+                var styleStr = style switch
+                {
+                    NumberingStyle.Decimal => "D",
+                    NumberingStyle.UpperRoman => "R",
+                    NumberingStyle.LowerRoman => "r",
+                    NumberingStyle.UpperAlpha => "A",
+                    NumberingStyle.LowerAlpha => "a",
+                    _ => null,
+                };
+                if (styleStr is not null) dict.Set("S", new PdfName(styleStr));
+                if (!string.IsNullOrEmpty(prefix))
+                    dict.Set("P", new PdfString(System.Text.Encoding.Latin1.GetBytes(prefix!)));
+                if (st != 1) dict.Set("St", new PdfInteger(st));
+                nums.Add(dict);
+            }
+        }
+        if (nums.Count == 0) return;
+
+        var treeDict = new PdfDictionary();
+        treeDict.Set("Nums", nums);
+        var treeObjNum = writer.AllocateObjectNumber();
+        writer.WriteIndirectObject(treeObjNum, treeDict);
+        catalogDict.Set("PageLabels", new PdfIndirectRef(treeObjNum, 0));
+    }
+
     /// <summary>Merge the logical-structure trees (/StructTreeRoot) of all inputs into
     /// a single tree under one Document element, written into the concatenated output's
     /// catalog. Element subtrees are cloned inline (primitive attributes only; page and
@@ -1741,20 +2485,37 @@ public sealed partial class PdfFileEditor
         }
     }
 
+    // Page attributes that are inheritable down the /Pages tree (PDF spec §7.7.3.4).
+    private static readonly string[] InheritablePageKeys = { "Resources", "MediaBox", "CropBox", "Rotate" };
+
     private static void CollectPages(PdfDictionary node, PdfReader reader, List<PdfDictionary> result)
+        => CollectPages(node, reader, result, null);
+
+    private static void CollectPages(PdfDictionary node, PdfReader reader, List<PdfDictionary> result,
+        Dictionary<string, PdfObject>? inherited)
     {
-        var type = node.GetName("Type");
-        if (type == "Page")
+        // Accumulate the inheritable attributes declared at this node so descendant pages
+        // that omit them (a page whose /Resources lives on an ancestor /Pages node) carry
+        // an explicit copy. The output /Pages tree is flat, so without this an inherited
+        // /Resources (or /MediaBox) would be silently lost on concatenation.
+        Dictionary<string, PdfObject>? effective = inherited;
+        foreach (var key in InheritablePageKeys)
         {
-            result.Add(node);
-            return;
+            var v = node.Get(key);
+            if (v is null) continue;
+            effective = effective is null ? new Dictionary<string, PdfObject>() : new Dictionary<string, PdfObject>(effective);
+            effective[key] = v;
         }
 
-        // Some PDFs omit explicit /Type on page nodes; treat as Page if /MediaBox is present
-        // (and no /Kids — otherwise it's a Pages node)
-        if (type is null && node.ContainsKey("MediaBox") && !node.ContainsKey("Kids"))
+        var type = node.GetName("Type");
+        bool isPage = type == "Page"
+            // Some PDFs omit explicit /Type on page nodes; treat as Page if /MediaBox is
+            // present (and no /Kids — otherwise it's a Pages node).
+            || (type is null && node.ContainsKey("MediaBox") && !node.ContainsKey("Kids"));
+
+        if (isPage)
         {
-            result.Add(node);
+            result.Add(MaterializeInherited(node, effective));
             return;
         }
 
@@ -1764,8 +2525,29 @@ public sealed partial class PdfFileEditor
         {
             var kidDict = reader.ResolveDict(kid);
             if (kidDict is not null)
-                CollectPages(kidDict, reader, result);
+                CollectPages(kidDict, reader, result, effective);
         }
+    }
+
+    /// <summary>Return a page dict that carries the inheritable attributes explicitly: if the
+    /// page already declares a key it is kept; otherwise the inherited value is added on a
+    /// shallow copy (the source dict is never mutated).</summary>
+    private static PdfDictionary MaterializeInherited(PdfDictionary page, Dictionary<string, PdfObject>? inherited)
+    {
+        if (inherited is null) return page;
+        var missing = new List<string>();
+        foreach (var key in InheritablePageKeys)
+            if (!page.ContainsKey(key) && inherited.ContainsKey(key)) missing.Add(key);
+        if (missing.Count == 0) return page;
+
+        var copy = new PdfDictionary();
+        foreach (var k in page.Keys)
+        {
+            var v = page.Get(k);
+            if (v is not null) copy.Set(k, v);
+        }
+        foreach (var k in missing) copy.Set(k, inherited[k]);
+        return copy;
     }
 
     /// <summary>

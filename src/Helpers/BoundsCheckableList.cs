@@ -11,7 +11,7 @@ public enum BoundsCheckMode
 
 /// <summary>A list of <typeparamref name="T"/> that optionally enforces container bounds on insertion.
 /// The FOSS implementation records the mode + container dimensions but never raises — bounds are
-/// checked at render time, not at add time. Mirrors the Aspose.PDF for .NET public surface.</summary>
+/// checked at render time, not at add time. Mirrors the Aspose.Pdf public surface.</summary>
 public class BoundsCheckableList<T> : System.Collections.Generic.IEnumerable<T>
 {
     private readonly System.Collections.Generic.List<T> _items = new();

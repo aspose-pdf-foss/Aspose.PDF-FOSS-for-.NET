@@ -104,6 +104,14 @@ internal sealed class PdfDecryptor
             return TryCreateV5(encryptDict, r, keyLength, oBytes, uBytes, password, encryptMetadata, stmF, strF);
         }
 
+        // V1–V4: the spec fixes /O and /U at 32 bytes. A shorter entry is a
+        // MALFORMED encryption dict, not a wrong password — throw so the caller's
+        // malformed-dict path keeps the reader usable for metadata (IsEncrypted,
+        // EncryptionInfo) instead of reporting "password required".
+        if (oBytes.Length < 32 || uBytes.Length < 32)
+            throw new InvalidOperationException(
+                $"Malformed /Encrypt dictionary: /O ({oBytes.Length}) and /U ({uBytes.Length}) must be 32 bytes for R{r}.");
+
         // V1–V4: try user-path and owner-path. Test BOTH so we can detect when
         // the supplied password matches both /U and /O (file encrypted with the
         // same password for user and owner, no effective owner password).
@@ -154,6 +162,47 @@ internal sealed class PdfDecryptor
 
         var objectKey = DeriveObjectKey(objectNumber, generation, filterName == "AESV2" || filterName == "AESV3");
         return DecryptData(data, objectKey, filterName);
+    }
+
+    /// <summary>Encrypt a string value for <paramref name="objectNumber"/> using
+    /// the document's standard security handler — the inverse of
+    /// <see cref="DecryptString"/>. Used when appending new objects (e.g. a
+    /// signature) to an already-encrypted document, whose strings/streams must be
+    /// encrypted with the per-object key.</summary>
+    public byte[] EncryptString(byte[] data, int objectNumber, int generation)
+    {
+        var filterName = _defaultStringFilter;
+        if (filterName == "Identity") return data;
+        var objectKey = DeriveObjectKey(objectNumber, generation, filterName == "AESV2" || filterName == "AESV3");
+        return EncryptData(data, objectKey, filterName);
+    }
+
+    /// <summary>Encrypt stream data for <paramref name="objectNumber"/> — the
+    /// inverse of <see cref="DecryptStream"/>.</summary>
+    public byte[] EncryptStream(byte[] data, int objectNumber, int generation, string? cryptFilterName = null)
+    {
+        var filterName = cryptFilterName ?? _defaultStreamFilter;
+        if (filterName == "Identity") return data;
+        var objectKey = DeriveObjectKey(objectNumber, generation, filterName == "AESV2" || filterName == "AESV3");
+        return EncryptData(data, objectKey, filterName);
+    }
+
+    private static byte[] EncryptData(byte[] data, byte[] key, string filterName)
+    {
+        return filterName switch
+        {
+            "V2" or "RC4" => Rc4Cipher.Decrypt(key, data), // RC4 is symmetric
+            "AESV2" or "AESV3" => EncryptAesCbc(key, data),
+            _ => data,
+        };
+    }
+
+    private static byte[] EncryptAesCbc(byte[] key, byte[] data)
+    {
+        // Object encryption stores IV(16) + AES-CBC(PKCS#7) ciphertext, which is
+        // exactly what AesCipher.EncryptCbc returns.
+        var iv = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        return new AesCipher(key).EncryptCbc(data, iv, pkcs7Padding: true);
     }
 
     private byte[] DeriveObjectKey(int objectNumber, int generation, bool isAes)

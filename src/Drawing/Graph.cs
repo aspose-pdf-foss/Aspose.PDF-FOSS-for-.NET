@@ -364,7 +364,7 @@ public sealed class Circle : Shape
         CenterX = centerX; CenterY = centerY; Radius = radius;
     }
 
-    /// <summary>Single-precision overload matching the Aspose.PDF for .NET public API.</summary>
+    /// <summary>Single-precision overload matching the Aspose.Pdf public API.</summary>
     public Circle(float posX, float posY, float radius)
         : this((double)posX, (double)posY, (double)radius)
     {
@@ -454,7 +454,7 @@ public sealed class Ellipse : Shape
         }
     }
 
-    /// <summary>Bounding-box ctor. Parameters match the Aspose.PDF for .NET public API.</summary>
+    /// <summary>Bounding-box ctor. Parameters match the Aspose.Pdf public API.</summary>
     public Ellipse(double left, double bottom, double width, double height)
     {
         RadiusX = width / 2.0;
@@ -580,7 +580,7 @@ public sealed class Arc : Shape
     {
     }
 
-    /// <summary>Single-precision overload matching the Aspose.PDF for .NET public API.</summary>
+    /// <summary>Single-precision overload matching the Aspose.Pdf public API.</summary>
     public Arc(float posX, float posY, float radius, float alpha, float beta)
         : this((double)posX, (double)posY, (double)radius, (double)alpha, (double)beta)
     {
@@ -809,7 +809,7 @@ public sealed class Rectangle : Shape
         Left = left; Bottom = bottom; Width = width; Height = height;
     }
 
-    /// <summary>Single-precision overload matching the Aspose.PDF for .NET public API.</summary>
+    /// <summary>Single-precision overload matching the Aspose.Pdf public API.</summary>
     public Rectangle(float left, float bottom, float width, float height)
         : this((double)left, (double)bottom, (double)width, (double)height) { }
 
@@ -868,7 +868,7 @@ public sealed class Graph : BaseParagraph
         Height = height;
     }
 
-    /// <summary>Single-precision overload matching the Aspose.PDF for .NET public API.</summary>
+    /// <summary>Single-precision overload matching the Aspose.Pdf public API.</summary>
     public Graph(float width, float height) : this((double)width, (double)height) { }
 
     public void Add(Shape shape) => Shapes.Add(shape);

@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
+using Aspose.Pdf.IO.Filters;
 
 namespace Aspose.Pdf.Optimization;
 
@@ -229,15 +230,36 @@ internal static class ImageCompressor
     {
         var filterName = GetFilterName(stream);
 
-        // Skip images that are already JPEG/JPEG2000/JBIG2 — they are already compressed
-        // and re-encoding JPEG→JPEG would only add generational loss.
-        if (filterName is "DCTDecode" or "JPXDecode" or "JBIG2Decode")
+        // JPEG2000 / JBIG2 have no native re-encoder — leave them untouched.
+        if (filterName is "JPXDecode" or "JBIG2Decode")
             return;
 
         // Get image dimensions
         var width = (int)stream.Dict.GetInt("Width", 0);
         var height = (int)stream.Dict.GetInt("Height", 0);
         if (width <= 0 || height <= 0) return;
+
+        // Already-JPEG (DCTDecode) images: first try a lossless palette re-encode (flat-colour
+        // graphics stored as bloated JPEGs shrink dramatically as /Indexed + Flate while every
+        // decoded sample is preserved, so it is safe at any quality — including 100). Otherwise
+        // re-encode at the requested quality when the caller asked for below-default
+        // compression. The encoder emits 4:2:0 JPEG, so a source that was stored at higher
+        // quality / no subsampling shrinks noticeably; keep the result only when it is actually
+        // smaller so size never regresses. Progressive / CMYK JPEGs the native decoder can't
+        // handle, image masks, and mask images are left as-is.
+        if (filterName == "DCTDecode")
+        {
+            if (stream.Dict.Get("Filter") is PdfArray) return;     // only the sole-filter case: RawData is raw JPEG
+            if (stream.Dict.GetBool("ImageMask") || maskStreams.Contains(stream)) return;
+            // A colour-key /Mask matches EXACT sample values; palettizing rewrites samples
+            // into palette indices, so such images must keep their original encoding.
+            if (reader.Resolve(stream.Dict.Get("Mask")) is not PdfArray &&
+                TryPalettizeJpeg(stream, width, height))
+                return;
+            if (quality >= 75) return;                             // default/high quality: leave JPEGs intact
+            TryReencodeJpeg(stream, width, height, quality);
+            return;
+        }
 
         // Decode the image data
         byte[] decoded;
@@ -268,6 +290,10 @@ internal static class ImageCompressor
             var rgb = TryBuildRgb(decoded, width, height, stream, reader);
             if (rgb is not null)
             {
+                // Lossless palette re-encode first: for flat-colour graphics it beats both
+                // JPEG and plain Flate while preserving every sample exactly.
+                if (TryPalettize(stream, rgb, width, height)) return;
+
                 byte[] jpeg;
                 try
                 {
@@ -313,6 +339,177 @@ internal static class ImageCompressor
 
         // Remove old decode params that don't apply to our FlateDecode
         stream.Dict.Remove("DecodeParms");
+    }
+
+    /// <summary>
+    /// Re-encode an already-JPEG (DCTDecode) image at a lower quality: decode the baseline/
+    /// extended-sequential JPEG to raw pixels natively, re-encode at <paramref name="quality"/>
+    /// (4:2:0), and replace the stream only when the result is smaller. Grayscale (1-component)
+    /// and 3-component images are handled; anything the native decoder cannot decode
+    /// (progressive, CMYK, arithmetic) or that would not shrink is left unchanged.
+    /// </summary>
+    private static void TryReencodeJpeg(PdfStream stream, int width, int height, int quality)
+    {
+        byte[] pixels;
+        int jw, jh, comp;
+        try
+        {
+            (pixels, jw, jh, comp) = JpegDecoder.Decode(stream.RawData);
+        }
+        catch
+        {
+            return; // progressive / CMYK / unsupported — keep the original JPEG
+        }
+        if (pixels.Length == 0 || jw <= 0 || jh <= 0 || (comp != 1 && comp != 3)) return;
+        if (jw != width || jh != height) return; // decoded geometry disagrees — don't risk it
+
+        byte[] jpeg;
+        try
+        {
+            jpeg = JpegEncoderImpl.Encode((int x, int y, out byte r, out byte g, out byte b) =>
+            {
+                if (comp == 3)
+                {
+                    var i = (y * jw + x) * 3;
+                    r = pixels[i]; g = pixels[i + 1]; b = pixels[i + 2];
+                }
+                else
+                {
+                    var v = pixels[y * jw + x];
+                    r = g = b = v;
+                }
+            }, jw, jh, quality);
+        }
+        catch
+        {
+            return;
+        }
+
+        if (jpeg.Length == 0 || jpeg.Length >= stream.RawData.Length) return;
+
+        stream.ReplaceData(jpeg);
+        stream.Dict.Set("Filter", new PdfName("DCTDecode"));
+        stream.Dict.Set("Length", new PdfInteger(jpeg.Length));
+        // The re-encoder emits 3-component YCbCr JPEG, so the stream is DeviceRGB regardless
+        // of the source colour model; drop decode arrays that no longer match.
+        stream.Dict.Set("ColorSpace", new PdfName("DeviceRGB"));
+        stream.Dict.Set("BitsPerComponent", new PdfInteger(8));
+        stream.Dict.Remove("DecodeParms");
+        stream.Dict.Remove("Decode");
+    }
+
+    /// <summary>
+    /// Decode a baseline JPEG XObject and hand it to the lossless palette re-encoder.
+    /// Returns true when the stream was replaced by an /Indexed + Flate encoding.
+    /// </summary>
+    private static bool TryPalettizeJpeg(PdfStream stream, int width, int height)
+    {
+        byte[] pixels;
+        int jw, jh, comp;
+        try
+        {
+            (pixels, jw, jh, comp) = JpegDecoder.Decode(stream.RawData);
+        }
+        catch
+        {
+            return false; // progressive / CMYK / unsupported — keep the original JPEG
+        }
+        if (pixels.Length == 0 || jw != width || jh != height || (comp != 1 && comp != 3))
+            return false;
+
+        byte[] rgb;
+        if (comp == 3)
+        {
+            rgb = pixels;
+        }
+        else
+        {
+            rgb = new byte[width * height * 3];
+            for (var i = 0; i < width * height; i++)
+            {
+                var v = pixels[i];
+                rgb[i * 3] = v; rgb[i * 3 + 1] = v; rgb[i * 3 + 2] = v;
+            }
+        }
+        return TryPalettize(stream, rgb, width, height);
+    }
+
+    /// <summary>
+    /// Losslessly re-encode a packed-RGB image as /Indexed /DeviceRGB + FlateDecode when it
+    /// uses at most 256 distinct colours, at the minimal bit depth (1 for 2 colours, 4 for
+    /// up to 16, 8 otherwise). Every decoded sample maps to the identical colour, so this is
+    /// valid at any requested ImageQuality. Replaces the stream only when the result is
+    /// smaller; returns true when replaced.
+    /// </summary>
+    private static bool TryPalettize(PdfStream stream, byte[] rgb, int width, int height)
+    {
+        var pixels = width * height;
+        if (pixels <= 0 || rgb.Length < pixels * 3) return false;
+
+        var palette = new Dictionary<int, int>();
+        var indices = new byte[pixels];
+        for (var i = 0; i < pixels; i++)
+        {
+            var packed = (rgb[i * 3] << 16) | (rgb[i * 3 + 1] << 8) | rgb[i * 3 + 2];
+            if (!palette.TryGetValue(packed, out var idx))
+            {
+                if (palette.Count == 256) return false; // continuous-tone — not palette material
+                idx = palette.Count;
+                palette[packed] = idx;
+            }
+            indices[i] = (byte)idx;
+        }
+
+        var count = palette.Count;
+        var bpc = count <= 2 ? 1 : count <= 16 ? 4 : 8;
+
+        byte[] samples;
+        if (bpc == 8)
+        {
+            samples = indices;
+        }
+        else
+        {
+            // Pack indices MSB-first with byte-aligned rows, as the imaging model requires.
+            var rowBytes = (width * bpc + 7) / 8;
+            samples = new byte[rowBytes * height];
+            for (var y = 0; y < height; y++)
+            {
+                var rowOff = y * rowBytes;
+                for (var x = 0; x < width; x++)
+                {
+                    var bitPos = x * bpc;
+                    samples[rowOff + (bitPos >> 3)] |=
+                        (byte)(indices[y * width + x] << (8 - bpc - (bitPos & 7)));
+                }
+            }
+        }
+
+        var compressed = Compress(samples);
+        if (compressed.Length >= stream.RawData.Length) return false;
+
+        var lookup = new byte[count * 3];
+        foreach (var (packed, idx) in palette)
+        {
+            lookup[idx * 3] = (byte)(packed >> 16);
+            lookup[idx * 3 + 1] = (byte)(packed >> 8);
+            lookup[idx * 3 + 2] = (byte)packed;
+        }
+
+        var cs = new PdfArray();
+        cs.Add(new PdfName("Indexed"));
+        cs.Add(new PdfName("DeviceRGB"));
+        cs.Add(new PdfInteger(count - 1));
+        cs.Add(new PdfString(lookup, isHex: true));
+
+        stream.ReplaceData(compressed);
+        stream.Dict.Set("Filter", new PdfName("FlateDecode"));
+        stream.Dict.Set("Length", new PdfInteger(compressed.Length));
+        stream.Dict.Set("ColorSpace", cs);
+        stream.Dict.Set("BitsPerComponent", new PdfInteger(bpc));
+        stream.Dict.Remove("DecodeParms");
+        stream.Dict.Remove("Decode");
+        return true;
     }
 
     /// <summary>

@@ -15,6 +15,29 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
     private Page _sourcePage;
     private PdfReader _sourceReader;
 
+    // The imported source-page Form XObject, registered once per target document. When a
+    // single stamp instance is applied to many target pages (Stamp.Pages spanning a whole
+    // document), every page references this one shared indirect object instead of importing
+    // a fresh copy of the source page's resource graph — otherwise the output grows by the
+    // full form size per page (a 100-page stamp ballooned to tens of MB).
+    private readonly Dictionary<Document, PdfIndirectRef> _importedForm = new();
+
+    /// <summary>When set (the PdfFileStamp facade path), the imported form's /Font
+    /// entries are hoisted to the TARGET page's /Resources/Font and removed from the
+    /// form's own resources — the Aspose.Pdf layout, where the stamped page
+    /// exposes the stamp's fonts (F1/F2…) at page level and the form inherits them.</summary>
+    internal bool PromoteFontsToPage { get; set; }
+
+    // Font entries hoisted out of the (shared) imported form, re-applied to every
+    // target page the stamp lands on.
+    private List<(string Name, PdfObject Font)>? _promotedFonts;
+
+    /// <summary>Whether ApplyTo also imports the source page's annotations onto
+    /// the target page (cross-document stamps only). Callers that carry
+    /// annotations themselves — MakeNUp transforms them to the placed tile's
+    /// geometry — turn this off to avoid double-adding.</summary>
+    internal bool CarryAnnotations { get; set; } = true;
+
     /// <summary>Width of the stamp in points. Defaults to source page width.</summary>
     public double Width { get; set; }
 
@@ -43,7 +66,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         Height = pdfPage.Height;
     }
 
-    /// <summary>Alias for <see cref="ApplyTo"/> matching the Aspose.PDF for .NET public surface.</summary>
+    /// <summary>Alias for <see cref="ApplyTo"/> matching the Aspose.Pdf public surface.</summary>
     public void Put(Page page) => ApplyTo(page);
 
     /// <summary>Create a PdfPageStamp from page <paramref name="pageIndex"/>
@@ -72,34 +95,82 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         var sourceContent = GetPageContent(sourcePage.Dict, sourceReader);
         if (sourceContent.Length == 0) return [];
 
-        // Create a Form XObject from the source page content
-        var formDict = new PdfDictionary();
-        formDict.Set("Type", new PdfName("XObject"));
-        formDict.Set("Subtype", new PdfName("Form"));
-
         var mb = sourcePage.MediaBox;
-        var bbox = new PdfArray();
-        bbox.Add(new PdfReal(mb.LLX));
-        bbox.Add(new PdfReal(mb.LLY));
-        bbox.Add(new PdfReal(mb.URX));
-        bbox.Add(new PdfReal(mb.URY));
-        formDict.Set("BBox", bbox);
-
-        // Import the source page's resources into the TARGET document. The source
-        // /Resources dictionary holds indirect references into the source document's
-        // object table (fonts, ICC colour spaces, images, ExtGStates); copying them
-        // verbatim would leave dangling references in the target. ImportDict resolves
-        // the whole object graph against the source reader and re-registers it with
-        // fresh object numbers in the target so the form is self-contained.
         var targetReader = targetPage.Reader;
         var targetDoc = targetReader.OwnerDocument;
-        var srcResources = sourceReader.ResolveDict(sourcePage.Dict.Get("Resources"));
-        if (srcResources is not null && targetDoc is not null)
-            formDict.Set("Resources", targetDoc.ImportDict(srcResources, sourceReader, new Dictionary<int, int>()));
-        else if (srcResources is not null)
-            formDict.Set("Resources", srcResources);
 
-        var formStream = new PdfStream(formDict, sourceContent);
+        // Build (or reuse) the source-page Form XObject. When the same stamp is applied to
+        // several pages of one target document the form is imported once and shared via a
+        // single indirect reference; each page's /XObject entry points at it.
+        PdfObject formObject;
+        if (targetDoc is not null && _importedForm.TryGetValue(targetDoc, out var sharedRef))
+        {
+            formObject = sharedRef;
+        }
+        else
+        {
+            var formDict = new PdfDictionary();
+            formDict.Set("Type", new PdfName("XObject"));
+            formDict.Set("Subtype", new PdfName("Form"));
+
+            var bbox = new PdfArray();
+            bbox.Add(new PdfReal(mb.LLX));
+            bbox.Add(new PdfReal(mb.LLY));
+            bbox.Add(new PdfReal(mb.URX));
+            bbox.Add(new PdfReal(mb.URY));
+            formDict.Set("BBox", bbox);
+
+            // Import the source page's resources into the TARGET document. The source
+            // /Resources dictionary holds indirect references into the source document's
+            // object table (fonts, ICC colour spaces, images, ExtGStates); copying them
+            // verbatim would leave dangling references in the target. ImportDict resolves
+            // the whole object graph against the source reader and re-registers it with
+            // fresh object numbers in the target so the form is self-contained.
+            var srcResources = ResolveEffectiveResources(sourcePage.Dict, sourceReader);
+            if (srcResources is not null && targetDoc is not null)
+                formDict.Set("Resources", targetDoc.ImportDict(srcResources, sourceReader,
+                    targetDoc.GetSharedImportCloneMap(sourceReader)));
+            else if (srcResources is not null)
+                formDict.Set("Resources", srcResources);
+
+            // Hoist the imported form's fonts for page-level promotion (facade path):
+            // capture the /Font entries and strip the key from the form's resources so
+            // the form inherits them from the page (Aspose.Pdf layout).
+            if (PromoteFontsToPage)
+            {
+                var formRes = targetReader.ResolveDict(formDict.Get("Resources"))
+                    ?? formDict.Get("Resources") as PdfDictionary;
+                var formFonts = formRes is null ? null
+                    : targetReader.ResolveDict(formRes.Get("Font")) ?? formRes.Get("Font") as PdfDictionary;
+                if (formRes is not null && formFonts is not null)
+                {
+                    _promotedFonts = new List<(string, PdfObject)>();
+                    foreach (var key in formFonts.Keys.ToList())
+                    {
+                        var v = formFonts.Get(key);
+                        if (v is not null) _promotedFonts.Add((key, v));
+                    }
+                    formRes.Remove("Font");
+                }
+            }
+
+            var formStream = new PdfStream(formDict, sourceContent);
+
+            if (targetDoc is not null)
+            {
+                // Register the form as a single indirect object so repeated applications
+                // (and the writer) reference one shared copy.
+                var objNum = targetDoc.AllocateObjectNumber();
+                targetDoc.AddNewObject(objNum, formStream, registerOverlay: true);
+                var formRef = new PdfIndirectRef(objNum, 0);
+                _importedForm[targetDoc] = formRef;
+                formObject = formRef;
+            }
+            else
+            {
+                formObject = formStream;
+            }
+        }
 
         // Register the Form XObject in target page resources
         var targetResources = targetReader.ResolveDict(targetPage.Dict.Get("Resources"));
@@ -116,13 +187,30 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
             targetResources.Set("XObject", xobjectDict);
         }
 
-        // Find unique name for the form XObject
+        // Re-apply the hoisted stamp fonts to this target page's /Resources/Font
+        // (fresh names are NOT invented: Aspose.Pdf keeps the source names,
+        // e.g. F1/F2; existing page entries win on collision).
+        if (PromoteFontsToPage && _promotedFonts is { Count: > 0 })
+        {
+            var pageFonts = targetReader.ResolveDict(targetResources.Get("Font"))
+                ?? targetResources.Get("Font") as PdfDictionary;
+            if (pageFonts is null)
+            {
+                pageFonts = new PdfDictionary();
+                targetResources.Set("Font", pageFonts);
+            }
+            foreach (var (name, font) in _promotedFonts)
+                if (!pageFonts.ContainsKey(name))
+                    pageFonts.Set(name, font);
+        }
+
+        // Find unique name for the form XObject on this page
         var xobjName = "Fm0";
         var counter = 0;
         while (xobjectDict.ContainsKey(xobjName))
             xobjName = $"Fm{++counter}";
 
-        xobjectDict.Set(xobjName, formStream);
+        xobjectDict.Set(xobjName, formObject);
 
         // Build content stream to draw the form XObject
         var x = XIndent;
@@ -132,7 +220,29 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
 
         var f = (double v) => v.ToString("0.######", CultureInfo.InvariantCulture);
 
-        var content = $"q {f(sx)} 0 0 {f(sy)} {f(x)} {f(y)} cm /{xobjName} Do Q\n";
+        // Placement matrix. Normally axis-aligned (sx 0 0 sy X Y), but when the target
+        // page is displayed rotated 90° the stamp must be rotated with it so it lands
+        // upright in the displayed view — Aspose.Pdf bakes the /Rotate 90 into
+        // the matrix as (0 sx -sy 0  W-YIndent  XIndent), W being the page width.
+        string matrix;
+        var rot = ((targetPage.RotateDegrees % 360) + 360) % 360;
+        if (rot == 90)
+        {
+            var tmb = targetPage.MediaBox;
+            matrix = $"0 {f(sx)} {f(-sy)} 0 {f(tmb.Width - y)} {f(x)}";
+        }
+        else
+        {
+            matrix = $"{f(sx)} 0 0 {f(sy)} {f(x)} {f(y)}";
+        }
+
+        // Draw the stamp form inside an /Artifact marked-content block with a default
+        // graphics state (matches Aspose.Pdf): the overlay is a pagination
+        // artifact, not real page content, and the leading `gs` resets the graphics
+        // state so the stamp is isolated from whatever state the page content left.
+        var gsName = targetPage.AddExtGState(new Content.ExtGState());
+        var content =
+            $"/Artifact BDC\nq\n/{gsName} gs\n{matrix} cm\n/{xobjName} Do\nQ\nEMC\n";
         return System.Text.Encoding.ASCII.GetBytes(content);
     }
 
@@ -160,8 +270,67 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         }
         else
         {
-            page.AddContentStream(stampBytes);
+            // Isolate the existing page content in its own q…Q so the appended stamp
+            // starts from a clean graphics state (matches Aspose.Pdf, which
+            // brackets the original content before overlaying the stamp).
+            page.PrependContentStream("q\n"u8.ToArray());
+            var wrapped = new byte[2 + stampBytes.Length];
+            wrapped[0] = (byte)'Q';
+            wrapped[1] = (byte)'\n';
+            stampBytes.CopyTo(wrapped, 2);
+            page.AddContentStream(wrapped);
         }
+
+        if (CarryAnnotations)
+            ImportSourceAnnotations(page);
+    }
+
+    /// <summary>A page stamp carries the stamped page's annotations onto the
+    /// target page: each source /Annots entry is imported into the target
+    /// document (fresh object numbers; the shared clone map de-duplicates
+    /// objects across repeated imports) and appended to the target /Annots.
+    /// Scoped to cross-document stamping — within one document the source
+    /// annotations already live on their own page and re-homing would alias
+    /// the same dictionaries onto two pages.</summary>
+    private void ImportSourceAnnotations(Page target)
+    {
+        if (_sourcePage is null || _sourceReader is null || target.Reader is null) return;
+        if (ReferenceEquals(_sourceReader, target.Reader)) return;
+        if (_sourceReader.Resolve(_sourcePage.Dict.Get("Annots")) is not PdfArray srcAnnots
+            || srcAnnots.Count == 0) return;
+        var doc = target.Reader.OwnerDocument;
+        if (doc is null) return;
+        var map = doc.GetSharedImportCloneMap(_sourceReader);
+        foreach (var item in srcAnnots)
+        {
+            var srcDict = _sourceReader.ResolveDict(item);
+            if (srcDict is null) continue;
+            var clone = doc.ImportDict(srcDict, _sourceReader, map);
+            clone.Remove("P"); // re-homed: the old page ref must not survive the import
+            target.Annotations.AddImportedDict(clone);
+        }
+    }
+
+    /// <summary>Resolve a source page's effective /Resources, walking the /Parent chain when
+    /// the page itself declares none (an inheritable attribute). Without this, a stamped page
+    /// whose resources live on an ancestor /Pages node would import an empty resource graph,
+    /// so the form's fonts/images would be missing.</summary>
+    private static PdfDictionary? ResolveEffectiveResources(PdfDictionary pageDict, PdfReader reader)
+    {
+        var res = reader.ResolveDict(pageDict.Get("Resources"));
+        if (res is not null) return res;
+        var parentObj = pageDict.Get("Parent");
+        var visited = new HashSet<int>();
+        while (parentObj is not null)
+        {
+            if (parentObj is PdfIndirectRef iref && !visited.Add(iref.ObjectNumber)) break;
+            var parent = reader.ResolveDict(parentObj);
+            if (parent is null) break;
+            var pr = reader.ResolveDict(parent.Get("Resources"));
+            if (pr is not null) return pr;
+            parentObj = parent.Get("Parent");
+        }
+        return null;
     }
 
     private static byte[] GetPageContent(PdfDictionary pageDict, PdfReader reader)

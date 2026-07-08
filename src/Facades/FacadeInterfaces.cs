@@ -31,7 +31,7 @@ namespace Aspose.Pdf.Facades
     }
 
     /// <summary>Custom event handler delegate for <c>PdfViewer.PdfQueryPageSettings</c>.
-    /// Lives in <see cref="Aspose.Pdf.Facades"/> in Aspose.PDF for .NET.</summary>
+    /// Lives in <see cref="Aspose.Pdf.Facades"/> in Aspose.Pdf.</summary>
     public delegate void PdfQueryPageSettingsEventHandler(
         object sender,
         Aspose.Pdf.Printing.PdfQueryPageSettingsEventArgs queryPageSettingsEventArgs,

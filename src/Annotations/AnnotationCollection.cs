@@ -240,6 +240,15 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
     /// <summary>Add any annotation that was created programmatically.</summary>
     public void Add(Annotation annotation)
     {
+        // Persist a FreeText's text alignment to /Q so it survives the annotation
+        // being re-wrapped from its dict when appearances are generated on save.
+        if (annotation is FreeTextAnnotation ft && ft.TextStyle is { } tstyle
+            && tstyle.HorizontalAlignment != Aspose.Pdf.HorizontalAlignment.Left)
+        {
+            ft.Justification = tstyle.HorizontalAlignment == Aspose.Pdf.HorizontalAlignment.Right
+                ? Justification.Right
+                : Justification.Center;
+        }
         AddDict(annotation.Dict);
     }
 
@@ -328,7 +337,7 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
         _annotations.CopyTo(array, index);
     }
 
-    /// <summary>Remove every annotation from the collection (Aspose.PDF for .NET
+    /// <summary>Remove every annotation from the collection (Aspose.Pdf
     /// alias for <see cref="Clear"/>; kept for API parity).</summary>
     public void Delete() => Clear();
 
@@ -412,6 +421,10 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
         else
             _pageDict.Remove("Annots");
     }
+
+    /// <summary>Append an already-imported raw annotation dictionary (internal:
+    /// PdfPageStamp carries the stamped page's annotations onto the target).</summary>
+    internal Annotation AddImportedDict(PdfDictionary dict) => AddDict(dict);
 
     private Annotation AddDict(PdfDictionary dict)
     {

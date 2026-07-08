@@ -15,6 +15,25 @@ public class OutlineItem
     private readonly PdfReader _reader;
     private protected List<OutlineItem>? _children;
 
+    /// <summary>The item that owns this node as a child, so <c>Delete()</c> can
+    /// remove this node from its parent. Set when the parent materializes its
+    /// children (see <see cref="Children"/>); null for a top-level item, whose
+    /// owner is an <see cref="OutlineCollection"/> instead.</summary>
+    private protected OutlineItem? _ownerItem;
+
+    /// <summary>Remove <paramref name="child"/> from this item's children.</summary>
+    internal bool RemoveChild(OutlineItem child)
+    {
+        _ = Children; // ensure lazy init
+        var removed = _children!.RemoveAll(c => ReferenceEquals(c, child)) > 0;
+        if (removed) MarkTreeDirty();
+        return removed;
+    }
+
+    /// <summary>Propagate a structural change up to the owning
+    /// <see cref="OutlineCollection"/> so the tree is re-serialised on save.</summary>
+    internal virtual void MarkTreeDirty() => _ownerItem?.MarkTreeDirty();
+
     internal OutlineItem(PdfDictionary dict, PdfReader reader)
     {
         _dict = dict;
@@ -174,6 +193,23 @@ public class OutlineItem
     /// <summary>Alias for <see cref="IsOpen"/>.</summary>
     public bool Open { get => IsOpen; set => IsOpen = value; }
 
+    /// <summary>Number of descendants that appear when this node is open:
+    /// immediate children plus, for every open child, that child's own
+    /// visible magnitude (PDF /Count magnitude, computed live from the tree).</summary>
+    internal int VisibleMagnitude
+    {
+        get
+        {
+            var count = 0;
+            foreach (var child in Children)
+            {
+                count++;
+                if (child.IsOpen) count += child.VisibleMagnitude;
+            }
+            return count;
+        }
+    }
+
     /// <summary>Whether the outline item title is displayed in bold.</summary>
     public bool IsBold
     {
@@ -330,7 +366,10 @@ public class OutlineItem
     {
         var children = Children;
         if (_children is not null && _children.Count > 0)
+        {
             _children.RemoveAt(0);
+            MarkTreeDirty();
+        }
     }
 
     /// <summary>Appends a child outline item.</summary>
@@ -338,6 +377,8 @@ public class OutlineItem
     {
         _ = Children; // ensure lazy init
         _children!.Add(child);
+        child._ownerItem = this;
+        MarkTreeDirty();
     }
 
     /// <summary>Inserts a child outline item at a 1-based position.</summary>
@@ -347,6 +388,8 @@ public class OutlineItem
         if (index < 1) index = 1;
         if (index > _children!.Count + 1) index = _children.Count + 1;
         _children.Insert(index - 1, child);
+        child._ownerItem = this;
+        MarkTreeDirty();
     }
 
     /// <summary>Child outline items.</summary>
@@ -364,7 +407,7 @@ public class OutlineItem
 
             while (current is not null)
             {
-                _children.Add(new OutlineItemCollection(current, _reader));
+                _children.Add(new OutlineItemCollection(current, _reader) { _ownerItem = this });
 
                 var nextRef = current.Get("Next");
                 if (nextRef is PdfIndirectRef iref && !visited.Add(iref.ObjectNumber))
@@ -407,6 +450,11 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
     private readonly OutlineCollection? _backingCollection;
     private Outlines? _parentOutlines;
 
+    /// <summary>The top-level collection that owns this item, so <c>Delete()</c>
+    /// can remove it. Set when <see cref="OutlineCollection.Items"/> materializes
+    /// the item; null for a nested item, whose owner is <c>_ownerItem</c>.</summary>
+    internal OutlineCollection? _ownerCollection;
+
     internal OutlineItemCollection(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
     /// <summary>
@@ -415,7 +463,10 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
     /// </summary>
     public System.Collections.Generic.IEnumerator<OutlineItemCollection> GetEnumerator()
     {
-        foreach (var child in Children)
+        // Snapshot the child list so callers can Remove/Add items mid-enumeration
+        // (a common outline-pruning pattern) without triggering "Collection was
+        // modified" — a tolerant enumerator.
+        foreach (var child in new System.Collections.Generic.List<OutlineItem>(Children))
         {
             // Children are OutlineItemCollection instances already (created in OutlineItem.Children)
             if (child is OutlineItemCollection oic)
@@ -502,7 +553,7 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
     /// <summary>Whether the bookmark is expanded.</summary>
     public new bool Open { get => base.Open; set => base.Open = value; }
 
-    // ── Aspose.PDF for .NET additions ─────────────────────────────────────
+    // ── Aspose.Pdf additions ─────────────────────────────────────
 
     /// <summary>Whether the collection is read-only. Always false.</summary>
     public bool IsReadOnly => false;
@@ -563,8 +614,19 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
         }
     }
 
-    /// <summary>Number of bookmarks that are visible (counts /Count entries recursively).</summary>
-    public int VisibleCount => Children.Count;
+    /// <summary>Signed visible-descendant count following PDF /Count semantics:
+    /// the number of items that appear when this node is open (immediate children
+    /// plus the visible counts of open descendants), negated while the node is
+    /// closed. 0 for a leaf.</summary>
+    public int VisibleCount
+    {
+        get
+        {
+            var mag = VisibleMagnitude;
+            if (mag == 0) return 0;
+            return IsOpen ? mag : -mag;
+        }
+    }
 
     /// <summary>Add an outline item as a child of this one.</summary>
     public void Add(OutlineItemCollection outline)
@@ -607,8 +669,16 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
         }
     }
 
-    /// <summary>Remove every child outline item (alias for <see cref="Clear"/>).</summary>
-    public new void Delete() => Clear();
+    /// <summary>Remove this outline item from its parent (a top-level
+    /// <see cref="OutlineCollection"/> or an enclosing item), matching the
+    /// reference API where <c>outlines[i].Delete()</c> drops that bookmark.
+    /// A detached item with no known owner falls back to clearing its children.</summary>
+    public new void Delete()
+    {
+        if (_ownerCollection is not null) { _ownerCollection.Remove(this); return; }
+        if (_ownerItem is not null) { _ownerItem.RemoveChild(this); return; }
+        Clear();
+    }
 
     /// <summary>Remove the first child whose title matches <paramref name="name"/>.</summary>
     public void Delete(string name)
@@ -641,7 +711,9 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
         {
             if (ReferenceEquals(_children[i], item)) _children.RemoveAt(i);
         }
-        return _children.Count < initial;
+        var removed = _children.Count < initial;
+        if (removed) MarkTreeDirty();
+        return removed;
     }
 
     /// <summary>Remove the child at the supplied 1-based index.</summary>
@@ -650,6 +722,15 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
         if (_children is null) _ = Children;
         if (index < 1 || index > _children!.Count) return;
         _children.RemoveAt(index - 1);
+        MarkTreeDirty();
+    }
+
+    /// <summary>A top-level item reports the change to its owning collection;
+    /// nested items delegate up the parent chain.</summary>
+    internal override void MarkTreeDirty()
+    {
+        if (_ownerCollection is not null) { _ownerCollection.MarkDirty(); return; }
+        base.MarkTreeDirty();
     }
 }
 
@@ -661,7 +742,7 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
     private bool _dirty;
 
     /// <summary>Enumerator over the top-level outline items, typed as
-    /// <see cref="OutlineItemCollection"/> to match the Aspose.PDF for .NET
+    /// <see cref="OutlineItemCollection"/> to match the Aspose.Pdf
     /// reflection signature. The items stored are concrete
     /// OutlineItemCollection instances anyway.</summary>
     public System.Collections.Generic.IEnumerator<OutlineItemCollection> GetEnumerator()
@@ -694,7 +775,7 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
 
             while (current is not null)
             {
-                _items.Add(new OutlineItemCollection(current, _reader));
+                _items.Add(new OutlineItemCollection(current, _reader) { _ownerCollection = this });
 
                 var nextRef = current.Get("Next");
                 if (nextRef is PdfIndirectRef iref && !visited.Add(iref.ObjectNumber))
@@ -770,7 +851,7 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
     }
 
     /// <summary>Add an item typed as <see cref="OutlineItemCollection"/> (the
-    /// Aspose.PDF for .NET overload signature). Forwards to the OutlineItem-typed
+    /// Aspose.Pdf overload signature). Forwards to the OutlineItem-typed
     /// path.</summary>
     public void Add(OutlineItemCollection outline)
     {
@@ -845,8 +926,9 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
     /// <summary>Sentinel object for ICollection.SyncRoot-style locking.</summary>
     public object SyncRoot { get; } = new();
 
-    /// <summary>Number of outline items currently visible (Open == true).
-    /// Items that aren't open hide their children from the visible count.</summary>
+    /// <summary>Total number of outline items currently visible (PDF /Count of
+    /// the /Outlines root): every top-level item plus, for each open item, its
+    /// visible-descendant magnitude. Computed live from the in-memory tree.</summary>
     public int VisibleCount
     {
         get
@@ -856,25 +938,18 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
             {
                 count++;
                 if (item.Open)
-                    count += CountVisibleChildren(item);
+                    count += item.VisibleMagnitude;
             }
             return count;
         }
     }
 
-    private static int CountVisibleChildren(OutlineItemCollection parent)
-    {
-        int count = 0;
-        foreach (OutlineItemCollection child in parent)
-        {
-            count++;
-            if (child.Open) count += CountVisibleChildren(child);
-        }
-        return count;
-    }
-
     /// <summary>Whether the outline collection was modified after loading.</summary>
     internal bool IsDirty => _dirty;
+
+    /// <summary>Flag a structural change somewhere in the tree (child item
+    /// added/removed) so Finalize re-serialises the outlines on save.</summary>
+    internal void MarkDirty() => _dirty = true;
 
     /// <summary>
     /// Serialize the in-memory outline tree to new PDF objects and update the
@@ -943,8 +1018,10 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
             {
                 dict.Set("First", new PdfIndirectRef(objMap[item.Children[0]], 0));
                 dict.Set("Last", new PdfIndirectRef(objMap[item.Children[^1]], 0));
-                var count = CountDescendants(item);
-                dict.Set("Count", new PdfInteger(count));
+                // PDF /Count semantics: visible-descendant magnitude, negated
+                // while the node is closed (so Open state survives reload).
+                var count = item.VisibleMagnitude;
+                dict.Set("Count", new PdfInteger(item.IsOpen ? count : -count));
             }
 
             // Copy /Dest or /A from the original dict if available
@@ -960,12 +1037,19 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
             doc.AddNewObject(objNum, dict);
         }
 
-        // Build /Outlines root dict
+        // Build /Outlines root dict — /Count is the total number of visible
+        // items: every top-level item plus open items' visible descendants.
+        var rootCount = 0;
+        foreach (var item in _items)
+        {
+            rootCount++;
+            if (item.IsOpen) rootCount += item.VisibleMagnitude;
+        }
         var outlinesDict = new PdfDictionary();
         outlinesDict.Set("Type", new PdfName("Outlines"));
         outlinesDict.Set("First", new PdfIndirectRef(objMap[_items[0]], 0));
         outlinesDict.Set("Last", new PdfIndirectRef(objMap[_items[^1]], 0));
-        outlinesDict.Set("Count", new PdfInteger(_items.Count));
+        outlinesDict.Set("Count", new PdfInteger(rootCount));
 
         doc.AddNewObject(outlinesObjNum, outlinesDict);
         doc.Reader.Catalog.Set("Outlines", new PdfIndirectRef(outlinesObjNum, 0));
@@ -994,14 +1078,6 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
         for (int i = 0; i < list.Count; i++)
             if (ReferenceEquals(list[i], target)) return i;
         return -1;
-    }
-
-    private static int CountDescendants(OutlineItem item)
-    {
-        var count = item.Children.Count;
-        foreach (var child in item.Children)
-            count += CountDescendants(child);
-        return count;
     }
 
     private static void CopyEntryIfPresent(PdfDictionary src, PdfDictionary dst, string key,

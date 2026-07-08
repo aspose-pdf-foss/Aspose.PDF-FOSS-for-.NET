@@ -27,10 +27,20 @@ public sealed class HeadingLevels
     /// <summary>All recorded font-size thresholds.</summary>
     public System.Collections.Generic.IList<double> AllLevels => _levels;
 
-    /// <summary>Append every entry from <paramref name="fontSizes"/> to <see cref="AllLevels"/>.</summary>
+    /// <summary>Append every entry from <paramref name="fontSizes"/> to <see cref="AllLevels"/>.
+    /// Heading font sizes map to levels largest-first, so the supplied sizes must be in
+    /// strictly descending order; otherwise an <see cref="System.ArgumentException"/> is thrown.</summary>
     public void AddLevels(System.Collections.Generic.ICollection<double> fontSizes)
     {
         if (fontSizes is null) return;
+        double? prev = null;
+        foreach (var size in fontSizes)
+        {
+            if (prev is not null && size >= prev.Value)
+                throw new System.ArgumentException(
+                    "Heading font sizes must be in strictly descending order.", nameof(fontSizes));
+            prev = size;
+        }
         foreach (var size in fontSizes) _levels.Add(size);
     }
 }
@@ -66,8 +76,12 @@ public sealed class AutoTaggingSettings
     /// <summary>Heuristic used to identify headings.</summary>
     public HeadingRecognitionStrategy HeadingRecognitionStrategy { get; set; }
 
-    /// <summary>Default instance with EnableAutoTagging=false.</summary>
-    public static AutoTaggingSettings Default => new();
+    /// <summary>Default auto-tagging profile — enables structure-tree generation during
+    /// conversion. (The bare <c>new AutoTaggingSettings()</c> that
+    /// <see cref="PdfFormatConversionOptions.AutoTaggingSettings"/> defaults to leaves
+    /// <see cref="EnableAutoTagging"/> off, so a normal conversion is unaffected unless the
+    /// caller opts in by assigning this profile.)</summary>
+    public static AutoTaggingSettings Default => new() { EnableAutoTagging = true };
 }
 
 /// <summary>

@@ -98,7 +98,7 @@ public sealed class SelectFont : Operator
 {
     public string FontName { get; }
     public double Size { get; }
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="FontName"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="FontName"/>.</summary>
     public string Name => FontName;
 
     public SelectFont(string resName, double size) { FontName = resName; Size = size; }
@@ -211,9 +211,9 @@ public sealed class SetSpacingMoveToNextLineShowText : TextShowOperator
 {
     public double WordSpacing { get; }
     public double CharSpacing { get; }
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="WordSpacing"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="WordSpacing"/>.</summary>
     public double Aw => WordSpacing;
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="CharSpacing"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="CharSpacing"/>.</summary>
     public double Ac => CharSpacing;
     public SetSpacingMoveToNextLineShowText(double aw, double ac, string text)
     { WordSpacing = aw; CharSpacing = ac; base.Text = text ?? string.Empty; }
@@ -229,7 +229,7 @@ public sealed class SetGlyphsPositionShowText : TextShowOperator
     /// <summary>Mixed array of strings (text runs) and doubles (position adjustments in 1/1000 text units).</summary>
     public object[] Items { get; }
 
-    /// <summary>Aspose.PDF for .NET-shape projection over <see cref="Items"/>: paired text-run / numeric-position
+    /// <summary>Aspose.Pdf-shape projection over <see cref="Items"/>: paired text-run / numeric-position
     /// entries surfaced as <see cref="GlyphPosition"/> instances.</summary>
     public System.Collections.Generic.IEnumerable<GlyphPosition> GlyphPositions
     {
@@ -312,7 +312,7 @@ public sealed class ConcatenateMatrix : Operator
 {
     /// <summary>
     /// The transformation matrix. Returns an <see cref="Aspose.Pdf.Matrix"/>
-    /// (public API parity with Aspose.PDF for .NET, whose `cm` operator
+    /// (public API parity with Aspose.Pdf, whose `cm` operator
     /// exposes a Matrix object with `.A`/`.B`/`.C`/`.D`/`.E`/`.F` accessors).
     /// </summary>
     public Aspose.Pdf.Matrix Matrix { get; set; }
@@ -335,9 +335,40 @@ public sealed class ConcatenateMatrix : Operator
     }
 
     public override string ToPdf() =>
-        $"{Fmt(Matrix.A)} {Fmt(Matrix.B)} {Fmt(Matrix.C)} {Fmt(Matrix.D)} {Fmt(Matrix.E)} {Fmt(Matrix.F)} cm";
+        $"{FmtMatrix(Matrix.A)} {FmtMatrix(Matrix.B)} {FmtMatrix(Matrix.C)} {FmtMatrix(Matrix.D)} {FmtMatrix(Matrix.E)} {FmtMatrix(Matrix.F)} cm";
     public override string ToString() => ToPdf();
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
+
+    /// <summary>
+    /// Format a <c>cm</c> operand. Differs from the shared 6-fraction-digit
+    /// <see cref="Operator.Fmt"/> in two ways that match how Aspose.PDF writes a
+    /// transformation matrix:
+    ///  - it preserves the value's full round-trip precision (an 8-significant-digit
+    ///    scale such as <c>8.41314506</c> keeps all its digits instead of being
+    ///    truncated to <c>8.413145</c>), while still emitting the short clean form for
+    ///    the common values that already fit in 6 fraction digits (0.5, 100, …);
+    ///  - a translation whose magnitude exceeds the 16-bit coordinate range
+    ///    (|v| &gt; 32768) is written as an integer. Sub-unit precision is meaningless
+    ///    that far out (0.5 unit in ~40000 is ~1e-5) and the PDF/A normaliser rounds
+    ///    such coordinates, so e.g. <c>-39247.3217</c> serialises as <c>-39247</c>.
+    /// </summary>
+    internal static string FmtMatrix(double v)
+    {
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        if (Math.Abs(v) > 32768.0)
+            return Math.Round(v).ToString("0", ci);
+        // Keep the short 6-fraction-digit form when it already represents v exactly
+        // (no churn for the overwhelming majority of matrices); otherwise fall back to
+        // the shortest round-trippable decimal, never in exponent form (invalid in a
+        // content stream).
+        var s6 = v.ToString("0.######", ci);
+        if (double.TryParse(s6, System.Globalization.NumberStyles.Float, ci, out var back) && back == v)
+            return s6;
+        var r = v.ToString("R", ci);
+        if (r.IndexOf('E') >= 0 || r.IndexOf('e') >= 0)
+            r = v.ToString("0.#################", ci);
+        return r;
+    }
 }
 
 /// <summary>Do — Invoke named XObject.</summary>
@@ -371,7 +402,7 @@ public sealed class ShowText : TextShowOperator
     public ShowText(int index, string text) { _text = text ?? string.Empty; _ = index; }
 
     /// <summary>Optional font hint kept for back-compat — does not surface in
-    /// the Aspose.PDF for .NET reflection surface.</summary>
+    /// the Aspose.Pdf reflection surface.</summary>
     internal ShowText(string text, FontInfo? font) { _text = text ?? string.Empty; _font = font; }
 
     public override string ToPdf()
@@ -681,7 +712,7 @@ public sealed class GS : Operator
 public sealed class SetLineWidth : Operator
 {
     public double LineWidth { get; set; }
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="LineWidth"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="LineWidth"/>.</summary>
     public double Width { get => LineWidth; set => LineWidth = value; }
     public SetLineWidth(double width) { LineWidth = width; }
     public override string ToPdf() => $"{Fmt(LineWidth)} w";
@@ -724,9 +755,9 @@ public sealed class SetDash : Operator
 {
     public int[] DashArray { get; set; }
     public int DashPhase { get; set; }
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="DashArray"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="DashArray"/>.</summary>
     public int[] Pattern { get => DashArray; set => DashArray = value; }
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="DashPhase"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="DashPhase"/>.</summary>
     public int Phase { get => DashPhase; set => DashPhase = value; }
     public SetDash(int[] pattern, int phase)
     { DashArray = pattern ?? Array.Empty<int>(); DashPhase = phase; }
@@ -976,7 +1007,7 @@ public sealed class SetAdvancedColorStroke : BasicSetColorAndPatternOperator
 public sealed class SetColorRenderingIntent : Operator
 {
     public string RenderingIntent { get; set; }
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="RenderingIntent"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="RenderingIntent"/>.</summary>
     public string IntentName { get => RenderingIntent; set => RenderingIntent = value; }
     public SetColorRenderingIntent() { RenderingIntent = "RelativeColorimetric"; }
     public SetColorRenderingIntent(string intentName) { RenderingIntent = intentName; }
@@ -992,7 +1023,7 @@ public sealed class SetColorRenderingIntent : Operator
 public sealed class SetCharacterSpacing : TextStateOperator
 {
     public double CharSpace { get; set; }
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="CharSpace"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="CharSpace"/>.</summary>
     public double CharSpacing { get => CharSpace; set => CharSpace = value; }
     public SetCharacterSpacing(double charSpacing) { CharSpace = charSpacing; }
     public override string ToPdf() => $"{Fmt(CharSpace)} Tc";
@@ -1003,7 +1034,7 @@ public sealed class SetCharacterSpacing : TextStateOperator
 public sealed class SetWordSpacing : TextStateOperator
 {
     public double WordSpace { get; set; }
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="WordSpace"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="WordSpace"/>.</summary>
     public double WordSpacing { get => WordSpace; set => WordSpace = value; }
     public SetWordSpacing(double wordSpacing) { WordSpace = wordSpacing; }
     public override string ToPdf() => $"{Fmt(WordSpace)} Tw";
@@ -1014,7 +1045,7 @@ public sealed class SetWordSpacing : TextStateOperator
 public sealed class SetHorizontalTextScaling : TextStateOperator
 {
     public double Scale { get; set; }
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="Scale"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="Scale"/>.</summary>
     public double HorizontalScaling { get => Scale; set => Scale = value; }
     public SetHorizontalTextScaling(double horizintalScaling) { Scale = horizintalScaling; }
     public override string ToPdf() => $"{Fmt(Scale)} Tz";
@@ -1045,7 +1076,7 @@ public sealed class SetTextRenderingMode : TextStateOperator
 public sealed class SetTextRise : TextStateOperator
 {
     public double Rise { get; set; }
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="Rise"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="Rise"/>.</summary>
     public double TextRise { get => Rise; set => Rise = value; }
     public SetTextRise(double textRise) { Rise = textRise; }
     public override string ToPdf() => $"{Fmt(Rise)} Ts";
@@ -1076,13 +1107,13 @@ public sealed class SetCharWidthBoundingBox : Operator
     public double LLy { get; }
     public double URx { get; }
     public double URy { get; }
-    /// <summary>Aspose.PDF for .NET-shape camel-cased alias for <see cref="LLx"/>.</summary>
+    /// <summary>Aspose.Pdf-shape camel-cased alias for <see cref="LLx"/>.</summary>
     public double Llx => LLx;
-    /// <summary>Aspose.PDF for .NET-shape camel-cased alias for <see cref="LLy"/>.</summary>
+    /// <summary>Aspose.Pdf-shape camel-cased alias for <see cref="LLy"/>.</summary>
     public double Lly => LLy;
-    /// <summary>Aspose.PDF for .NET-shape camel-cased alias for <see cref="URx"/>.</summary>
+    /// <summary>Aspose.Pdf-shape camel-cased alias for <see cref="URx"/>.</summary>
     public double Urx => URx;
-    /// <summary>Aspose.PDF for .NET-shape camel-cased alias for <see cref="URy"/>.</summary>
+    /// <summary>Aspose.Pdf-shape camel-cased alias for <see cref="URy"/>.</summary>
     public double Ury => URy;
     public SetCharWidthBoundingBox(double wx, double wy, double llx, double lly, double urx, double ury)
     { Wx = wx; Wy = wy; LLx = llx; LLy = lly; URx = urx; URy = ury; }
@@ -1131,7 +1162,7 @@ public sealed class DP : Operator
     public Aspose.Pdf.Facades.BDCProperties? Properties { get; }
 
     /// <summary>The marked-content property list as a name-keyed dictionary
-    /// (the modelled /MCID, /Lang and /E entries), mirroring the Aspose.PDF for .NET
+    /// (the modelled /MCID, /Lang and /E entries), mirroring the Aspose.Pdf
     /// DP.PropertiesDictionary accessor. Empty when no /Properties are present.</summary>
     public System.Collections.Generic.Dictionary<string, object> PropertiesDictionary
     {

@@ -111,9 +111,9 @@ public class ImageXObjectTests
         using var ms = new MemoryStream();
         img.Save(ms);
         var result = ms.ToArray();
-        // Save outputs PNG format — check PNG signature
-        Assert.True(result.Length > 8);
-        Assert.Equal(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }, result[..8]);
+        // Save outputs a JFIF-tagged JPEG — check the SOI + APP0 marker
+        Assert.True(result.Length > 3);
+        Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF }, result[..3]);
     }
 
     [Fact]

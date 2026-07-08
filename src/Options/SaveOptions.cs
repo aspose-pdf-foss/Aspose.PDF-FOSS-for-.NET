@@ -124,7 +124,7 @@ namespace Aspose.Pdf
             public ResourceLoadingResult(byte[] data) { Data = data; }
             public byte[] Data { get; }
 
-            /// <summary>Whether the caller asked the loader to drop this resource (Aspose.PDF for .NET-shape field).</summary>
+            /// <summary>Whether the caller asked the loader to drop this resource (Aspose.Pdf-shape field).</summary>
             public bool LoadingCancelled;
 
             /// <summary>Text encoding declared by the resource, if any.</summary>

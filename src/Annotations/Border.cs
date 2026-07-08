@@ -36,14 +36,36 @@ public sealed class Dash
 /// </summary>
 public sealed class Border
 {
-    /// <summary>Border width in points.</summary>
-    public int Width { get; set; } = 1;
+    /// <summary>Border width in points. When this border is bound to an annotation
+    /// (returned by <c>annotation.Border</c>), reads and writes pass through to the
+    /// annotation's /BS and /Border entries so e.g. <c>annot.Border.Width = 0</c> persists.</summary>
+    public int Width
+    {
+        get => Owner is Annotation a ? a.GetBorderWidthValue() : _width;
+        set { _width = value; if (Owner is Annotation a) a.SetBorderWidthValue(value); }
+    }
+    private int _width = 1;
 
-    /// <summary>Dash pattern for dashed borders.</summary>
-    public Dash? Dash { get; set; }
+    /// <summary>Dash pattern for dashed borders. Bound to the annotation's /BS /D
+    /// entry when this border belongs to an annotation, so a dash set after
+    /// <c>annotation.Border = border</c> still persists.</summary>
+    public Dash? Dash
+    {
+        get => Owner is Annotation a
+            ? (a.GetBorderDashValue() is { } p ? new Dash(p) : _dash)
+            : _dash;
+        set { _dash = value; if (Owner is Annotation a) a.SetBorderDashValue(value?.Pattern); }
+    }
+    private Dash? _dash;
 
-    /// <summary>Border style.</summary>
-    public BorderStyle Style { get; set; } = BorderStyle.Solid;
+    /// <summary>Border style. Bound to the annotation's /BS /S entry when this border
+    /// belongs to an annotation (mirrors <see cref="Width"/>).</summary>
+    public BorderStyle Style
+    {
+        get => Owner is Annotation a ? a.GetBorderStyleValue() : _style;
+        set { _style = value; if (Owner is Annotation a) a.SetBorderStyleValue(value); }
+    }
+    private BorderStyle _style = BorderStyle.Solid;
 
     /// <summary>Border effect (cloudy, none).</summary>
     public BorderEffect Effect { get; set; } = BorderEffect.None;

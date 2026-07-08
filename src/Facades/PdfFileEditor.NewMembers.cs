@@ -1,4 +1,5 @@
 using System.Linq;
+using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Facades;
 
@@ -41,9 +42,28 @@ public sealed partial class PdfFileEditor
     /// entries from the inputs. Default false.</summary>
     public bool PreserveUserRights { get; set; }
 
-    /// <summary>Suffix used to disambiguate form-field names when
-    /// <see cref="KeepFieldsUnique"/> is true. Default "_unique".</summary>
-    public string UniqueSuffix { get; set; } = "_unique";
+    private string _uniqueSuffix = "_unique%NUM%";
+    /// <summary>Whether <see cref="UniqueSuffix"/> was explicitly assigned. The XFA
+    /// merge renames duplicate top subforms with this suffix only when the caller
+    /// set it; otherwise it appends a plain occurrence number.</summary>
+    internal bool UniqueSuffixSet => _uniqueSuffixSet;
+    private bool _uniqueSuffixSet;
+
+    /// <summary>Suffix template used to disambiguate colliding form-field names when
+    /// <see cref="KeepFieldsUnique"/> is true. Must contain the <c>%NUM%</c> placeholder
+    /// (replaced by an incrementing number); assigning a value without it (or null) throws
+    /// <see cref="System.ArgumentException"/> and leaves the previous value unchanged.</summary>
+    public string UniqueSuffix
+    {
+        get => _uniqueSuffix;
+        set
+        {
+            if (value is null || !value.Contains("%NUM%"))
+                throw new System.ArgumentException("UniqueSuffix must contain the '%NUM%' placeholder.", nameof(value));
+            _uniqueSuffix = value;
+            _uniqueSuffixSet = true;
+        }
+    }
 
     /// <summary>Diagnostic log emitted by the most recent Concatenate /
     /// ConvertTo pass. Read-only — populated by <see cref="AppendConversionLog"/>
@@ -363,7 +383,13 @@ public sealed partial class PdfFileEditor
 
     /// <summary>Pack N=x*y source pages per output sheet (real grid imposition).
     /// Each source page becomes a Form XObject; output sheets place the
-    /// XObjects at row+column positions, scaled to fit the cell.</summary>
+    /// XObjects at row+column positions, scaled to fit the cell. Each sheet keeps
+    /// the source page size (unless an explicit <paramref name="pageSize"/> is given),
+    /// so the x*y pages are scaled DOWN to 1/x × 1/y and tiled — matching Aspose.PDF
+    /// for .NET, whose N-up sheets are the same size as the input pages. Page-level
+    /// annotations (markup, shapes, etc.) are carried onto the sheet with the same
+    /// scale+translate as their page, since annotations live in page space and are
+    /// not affected by the XObject's content-stream matrix.</summary>
     private static byte[] MakeNUpCore(byte[] input, int x, int y, PageSize? pageSize)
     {
         if (x < 1 || y < 1) throw new System.ArgumentOutOfRangeException(nameof(x), "x and y must be >= 1");
@@ -372,8 +398,12 @@ public sealed partial class PdfFileEditor
         var target = Document.Create();
         var n = src.PageCount;
 
-        var sheetW = pageSize?.Width ?? src.Pages[1].MediaBox.Width * x;
-        var sheetH = pageSize?.Height ?? src.Pages[1].MediaBox.Height * y;
+        var sheetW = pageSize?.Width ?? src.Pages[1].MediaBox.Width;
+        var sheetH = pageSize?.Height ?? src.Pages[1].MediaBox.Height;
+
+        // One clone map shared across the whole build so annotation resources shared
+        // between source pages (fonts, colour spaces, appearance forms) import once.
+        var cloneMap = new System.Collections.Generic.Dictionary<int, int>();
 
         for (var srcPage = 1; srcPage <= n; srcPage += perSheet)
         {
@@ -392,9 +422,78 @@ public sealed partial class PdfFileEditor
                 var dstX = col * cellW + (cellW - pw * scale) / 2;
                 var dstY = (y - 1 - row) * cellH + (cellH - ph * scale) / 2;
                 StampPageAsXObject(target, sheet, src, page, dstX, dstY, scale);
+                CarrySourceAnnotations(target, sheet, page, scale, dstX, dstY, cloneMap);
             }
         }
         return target.ToArray();
+    }
+
+    // Re-create each of the source page's annotations on the imposed sheet, mapping
+    // its coordinates by the SAME uniform scale+translate applied to the page content
+    // (a source point (px,py) lands at (dstX+px*scale, dstY+py*scale)). Annotations
+    // carry absolute page-space geometry, so they must be transformed explicitly — the
+    // Form XObject's `cm` matrix only affects the drawn content, not annotations.
+    private static void CarrySourceAnnotations(Document target, Page sheet, Page srcPage,
+        double scale, double dstX, double dstY, System.Collections.Generic.Dictionary<int, int> cloneMap)
+    {
+        var srcReader = srcPage.Reader;
+        if (srcReader.Resolve(srcPage.Dict.Get("Annots")) is not PdfArray annots) return;
+
+        var sheetAnnots = sheet.Annotations;
+        foreach (var entry in annots)
+        {
+            if (srcReader.ResolveDict(entry) is not PdfDictionary srcAnnot) continue;
+            var subtype = srcAnnot.GetName("Subtype");
+            // Skip annotations whose geometry/targets reference other objects a plain
+            // coordinate transform can't fix: Links/Widgets carry /Dest,/A,/Parent page
+            // and field refs; Popups depend on their parent annotation.
+            if (subtype is "Link" or "Popup" or "Widget") continue;
+
+            // Deep-import a copy that omits the page-targeting keys, so the clone does
+            // not drag the whole source page (via /P) or a popup graph into the target.
+            var shallow = new PdfDictionary();
+            foreach (var key in srcAnnot.Keys)
+            {
+                if (key is "P" or "Popup") continue;
+                if (srcAnnot.Get(key) is { } v) shallow.Set(key, v);
+            }
+            var imported = target.ImportDict(shallow, srcReader, cloneMap);
+            TransformAnnotationGeometry(imported, target.Reader, scale, dstX, dstY);
+            sheetAnnots.Add(Aspose.Pdf.Annotations.Annotation.Create(imported, sheet.Reader));
+        }
+    }
+
+    // Apply x' = x*s + tx, y' = y*s + ty to every coordinate-bearing entry of an
+    // annotation dict. Uniform scaling means the /AP appearance auto-maps to the new
+    // /Rect (PDF 32000-1 §12.5.5), so only the coordinate arrays need rewriting.
+    private static void TransformAnnotationGeometry(PdfDictionary d, IO.PdfReader reader,
+        double s, double tx, double ty)
+    {
+        foreach (var key in new[] { "Rect", "L", "QuadPoints", "Vertices", "CL" })
+        {
+            if (reader.Resolve(d.Get(key)) is PdfArray arr)
+                d.Set(key, TransformFlatCoords(arr, s, tx, ty));
+        }
+        // /InkList is an array of coordinate paths.
+        if (reader.Resolve(d.Get("InkList")) is PdfArray ink)
+        {
+            var newInk = new PdfArray();
+            foreach (var sub in ink)
+                newInk.Add(reader.Resolve(sub) is PdfArray path ? TransformFlatCoords(path, s, tx, ty) : sub);
+            d.Set("InkList", newInk);
+        }
+    }
+
+    // Map a flat [x0 y0 x1 y1 …] coordinate array by (scale, tx, ty).
+    private static PdfArray TransformFlatCoords(PdfArray arr, double s, double tx, double ty)
+    {
+        var result = new PdfArray();
+        for (var i = 0; i < arr.Count; i++)
+        {
+            var v = arr[i] switch { PdfReal r => r.Value, PdfInteger n => n.Value, _ => 0.0 };
+            result.Add(new PdfReal(i % 2 == 0 ? v * s + tx : v * s + ty));
+        }
+        return result;
     }
 
     private static byte[] MakeNUpTwoFiles(byte[] left, byte[] right, bool isSidewise)
@@ -449,6 +548,9 @@ public sealed partial class PdfFileEditor
             YIndent = y,
             Width = srcPage.MediaBox.Width * scale,
             Height = srcPage.MediaBox.Height * scale,
+            // N-up carries annotations itself (transformed to the tile
+            // geometry); the stamp must not import them a second time.
+            CarryAnnotations = false,
         };
         sourceStamp.ApplyTo(sheet);
         _ = target; _ = srcDoc; // contextual refs (target.Pages already holds sheet; srcDoc owns srcPage).

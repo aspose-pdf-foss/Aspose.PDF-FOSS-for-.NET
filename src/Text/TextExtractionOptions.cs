@@ -33,4 +33,11 @@ public sealed class TextExtractionOptions
     /// pick automatically; values such as 0.5 force a tighter split. Stored only;
     /// the absorber currently treats it as a hint.</summary>
     public double ScaleFactor { get; set; }
+
+    /// <summary>When set, tolerate a malformed content stream that shows text with no
+    /// font in effect (no preceding <c>Tf</c>) instead of throwing
+    /// <see cref="Aspose.Pdf.IncorrectFontUsageException"/>. Mirrors the same flag on
+    /// <see cref="TextSearchOptions.IgnoreResourceFontErrors"/>; the
+    /// <see cref="TextDevice"/> path reads it from here.</summary>
+    public bool IgnoreResourceFontErrors { get; set; }
 }

@@ -51,7 +51,7 @@ internal static class CjkFallbackFont
     /// Resolve a system/registered CJK font matching a non-embedded font's /BaseFont
     /// (serif vs sans, weight): e.g. MS-PMincho → MS Mincho, SimHei/黑体 → a heavy
     /// sans, SimSun/宋体 → SimSun. Registered <see cref="FontRepository"/> sources are
-    /// tried first — that's how the test harness (and Aspose.PDF for .NET) supply
+    /// tried first — that's how the test harness (and Aspose.Pdf) supply
     /// fonts like MSMINCHO.TTF that aren't installed on the host — then the installed
     /// system fonts, then the generic broad-coverage fallback (<see cref="TryGet"/>).
     /// </summary>
@@ -240,4 +240,142 @@ internal static class CjkFallbackFont
         parser.CMap.TryGetValue(unicode.Value, out var gid);
         return gid;
     }
+
+    // ── Embeddable-bytes resolution (for GENERATING content that names a CJK font not
+    //    installed, e.g. "Arial Unicode MS"). Returns a standalone single-font sfnt that
+    //    covers the text's script, ready to embed as a CIDFontType2 FontFile2.
+
+    private static readonly System.Collections.Generic.Dictionary<string, byte[]?> _embeddable =
+        new(System.StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Raw, embeddable single-font sfnt bytes of an installed system font that covers the
+    /// CJK <paramref name="text"/> — picked by script (kana→Japanese, hangul→Korean, else
+    /// Han→Chinese). If the system face is a TrueType Collection (.ttc) its first font is
+    /// extracted into a standalone sfnt so it embeds as a valid FontFile2. Returns null
+    /// when no covering system font is found. Cached per file path.
+    /// </summary>
+    public static byte[]? ResolveEmbeddableBytes(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return null;
+        lock (_lock)
+        {
+            foreach (var f in EmbeddableCandidates(text))
+            {
+                if (_embeddable.TryGetValue(f, out var cached))
+                {
+                    if (cached is not null) return cached;
+                    continue;
+                }
+                byte[]? bytes = null;
+                try
+                {
+                    if (System.IO.File.Exists(f))
+                        bytes = NormalizeToSfnt(System.IO.File.ReadAllBytes(f));
+                }
+                catch { bytes = null; }
+                _embeddable[f] = bytes;
+                if (bytes is not null) return bytes;
+            }
+        }
+        return null;
+    }
+
+    private static string[] EmbeddableCandidates(string text)
+    {
+        const string F = @"C:\Windows\Fonts\";
+        bool kana = false, hangul = false, han = false;
+        foreach (var c in text)
+        {
+            if (c >= 0x3040 && c <= 0x30FF) kana = true;
+            else if (c >= 0xAC00 && c <= 0xD7AF) hangul = true;
+            else if ((c >= 0x3400 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF)) han = true;
+        }
+        if (kana) return new[] { F + "msgothic.ttc", F + "YuGothR.ttc", F + "meiryo.ttc" };
+        if (hangul) return new[] { F + "malgun.ttf", F + "gulim.ttc", F + "batang.ttc" };
+        if (han) return new[] { F + "simsun.ttc", F + "msyh.ttc", F + "simhei.ttf" };
+        return System.Array.Empty<string>();
+    }
+
+    /// <summary>Number of fonts in a TrueType Collection ('ttcf'); 1 for a plain sfnt.</summary>
+    internal static int TtcFaceCount(byte[] data)
+    {
+        if (data.Length < 16 || data[0] != (byte)'t' || data[1] != (byte)'t'
+            || data[2] != (byte)'c' || data[3] != (byte)'f')
+            return 1;
+        var n = U32(data, 8);
+        if (n < 1) return 1;
+        // Each face needs its 4-byte offset entry inside the header.
+        var max = (data.Length - 12) / 4;
+        return (int)System.Math.Min(n, (uint)System.Math.Max(1, max));
+    }
+
+    /// <summary>
+    /// If <paramref name="data"/> is a TrueType Collection ('ttcf'), rebuild a standalone
+    /// sfnt from its FIRST embedded font (copying that font's tables with corrected offsets)
+    /// so it embeds as a single-font FontFile2. A plain sfnt is returned unchanged.
+    /// </summary>
+    internal static byte[] NormalizeToSfnt(byte[] data) => NormalizeToSfnt(data, 0);
+
+    /// <summary>
+    /// Extract face <paramref name="faceIndex"/> of a TrueType Collection as a standalone
+    /// sfnt. A plain (non-'ttcf') font is returned unchanged regardless of the index.
+    /// </summary>
+    internal static byte[] NormalizeToSfnt(byte[] data, int faceIndex)
+    {
+        if (data.Length < 16 || data[0] != (byte)'t' || data[1] != (byte)'t'
+            || data[2] != (byte)'c' || data[3] != (byte)'f')
+            return data;
+        if (faceIndex < 0 || 12 + (faceIndex + 1) * 4 > data.Length) return data;
+        int dirOff = (int)U32(data, 12 + faceIndex * 4);
+        if (dirOff < 0 || dirOff + 12 > data.Length) return data;
+        int numTables = U16(data, dirOff + 4);
+        if (numTables <= 0 || dirOff + 12 + numTables * 16 > data.Length) return data;
+
+        var tag = new byte[numTables][];
+        var sum = new uint[numTables];
+        var srcOff = new int[numTables];
+        var len = new int[numTables];
+        for (int i = 0; i < numTables; i++)
+        {
+            int e = dirOff + 12 + i * 16;
+            tag[i] = new byte[4]; System.Array.Copy(data, e, tag[i], 0, 4);
+            sum[i] = U32(data, e + 4);
+            srcOff[i] = (int)U32(data, e + 8);
+            len[i] = (int)U32(data, e + 12);
+        }
+
+        int hdr = 12 + numTables * 16;
+        long total = hdr;
+        for (int i = 0; i < numTables; i++) total += (len[i] + 3) & ~3;
+        if (total > int.MaxValue) return data;
+        var outb = new byte[total];
+        // Offset table: the font's sfnt version (4 bytes at dirOff), then table counts.
+        System.Array.Copy(data, dirOff, outb, 0, 4);
+        int sr = 16, es = 0; while (sr * 2 <= numTables * 16) { sr *= 2; es++; }
+        W16(outb, 4, (ushort)numTables);
+        W16(outb, 6, (ushort)sr);
+        W16(outb, 8, (ushort)es);
+        W16(outb, 10, (ushort)(numTables * 16 - sr));
+        int cursor = hdr;
+        for (int i = 0; i < numTables; i++)
+        {
+            int e = 12 + i * 16;
+            System.Array.Copy(tag[i], 0, outb, e, 4);
+            W32(outb, e + 4, sum[i]);
+            W32(outb, e + 8, (uint)cursor);
+            W32(outb, e + 12, (uint)len[i]);
+            if (srcOff[i] >= 0 && (long)srcOff[i] + len[i] <= data.Length)
+                System.Array.Copy(data, srcOff[i], outb, cursor, len[i]);
+            cursor += (len[i] + 3) & ~3;
+        }
+        return outb;
+    }
+
+    private static uint U32(byte[] d, int o) =>
+        (uint)((d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3]);
+    private static ushort U16(byte[] d, int o) => (ushort)((d[o] << 8) | d[o + 1]);
+    private static void W16(byte[] d, int o, ushort v) { d[o] = (byte)(v >> 8); d[o + 1] = (byte)v; }
+    private static void W32(byte[] d, int o, uint v)
+    { d[o] = (byte)(v >> 24); d[o + 1] = (byte)(v >> 16); d[o + 2] = (byte)(v >> 8); d[o + 3] = (byte)v; }
 }

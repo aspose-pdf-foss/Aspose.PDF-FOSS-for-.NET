@@ -74,7 +74,7 @@ public sealed class OptionalContentGroup
     /// <summary>Whether this layer is locked (cannot be toggled by users).</summary>
     public bool IsLocked { get; set; }
 
-    /// <summary>Alias for <see cref="IsLocked"/> matching the Aspose.PDF for .NET public surface.</summary>
+    /// <summary>Alias for <see cref="IsLocked"/> matching the Aspose.Pdf public surface.</summary>
     public bool Locked
     {
         get => IsLocked;
@@ -534,6 +534,7 @@ public sealed class OptionalContentProperties
         if (defaultConfig is not null)
         {
             RemoveFromArray(defaultConfig, "Order", ocgDict);
+            RemoveFromArray(defaultConfig, "ON", ocgDict);
             RemoveFromArray(defaultConfig, "OFF", ocgDict);
             RemoveFromArray(defaultConfig, "Locked", ocgDict);
         }
@@ -868,8 +869,45 @@ internal static class LayerHelper
         // Remove the OCG property from page resources
         RemovePropertyFromResources(page, layerId);
 
+        // XForm-style layer (/OC on a Form XObject): remove the form's Do
+        // invocations and the XObject entries so neither the content nor the
+        // OCG reference survives the save.
+        DeleteXFormLayer(page, ocgDict);
+
         // Remove OCG from document-level OCProperties
         RemoveOcgFromDocument(page, ocgDict);
+    }
+
+    /// <summary>Delete an XForm-level layer: drop the Do invocations of every Form
+    /// XObject whose /OC matches <paramref name="ocgDict"/> from the page content,
+    /// then remove those XObject resource entries. No-op for BDC-style layers.</summary>
+    private static void DeleteXFormLayer(Page page, PdfDictionary ocgDict)
+    {
+        var reader = page.Reader;
+        var resources = reader.ResolveDict(page.Dict.Get("Resources"));
+        var xobjects = resources is null ? null : reader.ResolveDict(resources.Get("XObject"));
+        if (xobjects is null) return;
+
+        var ocgName = GetOcgName(ocgDict);
+        var toRemove = new List<string>();
+        foreach (var key in xobjects.Keys)
+        {
+            var xobj = reader.ResolveStream(xobjects.Get(key));
+            var ocRef = xobj?.Dict.Get("OC");
+            if (ocRef is null) continue;
+            if (MatchesOcg(reader, ocRef, ocgDict, ocgName))
+                toRemove.Add(key);
+        }
+        if (toRemove.Count == 0) return;
+
+        var text = Encoding.Latin1.GetString(GetPageContentBytes(page));
+        foreach (var name in toRemove)
+            text = System.Text.RegularExpressions.Regex.Replace(
+                text, "/" + System.Text.RegularExpressions.Regex.Escape(name) + @"\s+Do\b", " ");
+        page.SetContentStream(Encoding.Latin1.GetBytes(text));
+
+        foreach (var name in toRemove)
+            xobjects.Remove(name);
     }
 
     /// <summary>

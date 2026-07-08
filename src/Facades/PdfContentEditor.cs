@@ -105,6 +105,18 @@ public sealed class PdfContentEditor : System.IDisposable
     {
         if (_document is null)
             throw new InvalidOperationException("No document bound. Call BindPdf first.");
+        // Editing operations (DeleteStamp/MoveStamp) replace a page's /Contents stream and
+        // drop XObjects from /Resources, orphaning the previous content stream and the
+        // removed image. Those orphans are still reachable in the source xref table, so
+        // without a prune they are re-serialised and the file grows on every edit cycle.
+        // Eliminate unreferenced objects (reachability sweep from the trailer) before
+        // writing so the saved file shrinks after a stamp is removed.
+        _document.OptimizeResources(new Aspose.Pdf.Optimization.OptimizationOptions
+        {
+            RemoveUnusedObjects = true,
+            RemoveUnusedStreams = false,
+            LinkDuplicateStreams = false,
+        });
         var result = _document.ToArray();
         // Re-open so further operations work on the saved state.
         // Skip re-open when caller owns the document — they hold the reference.
@@ -219,7 +231,7 @@ public sealed class PdfContentEditor : System.IDisposable
 
     /// <summary>
     /// Change the viewer preference. Sets the specified flags (replaces all previous settings).
-    /// Parameter is named <c>viewerAttribution</c> for parity with Aspose.PDF for .NET.
+    /// Parameter is named <c>viewerAttribution</c> for parity with Aspose.Pdf.
     /// </summary>
     public void ChangeViewerPreference(int viewerAttribution)
     {
@@ -406,13 +418,25 @@ public sealed class PdfContentEditor : System.IDisposable
     /// id, and — when the stamp draws an XObject — that XObject and its name.
     /// </summary>
     private readonly record struct StampBlock(
-        int Start, int End, int StampId, bool IsImage, string? XName, PdfStream? XObject, Rectangle? Rect);
+        int Start, int End, int StampId, bool IsImage, string? XName, PdfStream? XObject, Rectangle? Rect,
+        bool Hidden);
+
+    /// <summary>
+    /// Marker comment written by <see cref="HideStampById(int,int)"/> immediately before a
+    /// stamp's <c>%StampId</c>/<c>%StampRect</c> comment cluster to record that the stamp is
+    /// hidden. The drawing itself is suppressed by an empty-clip prologue inside the block.
+    /// </summary>
+    private const string StampHiddenMarker = "%StampHidden=1\n";
+
+    /// <summary>Empty-clip prologue injected after a hidden stamp block's opening <c>q</c> so the
+    /// stamp paints nothing while its operators remain present (and recoverable by Show).</summary>
+    private const string StampHiddenClip = "0 0 0 0 re W n\n";
 
     /// <summary>
     /// Locate the managed-stamp blocks on a page. A q/Q block is a stamp when either
     /// (a) it is preceded by a <c>%StampId=NNN</c> comment (the convention written by
     /// this library's stamp facades), or (b) it draws an XObject (<c>/Name Do</c>) whose
-    /// dictionary carries a <c>/StampId</c> entry (the convention used by Aspose.PDF for .NET
+    /// dictionary carries a <c>/StampId</c> entry (the convention used by Aspose.Pdf
     /// and present in externally-produced files).
     /// </summary>
     private static List<StampBlock> FindStampBlocks(string content, Page page, Document doc)
@@ -494,11 +518,31 @@ public sealed class PdfContentEditor : System.IDisposable
                 }
             }
 
-            if (!hasComment && !hasDictMarker) continue;
+            // (c) Unmarked image stamp: a block whose only operators are q/Q/gs/cm and a
+            // single image Do is the canonical image-placement shape Aspose emits for an
+            // image stamp. GetStamps must rediscover these even when the %StampId marker
+            // was never written (or was stripped by an earlier re-serialisation), matching
+            // the GetStamps contract, which reports such blocks with StampId 0.
+            var isCleanImageStamp = isImage && xobject is not null &&
+                                    IsCleanImagePlacementBlock(blockContent);
+
+            if (!hasComment && !hasDictMarker && !isCleanImageStamp) continue;
+
+            // A %StampHidden=1 marker sits immediately before the comment cluster when the
+            // stamp was hidden via HideStampById. Detect it and extend Start to cover it so
+            // a later DeleteStamp/MoveStamp rewrite preserves (or removes) it as one unit.
+            var hidden = false;
+            if (extendedStart >= StampHiddenMarker.Length &&
+                string.CompareOrdinal(content, extendedStart - StampHiddenMarker.Length,
+                    StampHiddenMarker, 0, StampHiddenMarker.Length) == 0)
+            {
+                hidden = true;
+                extendedStart -= StampHiddenMarker.Length;
+            }
 
             // The %StampId comment (when present) names the id; otherwise use the dict id.
             var stampId = commentId != 0 ? commentId : dictId;
-            result.Add(new StampBlock(extendedStart, block.End, stampId, isImage, xname, xobject, commentRect));
+            result.Add(new StampBlock(extendedStart, block.End, stampId, isImage, xname, xobject, commentRect, hidden));
         }
 
         return result;
@@ -514,14 +558,27 @@ public sealed class PdfContentEditor : System.IDisposable
             var sb = stampBlocks[idx];
             var blockContent = content.Substring(sb.Start, sb.End - sb.Start);
 
+            // A form-wrapped stamp draws its caption inside the referenced Form XObject
+            // (BT…Tj…ET), not in the page-level block; report it as StampType.Form and pull
+            // the text from the form. Matches Aspose.Pdf's GetStamps.
+            var isFormStamp = sb.XObject is not null && !sb.IsImage &&
+                              sb.XObject.Dict.GetName("Subtype") == "Form";
+
             var info = new StampInfo
             {
                 IndexOnPage = idx,
                 StampId = sb.StampId,
-                StampType = sb.IsImage ? StampType.Image : DetermineStampType(blockContent),
+                StampType = sb.IsImage ? StampType.Image
+                    : isFormStamp ? StampType.Form
+                    : DetermineStampType(blockContent),
+                Visible = !sb.Hidden,
             };
 
-            if (info.StampType == StampType.Text)
+            if (isFormStamp)
+            {
+                info.Text = ExtractFormStampText(doc, sb.XObject!);
+            }
+            else if (info.StampType == StampType.Text)
             {
                 var textMatch = Regex.Match(blockContent, @"\(([^)]*)\)\s*Tj");
                 if (textMatch.Success)
@@ -543,6 +600,14 @@ public sealed class PdfContentEditor : System.IDisposable
             {
                 var box = page.MediaBox;
                 info.Rect = ComputeStampRect(matrix, page.RotateDegrees, box.Width, box.Height);
+            }
+            else if (isFormStamp && doc.Reader.Resolve(sb.XObject!.Dict.Get("BBox")) is PdfArray bb && bb.Count >= 4)
+            {
+                // A plain form stamp carries no %StampRect and no page-level matrix (the
+                // transform lives inside the form); fall back to the form's /BBox so callers
+                // that read StampInfo.Rectangle don't hit a null.
+                double N(int i) => bb[i] is PdfReal r ? r.Value : bb[i] is PdfInteger n ? n.Value : 0;
+                info.Rect = new Rectangle(N(0), N(1), N(2), N(3));
             }
 
             result.Add(info);
@@ -650,6 +715,98 @@ public sealed class PdfContentEditor : System.IDisposable
         if (blockContent.Contains("%StampId="))
             return true;
         return false;
+    }
+
+    /// <summary>
+    /// True when a q/Q block is the canonical image-stamp shape Aspose emits —
+    /// <c>q /GSx gs cm /Imx Do Q</c>: its only operators are <c>q</c>/<c>Q</c>/<c>gs</c>/<c>cm</c>
+    /// and a single image <c>Do</c>, AND it sets a graphics state (<c>gs</c>). The <c>gs</c> is
+    /// the distinguishing signature of an Aspose image stamp (it carries the stamp's
+    /// opacity/blend ExtGState); ordinary page-content image placements (<c>q cm /Im Do Q</c>,
+    /// no <c>gs</c>) are NOT stamps and must not be reported or deleted. Any other operator
+    /// (text, paths, clipping, marked content) also disqualifies the block. The caller checks
+    /// separately that the drawn XObject is an image.
+    /// </summary>
+    private static bool IsCleanImagePlacementBlock(string blockContent)
+    {
+        int i = 0, n = blockContent.Length;
+        bool sawDo = false, sawGs = false;
+        while (i < n)
+        {
+            char ch = blockContent[i];
+            if (char.IsWhiteSpace(ch)) { i++; continue; }
+            if (ch == '%') { int nl = blockContent.IndexOf('\n', i); i = nl < 0 ? n : nl + 1; continue; }
+            if (ch == '/') { i++; while (i < n && !IsPdfDelimiterOrWhitespace(blockContent[i])) i++; continue; }
+            if (ch == '(') { i = SkipParenString(blockContent, i); continue; }
+            if (ch == '<') { int gt = blockContent.IndexOf('>', i); i = gt < 0 ? n : gt + 1; continue; }
+            if (ch == '[' || ch == ']') { i++; continue; }
+            if (ch is '+' or '-' or '.' || char.IsDigit(ch))
+            {
+                i++;
+                while (i < n && (char.IsDigit(blockContent[i]) || blockContent[i] is '.' or '-' or '+' or 'e' or 'E')) i++;
+                continue;
+            }
+            int s = i;
+            while (i < n && !IsPdfDelimiterOrWhitespace(blockContent[i])) i++;
+            switch (blockContent.Substring(s, i - s))
+            {
+                case "q": case "Q": case "cm": break;
+                case "gs": sawGs = true; break;
+                case "Do": sawDo = true; break;
+                default: return false;
+            }
+        }
+        return sawDo && sawGs;
+    }
+
+    private static bool IsPdfDelimiterOrWhitespace(char c)
+        => char.IsWhiteSpace(c) || c is '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '/' or '%';
+
+    /// <summary>Pull the caption out of a text-stamp Form XObject's content: the concatenated
+    /// operands of its text-showing operators. Handles literal <c>(..)Tj</c>, hex
+    /// <c>&lt;..&gt;Tj</c> and <c>[..]TJ</c> arrays (hex decoded as WinAnsi) so a rotated stamp
+    /// drawn with hex glyphs still reports its text.</summary>
+    private static string ExtractFormStampText(Document doc, PdfStream form)
+    {
+        string content;
+        try { content = Encoding.Latin1.GetString(doc.Reader.DecodeStream(form)); }
+        catch { return ""; }
+        var sb = new StringBuilder();
+        foreach (Match m in Regex.Matches(content,
+            @"(\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>)\s*Tj|\[((?:[^\]])*)\]\s*TJ"))
+        {
+            if (m.Groups[1].Success) sb.Append(DecodePdfStringToken(m.Groups[1].Value));
+            else foreach (Match t in Regex.Matches(m.Groups[2].Value, @"\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>"))
+                sb.Append(DecodePdfStringToken(t.Value));
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Decode a single PDF string token — literal <c>(..)</c> (with escapes) or hex
+    /// <c>&lt;..&gt;</c> — into text using WinAnsi for the byte values.</summary>
+    private static string DecodePdfStringToken(string token)
+    {
+        if (token.Length >= 2 && token[0] == '<')
+        {
+            var hex = new StringBuilder();
+            foreach (var c in token) if (Uri.IsHexDigit(c)) hex.Append(c);
+            if (hex.Length % 2 == 1) hex.Append('0');
+            var bytes = new byte[hex.Length / 2];
+            for (var i = 0; i < bytes.Length; i++)
+                bytes[i] = Convert.ToByte(hex.ToString(i * 2, 2), 16);
+            return Aspose.Pdf.Text.Cp1252.GetString(bytes);
+        }
+        var inner = token.Substring(1, token.Length - 2);
+        return Regex.Replace(inner, @"\\([nrtbf()\\]|[0-7]{1,3})", mm =>
+        {
+            var e = mm.Groups[1].Value;
+            return e switch
+            {
+                "n" => "\n", "r" => "\r", "t" => "\t", "b" => "\b", "f" => "\f",
+                "(" => "(", ")" => ")", "\\" => "\\",
+                _ => ((char)Convert.ToInt32(e, 8)).ToString(),
+            };
+        });
     }
 
     private static StampType DetermineStampType(string blockContent)
@@ -819,6 +976,9 @@ public sealed class PdfContentEditor : System.IDisposable
         {
             ReplaceFirstOnly = ReplaceTextStrategy.ReplaceScope == ReplaceTextStrategy.Scope.ReplaceFirst
                 && TextReplaceOptions.ReplaceScope == TextReplaceOptions.Scope.REPLACE_FIRST,
+            // Facade ReplaceText owns the whole replacement: font-switch a run whose glyphs
+            // are absent from the source embedded subset to a fallback (Times), so they render.
+            AllowSubsetGlyphFallback = true,
         };
         replacer.Replace(doc, srcString, destString, ReplaceTextStrategy.IsRegularExpressionUsed);
         return replacer.ReplacementCount > 0;
@@ -835,6 +995,9 @@ public sealed class PdfContentEditor : System.IDisposable
         {
             ReplaceFirstOnly = ReplaceTextStrategy.ReplaceScope == ReplaceTextStrategy.Scope.ReplaceFirst
                 && TextReplaceOptions.ReplaceScope == TextReplaceOptions.Scope.REPLACE_FIRST,
+            // Facade ReplaceText owns the whole replacement: font-switch a run whose glyphs
+            // are absent from the source embedded subset to a fallback (Times), so they render.
+            AllowSubsetGlyphFallback = true,
         };
         replacer.Replace(doc.Pages.At(thePage), srcString, destString, IsRegexSearch);
         return replacer.ReplacementCount > 0;
@@ -873,8 +1036,10 @@ public sealed class PdfContentEditor : System.IDisposable
             // line while excluding others on the same baseline, so a Y-only scope
             // (as used by the generic TextFragment.Text setter) would bleed into the
             // neighbouring out-of-rectangle word.
-            var replacer = new TextReplacer();
-            if (frag.Position is { } pos)
+            // Cross-operator ON so a word drawn glyph-by-glyph (one Tj per glyph) is matched;
+            // TargetY/TargetX (set below) keep the cross-op replacement scoped to this fragment.
+            var replacer = new TextReplacer { AllowSubsetGlyphFallback = true, AllowCrossOperator = true };
+            if (frag.PositionOrNull is { } pos)
             {
                 replacer.TargetY = pos.YIndent;
                 replacer.TargetX = pos.XIndent;
@@ -1581,7 +1746,11 @@ public sealed class PdfContentEditor : System.IDisposable
                 minX = System.Math.Min(minX, verts[i]); maxX = System.Math.Max(maxX, verts[i]);
                 minY = System.Math.Min(minY, verts[i + 1]); maxY = System.Math.Max(maxY, verts[i + 1]);
             }
-            double pad = System.Math.Max(width, 1.0) + 1.0;
+            // Aspose.Pdf pads the polygon/polyline /Rect beyond the vertex
+            // bounding box by (LineWidth + 3) on every side (verified against the
+            // CreatePolygon padding: width 1/3/5 → pad 4/6/8), leaving room for the
+            // stroke and end caps so the appearance is never clipped.
+            double pad = width + 3.0;
             minX -= pad; minY -= pad; maxX += pad; maxY += pad;
             dict.Set("Rect", RectToPdfArray(new Rectangle(minX, minY, maxX, maxY)));
 
@@ -1952,16 +2121,104 @@ public sealed class PdfContentEditor : System.IDisposable
 
     // ── Stamp move/hide (extend the existing GetStamps/DeleteStamp impl) ──
 
+    /// <summary>
+    /// Hide the stamp(s) with the given <paramref name="stampId"/> on a page without removing
+    /// them: the stamp's drawing operators are kept but suppressed by an empty-clip prologue, and
+    /// a <c>%StampHidden=1</c> marker records the state so <see cref="GetStamps"/> reports
+    /// <see cref="StampInfo.Visible"/> = <c>false</c> and <see cref="ShowStampById"/> can restore it.
+    /// </summary>
     public void HideStampById(int pageNumber, int stampId)
+        => SetStampVisibility(pageNumber, stampId, visible: false);
+
+    /// <summary>Show a previously-hidden stamp: remove the hidden marker and the empty-clip
+    /// prologue so the stamp paints again. A no-op for stamps that are already visible.</summary>
+    public void ShowStampById(int pageNumber, int stampId)
+        => SetStampVisibility(pageNumber, stampId, visible: true);
+
+    /// <summary>Toggle the persisted visibility of every stamp with <paramref name="stampId"/> on
+    /// the given page by rewriting the page content stream.</summary>
+    private void SetStampVisibility(int pageNumber, int stampId, bool visible)
     {
-        // Hide is implemented as delete in this simple implementation; the stamp doesn't
-        // return when the page is re-rendered. A separate visibility toggle is not yet provided.
-        DeleteStampById(pageNumber, stampId);
+        var doc = EnsureBound();
+        if (pageNumber < 1 || pageNumber > doc.PageCount)
+            throw new ArgumentOutOfRangeException(nameof(pageNumber));
+
+        var page = doc.Pages.At(pageNumber);
+        var contentBytes = GetPageContentBytes(page, doc);
+        if (contentBytes.Length == 0) return;
+
+        var content = Encoding.ASCII.GetString(contentBytes);
+        var blocks = FindStampBlocks(content, page, doc);
+
+        // Rewrite matching blocks back-to-front so each edit leaves earlier blocks' offsets valid.
+        var targets = blocks
+            .Where(b => b.StampId == stampId)
+            .OrderByDescending(b => b.Start)
+            .ToList();
+        if (targets.Count == 0) return;
+
+        var changed = false;
+        foreach (var b in targets)
+        {
+            var block = content.Substring(b.Start, b.End - b.Start);
+            var updated = visible ? UnhideStampBlock(block) : HideStampBlock(block);
+            if (updated == block) continue;
+            content = content[..b.Start] + updated + content[b.End..];
+            changed = true;
+        }
+
+        if (changed)
+            page.SetContentStream(Encoding.ASCII.GetBytes(content));
     }
 
-    /// <summary>Show a previously-hidden stamp. No-op — Hide is implemented as Delete,
-    /// so the stamp is unrecoverable through this surface. Kept for API parity.</summary>
-    public void ShowStampById(int pageNumber, int stampId) { }
+    /// <summary>Add the hidden marker and an empty-clip prologue to a stamp block. Idempotent.</summary>
+    private static string HideStampBlock(string block)
+    {
+        if (block.Contains(StampHiddenMarker.TrimEnd('\n'))) return block;
+        var qIdx = FindOpeningQ(block);
+        if (qIdx < 0) return block;
+
+        // Insert the empty clip immediately after the opening 'q' and its trailing delimiter
+        // so all painting in the q/Q block is clipped away.
+        var afterQ = qIdx + 1;
+        string withClip;
+        if (afterQ < block.Length && (block[afterQ] == '\n' || block[afterQ] == ' ' || block[afterQ] == '\t'))
+            withClip = block[..(afterQ + 1)] + StampHiddenClip + block[(afterQ + 1)..];
+        else
+            withClip = block[..afterQ] + "\n" + StampHiddenClip + block[afterQ..];
+
+        return StampHiddenMarker + withClip;
+    }
+
+    /// <summary>Remove the hidden marker and the empty-clip prologue from a stamp block. Idempotent.</summary>
+    private static string UnhideStampBlock(string block)
+    {
+        if (!block.Contains(StampHiddenMarker.TrimEnd('\n'))) return block;
+        var b = block.Replace(StampHiddenMarker, string.Empty);
+        var ci = b.IndexOf(StampHiddenClip, StringComparison.Ordinal);
+        if (ci >= 0)
+            b = b[..ci] + b[(ci + StampHiddenClip.Length)..];
+        return b;
+    }
+
+    /// <summary>Index of the graphics-block opening <c>q</c> (the first <c>q</c> token that starts a
+    /// line, after any leading <c>%</c> comment lines), or -1 if none.</summary>
+    private static int FindOpeningQ(string block)
+    {
+        var i = 0;
+        while (i < block.Length)
+        {
+            var nl = block.IndexOf('\n', i);
+            var lineEnd = nl < 0 ? block.Length : nl;
+            var j = i;
+            while (j < lineEnd && (block[j] == ' ' || block[j] == '\t')) j++;
+            if (j < lineEnd && block[j] == 'q' &&
+                (j + 1 == lineEnd || block[j + 1] == ' ' || block[j + 1] == '\t' || block[j + 1] == '\n'))
+                return j;
+            i = nl < 0 ? block.Length : nl + 1;
+        }
+        return -1;
+    }
 
     /// <summary>Delete all stamps with the given <paramref name="stampId"/> across every page.</summary>
     public void DeleteStampById(int stampId)
@@ -2018,17 +2275,15 @@ public sealed class PdfContentEditor : System.IDisposable
         var h = Math.Abs(m[3]);
         var box = page.MediaBox;
         var (ne, nf) = DisplayedLowerLeftToContent(x, y, w, h, page.RotateDegrees, box.Width, box.Height);
-        // Neutralise the stamp's own translation and prepend the new one, so the painted
-        // position becomes absolute while the operator layout (a leading positioning cm)
-        // is preserved.
-        var zeroed = RewriteMatrixTranslation(block, 0, 0);
-        if (zeroed is null) return;
-        var qPos = zeroed.IndexOf('q');
-        if (qPos < 0) return;
-        var ci = System.Globalization.CultureInfo.InvariantCulture;
-        var prepend = $"\n1 0 0 1 {ne.ToString(ci)} {nf.ToString(ci)} cm";
-        var newBlock = zeroed.Substring(0, qPos + 1) + prepend + zeroed.Substring(qPos + 1);
-        var newText = text.Substring(0, sb.Start) + newBlock + text.Substring(sb.End);
+        // Bake the new origin into the placement cm's translation in place (keeping
+        // its scale/rotation), so the stamp draws as `… <sx 0 0 sy ne nf cm> /XObj Do …`
+        // — a single cm carrying the position, matching Aspose.Pdf. Emitting a
+        // separate translation cm would push the placement matrix one operator further
+        // from the end, past the /Artifact EMC that now closes an image stamp, so callers
+        // reading the third-from-last operator would see the (zeroed) scale cm instead.
+        var moved = RewriteMatrixTranslation(block, ne, nf);
+        if (moved is null) return;
+        var newText = text.Substring(0, sb.Start) + moved + text.Substring(sb.End);
         page.SetContentStream(Encoding.ASCII.GetBytes(newText));
     }
 
@@ -2045,6 +2300,25 @@ public sealed class PdfContentEditor : System.IDisposable
             270 => (y, pageH - h - x),
             _ => (x, y),
         };
+
+    /// <summary>Zero the translation of the stamp's positioning cm (the last cm
+    /// before its <c>Do</c>) and insert an absolute <c>1 0 0 1 e f cm</c> immediately
+    /// before it, so the stamp's net placement becomes (e,f) while the operator layout
+    /// ends <c>… 1 0 0 1 e f cm  &lt;scale cm&gt;  /XObj Do Q</c>.</summary>
+    private static string? PrependTranslationCm(string block, double e, double f)
+    {
+        var doMatch = Regex.Match(block, @"/[\w.\-]+\s+Do\b");
+        var prefixEnd = doMatch.Success ? doMatch.Index : block.Length;
+        var cms = Regex.Matches(block.Substring(0, prefixEnd),
+            @"(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+cm\b");
+        if (cms.Count == 0) return null;
+        var last = cms[cms.Count - 1];
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        var repl = $"1 0 0 1 {e.ToString(ci)} {f.ToString(ci)} cm " +
+                   $"{last.Groups[1].Value} {last.Groups[2].Value} {last.Groups[3].Value} " +
+                   $"{last.Groups[4].Value} 0 0 cm";
+        return block.Substring(0, last.Index) + repl + block.Substring(last.Index + last.Length);
+    }
 
     /// <summary>Rewrite the translation (e,f) of the stamp's positioning cm, leaving its scale/rotation intact.</summary>
     private static string? RewriteMatrixTranslation(string block, double e, double f)

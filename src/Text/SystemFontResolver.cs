@@ -1,4 +1,6 @@
 using System.Text;
+using Aspose.Pdf.Core;
+using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Text;
 
@@ -41,6 +43,74 @@ internal static class SystemFontResolver
             _cache[baseFontName] = data;
         }
         return data;
+    }
+
+    /// <summary>
+    /// Choose a Standard-14 substitute face for a simple font that has no embedded program
+    /// and whose /BaseFont name matched no installed family (obfuscated names, a
+    /// Multiple-Master Type1, etc.). The family comes from the FontDescriptor: serif → Times,
+    /// monospace → Courier, otherwise Helvetica; bold/italic from the flags, the name and the
+    /// italic angle. The FixedPitch flag is frequently set incorrectly, so it is only honoured
+    /// when the /Widths array confirms near-uniform advances. Returns null if nothing resolves.
+    /// </summary>
+    internal static byte[]? ResolveDescriptorSubstitute(
+        PdfDictionary fontDict, PdfDictionary descriptor, PdfReader reader, out double horizontalScale)
+    {
+        horizontalScale = 1.0;
+        long flags = descriptor.GetInt("Flags");
+        var name = fontDict.GetName("BaseFont") ?? descriptor.GetName("FontName") ?? string.Empty;
+
+        // Only substitute non-symbolic (Latin-text) fonts: a symbolic font's codes map to
+        // custom pictographs, so a Helvetica/Times substitute would draw wrong glyphs. Such
+        // fonts keep their previous behaviour (render nothing) rather than render garbage.
+        bool symbolic = (flags & 0x4) != 0 && (flags & 0x20) == 0;
+        if (symbolic) return null;
+
+        bool serif = (flags & 0x2) != 0;
+        bool italic = (flags & 0x40) != 0
+            || System.Math.Abs(AsDouble(reader.Resolve(descriptor.Get("ItalicAngle")))) > 0.01
+            || name.Contains("Italic", System.StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Oblique", System.StringComparison.OrdinalIgnoreCase);
+        // Standard StemV: regular ≈ 80–110, bold ≈ 140+. Use a midpoint threshold plus the
+        // name to pick the weight (the descriptor's ForceBold flag is unreliable in the wild).
+        bool bold = name.Contains("Bold", System.StringComparison.OrdinalIgnoreCase)
+            || descriptor.GetInt("StemV") >= 120;
+        bool mono = (flags & 0x1) != 0 && WidthsAreUniform(fontDict, reader);
+
+        string family = mono ? "Courier" : serif ? "Times" : "Helvetica";
+        string style = (bold, italic) switch
+        {
+            (true, true) => "-BoldItalic",
+            (true, false) => "-Bold",
+            (false, true) => "-Italic",
+            _ => string.Empty,
+        };
+        return Resolve(family + style, out horizontalScale);
+    }
+
+    private static double AsDouble(PdfObject? obj) => obj switch
+    {
+        PdfInteger i => i.Value,
+        PdfReal r => r.Value,
+        _ => 0.0,
+    };
+
+    /// <summary>True when a simple font's /Widths advances are (mostly) uniform — the
+    /// hallmark of a monospace font. Zero/absent widths are ignored.</summary>
+    private static bool WidthsAreUniform(PdfDictionary fontDict, PdfReader reader)
+    {
+        if (reader.Resolve(fontDict.Get("Widths")) is not PdfArray widths) return false;
+        double? first = null;
+        int sampled = 0;
+        foreach (var item in widths)
+        {
+            var w = AsDouble(item);
+            if (w <= 0) continue;
+            first ??= w;
+            if (System.Math.Abs(w - first.Value) > 1.0) return false; // a clearly different advance
+            if (++sampled >= 8) break;
+        }
+        return sampled >= 2;
     }
 
     /// <summary>
@@ -274,6 +344,14 @@ internal static class SystemFontResolver
         // font without embedding it.
         var winShort = (family, bold, italic) switch
         {
+            // CJK system faces (collection files with non-family file names).
+            ("MS Gothic", _, _) or ("MS-Gothic", _, _) or ("MSGothic", _, _) => "msgothic.ttc",
+            ("MS Mincho", _, _) or ("MS-Mincho", _, _) or ("MSMincho", _, _) => "msmincho.ttc",
+            ("Yu Gothic", _, _) or ("YuGothic", _, _) => "YuGothR.ttc",
+            ("Meiryo", _, _) => "meiryo.ttc",
+            ("SimSun", _, _) => "simsun.ttc",
+            ("Microsoft YaHei", _, _) => "msyh.ttc",
+            ("Malgun Gothic", _, _) => "malgun.ttf",
             ("Arial Narrow", false, false) => "ARIALN.TTF",
             ("Arial Narrow", true, false) => "ARIALNB.TTF",
             ("Arial Narrow", false, true) => "ARIALNI.TTF",

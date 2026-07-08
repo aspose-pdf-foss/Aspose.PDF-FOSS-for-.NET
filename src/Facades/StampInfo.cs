@@ -4,7 +4,7 @@ namespace Aspose.Pdf.Facades;
 /// Contains information about a stamp on a page.
 /// Stamps are content-stream blocks wrapped in q/Q save/restore pairs
 /// that were added by stamp operations (AddStamp, PdfFileStamp, etc.).
-/// Lives in <c>Aspose.Pdf.Facades</c> to match the Aspose.PDF for .NET surface.
+/// Lives in <c>Aspose.Pdf.Facades</c> to match the Aspose.Pdf surface.
 /// </summary>
 public sealed class StampInfo
 {
@@ -25,8 +25,9 @@ public sealed class StampInfo
     /// <summary>Whether the stamp is visible.</summary>
     public bool Visible { get; internal set; } = true;
 
-    /// <summary>Text content, if this is a text stamp.</summary>
-    public string? Text { get; internal set; }
+    /// <summary>Text content; empty for a non-text (e.g. image) stamp. The
+    /// API reports "" rather than null for such stamps.</summary>
+    public string Text { get; internal set; } = "";
 
     /// <summary>Image bytes, if this is an image stamp.</summary>
     public byte[]? ImageBytes { get; internal set; }
@@ -50,16 +51,16 @@ public sealed class StampInfo
     /// <summary>The rectangle area of this stamp (if determinable).</summary>
     public Rectangle? Rect { get; internal set; }
 
-    /// <summary>Alias for <see cref="Rect"/> matching the Aspose.PDF for .NET property name.</summary>
+    /// <summary>Alias for <see cref="Rect"/> matching the Aspose.Pdf property name.</summary>
     public Rectangle? Rectangle => Rect;
 }
 
-/// <summary>Stamp kind exposed by <see cref="StampInfo"/>. Lives in Facades to match the Aspose.PDF for .NET reflection shape.</summary>
+/// <summary>Stamp kind exposed by <see cref="StampInfo"/>. Lives in Facades to match the Aspose.Pdf reflection shape.</summary>
 public enum StampType
 {
     Form = 0,
     Image = 1,
     /// <summary>FOSS-only convenience value used by the stamp parser when it
-    /// recognises a text-only block. Aspose.PDF for .NET omits this value.</summary>
+    /// recognises a text-only block. Aspose.Pdf omits this value.</summary>
     Text = 2,
 }

@@ -19,8 +19,22 @@ public sealed class TextReplacer
     private Regex? _regexPattern;
     private bool _allowCrossOperator;
 
+    /// <summary>When true, <see cref="Replace(Page,string,string,bool)"/> also matches search
+    /// text that spans multiple text operators (a word drawn glyph-by-glyph). Off by default;
+    /// the rectangle/fragment replace path turns it on and relies on <see cref="TargetY"/>/
+    /// <see cref="TargetX"/> to keep the cross-operator replacement inside the target region.</summary>
+    internal bool AllowCrossOperator { get => _allowCrossOperator; set => _allowCrossOperator = value; }
+
     /// <summary>Number of replacements made in the last Replace call.</summary>
     public int ReplacementCount => _replacementCount;
+
+    /// <summary>When true, a cross-operator replacement re-flows the rest of the LINE:
+    /// the kept tail after the match is re-anchored at match-start + replacement width,
+    /// and following same-line absolute-Tm runs shift left/right by the width delta —
+    /// giving a same-line reflow when replacing with shorter/longer
+    /// text. Off by default: page/document-wide Replace keeps every surviving glyph at its
+    /// original position. Set by the <see cref="TextFragment.Text"/> setter.</summary>
+    internal bool ReflowLineOnReplace { get; set; }
 
     /// <summary>
     /// When true, stop after the first match. Set by callers to honour
@@ -37,6 +51,38 @@ public sealed class TextReplacer
     /// <c>RedactionAnnotation.Redact()</c>.
     /// </summary>
     internal bool PreserveAdvanceOnDelete { get; set; }
+
+    /// <summary>
+    /// When true, a full deletion (replacement is empty) keeps an empty
+    /// <c>() Tj</c> show operator instead of dropping it, so the emptied
+    /// fragment is still re-extractable as a zero-length fragment. Set by the
+    /// <see cref="Replace(XForm, string, string)"/> path (clearing a Form
+    /// XObject's text) so an emptied form field remains a zero-length fragment
+    /// in place rather than disappearing. Off by default so page-level
+    /// deletions keep dropping the operator (no spurious empty fragments).
+    /// </summary>
+    internal bool KeepEmptyShowOperator { get; set; }
+
+    /// <summary>
+    /// When set, a replacement whose glyphs are absent from the source embedded subset
+    /// font is font-switched to a fallback (source family if installed, else Times) so the
+    /// missing glyphs render via whole-run substitution. Enabled only
+    /// on the facade <c>PdfContentEditor.ReplaceText</c> path (which owns the whole
+    /// replacement); the <c>TextFragment.Text</c> setter leaves it off, since that caller
+    /// manages the font itself (e.g. sets <c>TextState.Font</c> after the text) and an
+    /// auto-switch would change the run width and shift following text.
+    /// </summary>
+    internal bool AllowSubsetGlyphFallback { get; set; }
+
+    // When a subset-glyph fallback substitutes the whole run in a different face
+    // (source family / Times), record that family so the caller can report it on
+    // the fragment's TextState.Font (matching the default no-character behaviour
+    // that surfaces the substituted font). Thread-static because the embed helpers
+    // that resolve the family are static; reset per replacement via ResetSwitchedFont.
+    [ThreadStatic] private static string? s_switchedFontFamily;
+    internal string? SwitchedFontFamily => s_switchedFontFamily;
+    internal static void ResetSwitchedFont() => s_switchedFontFamily = null;
+    internal static void RecordSwitchedFont(string family) => s_switchedFontFamily = family;
 
     // Emit `[ kern ] TJ` — an advance with no glyphs — that moves the text
     // position right by the width of <paramref name="removedBytes"/>, so text
@@ -136,6 +182,26 @@ public sealed class TextReplacer
     internal bool MatchWholeOperator { get; set; }
 
     /// <summary>
+    /// When true, EVERY text-showing operator whose start position passes the
+    /// <see cref="TargetY"/>/<see cref="TargetX"/> scoping is treated as a whole-operator
+    /// match and replaced with the replacement text (typically empty = the operator is
+    /// deleted), regardless of what it shows. Used to clear a page region at operator
+    /// granularity — producers that draw one word (or one space) per operator defeat
+    /// text-keyed deletion because no single operator's decode equals the coalesced
+    /// segment text. Only deletion (empty replacement) is supported.
+    /// </summary>
+    internal bool MatchAnyOperator { get; set; }
+
+    /// <summary>
+    /// When true (TextFragment.Text setter under ReplaceAdjustment.None), a TJ
+    /// rewrite with trailing text re-anchors the tail at its ORIGINAL absolute Tm so
+    /// surrounding text keeps its exact position regardless of the replacement's
+    /// width. Default false = the tail flows with the width delta (the reference's
+    /// default replace behaviour, also what redaction and the facades expect).
+    /// </summary>
+    internal bool AnchorTrailingOnReplace { get; set; }
+
+    /// <summary>
     /// Replace all occurrences of <paramref name="search"/> with <paramref name="replacement"/>
     /// in the given page's content stream(s).
     /// </summary>
@@ -164,7 +230,7 @@ public sealed class TextReplacer
     public void Replace(Page page, string search, string replacement, bool isRegex)
     {
         _replacementCount = 0;
-        if (string.IsNullOrEmpty(search)) return;
+        if (string.IsNullOrEmpty(search) && !MatchAnyOperator) return;
         _isRegex = isRegex;
         _regexPattern = isRegex ? new Regex(search) : null;
         var reader = page.Reader;
@@ -180,11 +246,12 @@ public sealed class TextReplacer
         if (contentStreams.Count > 0)
         {
             var combined = CombineStreams(contentStreams);
+            var (rA, rB, rC, rD, rTx, rTy) = PageRotationSeed(page);
             var replaced = ReplaceInContentStream(combined, search, replacement,
-                page.Dict, reader, processedXObjects);
+                page.Dict, reader, processedXObjects, rA, rB, rC, rD, rTx, rTy);
             if (_replacementCount > 0)
             {
-                page.SetContentStream(replaced);
+                page.SetContentStream(WrapInGraphicsState(replaced));
             }
         }
 
@@ -195,6 +262,26 @@ public sealed class TextReplacer
 
         _isRegex = false;
         _regexPattern = null;
+    }
+
+    /// <summary>Bracket replace-rewritten page content in a single q…Q pair to
+    /// isolate the rewritten stream. Content that already BEGINS with a q is returned
+    /// unchanged (content opening with q keeps its operator indices after an edit,
+    /// while content opening with a BDC gains exactly one wrapper), which keeps
+    /// repeated absorber passes from nesting graphics-state operators.</summary>
+    internal static byte[] WrapInGraphicsState(byte[] content)
+    {
+        var ops = ContentStreamOperatorParser.ParseOperators(content);
+        if (ops.Count >= 1 && ops[0] == "q")
+            return content;
+
+        var prefix = System.Text.Encoding.ASCII.GetBytes("q\n");
+        var suffix = System.Text.Encoding.ASCII.GetBytes("\nQ\n");
+        var wrapped = new byte[prefix.Length + content.Length + suffix.Length];
+        prefix.CopyTo(wrapped, 0);
+        content.CopyTo(wrapped, prefix.Length);
+        suffix.CopyTo(wrapped, prefix.Length + content.Length);
+        return wrapped;
     }
 
     /// <summary>
@@ -233,12 +320,13 @@ public sealed class TextReplacer
                 {
                     var combined = CombineStreams(contentStreams);
                     var count = _replacementCount;
+                    var (rA, rB, rC, rD, rTx, rTy) = PageRotationSeed(page);
                     var replaced = ReplaceInContentStream(combined, search, replacement,
-                        page.Dict, reader, processedXObjects);
+                        page.Dict, reader, processedXObjects, rA, rB, rC, rD, rTx, rTy);
 
                     if (_replacementCount > count)
                     {
-                        page.SetContentStream(replaced);
+                        page.SetContentStream(WrapInGraphicsState(replaced));
                     }
                 }
 
@@ -269,6 +357,11 @@ public sealed class TextReplacer
         // Cross-operator on: form text frequently spans separate Tj/TJ operators.
         var prevAllowCross = _allowCrossOperator;
         _allowCrossOperator = true;
+        // Clearing a form's text should leave an empty, re-extractable fragment
+        // (an emptied Typewriter-form field stays in place), so retain the
+        // empty show operator on full deletion only for this form path.
+        var prevKeepEmpty = KeepEmptyShowOperator;
+        KeepEmptyShowOperator = true;
         try
         {
             // Nested Form XObjects first (identity CTM catch-all).
@@ -282,6 +375,7 @@ public sealed class TextReplacer
         finally
         {
             _allowCrossOperator = prevAllowCross;
+            KeepEmptyShowOperator = prevKeepEmpty;
         }
     }
 
@@ -326,6 +420,307 @@ public sealed class TextReplacer
                 xobjStream.ReplaceData(replaced);
             }
         }
+    }
+
+    /// <summary>Initial CTM for a page's operator walk: the page-rotation matrix
+    /// (identity for Rotate 0). The absorber reports every fragment coordinate in
+    /// VIEWER space (rotation applied), and <see cref="TargetY"/>/<see cref="TargetX"/>
+    /// are set from those fragments — so the walk's position gating must live in the
+    /// same space. Matrices mirror TextFragmentAbsorber.PageRotationCtm.</summary>
+    private static (double a, double b, double c, double d, double tx, double ty) PageRotationSeed(Page page)
+    {
+        var rotate = ((page.RotateDegrees % 360) + 360) % 360;
+        if (rotate == 0) return (1, 0, 0, 1, 0, 0);
+        var mb = page.MediaBox;
+        var w = mb.URX - mb.LLX;
+        var h = mb.URY - mb.LLY;
+        return rotate switch
+        {
+            90 => (0, -1, 1, 0, 0, w),
+            180 => (-1, 0, 0, -1, w, h),
+            270 => (0, 1, -1, 0, h, 0),
+            _ => (1, 0, 0, 1, 0, 0),
+        };
+    }
+
+    /// <summary>Reference-parity WholeWordsHyphenation reflow: keeps every original
+    /// text-showing run VERBATIM (same bytes, kerns, font, per-run Tc) and only
+    /// repositions runs by inserting an absolute Tm before (and a restoring Tm after)
+    /// each moved run. Only the matched run itself is rewritten, re-encoded in its
+    /// ORIGINAL font. Every run after the match shifts by the replacement's width
+    /// delta; runs that would cross <paramref name="rightMargin"/> split at a space
+    /// glyph and wrap onto the next original baseline; later lines pull up greedily
+    /// with their original inter-run gaps preserved. Returns false when this page's
+    /// structure can't be handled (CID font, missing glyphs, match not at a run
+    /// start) so the caller can fall back to coarser strategies.</summary>
+    internal bool ReflowFromMatch(Page page, string search, string replacement,
+        double matchX, IReadOnlyList<(double y, double lx, double rx)> lines,
+        double leftX, double rightMargin, double pitch)
+    {
+        if (lines.Count == 0 || string.IsNullOrEmpty(search)) return false;
+        var reader = page.Reader;
+        var contentStreams = GetContentStreams(page, reader);
+        if (contentStreams.Count == 0) return false;
+        var streamBytes = CombineStreams(contentStreams);
+        var fonts = TextAbsorber.ResolveFonts(page.Dict, reader);
+        var (rA, rB, rC, rD, rTx, rTy) = PageRotationSeed(page);
+        var textOps = CollectTextOps(streamBytes, fonts, reader, rA, rB, rC, rD, rTx, rTy);
+        if (textOps.Count == 0) return false;
+
+        var metricsCache = new Dictionary<PdfDictionary, FontMetrics?>();
+        FontMetrics? MetricsOf(CrossTextOp o)
+        {
+            if (o.FontDict is null) return null;
+            if (metricsCache.TryGetValue(o.FontDict, out var m)) return m;
+            FontMetrics? built = null;
+            try { built = FontMetrics.FromFontDict(o.FontDict, reader); } catch { }
+            metricsCache[o.FontDict] = built;
+            return built;
+        }
+        double PageX(CrossTextOp o) => o.CtmA * o.TmTx + o.CtmC * o.TmTy + o.CtmTx;
+        double PageY(CrossTextOp o) => o.CtmB * o.TmTx + o.CtmD * o.TmTy + o.CtmTy;
+        double ScaleOf(CrossTextOp o)
+        {
+            var det = Math.Abs(o.CtmA * o.CtmD - o.CtmB * o.CtmC);
+            return det > 1e-12 ? Math.Sqrt(det) : 1.0;
+        }
+        // The text-matrix scale multiplies every advance: producers often set
+        // `/F 1 Tf` and carry the size in Tm (e.g. `33 0 0 33 … Tm`).
+        double TmScaleOf(CrossTextOp o) => Math.Sqrt(o.TmA * o.TmA + o.TmB * o.TmB);
+        // Page-space advance of a byte run under an op's font state (glyph widths +
+        // per-glyph Tc; the op's own TJ kerns only when measuring its full bytes).
+        double AdvPage(CrossTextOp o, byte[] bytes, bool own)
+        {
+            var m = MetricsOf(o);
+            double w;
+            if (m is not null)
+            {
+                try { w = m.MeasureString(bytes, o.FontSize); }
+                catch { w = o.FontSize * 0.5 * bytes.Length; }
+            }
+            else
+                w = o.FontSize * 0.5 * bytes.Length;
+            w += o.Tc * bytes.Length;
+            if (own) w -= o.KernSum / 1000.0 * o.FontSize;
+            return w * TmScaleOf(o) * ScaleOf(o);
+        }
+
+        // Assign ops to the paragraph lines. The op baseline (Tm origin) sits a couple
+        // of points ABOVE the absorber's fragment Y (descent offset), so match by
+        // nearest line within half the pitch.
+        double yTol = Math.Max(4.0, Math.Min(6.0, pitch * 0.45));
+        int LineOf(CrossTextOp o)
+        {
+            double py = PageY(o); int best = -1; double bestD = yTol;
+            for (int li = 0; li < lines.Count; li++)
+            {
+                double d = Math.Abs(py - lines[li].y);
+                if (d < bestD) { bestD = d; best = li; }
+            }
+            return best;
+        }
+
+        var affected = new List<(CrossTextOp op, int li, double px)>();
+        foreach (var o in textOps)
+        {
+            int li = LineOf(o);
+            if (li < 0) continue;
+            double px = PageX(o);
+            if (px < lines[li].lx - 0.5 || px > lines[li].rx + 1.0) continue;
+            if (li == 0 && px < matchX - 0.5) continue;
+            if (string.IsNullOrEmpty(o.Text)) continue;
+            if (MetricsOf(o)?.IsCid == true) return false; // 2-byte codes: split unsafe
+            affected.Add((o, li, px));
+        }
+        if (affected.Count == 0) return false;
+        affected.Sort((a, b) => a.li != b.li ? a.li.CompareTo(b.li) : a.px.CompareTo(b.px));
+
+        // The first affected run must carry the match (prefix inside the run is kept).
+        var head = affected[0].op;
+        if (affected[0].li != 0 || !head.Text.Contains(search, StringComparison.Ordinal))
+            return false;
+        var newHeadText = head.Text.Replace(search, replacement, StringComparison.Ordinal);
+                // Encode the rewritten run in its ORIGINAL font. A subset's ToUnicode often
+        // omits the space glyph's code (only 'real' glyphs get mapped), so recover the
+        // space code from the paragraph's own bytes: any byte in an affected run of the
+        // same font that DECODES space-like is the font's space. Bail (so the caller
+        // falls back) when any character has no code at all.
+        byte[]? TryEncodeInFont(string text)
+        {
+            if (head.ToUnicode is null)
+            {
+                foreach (var ch in text) if (ch > 0xFF) return null;
+                return EncodeString(text, null, head.FontDict);
+            }
+            var rev = BuildReverseMap(head.ToUnicode);
+            int spaceCode = -1;
+            foreach (var (o, _, _) in affected)
+            {
+                if (!ReferenceEquals(o.FontDict, head.FontDict)) continue;
+                foreach (var b in o.Bytes)
+                {
+                    var ch = DecodeString(new[] { b }, o.ToUnicode, o.FontDict, reader);
+                    if (ch is " " or "\u00A0") { spaceCode = b; break; }
+                }
+                if (spaceCode >= 0) break;
+            }
+            var outBytes = new List<byte>(text.Length);
+            foreach (var ch in text)
+            {
+                if (rev.TryGetValue(ch.ToString(), out var code) && code >= 0 && code <= 0xFF)
+                    outBytes.Add((byte)code);
+                else if ((ch == ' ' || ch == '\u00A0') && spaceCode >= 0)
+                    outBytes.Add((byte)spaceCode);
+                else
+                    return null;
+            }
+            return outBytes.ToArray();
+        }
+        var newHeadBytes = TryEncodeInFont(newHeadText);
+        if (newHeadBytes is null) return false;
+
+        // Baseline page-Y per line, from each line's first affected op; missing lines
+        // (fully emptied by the shift) interpolate from the previous baseline.
+        var lineBaseY = new double?[lines.Count];
+        foreach (var (o, li, _) in affected) lineBaseY[li] ??= PageY(o);
+        for (int li = 1; li < lines.Count; li++) lineBaseY[li] ??= lineBaseY[li - 1] - pitch;
+        double BaseY(int li) => li < lines.Count
+            ? lineBaseY[li]!.Value
+            : lineBaseY[^1]!.Value - pitch * (li - lines.Count + 1);
+
+        // Greedy repack with MULTI-SPLIT: any run that crosses the right margin \u2014
+        // including the rewritten match run, whose replacement can be several lines
+        // long \u2014 splits at the last fitting space glyph as many times as needed; each
+        // remainder continues from the paragraph's left margin on the next baseline.
+        // A split piece re-emits as a plain Tj (the original TJ kerns are dropped for
+        // the pieces; sub-point intra-run shifts, invisible to the layout checks).
+        int LastFittingSpace(CrossTextOp o, byte[] bytes, double budget)
+        {
+            var m = MetricsOf(o);
+            if (m is null || bytes.Length < 2) return -1;
+            double run = 0; int lastFit = -1;
+            for (int k = 0; k < bytes.Length; k++)
+            {
+                double gw;
+                try { gw = m.MeasureString(new[] { bytes[k] }, o.FontSize); }
+                catch { gw = o.FontSize * 0.5; }
+                run += (gw + o.Tc) * TmScaleOf(o) * ScaleOf(o);
+                if (run > budget) break;
+                var ch = DecodeString(new[] { bytes[k] }, o.ToUnicode, o.FontDict, reader);
+                if (ch is " " or " ") lastFit = k;
+            }
+            return lastFit < 0 ? -1 : lastFit + 1; // piece keeps the space glyph
+        }
+
+        var pieces = new List<(CrossTextOp op, double x, int line, byte[] bytes)>();
+        double cursor = 0; int curLi = 0;
+        double prevOrigEnd = 0; int prevOrigLine = -1;
+        for (int j = 0; j < affected.Count; j++)
+        {
+            var (o, li, px) = affected[j];
+            bool isHead = j == 0;
+            var rest = isHead ? newHeadBytes : o.Bytes;
+            double wOrig = AdvPage(o, o.Bytes, own: true);
+            double gap = !isHead && li == prevOrigLine ? px - prevOrigEnd : 0.0;
+            if (gap < -1.0 || gap > 3.0 * o.FontSize * TmScaleOf(o) * ScaleOf(o)) gap = 0.0;
+            double startX = isHead ? px : cursor + gap;
+            bool wholeOriginal = !isHead; // still the op's full bytes (kerns apply)
+            int guard = 0;
+            while (true)
+            {
+                if (++guard > 64) return false; // runaway split: fall back
+                double w = AdvPage(o, rest, own: wholeOriginal);
+                if (startX + w <= rightMargin + 0.25 || startX <= leftX + 0.25)
+                {
+                    pieces.Add((o, startX, curLi, rest));
+                    cursor = startX + w;
+                    break;
+                }
+                int k = LastFittingSpace(o, rest, rightMargin + 0.25 - startX);
+                if (k <= 0 || k >= rest.Length)
+                {
+                    // No split point on this line: wrap the whole remainder.
+                    curLi++; startX = leftX;
+                    continue;
+                }
+                pieces.Add((o, startX, curLi, rest[..k]));
+                rest = rest[k..];
+                wholeOriginal = false;
+                curLi++; startX = leftX;
+            }
+            prevOrigEnd = px + wOrig; prevOrigLine = li;
+        }
+
+        // Rewrite the stream. Pieces group back to their source op; ops are edited in
+        // byte order regardless of reading order.
+        string N(double v) => Math.Round(v, 5).ToString("0.#####", CultureInfo.InvariantCulture);
+        (double tx, double ty) SolveTm(CrossTextOp o, double px, double py)
+        {
+            var det = o.CtmA * o.CtmD - o.CtmB * o.CtmC;
+            if (Math.Abs(det) < 1e-12) return (o.TmTx, o.TmTy);
+            var dx = px - o.CtmTx; var dy = py - o.CtmTy;
+            return ((o.CtmD * dx - o.CtmC * dy) / det, (-o.CtmB * dx + o.CtmA * dy) / det);
+        }
+        string TmOf(CrossTextOp o, double tx, double ty) =>
+            $" {N(o.TmA)} {N(o.TmB)} {N(o.TmC)} {N(o.TmD)} {N(tx)} {N(ty)} Tm ";
+
+        var byOp = new Dictionary<CrossTextOp, List<(double x, int line, byte[] bytes)>>();
+        var opOrder = new List<CrossTextOp>();
+        foreach (var pc in pieces)
+        {
+            if (!byOp.TryGetValue(pc.op, out var l))
+            {
+                byOp[pc.op] = l = new List<(double, int, byte[])>();
+                opOrder.Add(pc.op);
+            }
+            l.Add((pc.x, pc.line, pc.bytes));
+        }
+        opOrder.Sort((a, b) => a.OpStart.CompareTo(b.OpStart));
+
+        var result = new MemoryStream();
+        int lastWritePos = 0;
+        foreach (var o in opOrder)
+        {
+            var pl = byOp[o];
+            var (tx0, ty0) = SolveTm(o, pl[0].x, BaseY(pl[0].line));
+            bool moved = Math.Abs(tx0 - o.TmTx) > 1e-4 || Math.Abs(ty0 - o.TmTy) > 1e-4;
+            bool isHead = ReferenceEquals(o, head);
+            bool split = pl.Count > 1;
+            if (!moved && !isHead && !split)
+                continue; // untouched: copied verbatim with the surrounding bytes
+
+            result.Write(streamBytes, lastWritePos, o.OpStart - lastWritePos);
+            bool wroteTm = false;
+            for (int i = 0; i < pl.Count; i++)
+            {
+                var (px2, li2, bytes2) = pl[i];
+                if (i > 0 || moved || split)
+                {
+                    var (tx, ty) = SolveTm(o, px2, BaseY(li2));
+                    result.Write(Encoding.ASCII.GetBytes(TmOf(o, tx, ty)));
+                    wroteTm = true;
+                }
+                if (isHead || split)
+                {
+                    WriteStringOperand(result, bytes2, o.IsHex);
+                    result.Write(" Tj"u8);
+                }
+                else
+                {
+                    // Moved but intact: keep the original operator bytes (kerns and all).
+                    result.Write(streamBytes, o.OpStart, o.OpEnd - o.OpStart);
+                }
+            }
+            if (wroteTm)
+                result.Write(Encoding.ASCII.GetBytes(TmOf(o, o.TmTx, o.TmTy)));
+            lastWritePos = o.OpEnd;
+        }
+        if (lastWritePos < streamBytes.Length)
+            result.Write(streamBytes, lastWritePos, streamBytes.Length - lastWritePos);
+
+        _replacementCount = 1;
+        page.SetContentStream(result.ToArray());
+        return true;
     }
 
     private byte[] ReplaceInContentStream(byte[] streamBytes, string search, string replacement,
@@ -418,37 +813,36 @@ public sealed class TextReplacer
 
                         case "Tj":
                             if (operands.Count >= 1 && operands[0].obj is PdfString str
-                                && IsAtTargetY(tmTy, ctmD, ctmTy)
+                                && IsAtTargetY(tmTx, tmTy, ctmB, ctmD, ctmTy)
                                 && IsAtTargetX(tmTx, tmTy, ctmA, ctmC, ctmTx))
                             {
                                 var decoded = DecodeString(str.Value, currentToUnicode, currentFontDict, reader);
                                 var normalizedDecoded = NormalizeForSearch(decoded);
-                                if (MatchesSearch(normalizedDecoded, normalizedSearch))
+                                var effSearch = ResolveRtlSearch(normalizedDecoded, normalizedSearch);
+                                if (MatchesSearch(normalizedDecoded, effSearch))
                                 {
-                                    var newText = ApplyReplace(normalizedDecoded, normalizedSearch, replacement);
+                                    var newText = ApplyReplace(normalizedDecoded, effSearch, replacement);
                                     // Write everything before this operand
                                     result.Write(streamBytes, lastWritePos, operands[0].startPos - lastWritePos);
 
                                     if (newText.Length == 0)
                                     {
-                                        // Full deletion: drop the show operator entirely so no
+                                        // Full deletion: normally drop the show operator entirely so no
                                         // empty text-showing operator remains (which would still
                                         // be re-extracted as a zero-length fragment). In redaction
                                         // mode, leave a glyph-less advance so following text on the
-                                        // line does not reflow.
+                                        // line does not reflow. When KeepEmptyShowOperator is set
+                                        // (form-XObject deletion), retain an empty `() Tj` so the
+                                        // emptied fragment is still re-extractable as "" — an
+                                        // emptied form field stays a zero-length fragment in place.
+                                        if (KeepEmptyShowOperator)
+                                            result.Write("() Tj"u8);
                                         WriteDeletionAdvance(result, str.Value, currentFontDict, reader, currentFontSize);
                                     }
-                                    else if (NeedsFontSwitch(newText, currentToUnicode, currentFontDict, reader))
+                                    else if (NeedsFontSwitch(newText, currentToUnicode, currentFontDict, reader, AllowSubsetGlyphFallback))
                                     {
-                                        // Switch to a standard font for the replacement text, then restore
-                                        var fallbackFont = EnsureStandardFont(pageDict, reader);
-                                        var fs = currentFontSize.ToString("F1", CultureInfo.InvariantCulture);
-                                        result.Write(Encoding.ASCII.GetBytes(
-                                            $"/{fallbackFont} {fs} Tf "));
-                                        var latin = Encoding.Latin1.GetBytes(newText);
-                                        WriteStringOperand(result, latin, false);
-                                        result.Write(Encoding.ASCII.GetBytes(
-                                            $" Tj /{currentFontName} {fs} Tf"));
+                                        WriteFontSwitchedReplacement(result, newText, currentFontDict,
+                                            currentFontName, currentFontSize, pageDict, reader, "Tj", AllowSubsetGlyphFallback);
                                     }
                                     else
                                     {
@@ -463,17 +857,19 @@ public sealed class TextReplacer
 
                         case "TJ":
                             if (operands.Count >= 1 && operands[0].obj is PdfArray arr
-                                && IsAtTargetY(tmTy, ctmD, ctmTy)
+                                && IsAtTargetY(tmTx, tmTy, ctmB, ctmD, ctmTy)
                                 && IsAtTargetX(tmTx, tmTy, ctmA, ctmC, ctmTx))
                             {
                                 // Pre-check: compute what the replaced text would be to decide
                                 // font switch BEFORE encoding (avoids round-trip corruption).
                                 var tjOrigText = ConcatenateTJText(arr, currentToUnicode, currentFontDict, reader);
                                 var tjNormalizedOrig = NormalizeForSearch(tjOrigText);
-                                var tjNormalizedSearch = NormalizeForSearch(search);
+                                var tjNormalizedSearch = ResolveRtlSearch(tjNormalizedOrig, NormalizeForSearch(search));
                                 if (MatchesSearch(tjNormalizedOrig, tjNormalizedSearch))
                                 {
-                                    var tjReplacedText = tjNormalizedOrig.Replace(tjNormalizedSearch, replacement, StringComparison.Ordinal);
+                                    var tjReplacedText = MatchAnyOperator
+                                        ? replacement
+                                        : tjNormalizedOrig.Replace(tjNormalizedSearch, replacement, StringComparison.Ordinal);
                                     result.Write(streamBytes, lastWritePos, operands[0].startPos - lastWritePos);
 
                                     if (tjReplacedText.Length == 0)
@@ -482,20 +878,40 @@ public sealed class TextReplacer
                                         // empty text-showing operator remains (which would
                                         // still be re-extracted as a zero-length fragment). In
                                         // redaction mode, leave a glyph-less advance so following
-                                        // text on the line does not reflow.
+                                        // text on the line does not reflow. When
+                                        // KeepEmptyShowOperator is set (form-XObject deletion),
+                                        // retain an empty `() Tj` so the emptied fragment stays
+                                        // re-extractable as "" (see the Tj branch above).
+                                        if (KeepEmptyShowOperator)
+                                            result.Write("() Tj"u8);
                                         WriteDeletionAdvanceTJ(result, arr, currentFontDict, reader, currentFontSize);
                                         _replacementCount++;
                                     }
-                                    else if (NeedsFontSwitch(tjReplacedText, currentToUnicode, currentFontDict, reader))
+                                    else if (NeedsFontSwitch(tjReplacedText, currentToUnicode, currentFontDict, reader, AllowSubsetGlyphFallback))
                                     {
-                                        var fallbackFont = EnsureStandardFont(pageDict, reader);
-                                        var fs = currentFontSize.ToString("F1", CultureInfo.InvariantCulture);
-                                        result.Write(Encoding.ASCII.GetBytes(
-                                            $"/{fallbackFont} {fs} Tf "));
-                                        var latin = Encoding.Latin1.GetBytes(tjReplacedText);
-                                        WriteStringOperand(result, latin, false);
-                                        result.Write(Encoding.ASCII.GetBytes(
-                                            $" Tj /{currentFontName} {fs} Tf"));
+                                        // Preserve any trailing text's position: split the TJ, font-switch
+                                        // only the matched run, re-anchor the rest at its original absolute
+                                        // Tm. Falls back to flattening the whole TJ when there's no trailing
+                                        // text or the match isn't at the array start.
+                                        if (!WriteFontSwitchedTJSplit(result, arr, search, replacement,
+                                                currentToUnicode, currentFontDict, currentFontName, currentFontSize,
+                                                tmA, tmB, tmC, tmD, tmTx, tmTy, reader, pageDict,
+                                                NeedsTlmRestore(streamBytes, endPos)))
+                                            WriteFontSwitchedReplacement(result, tjReplacedText, currentFontDict,
+                                                currentFontName, currentFontSize, pageDict, reader, "Tj", AllowSubsetGlyphFallback);
+                                        _replacementCount++;
+                                    }
+                                    else if (AnchorTrailingOnReplace
+                                        && WriteAnchoredTJSplit(result, arr, search, replacement,
+                                            currentToUnicode, currentFontDict, currentFontSize,
+                                            tmA, tmB, tmC, tmD, tmTx, tmTy, reader,
+                                            NeedsTlmRestore(streamBytes, endPos)))
+                                    {
+                                        // ReplaceAdjustment.None with trailing text: split the TJ and
+                                        // re-anchor the tail at its ORIGINAL absolute Tm instead of a
+                                        // compensating kern — kern-blind consumers (extraction's
+                                        // rect clip, sub-run positions) would misplace every glyph
+                                        // after a large kern.
                                         _replacementCount++;
                                     }
                                     else if (TryReplaceTJArray(arr, search, replacement,
@@ -518,7 +934,7 @@ public sealed class TextReplacer
                             tmTx = -tlLeading * tmC + tmTx;
                             tmTy = -tlLeading * tmD + tmTy;
                             if (operands.Count >= 1 && operands[0].obj is PdfString str2
-                                && IsAtTargetY(tmTy, ctmD, ctmTy)
+                                && IsAtTargetY(tmTx, tmTy, ctmB, ctmD, ctmTy)
                                 && IsAtTargetX(tmTx, tmTy, ctmA, ctmC, ctmTx))
                             {
                                 var decoded = DecodeString(str2.Value, currentToUnicode, currentFontDict, reader);
@@ -528,16 +944,10 @@ public sealed class TextReplacer
                                     var newText = ApplyReplace(normalizedDecoded2, normalizedSearch, replacement);
 
                                     result.Write(streamBytes, lastWritePos, operands[0].startPos - lastWritePos);
-                                    if (NeedsFontSwitch(newText, currentToUnicode, currentFontDict, reader))
+                                    if (NeedsFontSwitch(newText, currentToUnicode, currentFontDict, reader, AllowSubsetGlyphFallback))
                                     {
-                                        var fallbackFont = EnsureStandardFont(pageDict, reader);
-                                        var fs = currentFontSize.ToString("F1", CultureInfo.InvariantCulture);
-                                        result.Write(Encoding.ASCII.GetBytes(
-                                            $"/{fallbackFont} {fs} Tf "));
-                                        var latin = Encoding.Latin1.GetBytes(newText);
-                                        WriteStringOperand(result, latin, false);
-                                        result.Write(Encoding.ASCII.GetBytes(
-                                            $" ' /{currentFontName} {fs} Tf"));
+                                        WriteFontSwitchedReplacement(result, newText, currentFontDict,
+                                            currentFontName, currentFontSize, pageDict, reader, "'", AllowSubsetGlyphFallback);
                                     }
                                     else
                                     {
@@ -692,7 +1102,8 @@ public sealed class TextReplacer
         // don't double-process spans the per-op pass already replaced.
         if (_allowCrossOperator)
         {
-            var crossResult = TryCrossOperatorReplace(output, search, replacement, pageDict, reader);
+            var crossResult = TryCrossOperatorReplace(output, search, replacement, pageDict, reader,
+                initCtmA, initCtmB, initCtmC, initCtmD, initCtmTx, initCtmTy);
             if (crossResult is not null)
                 output = crossResult;
         }
@@ -708,19 +1119,51 @@ public sealed class TextReplacer
     /// invisible to the per-operator matcher.
     /// </summary>
     private byte[]? TryCrossOperatorReplace(byte[] streamBytes, string search, string replacement,
-        PdfDictionary pageDict, PdfReader reader)
+        PdfDictionary pageDict, PdfReader reader,
+        double initCtmA = 1, double initCtmB = 0, double initCtmC = 0, double initCtmD = 1,
+        double initCtmTx = 0, double initCtmTy = 0)
     {
         var fonts = TextAbsorber.ResolveFonts(pageDict, reader);
         var normalizedSearch = NormalizeForSearch(search);
 
-        // Collect text operators: (decodedText, operandStart, operatorEnd)
-        var textOps = new List<(string text, int opStart, int opEnd)>();
+        // Collect text operators with everything needed to (a) build a gap-aware
+        // concatenation for matching, (b) split a partially-matched first/last operator,
+        // and (c) re-anchor / shift following same-line runs: decoded text + raw string
+        // bytes, byte span, text matrix + CTM, font state (dict/ToUnicode/size/Tc), TJ
+        // kern total, and the byte span of the op's positioning Tm x-operand (when the
+        // op is Tm-positioned) so a follower's Tm can be rewritten in place.
+        var textOps = CollectTextOps(streamBytes, fonts, reader,
+            initCtmA, initCtmB, initCtmC, initCtmD, initCtmTx, initCtmTy);
+        return TryCrossOperatorReplaceCore(streamBytes, search, replacement, pageDict, reader,
+            normalizedSearch, textOps);
+    }
+
+    /// <summary>Walk a content stream and collect every text-showing operator with the
+    /// full state needed to match, measure, split, or re-anchor it: decoded text + raw
+    /// bytes, byte span, text matrix + composed CTM, font state (dict/ToUnicode/size/Tc),
+    /// TJ kern total, and the positioning-Tm operand span. Shared by the cross-operator
+    /// replace and the run-move reflow.</summary>
+    private List<CrossTextOp> CollectTextOps(byte[] streamBytes,
+        Dictionary<string, PdfDictionary> fonts, PdfReader reader,
+        double initCtmA = 1, double initCtmB = 0, double initCtmC = 0, double initCtmD = 1,
+        double initCtmTx = 0, double initCtmTy = 0)
+    {
+        var textOps = new List<CrossTextOp>();
         var lexer2 = new PdfLexer(streamBytes);
         var ops2 = new List<(TokenKind kind, PdfObject obj, int startPos, int endPos)>();
         Dictionary<int, string>? curToUnicode = null;
         PdfDictionary? curFontDict = null;
         string? curFontName = null;
         double curFontSize = 12;
+        double curTc = 0;
+        double tmA = 1, tmB = 0, tmC = 0, tmD = 1, tmTx = 0, tmTy = 0, tlLeading = 0;
+        // Seed the CTM with the caller's context (the Do-site CTM when this stream is a
+        // recursed Form XObject) so TargetY/TargetX scoping sees page-space positions.
+        double ctmA = initCtmA, ctmB = initCtmB, ctmC = initCtmC, ctmD = initCtmD;
+        double ctmTx = initCtmTx, ctmTy = initCtmTy;
+        var ctmStack = new Stack<(double, double, double, double, double, double)>();
+        // Pending positioning-Tm record, consumed by the next text-showing op.
+        var pendingTm = (has: false, xStart: 0, xEnd: 0, xVal: 0.0);
 
         while (true)
         {
@@ -759,18 +1202,83 @@ public sealed class TextReplacer
                         { curFontDict = fd; curToUnicode = TextAbsorber.ParseToUnicodeFromDict(fd, reader); }
                         else { curFontDict = null; curToUnicode = null; }
                     }
+                    else if (op == "Tc" && ops2.Count >= 1)
+                        curTc = ToDouble(ops2[0].obj);
                     else if (op is "Tj" or "'" && ops2.Count >= 1 && ops2[0].obj is PdfString s)
                     {
+                        if (op == "'") { tmTx = -tlLeading * tmC + tmTx; tmTy = -tlLeading * tmD + tmTy; pendingTm.has = false; }
                         var decoded = DecodeString(s.Value, curToUnicode, curFontDict, reader);
-                        textOps.Add((decoded, ops2[0].startPos, ep));
+                        textOps.Add(new CrossTextOp
+                        {
+                            Text = decoded, Bytes = s.Value, IsHex = s.IsHex,
+                            OpStart = ops2[0].startPos, OpEnd = ep,
+                            TmA = tmA, TmB = tmB, TmC = tmC, TmD = tmD, TmTx = tmTx, TmTy = tmTy,
+                            CtmA = ctmA, CtmB = ctmB, CtmC = ctmC, CtmD = ctmD, CtmTx = ctmTx, CtmTy = ctmTy,
+                            FontDict = curFontDict, FontName = curFontName, ToUnicode = curToUnicode,
+                            FontSize = curFontSize, Tc = curTc,
+                            TmPositioned = pendingTm.has, TmXTokStart = pendingTm.xStart,
+                            TmXTokEnd = pendingTm.xEnd, TmXVal = pendingTm.xVal,
+                        });
+                        pendingTm.has = false;
                     }
                     else if (op == "TJ" && ops2.Count >= 1 && ops2[0].obj is PdfArray tjArr)
                     {
                         var sb = new StringBuilder();
+                        var byteBuf = new MemoryStream();
+                        double kernSum = 0;
+                        bool isHex = false; bool firstStr = true;
                         foreach (var item in tjArr)
+                        {
                             if (item is PdfString ps)
+                            {
                                 sb.Append(DecodeString(ps.Value, curToUnicode, curFontDict, reader));
-                        textOps.Add((sb.ToString(), ops2[0].startPos, ep));
+                                byteBuf.Write(ps.Value, 0, ps.Value.Length);
+                                if (firstStr) { isHex = ps.IsHex; firstStr = false; }
+                            }
+                            else if (item is PdfInteger ki) kernSum += ki.Value;
+                            else if (item is PdfReal kr) kernSum += kr.Value;
+                        }
+                        textOps.Add(new CrossTextOp
+                        {
+                            Text = sb.ToString(), Bytes = byteBuf.ToArray(), IsHex = isHex,
+                            OpStart = ops2[0].startPos, OpEnd = ep,
+                            TmA = tmA, TmB = tmB, TmC = tmC, TmD = tmD, TmTx = tmTx, TmTy = tmTy,
+                            CtmA = ctmA, CtmB = ctmB, CtmC = ctmC, CtmD = ctmD, CtmTx = ctmTx, CtmTy = ctmTy,
+                            FontDict = curFontDict, FontName = curFontName, ToUnicode = curToUnicode,
+                            FontSize = curFontSize, Tc = curTc, KernSum = kernSum,
+                            TmPositioned = pendingTm.has, TmXTokStart = pendingTm.xStart,
+                            TmXTokEnd = pendingTm.xEnd, TmXVal = pendingTm.xVal,
+                        });
+                        pendingTm.has = false;
+                    }
+                    else if (op == "BT") { tmA = 1; tmB = 0; tmC = 0; tmD = 1; tmTx = 0; tmTy = 0; tlLeading = 0; pendingTm.has = false; }
+                    else if ((op == "Td" || op == "TD") && ops2.Count >= 2)
+                    {
+                        double dx = ToDouble(ops2[0].obj), dy = ToDouble(ops2[1].obj);
+                        tmTx = dx * tmA + dy * tmC + tmTx;
+                        tmTy = dx * tmB + dy * tmD + tmTy;
+                        if (op == "TD") tlLeading = -dy;
+                        pendingTm.has = false; // Td-positioned: inherits the line chain, no Tm patch
+                    }
+                    else if (op == "Tm" && ops2.Count >= 6)
+                    {
+                        tmA = ToDouble(ops2[0].obj); tmB = ToDouble(ops2[1].obj);
+                        tmC = ToDouble(ops2[2].obj); tmD = ToDouble(ops2[3].obj);
+                        tmTx = ToDouble(ops2[4].obj); tmTy = ToDouble(ops2[5].obj);
+                        pendingTm = (true, ops2[4].startPos, ops2[4].endPos, tmTx);
+                    }
+                    else if (op == "TL" && ops2.Count >= 1) tlLeading = ToDouble(ops2[0].obj);
+                    else if (op == "T*") { tmTx = -tlLeading * tmC + tmTx; tmTy = -tlLeading * tmD + tmTy; pendingTm.has = false; }
+                    else if (op == "q") ctmStack.Push((ctmA, ctmB, ctmC, ctmD, ctmTx, ctmTy));
+                    else if (op == "Q") { if (ctmStack.Count > 0) (ctmA, ctmB, ctmC, ctmD, ctmTx, ctmTy) = ctmStack.Pop(); }
+                    else if (op == "cm" && ops2.Count >= 6)
+                    {
+                        double a = ToDouble(ops2[0].obj), b = ToDouble(ops2[1].obj), c = ToDouble(ops2[2].obj);
+                        double dd = ToDouble(ops2[3].obj), tx = ToDouble(ops2[4].obj), ty = ToDouble(ops2[5].obj);
+                        double nA = a * ctmA + b * ctmC, nB = a * ctmB + b * ctmD;
+                        double nC = c * ctmA + dd * ctmC, nD = c * ctmB + dd * ctmD;
+                        double nTx = tx * ctmA + ty * ctmC + ctmTx, nTy = tx * ctmB + ty * ctmD + ctmTy;
+                        ctmA = nA; ctmB = nB; ctmC = nC; ctmD = nD; ctmTx = nTx; ctmTy = nTy;
                     }
                     ops2.Clear();
                     break;
@@ -779,15 +1287,82 @@ public sealed class TextReplacer
                     break;
             }
         }
+        return textOps;
+    }
 
-        // Concatenate all text and search for the pattern
+    private byte[]? TryCrossOperatorReplaceCore(byte[] streamBytes, string search, string replacement,
+        PdfDictionary pageDict, PdfReader reader, string normalizedSearch, List<CrossTextOp> textOps)
+    {
+        // Advance (in text-space units) a byte string renders with an op's font state:
+        // glyph widths + per-glyph Tc − TJ kerns (kern applied only when measuring the
+        // op's own full bytes).
+        var metricsCache = new Dictionary<PdfDictionary, FontMetrics?>();
+        FontMetrics? MetricsOf(CrossTextOp o)
+        {
+            if (o.FontDict is null) return null;
+            if (metricsCache.TryGetValue(o.FontDict, out var m)) return m;
+            FontMetrics? built = null;
+            try { built = FontMetrics.FromFontDict(o.FontDict, reader); } catch { }
+            metricsCache[o.FontDict] = built;
+            return built;
+        }
+        double Adv(CrossTextOp o, byte[] bytes, bool own)
+        {
+            var m = MetricsOf(o);
+            double w;
+            if (m is not null)
+            {
+                try { w = m.MeasureString(bytes, o.FontSize); }
+                catch { w = o.FontSize * 0.5 * bytes.Length; }
+            }
+            else
+                w = o.FontSize * 0.5 * bytes.Length;
+            var glyphs = m?.IsCid == true ? (bytes.Length + 1) / 2 : bytes.Length;
+            w += o.Tc * glyphs;
+            if (own) w -= o.KernSum / 1000.0 * o.FontSize;
+            return w;
+        }
+
+        // Gap-aware concatenation: like the absorber, insert a synthetic space between
+        // two same-line ops separated by a word-sized positioning gap (text drawn
+        // word-per-Tm with no space glyphs), so a spaced phrase can match across ops.
+        // Synthetic chars map to op −1 and are trimmed off the match edges.
         var allText = new StringBuilder();
-        foreach (var (text, _, _) in textOps)
-            allText.Append(text);
+        var charToOp = new List<int>();
+        for (var i = 0; i < textOps.Count; i++)
+        {
+            var cur = textOps[i];
+            if (i > 0 && allText.Length > 0)
+            {
+                var prev = textOps[i - 1];
+                bool sameCtm = Math.Abs(cur.CtmA - prev.CtmA) < 1e-6 && Math.Abs(cur.CtmC - prev.CtmC) < 1e-6
+                    && Math.Abs(cur.CtmD - prev.CtmD) < 1e-6 && Math.Abs(cur.CtmTx - prev.CtmTx) < 1e-6
+                    && Math.Abs(cur.CtmTy - prev.CtmTy) < 1e-6;
+                bool horizontal = Math.Abs(cur.TmB) <= Math.Abs(cur.TmA) && Math.Abs(prev.TmB) <= Math.Abs(prev.TmA);
+                if (sameCtm && horizontal && Math.Abs(cur.TmTy - prev.TmTy) < 2.0)
+                {
+                    var gap = cur.TmTx - (prev.TmTx + Adv(prev, prev.Bytes, own: true));
+                    var fs = cur.FontSize > 0 ? cur.FontSize : 12.0;
+                    var lastChar = allText[^1];
+                    var nextChar = cur.Text.Length > 0 ? cur.Text[0] : '\0';
+                    if (gap > 0.2 * fs && gap <= 3.0 * fs && lastChar != ' ' && nextChar != ' ')
+                    {
+                        charToOp.Add(-1);
+                        allText.Append(' ');
+                    }
+                }
+            }
+            cur.CharStart = allText.Length;
+            foreach (var _ in cur.Text) charToOp.Add(i);
+            allText.Append(cur.Text);
+        }
 
         var fullText = NormalizeForSearch(allText.ToString());
 
-        // Enumerate match spans as (start, length) — literal IndexOf or regex match.
+        // Enumerate match spans as (start, length) — regex match, or a literal scan that
+        // is ELASTIC over the synthetic gap-spaces (charToOp < 0): a synthetic space
+        // matches a needle space OR nothing, so both "05 DEC 2012" and the fragment's
+        // segment-joined "05DEC2012" find the same span.
         (int idx, int len) NextMatch(int from)
         {
             if (_isRegex && _regexPattern is not null)
@@ -795,93 +1370,215 @@ public sealed class TextReplacer
                 var m = _regexPattern.Match(fullText, from);
                 return m.Success ? (m.Index, m.Length) : (-1, 0);
             }
-            var i = fullText.IndexOf(normalizedSearch, from, StringComparison.Ordinal);
-            return i < 0 ? (-1, 0) : (i, normalizedSearch.Length);
+            if (normalizedSearch.Length == 0) return (-1, 0);
+            for (var st = Math.Max(0, from); st < fullText.Length; st++)
+            {
+                int h = st, n = 0;
+                while (n < normalizedSearch.Length && h < fullText.Length)
+                {
+                    if (fullText[h] == normalizedSearch[n]) { h++; n++; continue; }
+                    if (h < charToOp.Count && charToOp[h] < 0) { h++; continue; } // skip synthetic space
+                    break;
+                }
+                if (n == normalizedSearch.Length) return (st, h - st);
+            }
+            return (-1, 0);
         }
 
         var (searchIdx, searchLen) = NextMatch(0);
         if (searchIdx < 0) return null;
 
-        // Find which operators span this match
-        var charPos = 0;
+        string FormatNum(double v) => Math.Round(v, 4).ToString("0.####", CultureInfo.InvariantCulture);
+
+        // Byte-level patches (follower Tm x rewrites), applied while copying.
+        var patches = new SortedList<int, (int end, byte[] text)>();
         var result = new MemoryStream();
         var lastWrite = 0;
-        var replaced = false;
+        void CopyRange(int to)
+        {
+            while (patches.Count > 0)
+            {
+                var start = patches.Keys[0];
+                if (start >= to) break;
+                var (pEnd, pText) = patches.Values[0];
+                patches.RemoveAt(0);
+                if (start < lastWrite) continue; // inside an already-replaced span
+                result.Write(streamBytes, lastWrite, start - lastWrite);
+                result.Write(pText, 0, pText.Length);
+                lastWrite = pEnd;
+            }
+            if (to > lastWrite)
+            {
+                result.Write(streamBytes, lastWrite, to - lastWrite);
+                lastWrite = to;
+            }
+        }
 
+        // Can every char of the replacement be encoded in the op's own font? (Reverse
+        // ToUnicode coverage; keeps the replacement in the source face — and measured
+        // with the source metrics — instead of switching to a fallback font.)
+        bool CanEncodeInFont(CrossTextOp o, string text)
+        {
+            if (o.ToUnicode is null)
+                return text.All(c => c <= 0xFF); // simple Latin1 encoding
+            var reverse = BuildReverseMap(o.ToUnicode);
+            return text.All(c => reverse.ContainsKey(c.ToString()));
+        }
+
+        var replaced = false;
         while (searchIdx >= 0)
         {
             if (ReplaceFirstOnly && replaced) break;
 
-            // Find operator range for this match
-            charPos = 0;
-            int firstOp = -1, lastOp = -1;
-            for (var i = 0; i < textOps.Count; i++)
-            {
-                var opTextLen = textOps[i].text.Length;
-                if (charPos + opTextLen > searchIdx && firstOp < 0)
-                    firstOp = i;
-                if (charPos + opTextLen >= searchIdx + searchLen)
-                { lastOp = i; break; }
-                charPos += opTextLen;
-            }
+            // Trim synthetic gap-space chars off the match edges and locate the ops.
+            var msIdx = searchIdx;
+            var meIdx = searchIdx + searchLen - 1;
+            while (msIdx < meIdx && msIdx < charToOp.Count && charToOp[msIdx] < 0) msIdx++;
+            while (meIdx > msIdx && meIdx < charToOp.Count && charToOp[meIdx] < 0) meIdx--;
+            int firstOp = msIdx < charToOp.Count ? charToOp[msIdx] : -1;
+            int lastOp = meIdx < charToOp.Count ? charToOp[meIdx] : -1;
 
-            // Skip matches that fall entirely inside ONE operator — the per-op
-            // pass already handled those (or chose not to). Cross-op only adds
-            // value for spans that cover multiple operators.
-            if (firstOp >= 0 && lastOp >= 0 && firstOp != lastOp)
-            {
-                // Write everything before the first matched operator
-                result.Write(streamBytes, lastWrite, textOps[firstOp].opStart - lastWrite);
+            bool inTarget = firstOp < 0 ||
+                (IsAtTargetY(textOps[firstOp].TmTx, textOps[firstOp].TmTy,
+                             textOps[firstOp].CtmB, textOps[firstOp].CtmD, textOps[firstOp].CtmTy)
+                 && IsAtTargetX(textOps[firstOp].TmTx, textOps[firstOp].TmTy,
+                                textOps[firstOp].CtmA, textOps[firstOp].CtmC, textOps[firstOp].CtmTx));
 
-                // Replace operator-by-operator: first gets replacement text,
-                // rest get empty strings. Preserves inter-operator positioning (Td/Tm).
-                for (var oi = firstOp; oi <= lastOp; oi++)
+            // Matches inside ONE operator belong to the per-op pass; cross-op only adds
+            // value for spans covering multiple operators.
+            if (inTarget && firstOp >= 0 && lastOp >= 0 && firstOp != lastOp)
+            {
+                var fo = textOps[firstOp];
+                var lo = textOps[lastOp];
+                var prefixText = fo.Text.Substring(0, Math.Clamp(msIdx - fo.CharStart, 0, fo.Text.Length));
+                var matchedLastLen = Math.Clamp(meIdx - lo.CharStart + 1, 0, lo.Text.Length);
+                var suffixText = lo.Text.Substring(matchedLastLen);
+
+                var prefixBytes = prefixText.Length > 0 ? EncodeString(prefixText, fo.ToUnicode, fo.FontDict) : Array.Empty<byte>();
+                var suffixBytes = suffixText.Length > 0 ? EncodeString(suffixText, lo.ToUnicode, lo.FontDict) : Array.Empty<byte>();
+                var matchedLastBytes = matchedLastLen > 0 ? EncodeString(lo.Text.Substring(0, matchedLastLen), lo.ToUnicode, lo.FontDict) : Array.Empty<byte>();
+
+                // Copy everything before the first matched operator.
+                CopyRange(fo.OpStart);
+
+                // Prefix (kept head of the first op) stays in the original font at the
+                // original pen position.
+                if (prefixBytes.Length > 0)
                 {
-                    if (oi > firstOp)
-                    {
-                        // Write gap between operators (positioning commands like Td, Tm)
-                        var gapStart = textOps[oi - 1].opEnd;
-                        var gapEnd = textOps[oi].opStart;
-                        if (gapEnd > gapStart)
-                            result.Write(streamBytes, gapStart, gapEnd - gapStart);
-                    }
-
-                    if (oi == firstOp)
-                    {
-                        // First operator: emit font switch + replacement text
-                        var fallbackFont = EnsureStandardFont(pageDict, reader);
-                        var fs = curFontSize.ToString("F1", CultureInfo.InvariantCulture);
-                        result.Write(Encoding.ASCII.GetBytes($"/{fallbackFont} {fs} Tf "));
-                        var latin = Encoding.Latin1.GetBytes(replacement);
-                        WriteStringOperand(result, latin, false);
-                        result.Write(Encoding.ASCII.GetBytes(" Tj "));
-                        if (curFontName is not null)
-                            result.Write(Encoding.ASCII.GetBytes($"/{curFontName} {fs} Tf "));
-                    }
-                    else
-                    {
-                        // Subsequent operators: emit empty string
-                        result.Write(Encoding.ASCII.GetBytes("() Tj "));
-                    }
+                    WriteStringOperand(result, prefixBytes, fo.IsHex);
+                    result.Write(Encoding.ASCII.GetBytes(" Tj "));
                 }
 
-                lastWrite = textOps[lastOp].opEnd;
+                // Replacement: re-encoded into the source font when its glyphs map
+                // (source-metric width, keeps the face); otherwise the font-switch path.
+                double advRepl;
+                if (replacement.Length > 0 && CanEncodeInFont(fo, replacement))
+                {
+                    var replBytes = EncodeString(replacement, fo.ToUnicode, fo.FontDict);
+                    WriteStringOperand(result, replBytes, fo.IsHex);
+                    result.Write(Encoding.ASCII.GetBytes(" Tj "));
+                    advRepl = Adv(fo, replBytes, own: false);
+                }
+                else if (replacement.Length > 0)
+                {
+                    WriteFontSwitchedReplacement(result, replacement, fo.FontDict,
+                        fo.FontName, fo.FontSize, pageDict, reader, "Tj", AllowSubsetGlyphFallback);
+                    result.WriteByte((byte)' ');
+                    double est = 0;
+                    foreach (var ch in replacement)
+                    {
+                        var cw = ch <= 0xFF ? Standard14Fonts.GetWidth("Helvetica", ch) : 0;
+                        est += cw > 0 ? cw : 500;
+                    }
+                    advRepl = est / 1000.0 * fo.FontSize;
+                }
+                else
+                    advRepl = 0;
+
+                // Middle operators: keep their positioning/state gaps, blank the text.
+                for (var oi = firstOp + 1; oi < lastOp; oi++)
+                {
+                    lastWrite = textOps[oi - 1].OpEnd;
+                    CopyRange(textOps[oi].OpStart);
+                    result.Write(Encoding.ASCII.GetBytes("() Tj "));
+                }
+
+                // Last operator: keep the tail after the match, re-anchored with an
+                // absolute Tm. Reflow mode puts it at match-start + replacement width
+                // (the reference same-line reflow); otherwise it keeps its original X.
+                lastWrite = textOps[lastOp - 1 >= firstOp ? lastOp - 1 : firstOp].OpEnd;
+                CopyRange(lo.OpStart);
+                var advPrefix = prefixBytes.Length > 0 ? Adv(fo, prefixBytes, own: false) : 0;
+                var advMatchedLast = matchedLastBytes.Length > 0 ? Adv(lo, matchedLastBytes, own: false) : 0;
+                var oldSuffixTmX = lo.TmTx + advMatchedLast;
+                var newSuffixTmX = ReflowLineOnReplace ? fo.TmTx + advPrefix + advRepl : oldSuffixTmX;
+                if (suffixBytes.Length > 0)
+                {
+                    // Leading space: the copied gap can end in a keyword ("… Tc") with no
+                    // trailing delimiter, and "Tc1 0 0 …" would lex as an unknown keyword.
+                    result.Write(Encoding.ASCII.GetBytes(
+                        $" {FormatNum(lo.TmA)} {FormatNum(lo.TmB)} {FormatNum(lo.TmC)} {FormatNum(lo.TmD)} {FormatNum(newSuffixTmX)} {FormatNum(lo.TmTy)} Tm "));
+                    WriteStringOperand(result, suffixBytes, lo.IsHex);
+                    result.Write(Encoding.ASCII.GetBytes(" Tj"));
+                }
+                else
+                    result.Write(Encoding.ASCII.GetBytes("() Tj"));
+
+                lastWrite = lo.OpEnd;
                 _replacementCount++;
                 replaced = true;
+
+                // Same-line reflow: shift following absolute-Tm runs on this line left by
+                // the width delta so words split across runs stay joined. Td-positioned
+                // followers inherit the shift through the re-anchored suffix Tm.
+                var delta = oldSuffixTmX - newSuffixTmX;
+                if (Math.Abs(delta) > 0.01)
+                {
+                    for (var j = lastOp + 1; j < textOps.Count; j++)
+                    {
+                        var fl = textOps[j];
+                        if (!fl.TmPositioned) continue;
+                        if (fl.TmXTokStart < lastWrite) continue;
+                        bool sameCtm = Math.Abs(fl.CtmA - lo.CtmA) < 1e-6 && Math.Abs(fl.CtmC - lo.CtmC) < 1e-6
+                            && Math.Abs(fl.CtmD - lo.CtmD) < 1e-6 && Math.Abs(fl.CtmTx - lo.CtmTx) < 1e-6
+                            && Math.Abs(fl.CtmTy - lo.CtmTy) < 1e-6;
+                        if (!sameCtm || Math.Abs(fl.TmTy - lo.TmTy) >= 2.0) continue;
+                        if (fl.TmXVal <= fo.TmTx) continue;
+                        patches[fl.TmXTokStart] = (fl.TmXTokEnd,
+                            Encoding.ASCII.GetBytes(FormatNum(fl.TmXVal - delta)));
+                    }
+                }
             }
 
-            // Look for next occurrence (advance past the matched span; skipped
-            // single-op matches still need to advance past their length to avoid
-            // an infinite loop on regex zero-width corner cases).
+            // Advance past the matched span (skipped single-op matches still advance
+            // to avoid an infinite loop on regex zero-width corner cases).
             (searchIdx, searchLen) = NextMatch(searchIdx + Math.Max(searchLen, 1));
         }
 
         if (!replaced) return null;
 
-        if (lastWrite < streamBytes.Length)
-            result.Write(streamBytes, lastWrite, streamBytes.Length - lastWrite);
+        CopyRange(streamBytes.Length);
 
         return result.ToArray();
+    }
+
+    /// <summary>Per-text-operator record for <see cref="TryCrossOperatorReplace"/>.</summary>
+    private sealed class CrossTextOp
+    {
+        public string Text = "";
+        public byte[] Bytes = Array.Empty<byte>();
+        public bool IsHex;
+        public int OpStart, OpEnd;
+        public double TmA = 1, TmB, TmC, TmD = 1, TmTx, TmTy;
+        public double CtmA = 1, CtmB, CtmC, CtmD = 1, CtmTx, CtmTy;
+        public PdfDictionary? FontDict;
+        public string? FontName;
+        public Dictionary<int, string>? ToUnicode;
+        public double FontSize = 12, Tc, KernSum;
+        public int CharStart = -1;
+        public bool TmPositioned;
+        public int TmXTokStart, TmXTokEnd;
+        public double TmXVal;
     }
 
     private bool TryReplaceTJArray(PdfArray arr, string search, string replacement,
@@ -1282,10 +1979,12 @@ public sealed class TextReplacer
     /// rotation/skew degrades to "no replacement" which is safer than
     /// page-wide for the per-fragment use case.
     /// </summary>
-    private bool IsAtTargetY(double tmTy, double ctmD, double ctmTy)
+    private bool IsAtTargetY(double tmTx, double tmTy, double ctmB, double ctmD, double ctmTy)
     {
         if (TargetY is not double targetY) return true;
-        var pageY = ctmD * tmTy + ctmTy;
+        // Full Y row of the CTM: the ctmB×tmTx cross-term matters on rotated pages
+        // (page /Rotate seeds a 90°/270° CTM where Y comes from the text-space X).
+        var pageY = ctmB * tmTx + ctmD * tmTy + ctmTy;
         return Math.Abs(pageY - targetY) <= TargetYTolerance;
     }
 
@@ -1309,10 +2008,42 @@ public sealed class TextReplacer
         _ => 0
     };
 
+    /// <summary>True when <paramref name="s"/> contains a right-to-left script
+    /// character (Hebrew / Arabic + presentation forms). Such text is frequently
+    /// stored in the content stream in VISUAL (reversed) order, so a logical-order
+    /// search term won't match the decoded run directly.</summary>
+    private static bool IsRtlSearch(string s)
+    {
+        foreach (var c in s)
+            if ((c >= '֐' && c <= '׿')   // Hebrew
+                || (c >= '؀' && c <= 'ۿ') // Arabic
+                || (c >= 'יִ' && c <= '﻿')) // Hebrew/Arabic presentation forms
+                return true;
+        return false;
+    }
+
+    /// <summary>Resolve the search variant actually present in <paramref name="runText"/>.
+    /// Returns the original <paramref name="search"/> when it matches directly; for an
+    /// RTL term that doesn't (the run is stored visually reversed) returns the reversed
+    /// term when THAT is present, so the visual slice can be matched and replaced.
+    /// Regex searches are returned unchanged (RTL-regex is not modelled).</summary>
+    private string ResolveRtlSearch(string runText, string search)
+    {
+        if (_isRegex || string.IsNullOrEmpty(search)) return search;
+        if (runText.Contains(search, StringComparison.Ordinal)) return search;
+        if (IsRtlSearch(search))
+        {
+            var rev = new string(search.Reverse().ToArray());
+            if (runText.Contains(rev, StringComparison.Ordinal)) return rev;
+        }
+        return search;
+    }
+
     /// <summary>Check if <paramref name="text"/> contains a match for the current search.</summary>
     private bool MatchesSearch(string text, string normalizedSearch)
     {
         if (ReplaceFirstOnly && _replacementCount > 0) return false;
+        if (MatchAnyOperator) return true;
         if (MatchWholeOperator)
             return string.Equals(text, normalizedSearch, StringComparison.Ordinal);
         if (_isRegex && _regexPattern is not null)
@@ -1324,6 +2055,11 @@ public sealed class TextReplacer
     /// Honours <see cref="ReplaceFirstOnly"/>.</summary>
     private string ApplyReplace(string text, string normalizedSearch, string replacement)
     {
+        if (MatchAnyOperator)
+        {
+            _replacementCount++;
+            return replacement;
+        }
         if (_isRegex && _regexPattern is not null)
         {
             if (ReplaceFirstOnly)
@@ -1413,6 +2149,386 @@ public sealed class TextReplacer
         return 12.0;
     }
 
+    /// <summary>Resolve (creating if absent) the page/XObject's own /Resources /Font
+    /// dictionary so a fallback font can be registered locally.</summary>
+    private static PdfDictionary GetOrCreatePageFontDict(PdfDictionary pageDict, PdfReader reader)
+    {
+        var resources = pageDict.Get("Resources") as PdfDictionary;
+        resources ??= reader.ResolveDict(pageDict.Get("Resources"));
+        if (resources is null)
+        {
+            resources = new PdfDictionary();
+            pageDict.Set("Resources", resources);
+        }
+        var fonts = resources.Get("Font") as PdfDictionary;
+        fonts ??= reader.ResolveDict(resources.Get("Font"));
+        if (fonts is null)
+        {
+            fonts = new PdfDictionary();
+            resources.Set("Font", fonts);
+        }
+        return fonts;
+    }
+
+    /// <summary>Family name usable for a font lookup, derived from a /BaseFont by
+    /// stripping a 6-char subset tag ("ABCDEF+Name").</summary>
+    private static string? SourceFontFamily(PdfDictionary? fontDict)
+    {
+        var bf = fontDict?.GetName("BaseFont");
+        if (string.IsNullOrEmpty(bf)) return null;
+        var plus = bf!.IndexOf('+');
+        if (plus == 6) bf = bf.Substring(plus + 1);
+        return bf;
+    }
+
+    private static bool ContainsCjk(string text)
+    {
+        foreach (var ch in text)
+            if (ch >= '　' && ch <= '鿿') return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Embed a Type0/CID fallback font — from the source font's own family when
+    /// installed, else a script-appropriate face — that contains the glyphs for
+    /// <paramref name="text"/>, and return its resource name plus the 2-byte
+    /// glyph-id string. Used when the source font can't encode a non-Latin1
+    /// replacement (Cyrillic/CJK not in its subset) so the run renders AND stays
+    /// searchable via the embedder's /ToUnicode CMap. Re-embeds the source font's
+    /// own family when installed (e.g. TimesNewRoman / FangSong / SimHei), else a
+    /// script-appropriate face. Returns null when no suitable TTF is available
+    /// (caller keeps the Standard-14 Latin path).
+    /// </summary>
+    private static (string resName, byte[] hexIds)? TryEmbedCidFallback(
+        PdfDictionary pageDict, PdfReader reader, string text, PdfDictionary? sourceFontDict)
+    {
+        var candidates = new List<string?> { SourceFontFamily(sourceFontDict) };
+        // SimSun is the reference's default Han substitute (its harness also has
+        // FangSong available, yet CJK replacements read back as SimSun); a
+        // FangSong result comes from the SOURCE font family candidate above.
+        if (ContainsCjk(text))
+        {
+            candidates.Add("SimSun");
+            candidates.Add("FangSong");
+            candidates.Add("MS Gothic");
+        }
+        candidates.Add("Arial");
+        candidates.Add("TimesNewRoman");
+
+        // The non-ASCII characters that actually need a glyph in the fallback face.
+        var need = text.Where(c => c > 0x7F).Distinct().ToArray();
+
+        byte[]? ttf = null;
+        var family = "Arial";
+        byte[]? firstAvail = null;
+        var firstFamily = "";
+        foreach (var c in candidates)
+        {
+            if (string.IsNullOrEmpty(c)) continue;
+            byte[]? t;
+            try { t = FontRepository.GetTtfData(c!); } catch { t = null; }
+            if (t is not { Length: > 12 }) continue;
+            if (firstAvail is null) { firstAvail = t; firstFamily = c!; }
+            // Prefer a face that actually covers every needed non-ASCII glyph —
+            // the source family may be a Latin-only subset with no Hebrew/CJK.
+            try
+            {
+                var gp = new GlyphOutlineParser(t);
+                if (need.All(ch => gp.CMap.TryGetValue(ch, out var g) && g != 0))
+                { ttf = t; family = c!; break; }
+            }
+            catch { /* unparseable — skip */ }
+        }
+        if (ttf is null) { ttf = firstAvail; family = firstFamily; } // best-effort
+        if (ttf is null) return null;
+
+        try
+        {
+            var fonts = GetOrCreatePageFontDict(pageDict, reader);
+            var (resName, hexIds) = Type0FontEmbedder.Embed(fonts, ttf, family, text, stripSpacesInBaseFont: true);
+            return (resName, hexIds);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Font-switch a TJ whose matched run needs a fallback font, PRESERVING the position
+    /// of text that follows the match in the same TJ array. The matched run is re-emitted
+    /// in the fallback (CID) font; the trailing run is re-anchored with an ABSOLUTE Tm at
+    /// its ORIGINAL local X so a following fragment keeps its
+    /// absolute position regardless of the replacement width. Handles the match-at-start
+    /// case (no prefix text before the match in the same TJ); returns false otherwise so
+    /// the caller flattens the whole TJ (unchanged behaviour).</summary>
+    /// <summary>Same-font TJ split for ReplaceAdjustment.None: rewrite the matched span
+    /// with the replacement re-encoded in the op's OWN font and re-anchor the trailing
+    /// elements at their original absolute Tm X, so trailing text keeps its exact
+    /// position regardless of the replacement's width. A compensating kern would keep
+    /// the RENDERED position but mislead kern-blind consumers (the extraction rect clip
+    /// and sub-run positions walk glyph widths only), so the split is preferred.
+    /// Handles matches that start and end at string-element boundaries (the shape
+    /// one-char-per-element producers emit); returns false otherwise so the caller
+    /// falls back to the kern-compensated array rewrite.</summary>
+    /// <summary>Whether a TJ split's re-anchored suffix must be followed by a
+    /// line-matrix restore: look ahead for the next operator that consumes text
+    /// position. Relative positioning (Td/TD/T*/'/") computes from the Tlm that was
+    /// live at the rewritten op, so the restore is REQUIRED — without it the next
+    /// Td-positioned line inherits the suffix X and shifts by the re-anchor delta.
+    /// A bare show op (Tj/TJ) instead continues from the suffix's pen, so a restore
+    /// would misplace it; an absolute Tm, BT/ET, or end-of-stream makes the
+    /// clobbered Tlm irrelevant.</summary>
+    private static bool NeedsTlmRestore(byte[] streamBytes, int fromPos)
+    {
+        var lexer = new PdfLexer(streamBytes) { Position = fromPos };
+        try
+        {
+            while (true)
+            {
+                var token = lexer.NextToken();
+                if (token.Kind == TokenKind.Eof) return false;
+                if (token.Kind != TokenKind.Keyword) continue;
+                switch (token.StringValue)
+                {
+                    case "Td": case "TD": case "T*": case "'": case "\"":
+                        return true;
+                    case "Tj": case "TJ": case "Tm": case "BT": case "ET":
+                        return false;
+                }
+            }
+        }
+        catch { return false; }
+    }
+
+    private bool WriteAnchoredTJSplit(MemoryStream result, PdfArray arr, string search, string replacement,
+        Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, double fontSize,
+        double tmA, double tmB, double tmC, double tmD, double tmTx, double tmTy,
+        PdfReader reader, bool restoreTlm)
+    {
+        if (fontDict is null || fontSize <= 0 || string.IsNullOrEmpty(search)) return false;
+        FontMetrics? metrics;
+        try { metrics = FontMetrics.FromFontDict(fontDict, reader); } catch { return false; }
+        if (metrics is null) return false;
+
+        // Per-element char-start in the concatenated text (mirroring ConcatenateTJText's
+        // synthetic-space rule) and the local pen X before each element (kern-aware).
+        var charStart = new int[arr.Count];
+        var localXBefore = new double[arr.Count];
+        var sb = new StringBuilder();
+        double localX = 0; int lastLen = 0;
+        for (int i = 0; i < arr.Count; i++)
+        {
+            charStart[i] = sb.Length; localXBefore[i] = localX;
+            if (arr[i] is PdfString s)
+            {
+                var dec = DecodeString(s.Value, toUnicode, fontDict, reader);
+                sb.Append(dec); lastLen = dec.Length;
+                try { localX += metrics.MeasureString(s.Value, fontSize); } catch { return false; }
+            }
+            else
+            {
+                double v = arr[i] is PdfInteger ai ? ai.Value : arr[i] is PdfReal ar2 ? ar2.Value : 0;
+                if (v < -190 && lastLen != 1 && (sb.Length == 0 || sb[^1] != ' ')) sb.Append(' ');
+                localX += -v * fontSize / 1000.0;
+            }
+        }
+        var concat = sb.ToString();
+        int matchStart = concat.IndexOf(search, StringComparison.Ordinal);
+        if (matchStart < 0) return false;
+        int matchEnd = matchStart + search.Length;
+
+        // The match must start AT a string element boundary and end right before one
+        // (or at the concatenation's end) so whole elements are consumed.
+        int headEnd = -1, firstSuffix = -1;
+        for (int i = 0; i < arr.Count; i++)
+        {
+            if (arr[i] is not PdfString) continue;
+            if (charStart[i] == matchStart) headEnd = i;
+            if (firstSuffix < 0 && charStart[i] >= matchEnd)
+            {
+                if (charStart[i] != matchEnd) return false; // ends mid-element
+                firstSuffix = i;
+            }
+        }
+        if (headEnd < 0) return false;
+        if (firstSuffix < 0 && matchEnd != concat.Length) return false;
+
+        if (replacement.Length > 0
+            && NeedsFontSwitch(replacement, toUnicode, fontDict, reader, allowGlyphFallback: false))
+            return false;
+        var replBytes = replacement.Length > 0
+            ? EncodeString(replacement, toUnicode, fontDict)
+            : Array.Empty<byte>();
+
+        bool isHex = false;
+        foreach (var el in arr)
+            if (el is PdfString ps0) { isHex = ps0.IsHex; break; }
+
+        // Head: untouched leading elements plus the re-encoded replacement, one TJ.
+        var headArr = new PdfArray();
+        for (int i = 0; i < headEnd; i++) headArr.Add(arr[i]);
+        if (replBytes.Length > 0) headArr.Add(new PdfString(replBytes, isHex));
+        if (headArr.Count > 0)
+        {
+            WriteTJArray(result, headArr);
+            result.Write(" TJ "u8);
+        }
+
+        if (firstSuffix >= 0)
+        {
+            // The pen advances along the text matrix's X axis: origin' = Tm·(localX, 0).
+            // Adding localX to tmTx alone breaks rotated matrices (0 b -c 0), where the
+            // advance lands in the Y component through tmB.
+            double advX = localXBefore[firstSuffix];
+            string N(double d) => d.ToString("0.######", CultureInfo.InvariantCulture);
+            // Leading space: the bytes copied before this op can end in a keyword
+            // ("… Tm") with no trailing delimiter, and "Tm0 0.99 …" would lex as an
+            // unknown operator.
+            result.Write(Encoding.ASCII.GetBytes(
+                $" {N(tmA)} {N(tmB)} {N(tmC)} {N(tmD)} {N(tmTx + tmA * advX)} {N(tmTy + tmB * advX)} Tm "));
+            var suffix = new PdfArray();
+            for (int i = firstSuffix; i < arr.Count; i++) suffix.Add(arr[i]);
+            WriteTJArray(result, suffix);
+            result.Write(" TJ"u8);
+            // Restore the line matrix: the suffix's absolute Tm also moved Tlm, but any
+            // following RELATIVE positioning (Td/TD/T*/'/") computes from the Tlm that
+            // was live at this op. Without the restore, the next Td-positioned line
+            // inherits the suffix X and every later line shifts by the re-anchor delta.
+            if (restoreTlm)
+                result.Write(Encoding.ASCII.GetBytes(
+                    $" {N(tmA)} {N(tmB)} {N(tmC)} {N(tmD)} {N(tmTx)} {N(tmTy)} Tm"));
+        }
+        return true;
+    }
+
+    private bool WriteFontSwitchedTJSplit(MemoryStream result, PdfArray arr, string search, string replacement,
+        Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, string? fontName, double fontSize,
+        double tmA, double tmB, double tmC, double tmD, double tmTx, double tmTy,
+        PdfReader reader, PdfDictionary pageDict, bool restoreTlm)
+    {
+        if (fontDict is null || fontSize <= 0 || string.IsNullOrEmpty(fontName)) return false;
+        var metrics = FontMetrics.FromFontDict(fontDict, reader);
+        if (metrics is null) return false;
+
+        // Per-element char-start (in the concatenated text, mirroring ConcatenateTJText's
+        // synthetic-space rule) and the local pen X before each element.
+        var charStart = new int[arr.Count];
+        var localXBefore = new double[arr.Count];
+        var sb = new StringBuilder();
+        double localX = 0; int lastLen = 0;
+        for (int i = 0; i < arr.Count; i++)
+        {
+            charStart[i] = sb.Length; localXBefore[i] = localX;
+            if (arr[i] is PdfString s)
+            {
+                var dec = DecodeString(s.Value, toUnicode, fontDict, reader);
+                sb.Append(dec); lastLen = dec.Length;
+                try { localX += metrics.MeasureString(s.Value, fontSize); } catch { return false; }
+            }
+            else
+            {
+                double v = arr[i] is PdfInteger ai ? ai.Value : arr[i] is PdfReal ar2 ? ar2.Value : 0;
+                if (v < -190 && lastLen != 1 && (sb.Length == 0 || sb[^1] != ' ')) sb.Append(' ');
+                localX += -v * fontSize / 1000.0;
+            }
+        }
+        var concat = sb.ToString();
+        int matchStart = concat.IndexOf(search, StringComparison.Ordinal);
+        if (matchStart != 0)
+        {
+            // Only the match-AT-START case is handled here (else caller flattens).
+            var nn = NormalizeForSearch(concat);
+            if (nn.IndexOf(NormalizeForSearch(search), StringComparison.Ordinal) != 0) return false;
+            matchStart = 0;
+        }
+        int matchEnd = matchStart + search.Length;
+
+        // First STRING element beginning at/after the match end starts the trailing run to
+        // preserve. No trailing text → nothing to re-anchor → let the caller flatten.
+        int firstSuffix = -1;
+        for (int i = 0; i < arr.Count; i++)
+            if (arr[i] is PdfString && charStart[i] >= matchEnd) { firstSuffix = i; break; }
+        if (firstSuffix < 0) return false;
+
+        // Font-switched replacement for the matched run (drawn at the current Tm origin).
+        var cid = EmbedTimesCidForRun(pageDict, reader, replacement, fontDict);
+        if (cid is not { } c) return false;
+        var fs = fontSize.ToString("0.####", CultureInfo.InvariantCulture);
+        result.Write(Encoding.ASCII.GetBytes($"/{c.resName} {fs} Tf <"));
+        result.Write(Encoding.ASCII.GetBytes(Convert.ToHexString(c.hexIds)));
+        result.Write(Encoding.ASCII.GetBytes("> Tj "));
+
+        // Re-anchor the trailing run at its original absolute Tm (original font), so it keeps
+        // its pre-replacement position independent of the replacement width.
+        double suffixLocalX = localXBefore[firstSuffix];
+        string N(double d) => d.ToString("0.######", CultureInfo.InvariantCulture);
+        result.Write(Encoding.ASCII.GetBytes(
+            $"/{fontName} {fs} Tf {N(tmA)} {N(tmB)} {N(tmC)} {N(tmD)} {N(tmTx + suffixLocalX)} {N(tmTy)} Tm "));
+        var suffix = new PdfArray();
+        for (int i = firstSuffix; i < arr.Count; i++) suffix.Add(arr[i]);
+        WriteTJArray(result, suffix);
+        result.Write(" TJ"u8);
+        // Restore the line matrix: the suffix's absolute Tm also moved Tlm, but any
+        // following RELATIVE positioning (Td/TD/T*/'/") computes from the Tlm that
+        // was live at this op. Without the restore, the next Td-positioned line
+        // inherits the suffix X and every later line shifts by the re-anchor delta.
+        if (restoreTlm)
+            result.Write(Encoding.ASCII.GetBytes(
+                $" {N(tmA)} {N(tmB)} {N(tmC)} {N(tmD)} {N(tmTx)} {N(tmTy)} Tm"));
+        return true;
+    }
+
+    /// <summary>
+    /// Write a font-switched replacement show operator. For non-Latin1 text
+    /// (Cyrillic/CJK) embed a Type0 CID fallback so the run renders + is
+    /// searchable; otherwise fall back to the Standard-14 Helvetica + Latin1 path
+    /// (unchanged behaviour for Latin replacements). Restores the original font
+    /// afterwards. <paramref name="showOp"/> is "Tj" or "'".
+    /// </summary>
+    private static void WriteFontSwitchedReplacement(MemoryStream result, string newText,
+        PdfDictionary? currentFontDict, string? currentFontName, double currentFontSize,
+        PdfDictionary pageDict, PdfReader reader, string showOp, bool allowGlyphFallback = false)
+    {
+        var fs = currentFontSize.ToString("F1", CultureInfo.InvariantCulture);
+        if (newText.Any(c => c > 0xFF))
+        {
+            var cid = TryEmbedCidFallback(pageDict, reader, newText, currentFontDict);
+            if (cid is { } c)
+            {
+                result.Write(Encoding.ASCII.GetBytes($"/{c.resName} {fs} Tf <"));
+                result.Write(Encoding.ASCII.GetBytes(Convert.ToHexString(c.hexIds)));
+                result.Write(Encoding.ASCII.GetBytes($"> {showOp} /{currentFontName} {fs} Tf"));
+                return;
+            }
+        }
+        // Latin replacement whose glyphs are absent from the source subset font: substitute
+        // the whole run in a Times New Roman Type0/CID subset, so the
+        // missing glyphs render AND the run stays searchable via the embedder's /ToUnicode.
+        else if (allowGlyphFallback && SimpleFontMissingGlyphChars(currentFontDict, reader, newText).Length > 0)
+        {
+            var times = EmbedTimesCidForRun(pageDict, reader, newText, currentFontDict);
+            if (times is { } t)
+            {
+                result.Write(Encoding.ASCII.GetBytes($"/{t.resName} {fs} Tf <"));
+                result.Write(Encoding.ASCII.GetBytes(Convert.ToHexString(t.hexIds)));
+                result.Write(Encoding.ASCII.GetBytes($"> {showOp} /{currentFontName} {fs} Tf"));
+                return;
+            }
+        }
+        // Standard-font substitution for a run the source subset can't faithfully show (its
+        // glyph is present by width but absent from the font's ToUnicode, so the encoding
+        // can't be confirmed). Record the family the fragment should REPORT for the default
+        // no-character behaviour (source family if installed, else Times New Roman). This is
+        // a REPORT ONLY — the glyphs stay on this cheap Standard-14 path (no font embedded,
+        // file size unaffected), and only the TextFragment.Text setter reads the record; the
+        // facade ReplaceText path never surfaces it, so its output is byte-for-byte unchanged.
+        if (allowGlyphFallback && IsEmbeddedSimpleFont(currentFontDict, reader))
+            RecordSwitchedFont(ResolveReportedFallbackFamily(currentFontDict));
+        var fallbackFont = EnsureStandardFont(pageDict, reader);
+        result.Write(Encoding.ASCII.GetBytes($"/{fallbackFont} {fs} Tf "));
+        var latin = Encoding.Latin1.GetBytes(newText);
+        WriteStringOperand(result, latin, false);
+        result.Write(Encoding.ASCII.GetBytes($" {showOp} /{currentFontName} {fs} Tf"));
+    }
+
     /// <summary>
     /// Build a reverse map from Unicode characters to CID codes, including NFKD-decomposed
     /// variants so base Arabic characters (e.g., U+0627 Alef) can map to presentation form
@@ -1464,7 +2580,7 @@ public sealed class TextReplacer
     }
 
     private static bool NeedsFontSwitch(string text, Dictionary<int, string>? toUnicode,
-        PdfDictionary? fontDict, PdfReader? reader = null)
+        PdfDictionary? fontDict, PdfReader? reader = null, bool allowGlyphFallback = false)
     {
         var isCid = fontDict?.GetName("Subtype") == "Type0";
 
@@ -1474,6 +2590,14 @@ public sealed class TextReplacer
         if (isCid && toUnicode is null)
             return true;
 
+        // A simple (non-CID) font with NO ToUnicode is single-byte WinAnsi/Latin1:
+        // it physically cannot encode a character outside Latin-1 (> 0xFF), so a
+        // Cyrillic/Hebrew/CJK replacement must switch fonts (→ CID fallback in
+        // WriteFontSwitchedReplacement). Without this, the reverse-map check below
+        // is skipped and EncodeString silently Latin1-encodes the char to '?'.
+        if (!isCid && toUnicode is null && text.Any(ch => ch > 0xFF))
+            return true;
+
         if (toUnicode is not null)
         {
             var reverseMap = BuildReverseMap(toUnicode);
@@ -1481,6 +2605,15 @@ public sealed class TextReplacer
             if (text.Any(ch => !reverseMap.ContainsKey(ch.ToString())))
                 return true;
         }
+
+        // Base-encoded simple subset that lacks an embedded glyph for a replacement char
+        // (a Type1/TrueType subset embeds only the glyphs it draws; the /Widths entry is 0
+        // for the rest). Without a switch the missing glyphs render blank. Fires only for a
+        // plain base encoding, so /Differences fonts fall through to the remap check below.
+        // Gated to the facade ReplaceText path (allowGlyphFallback) — the TextFragment.Text
+        // setter manages the font itself, so an auto-switch there would shift following text.
+        if (allowGlyphFallback && !isCid && SimpleFontMissingGlyphChars(fontDict, reader, text).Length > 0)
+            return true;
 
         // Non-CID fonts with /Encoding containing /Differences: if any replacement
         // character's Latin1 byte value is remapped by the Differences array, the
@@ -1525,6 +2658,130 @@ public sealed class TextReplacer
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Characters in <paramref name="text"/> for which a base-encoded simple (non-CID)
+    /// subset font has NO embedded glyph. A subset embeds only the glyphs it draws and
+    /// zeroes the /Widths entry (or omits the code from /FirstChar../LastChar) for the
+    /// rest — so a width of 0 / an out-of-range code marks an absent glyph. Only applied
+    /// to a plain base encoding (WinAnsi/Standard/MacRoman name, no /Differences); a
+    /// /Differences font is left to the remap check in <see cref="NeedsFontSwitch"/> so
+    /// this never over-fires. Returns empty when coverage can't be judged (no /Widths,
+    /// Type0, unknown encoding) — never guess a switch. Space is ignored (word gap, not
+    /// a drawn glyph).
+    /// </summary>
+    /// <summary>
+    /// True when the font is an EMBEDDED (FontFile/2/3) simple (non-Type0) font — a subset
+    /// that embeds only the glyphs it draws. When such a font can't faithfully show a
+    /// replacement char, the default no-character behaviour substitutes and REPORTS a
+    /// fallback face. Used only to gate that report (not the rendering), so it deliberately
+    /// covers /Differences subsets too; a non-embedded system-font reference is excluded
+    /// (its real installed face has the glyph, so no substitution is reported).
+    /// </summary>
+    private static bool IsEmbeddedSimpleFont(PdfDictionary? fontDict, PdfReader? reader)
+    {
+        if (fontDict is null || reader is null) return false;
+        if (fontDict.GetName("Subtype") == "Type0") return false;
+        var descriptor = reader.ResolveDict(fontDict.Get("FontDescriptor"));
+        return descriptor is not null &&
+            (descriptor.Get("FontFile") is not null || descriptor.Get("FontFile2") is not null
+             || descriptor.Get("FontFile3") is not null);
+    }
+
+    /// <summary>The family the fragment should REPORT after a default no-character
+    /// substitution: the source font's own family when it's installed (kept, like an
+    /// Arial subset → Arial), else Times New Roman (source not available to expand).</summary>
+    private static string ResolveReportedFallbackFamily(PdfDictionary? fontDict)
+    {
+        var src = SourceFontFamily(fontDict);
+        if (!string.IsNullOrEmpty(src))
+        {
+            try { var t = FontRepository.GetTtfData(src!); if (t is { Length: > 12 }) return src!; }
+            catch { /* not installed → fall through to Times */ }
+        }
+        return "TimesNewRoman";
+    }
+
+    private static char[] SimpleFontMissingGlyphChars(PdfDictionary? fontDict, PdfReader? reader, string text)
+    {
+        if (fontDict is null || reader is null) return Array.Empty<char>();
+        if (fontDict.GetName("Subtype") == "Type0") return Array.Empty<char>();
+
+        // Only an EMBEDDED font's /Widths tell the truth about glyph presence: a subset
+        // embeds only the glyphs it draws (0-width for the rest). A NON-embedded font
+        // (a system-font reference like "Arial,Bold") often ships /Widths only for the
+        // codes it happens to use, but the real installed face still has every glyph — a
+        // 0 width there is missing metadata, not a missing glyph. So gate on an embedded
+        // FontFile/FontFile2/FontFile3; otherwise never treat a 0 width as absent.
+        var descriptor = reader.ResolveDict(fontDict.Get("FontDescriptor"));
+        bool embedded = descriptor is not null &&
+            (descriptor.Get("FontFile") is not null || descriptor.Get("FontFile2") is not null
+             || descriptor.Get("FontFile3") is not null);
+        if (!embedded) return Array.Empty<char>();
+
+        // Only a plain base-encoding name (no Differences) has a code==WinAnsi-byte
+        // mapping we can trust here.
+        var enc = fontDict.Get("Encoding");
+        string? encName = enc as PdfName is { } pn ? pn.Value
+            : (reader.ResolveDict(enc)?.Get("Differences") is null
+                ? reader.ResolveDict(enc)?.GetName("BaseEncoding")
+                : null);
+        if (encName is not ("WinAnsiEncoding" or "StandardEncoding" or "MacRomanEncoding"))
+            return Array.Empty<char>();
+
+        if (reader.Resolve(fontDict.Get("Widths")) is not PdfArray widths) return Array.Empty<char>();
+        if (reader.Resolve(fontDict.Get("FirstChar")) is not PdfInteger fc) return Array.Empty<char>();
+        int firstChar = (int)fc.Value;
+        int lastChar = firstChar + widths.Count - 1;
+
+        var missing = new List<char>();
+        foreach (var ch in text.Distinct())
+        {
+            if (ch == ' ') continue;
+            // Map char → single-byte code. ASCII (0x20-0x7E) is identity under WinAnsi/
+            // Standard/MacRoman; Latin-1 (0xA0-0xFF) ≈ WinAnsi. Anything else can't be a
+            // single-byte code here, so treat as absent-from-this-font.
+            if (ch >= 0x100) { missing.Add(ch); continue; }
+            int code = ch;
+            if (code < firstChar || code > lastChar) { missing.Add(ch); continue; }
+            var w = reader.Resolve(widths[code - firstChar]);
+            double width = w is PdfInteger wi ? wi.Value : w is PdfReal wr ? wr.Value : 0;
+            if (width == 0) missing.Add(ch);
+        }
+        return missing.ToArray();
+    }
+
+    /// <summary>
+    /// Embed Times New Roman as a Type0/Identity-H subset covering <paramref name="text"/>
+    /// and return its resource name + 2-byte glyph-id string. Used to font-switch a run
+    /// whose source subset lacks glyphs for (Latin) replacement chars by substituting
+    /// the whole run in Times. Returns null when Times isn't resolvable.
+    /// </summary>
+    private static (string resName, byte[] hexIds)? EmbedTimesCidForRun(
+        PdfDictionary pageDict, PdfReader reader, string text, PdfDictionary? sourceFontDict)
+    {
+        // Prefer re-embedding the SOURCE font's own family when it's installed (keep the
+        // family, e.g. an Arial subset → Arial), else fall back to Times New Roman
+        // (the source family isn't available to expand, e.g. Bookman/Folio not installed).
+        byte[]? ttf = null;
+        string family = "TimesNewRoman";
+        foreach (var fam in new[] { SourceFontFamily(sourceFontDict), "TimesNewRoman", "Times New Roman", "Times" })
+        {
+            if (string.IsNullOrEmpty(fam)) continue;
+            byte[]? t;
+            try { t = FontRepository.GetTtfData(fam!); } catch { t = null; }
+            if (t is { Length: > 12 }) { ttf = t; family = fam!; break; }
+        }
+        if (ttf is null) return null;
+        try
+        {
+            var fonts = GetOrCreatePageFontDict(pageDict, reader);
+            var emb = Type0FontEmbedder.Embed(fonts, ttf, family, text, stripSpacesInBaseFont: true);
+            RecordSwitchedFont(family);
+            return emb;
+        }
+        catch { return null; }
     }
 
     private static byte[] EncodeString(string text, Dictionary<int, string>? toUnicode,

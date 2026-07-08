@@ -178,6 +178,17 @@ public sealed class ParagraphAbsorber
             .Where(f => f.Rectangle is not null && !string.IsNullOrWhiteSpace(f.Text))
             .ToList();
 
+        // Whitespace-only fragments are excluded from section/line geometry but
+        // kept aside: documents that draw each inter-word space as its own run
+        // (word runs touching, space glyph overlapping) need them to re-insert
+        // the spaces into paragraph text — the pure fragment-gap heuristic sees
+        // a near-zero gap there and drops the space.
+        var spaceFragments = fragments
+            .Where(f => f.Rectangle is not null && f.Text is { Length: > 0 }
+                && string.IsNullOrWhiteSpace(f.Text))
+            .OrderBy(f => f.Rectangle!.LLX)
+            .ToList();
+
         // Restrict to the requested page region, if any: keep a fragment when its
         // centre falls inside SearchRectangle. This drops out-of-region content
         // (e.g. headers/footers) before section/paragraph detection runs.
@@ -216,6 +227,12 @@ public sealed class ParagraphAbsorber
             // Sanity: if split-merge made things worse, revert (safety net)
             // This shouldn't happen in production.
         }
+
+        // Re-assemble paragraph text with the standalone space glyphs folded back in.
+        if (spaceFragments.Count > 0)
+            foreach (var section in sections)
+                foreach (var para in section.Paragraphs)
+                    para.RefreshText(AssembleTextWithSpaces(para.Lines, spaceFragments));
 
         // Undo page rotation on section/paragraph coordinates so they are in
         // the content stream's native coordinate system (matching the public API behaviour).
@@ -1341,6 +1358,12 @@ public sealed class ParagraphAbsorber
         var avgFontSize = lines.Average(l => l.AvgFontSize);
         var normalSpacing = lineSpacings.Count > 0 ? Median(lineSpacings) : avgFontSize * 1.2;
 
+        // Right margin of this section's body: the furthest right any line reaches.
+        // A line ending well short of it (with room for the next line's first word)
+        // is a "ragged" paragraph end rather than a normal wrap.
+        var bodyRight = lines.Max(l => l.MaxX);
+        var bodyWidth = bodyRight - lines.Min(l => l.MinX);
+
         // Paragraph break threshold: use bimodal gap detection when available.
         // Find the largest jump in the sorted gap sequence — if significant,
         // the threshold sits between normal line spacing and paragraph breaks.
@@ -1408,7 +1431,39 @@ public sealed class ParagraphAbsorber
                     isIndentBreak = true;
             }
 
-            if (isSpacingBreak || isFontSizeBreak || isIndentBreak)
+            // Ragged short-line break: the previous line ended a full sentence well
+            // short of the body's right margin, and the current line's first word would
+            // have fit in that gap — so the previous line deliberately ended the
+            // paragraph instead of wrapping. Three guards keep this from firing on
+            // ordinary justified/wrapped prose (which was the false-positive risk):
+            //   1. the gap is substantial (> ~1.5 em), not a small ragged-right jitter;
+            //   2. the previous line ends with sentence-terminal punctuation (. ! ?),
+            //      so a line that wrapped mid-sentence on a long name/word never breaks;
+            //   3. the current line's first word would have fit on the previous line.
+            var isShortLineBreak = false;
+            var prevGap = bodyRight - prev.MaxX;
+            // Only a MODERATE short line (ends a bit early) is a within-block paragraph
+            // break. A line ending very short (> a quarter of the body width) is a
+            // section-level cue — a heading or standalone line — which section detection
+            // owns; treating it as a within-section paragraph split miscounts.
+            if (prevGap > prev.AvgFontSize * 1.5 && prevGap < bodyWidth * 0.25)
+            {
+                var prevText = string.Concat(prev.Fragments.Select(f => f.Text)).TrimEnd();
+                var endsSentence = prevText.Length > 0
+                    && (prevText[^1] == '.' || prevText[^1] == '!' || prevText[^1] == '?');
+                if (endsSentence)
+                {
+                    var prevChars = prev.Fragments.Sum(f => f.Text?.Length ?? 0);
+                    var avgCharW = prevChars > 0 ? (prev.MaxX - prev.MinX) / prevChars : prev.AvgFontSize * 0.5;
+                    var currText = string.Concat(curr.Fragments.Select(f => f.Text)).TrimStart();
+                    var sp = currText.IndexOf(' ');
+                    var firstWordLen = sp < 0 ? currText.Length : sp;
+                    if (prevGap > firstWordLen * avgCharW + avgCharW)
+                        isShortLineBreak = true;
+                }
+            }
+
+            if (isSpacingBreak || isFontSizeBreak || isIndentBreak || isShortLineBreak)
             {
                 paragraphs.Add(BuildParagraph(currentLines));
                 currentLines = [curr];
@@ -1423,6 +1478,57 @@ public sealed class ParagraphAbsorber
             paragraphs.Add(BuildParagraph(currentLines));
 
         return paragraphs;
+    }
+
+    /// <summary>Re-join a paragraph's per-line fragments into text, consulting the page's
+    /// standalone space glyphs: a space is inserted between two fragments when either the
+    /// plain horizontal-gap heuristic fires or a space glyph sits between them (documents
+    /// that draw every inter-word space as its own overlapping run leave a near-zero gap).</summary>
+    private static string AssembleTextWithSpaces(
+        List<List<TextFragment>> lines, List<TextFragment> spaces)
+    {
+        static bool SpaceGlyphAt(List<TextFragment> spaces, Rectangle anchor, double fromX, double toX)
+        {
+            foreach (var s in spaces)
+            {
+                var r = s.Rectangle!;
+                var cx = (r.LLX + r.URX) / 2;
+                if (cx < fromX - 1) continue;
+                if (cx > toX + r.Width) break;              // spaces sorted by LLX
+                if (r.LLY < anchor.URY && r.URY > anchor.LLY) return true;
+            }
+            return false;
+        }
+
+        var sb = new StringBuilder();
+        foreach (var line in lines)
+        {
+            for (var fi = 0; fi < line.Count; fi++)
+            {
+                var f = line[fi];
+                if (fi > 0 && f.Rectangle is not null)
+                {
+                    var prevFrag = line[fi - 1];
+                    if (prevFrag.Rectangle is not null)
+                    {
+                        var gap = f.Rectangle.LLX - prevFrag.Rectangle.URX;
+                        var spaceGlyph = gap <= f.FontSize * 0.15
+                            && SpaceGlyphAt(spaces, f.Rectangle, prevFrag.Rectangle.URX, f.Rectangle.LLX);
+                        if ((gap > f.FontSize * 0.15 || spaceGlyph)
+                            && !prevFrag.Text.EndsWith(" ") && !f.Text.StartsWith(" "))
+                            sb.Append(' ');
+                    }
+                }
+                sb.Append(f.Text);
+            }
+            // Standalone space glyphs at the end of a line are dropped (the reference
+            // keeps a trailing space only when it is part of the last word's own run).
+            sb.Append("\r\n");
+        }
+        var text = sb.ToString();
+        if (text.EndsWith("\r\n"))
+            text = text[..^2];
+        return text;
     }
 
     private static MarkupParagraph BuildParagraph(List<TextLine> lines)
@@ -1477,10 +1583,10 @@ public sealed class ParagraphAbsorber
     }
 
     private static double GetX(TextFragment f) =>
-        f.Position?.XIndent ?? f.Rectangle?.LLX ?? 0;
+        f.PositionOrNull?.XIndent ?? f.Rectangle?.LLX ?? 0;
 
     private static double GetY(TextFragment f) =>
-        f.Position?.YIndent ?? f.Rectangle?.LLY ?? 0;
+        f.PositionOrNull?.YIndent ?? f.Rectangle?.LLY ?? 0;
 
     private static double Median(List<double> list)
     {
@@ -1525,9 +1631,9 @@ public sealed class ParagraphAbsorber
         }
 
         private static double GetX(TextFragment f) =>
-            f.Position?.XIndent ?? f.Rectangle?.LLX ?? 0;
+            f.PositionOrNull?.XIndent ?? f.Rectangle?.LLX ?? 0;
         private static double GetY(TextFragment f) =>
-            f.Position?.YIndent ?? f.Rectangle?.LLY ?? 0;
+            f.PositionOrNull?.YIndent ?? f.Rectangle?.LLY ?? 0;
     }
 }
 
@@ -1890,6 +1996,10 @@ public sealed class MarkupParagraph
         Points = points;
         _lines = lines;
     }
+
+    /// <summary>Replace the cached text without touching the underlying fragments
+    /// (used by the absorber's space-glyph reassembly pass).</summary>
+    internal void RefreshText(string text) => _text = text;
 
     /// <summary>
     /// The text of this paragraph. Lines are separated by \r\n.

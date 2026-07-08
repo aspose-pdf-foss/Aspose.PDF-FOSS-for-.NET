@@ -130,7 +130,7 @@ public abstract class ImageDevice
     /// Render a page to a <see cref="System.Drawing.Bitmap"/>. The bitmap is built from the
     /// internal RGBA buffer; on non-Windows hosts <c>System.Drawing.Common</c> raises
     /// <see cref="System.PlatformNotSupportedException"/> at bitmap construction time
-    /// — that's the cross-platform shape Aspose.PDF for .NET also ships.
+    /// — that's the cross-platform shape Aspose.Pdf also ships.
     /// </summary>
     public System.Drawing.Bitmap GetBitmap(Page page)
     {
@@ -188,7 +188,7 @@ public abstract class ImageDevice
     /// <summary>
     /// Render a page to an RGBA pixel buffer using the configured renderer and resolution.
     /// When <see cref="TargetWidth"/>/<see cref="TargetHeight"/> are set, the rendered buffer is
-    /// bilinearly resampled to those pixel dimensions (matches Aspose.PDF for .NET's
+    /// bilinearly resampled to those pixel dimensions (matches Aspose.Pdf's
     /// <c>PngDevice(int, int, Resolution)</c> contract: resolution controls render quality,
     /// the size pair pins the final pixel dimensions).
     /// </summary>
@@ -203,6 +203,11 @@ public abstract class ImageDevice
         // and the hinting path is skipped. For mismatched aspects (e.g. 500×700 on
         // a 612×792 Letter page) we fall through to render-uniformly-then-resample
         // so the content fills the target canvas the way Aspose's GDI+ renderer does.
+        // Propagate the caller's default-font substitution name so runs whose own font
+        // program can't be resolved render with it instead of vanishing.
+        if (OperatingSystem.IsWindows() && _renderer is GdiPlusPageRenderer gdiOpt)
+            gdiOpt.DefaultFontName = RenderingOptions?.DefaultFontName;
+
         if (TargetWidth > 0 && TargetHeight > 0)
         {
             var pageAspect = page.Width / page.Height;
@@ -216,13 +221,33 @@ public abstract class ImageDevice
             }
         }
 
+        // Out-of-memory guard (Aspose.Pdf parity): when the page's natural
+        // pixel count at the requested DPI exceeds 40M pixels (~160 MB RGBA), halve
+        // the effective resolution until it fits. Oversized-page renders (wall-plot
+        // pages at 300 DPI: 13200px → 6600, 16500px → 8250) come back at half/quarter
+        // scale instead of exhausting memory; explicitly pinned TargetWidth/Height
+        // outputs are never affected. The bound is bracketed by the reference
+        // contract: 16500×8850 must halve to 8250×4425 (36.5M px allowed) while
+        // 13200×3300 (43.6M px) must halve to 6600×1650.
+        int dpiX = Resolution.X, dpiY = Resolution.Y;
+        if (TargetWidth <= 0 && TargetHeight <= 0)
+        {
+            const long maxPixels = 40_000_000;
+            while (dpiX > 1 &&
+                   (long)(page.Width / 72.0 * dpiX) * (long)(page.Height / 72.0 * dpiY) > maxPixels)
+            {
+                dpiX = Math.Max(1, dpiX / 2);
+                dpiY = Math.Max(1, dpiY / 2);
+            }
+        }
+
         RgbaBuffer rendered;
         if (_renderer is SoftwarePageRenderer sw)
-            rendered = sw.RenderPage(page, Resolution.X, Resolution.Y);
+            rendered = sw.RenderPage(page, dpiX, dpiY);
         else if (OperatingSystem.IsWindows() && _renderer is GdiPlusPageRenderer gdi)
-            rendered = gdi.RenderPage(page, Resolution.X, Resolution.Y);
+            rendered = gdi.RenderPage(page, dpiX, dpiY);
         else
-            rendered = _renderer.RenderPage(page.Reader.RawData, page.Number, Resolution.X);
+            rendered = _renderer.RenderPage(page.Reader.RawData, page.Number, dpiX);
 
         if (TargetWidth <= 0 || TargetHeight <= 0) return rendered;
         if (rendered.Width == TargetWidth && rendered.Height == TargetHeight) return rendered;

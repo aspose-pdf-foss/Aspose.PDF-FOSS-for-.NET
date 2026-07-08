@@ -16,7 +16,7 @@ public enum CaptionPosition
 /// renderer does not interpret measure entries at write time.</summary>
 public class Measure
 {
-    /// <summary>Nested number-format list (Aspose.PDF for .NET shape:
+    /// <summary>Nested number-format list (Aspose.Pdf shape:
     /// <c>Measure+NumberFormatList</c>). Backed by an in-memory list.</summary>
     public class NumberFormatList
     {
@@ -152,37 +152,94 @@ public class Measure
 }
 
 /// <summary>Per-event PDF action slots for a widget annotation
-/// (matches the Aspose.PDF for .NET /AA-tree entry shape: 14 named events).
-/// Each slot is stored only in this build — the FOSS renderer doesn't
-/// dispatch widget actions.</summary>
+/// (matches the Aspose.Pdf /AA-tree entry shape: 14 named events plus
+/// the direct /A activation action). When bound to an annotation dictionary
+/// (the normal case) each setter writes through to the live /AA tree (or /A for
+/// <see cref="OnActivated"/>), so assignments survive save/reload. The FOSS
+/// renderer does not dispatch widget actions, but the dictionary round-trips.</summary>
 public class AnnotationActionCollection
 {
-    public PdfAction? OnActivated { get; set; }
-    public PdfAction? OnCalculate { get; set; }
-    public PdfAction? OnClosePage { get; set; }
-    public PdfAction? OnEnter { get; set; }
-    public PdfAction? OnExit { get; set; }
-    public PdfAction? OnFormat { get; set; }
-    public PdfAction? OnHidePage { get; set; }
-    public PdfAction? OnLostFocus { get; set; }
-    public PdfAction? OnModifyCharacter { get; set; }
-    public PdfAction? OnOpenPage { get; set; }
-    public PdfAction? OnPressMouseBtn { get; set; }
-    public PdfAction? OnReceiveFocus { get; set; }
-    public PdfAction? OnReleaseMouseBtn { get; set; }
-    public PdfAction? OnShowPage { get; set; }
-    public PdfAction? OnValidate { get; set; }
+    private readonly Dictionary<string, PdfAction?> _slots = new(System.StringComparer.Ordinal);
+    private Aspose.Pdf.Core.PdfDictionary? _owner;
+    private Aspose.Pdf.IO.PdfReader? _reader;
+
+    // /AA event key for each property (OnActivated is the direct /A, handled separately).
+    private const string ActivatedKey = "A";
+
+    /// <summary>Bind this collection to the owning annotation dict so setters
+    /// write through to /A and /AA.</summary>
+    internal void Bind(Aspose.Pdf.Core.PdfDictionary owner, Aspose.Pdf.IO.PdfReader reader)
+    {
+        _owner = owner;
+        _reader = reader;
+    }
+
+    /// <summary>Populate a slot during read-back WITHOUT writing through (the
+    /// value already lives in the dictionary).</summary>
+    internal void Load(string key, PdfAction? action) => _slots[key] = action;
+
+    private PdfAction? Get(string key) => _slots.TryGetValue(key, out var v) ? v : null;
+
+    private void Set(string key, PdfAction? value)
+    {
+        _slots[key] = value;
+        if (_owner is null) return;
+
+        if (key == ActivatedKey)
+        {
+            if (value is null) _owner.Remove("A");
+            else _owner.Set("A", value.Dict);
+            return;
+        }
+
+        var aa = _reader?.ResolveDict(_owner.Get("AA"));
+        if (value is null)
+        {
+            aa?.Remove(key);
+            if (aa is not null && aa.Count == 0) _owner.Remove("AA");
+            return;
+        }
+        if (aa is null)
+        {
+            aa = new Aspose.Pdf.Core.PdfDictionary();
+            _owner.Set("AA", aa);
+        }
+        aa.Set(key, value.Dict);
+    }
+
+    public PdfAction? OnActivated { get => Get(ActivatedKey); set => Set(ActivatedKey, value); }
+    public PdfAction? OnCalculate { get => Get("C"); set => Set("C", value); }
+    public PdfAction? OnClosePage { get => Get("PC"); set => Set("PC", value); }
+    public PdfAction? OnEnter { get => Get("E"); set => Set("E", value); }
+    public PdfAction? OnExit { get => Get("X"); set => Set("X", value); }
+    public PdfAction? OnFormat { get => Get("F"); set => Set("F", value); }
+    public PdfAction? OnHidePage { get => Get("PI"); set => Set("PI", value); }
+    public PdfAction? OnLostFocus { get => Get("Bl"); set => Set("Bl", value); }
+    public PdfAction? OnModifyCharacter { get => Get("K"); set => Set("K", value); }
+    public PdfAction? OnOpenPage { get => Get("PO"); set => Set("PO", value); }
+    public PdfAction? OnPressMouseBtn { get => Get("D"); set => Set("D", value); }
+    public PdfAction? OnReceiveFocus { get => Get("Fo"); set => Set("Fo", value); }
+    public PdfAction? OnReleaseMouseBtn { get => Get("U"); set => Set("U", value); }
+    public PdfAction? OnShowPage { get => Get("PV"); set => Set("PV", value); }
+    public PdfAction? OnValidate { get => Get("V"); set => Set("V", value); }
 }
 
 /// <summary>Collection of <see cref="PdfAction"/> entries attached to an
 /// annotation (or any other action-bearing PDF object). Indexed by
-/// 1-based position to match Aspose.PDF for .NET.</summary>
+/// 1-based position to match Aspose.Pdf.</summary>
 public class PdfActionCollection : IEnumerable<PdfAction>
 {
     private readonly List<PdfAction> _actions = new();
+    private Aspose.Pdf.Core.PdfDictionary? _owner;
 
     /// <summary>Number of actions in the collection.</summary>
     public int Count => _actions.Count;
+
+    /// <summary>Bind this collection to the owning annotation dict so that <see cref="Add"/> /
+    /// <see cref="Delete"/> write the action through to the dict's /A (+ /Next chain), and thus
+    /// survive save. Called after the collection is populated from the dict, so read-back does not
+    /// re-persist.</summary>
+    internal void Bind(Aspose.Pdf.Core.PdfDictionary owner) => _owner = owner;
 
     /// <summary>1-based indexer for the action at <paramref name="index"/>.</summary>
     public PdfAction this[int index]
@@ -200,6 +257,7 @@ public class PdfActionCollection : IEnumerable<PdfAction>
     {
         if (action is null) throw new System.ArgumentNullException(nameof(action));
         _actions.Add(action);
+        Persist();
     }
 
     /// <summary>Remove the action at the given 1-based index.</summary>
@@ -207,6 +265,21 @@ public class PdfActionCollection : IEnumerable<PdfAction>
     {
         if (index < 1 || index > _actions.Count) return;
         _actions.RemoveAt(index - 1);
+        Persist();
+    }
+
+    // Write the action list onto the bound annotation dict: first action as /A, the rest chained
+    // via /Next (mirroring ActionCollection), so the actions round-trip through save/reload.
+    private void Persist()
+    {
+        if (_owner is null) return;
+        if (_actions.Count == 0) { _owner.Remove("A"); return; }
+        _owner.Set("A", _actions[0].Dict);
+        for (int i = 0; i < _actions.Count; i++)
+        {
+            if (i < _actions.Count - 1) _actions[i].Dict.Set("Next", _actions[i + 1].Dict);
+            else _actions[i].Dict.Remove("Next");
+        }
     }
 
     /// <inheritdoc />
@@ -217,7 +290,7 @@ public class PdfActionCollection : IEnumerable<PdfAction>
 
 /// <summary>Appearance-stream dictionary on an annotation (/AP entry):
 /// maps appearance-state name -> <see cref="XForm"/>. Implements the full
-/// <see cref="IDictionary{TKey,TValue}"/> shape for Aspose.PDF for .NET parity.
+/// <see cref="IDictionary{TKey,TValue}"/> shape for Aspose.Pdf parity.
 /// The FOSS implementation backs the dictionary in memory; round-trip
 /// to the /AP entry is not currently emitted at save time.</summary>
 public class AppearanceDictionary : IDictionary<string, XForm>
@@ -245,10 +318,12 @@ public class AppearanceDictionary : IDictionary<string, XForm>
     /// <inheritdoc />
     public ICollection<XForm> Values => _entries.Values;
 
-    /// <inheritdoc />
+    /// <summary>Appearance-state lookup. Returns null for an absent state (e.g.
+    /// a field with no /N appearance) rather than throwing, matching the public
+    /// API where callers null-check the result.</summary>
     public XForm this[string key]
     {
-        get => _entries[key];
+        get => _entries.TryGetValue(key, out var v) ? v : null!;
         set => _entries[key] = value;
     }
 

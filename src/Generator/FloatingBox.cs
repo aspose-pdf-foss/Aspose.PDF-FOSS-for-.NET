@@ -153,32 +153,43 @@ public class FloatingBox : BaseParagraph
 
             var side = Border.Side;
 
-            if (side.HasFlag(BorderSide.Bottom))
+            if (side == BorderSide.All)
             {
-                builder.MoveTo(boxX, boxY);
-                builder.LineTo(boxX + Width, boxY);
+                // A full border is emitted as a single rectangle subpath so the box
+                // outline is one `re` operator (matching the all-sides border shape)
+                // rather than four disjoint line segments.
+                builder.Rectangle(boxX, boxY, Width, Height);
                 builder.Stroke();
             }
-
-            if (side.HasFlag(BorderSide.Top))
+            else
             {
-                builder.MoveTo(boxX, boxY + Height);
-                builder.LineTo(boxX + Width, boxY + Height);
-                builder.Stroke();
-            }
+                if (side.HasFlag(BorderSide.Bottom))
+                {
+                    builder.MoveTo(boxX, boxY);
+                    builder.LineTo(boxX + Width, boxY);
+                    builder.Stroke();
+                }
 
-            if (side.HasFlag(BorderSide.Left))
-            {
-                builder.MoveTo(boxX, boxY);
-                builder.LineTo(boxX, boxY + Height);
-                builder.Stroke();
-            }
+                if (side.HasFlag(BorderSide.Top))
+                {
+                    builder.MoveTo(boxX, boxY + Height);
+                    builder.LineTo(boxX + Width, boxY + Height);
+                    builder.Stroke();
+                }
 
-            if (side.HasFlag(BorderSide.Right))
-            {
-                builder.MoveTo(boxX + Width, boxY);
-                builder.LineTo(boxX + Width, boxY + Height);
-                builder.Stroke();
+                if (side.HasFlag(BorderSide.Left))
+                {
+                    builder.MoveTo(boxX, boxY);
+                    builder.LineTo(boxX, boxY + Height);
+                    builder.Stroke();
+                }
+
+                if (side.HasFlag(BorderSide.Right))
+                {
+                    builder.MoveTo(boxX + Width, boxY);
+                    builder.LineTo(boxX + Width, boxY + Height);
+                    builder.Stroke();
+                }
             }
         }
 

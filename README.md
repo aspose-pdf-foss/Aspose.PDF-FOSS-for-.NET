@@ -102,14 +102,15 @@ The following Aspose.PDF for .NET features are **not** in the FOSS edition. Code
 ### Out of scope by design
 - **AI / LowCode workflows** — `Aspose.Pdf.AI.*`, `Aspose.Pdf.LowCode.*`. Use Aspose.PDF for .NET for OpenAI / Llama-powered summarisation, OCR-aided extraction, and the LowCode façade APIs.
 - **Multithreading APIs** — `Aspose.Pdf.Multithreading.*`. The FOSS edition is single-threaded for a single `Document` instance.
-- **Format converters beyond PDF / HTML / SVG / Markdown / XML** — DOCX, EPUB, MHT, XPS, PCL, LaTeX, DJVU, OFD, PostScript, Comparison, Cgm.
+- **Format converters beyond PDF / HTML / SVG / Markdown / XML** — DOCX, EPUB, MHT, XPS, PCL, LaTeX, DJVU, OFD, PostScript, Cgm.
 - **Printing pipeline** — `PdfViewer.Print*` methods throw `PlatformNotSupportedException`. Render to image and pass the image to your printing stack instead.
 
 ### Partial — basics work, advanced doesn't
 - **Digital signatures** — basic Sign / Verify / PKCS#1 / PKCS#7 / DocMDP / certifying works. The validation-options surface (`ValidationOptions`, `ValidationResult`, OCSP, timestamping over the network, custom remote-sign delegates) is stored-but-not-active.
 - **Advanced `PdfFileEditor` features** — `MakeNUp` imposition, `MakeBooklet` from `Stream` with non-trivial margins, `ResizeContents` with custom imposition matrices — accepted as input but the FOSS save path emits the simple layout.
-- **XFA forms** — dynamic XFA can be read, and a whole XFA packet can be assigned / copied via `Form.AssignXfa` (it round-trips through the AcroForm `/XFA`); fine-grained authoring of individual XFA dataset fields is still limited.
-- **3D annotations (`PDF3DAnnotation`)** — annotation surface exists (artwork, content stream, lighting / render mode, view array) but the 3D content stream is not embedded in the saved PDF and the page renderer does not display the 3D model.
+- **XFA forms** — dynamic XFA is read and can be flattened to real, findable AcroForm pages; XFA datasets round-trip through the AcroForm `/XFA`, sync two-way with AcroForm fields, and export / import via FDF / XFDF / XML. Fine-grained authoring of individual XFA dataset fields is still limited.
+- **3D annotations (`PDF3DAnnotation`)** — 3D annotations are read (artwork, views, cross-sections, lighting / render mode, view array) and round-trip, but the 3D content stream is not regenerated on save and the page renderer does not display the 3D model.
+- **Document comparison** — the low-level `Aspose.Pdf.Comparison.Diff` edit-operation model (diff operations plus merge / slide optimizers) is available; a higher-level "compare two PDFs and produce a visual diff document" workflow is not.
 - **Tagged PDF rendering fidelity** — the structure tree is built and round-trips through `/StructTreeRoot`, but advanced PDF/UA-2 layout-aware tagging features are partial.
 - **Some PDF/A conversion semantics** — validation against PDF/A levels works; certain PDF/A-2 / PDF/A-3 conversion fix-ups (transparency flattening, embedded-file constraints, ICC profile downgrade) are stored-but-not-applied.
 - **Advanced rendering of complex colour spaces** — `DeviceN` and `Separation` with N > 4 channels, ICC-based group blending in CMYK — render in approximate sRGB.

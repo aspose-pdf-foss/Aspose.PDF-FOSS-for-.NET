@@ -62,7 +62,8 @@ public sealed class FileSpecification : IDisposable
     {
         var dict = new PdfDictionary();
         dict.Set("Type", new PdfName("Filespec"));
-        dict.Set("F", new PdfString(System.Text.Encoding.Latin1.GetBytes(name)));
+        // Keep non-Latin1 path characters intact (Latin1 would flatten them to '?').
+        dict.Set("F", Forms.Field.EncodePdfTextString(name));
         return new FileSpecification(dict, null);
     }
 
@@ -90,10 +91,23 @@ public sealed class FileSpecification : IDisposable
     public FileSpecification(string file, string description)
     {
         _reader = null;
-        _pendingData = File.ReadAllBytes(file);
-        CaptureFileDates(file);
 
-        var fileName = Path.GetFileName(file);
+        // An existing local file is embedded under its display (base) name. A path
+        // that does not resolve to a file is still a valid *reference* — e.g.
+        // GoToRemoteAction.File pointing at an external document — so keep the path
+        // verbatim and don't try to read it (which would throw):
+        // FileSpecification(path) never reads eagerly.
+        string fileName;
+        if (File.Exists(file))
+        {
+            _pendingData = File.ReadAllBytes(file);
+            CaptureFileDates(file);
+            fileName = Path.GetFileName(file);
+        }
+        else
+        {
+            fileName = file;
+        }
 
         _dict = new PdfDictionary();
         _dict.Set("Type", new PdfName("Filespec"));
@@ -142,7 +156,7 @@ public sealed class FileSpecification : IDisposable
 
         // The /F file name is a leaf name, not a path: callers (and the test inputs)
         // pass a full path here, but the embedded entry — like the file-path ctor and
-        // Aspose.PDF for .NET — stores just the file name. This also keeps the name-tree key
+        // Aspose.Pdf — stores just the file name. This also keeps the name-tree key
         // portable (an absolute "E:\..." key would mis-sort against plain file names).
         var leafName = Path.GetFileName(name);
         if (string.IsNullOrEmpty(leafName)) leafName = name;
@@ -283,14 +297,36 @@ public sealed class FileSpecification : IDisposable
         return stream is not null ? _reader.DecodeStream(stream) : null;
     }
 
+    /// <summary>Return at most <paramref name="maxBytes"/> of the embedded file's decoded
+    /// content without materialising the whole payload — used to sniff the header of a
+    /// possibly very large attachment (e.g. the on-load dangerous-content check) cheaply.</summary>
+    internal byte[]? GetDataPrefix(int maxBytes)
+    {
+        if (_pendingData is not null)
+            return _pendingData.Length <= maxBytes ? _pendingData : _pendingData[..maxBytes];
+
+        if (_reader is null) return null;
+        var ef = _reader.ResolveDict(_dict.Get("EF"));
+        if (ef is null) return null;
+        var stream = _reader.ResolveStream(ef.Get("F"));
+        return stream is not null ? _reader.DecodeStreamPrefix(stream, maxBytes) : null;
+    }
+
     private FileParams? _params;
 
     /// <summary>The /Params dict on the embedded-file stream, wrapped as
-    /// a <see cref="FileParams"/>. Lazy-constructed so callers can set
-    /// CreationDate / ModDate on an unbound spec.</summary>
-    public FileParams Params
+    /// a <see cref="FileParams"/>. Null for a document-backed spec whose
+    /// embedded stream has no /Params entry (reference behaviour); lazy-
+    /// constructed on an unbound spec so callers can set CreationDate /
+    /// ModDate before the spec is saved.</summary>
+    public FileParams? Params
     {
-        get => _params ??= new FileParams(this);
+        get
+        {
+            if (_params is not null) return _params;
+            if (_reader is not null && GetEmbeddedParamsDict(out _) is null) return null;
+            return _params ??= new FileParams(this);
+        }
         set => _params = value;
     }
 
@@ -451,7 +487,7 @@ public sealed class FileSpecification : IDisposable
 
 /// <summary>
 /// Wraps the /Params dict on an embedded-file stream (PDF §7.11.3 Table 46).
-/// Aspose.PDF for .NET reflection signature uses DateTime get/set for CreationDate/
+/// Aspose.Pdf reflection signature uses DateTime get/set for CreationDate/
 /// ModDate; this version honours that.
 /// </summary>
 public sealed class FileParams
@@ -591,7 +627,10 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
         {
             try
             {
-                if (FileSpecification.IsDangerousContent(spec.Name, spec.GetData()))
+                // IsDangerousContent only inspects the name and a bounded (4 KB) prefix, so
+                // decode just that prefix — fully materialising every attachment here
+                // buffered hundreds of MB for a large embedded file on load.
+                if (FileSpecification.IsDangerousContent(spec.Name, spec.GetDataPrefix(4096)))
                     spec.NeutralizeAsDangerous();
             }
             catch
@@ -668,7 +707,7 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
         return null;
     }
 
-    /// <summary>Sibling of <see cref="Delete(string)"/> matching Aspose.PDF for .NET's by-key naming.</summary>
+    /// <summary>Sibling of <see cref="Delete(string)"/> matching Aspose.Pdf's by-key naming.</summary>
     public void DeleteByKey(string key) => Delete(key);
 
     /// <summary>

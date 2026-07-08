@@ -8,7 +8,7 @@ namespace Aspose.Pdf;
 public sealed class PageInfo
 {
     private readonly Page? _page;
-    // Default to A4 (595x842), matching Aspose.PDF for .NET's PageInfo ctor
+    // Default to A4 (595x842), matching Aspose.Pdf's PageInfo ctor
     // (`PageSize.A4 = new PageSize(595f, 842f)` and assignment from
     // the parameterless ctor). FOSS previously defaulted to US Letter; that
     // caused pixel-diff against A4-rendered templates.
@@ -21,7 +21,7 @@ public sealed class PageInfo
     /// <summary>Bound constructor used by <c>Page.PageInfo</c>. A page's margins default
     /// to the same values the layout engine falls back to (90 pt left/right, 72 pt
     /// top/bottom) so reading <c>page.PageInfo.Margin</c> reports the effective margins
-    /// rather than bare zeros — matching Aspose.PDF for .NET.</summary>
+    /// rather than bare zeros — matching Aspose.Pdf.</summary>
     internal PageInfo(Page page)
     {
         _page = page;
@@ -72,6 +72,13 @@ public sealed class PageInfo
         {
             var isCurrentlyLandscape = Width > Height;
             if (isCurrentlyLandscape == value) return;
+            // On a page already bound to a live Page, only ESTABLISH landscape; do not revert an
+            // already-landscape page to portrait, where setting
+            // IsLandscape=false on a page created landscape (e.g. an HTML conversion done with
+            // PageInfo.IsLandscape=true, whose media box was auto-sized to wide content) leaves
+            // that box in place rather than rotating the laid-out content back to portrait.
+            // Free-standing PageInfo keeps the symmetric swap so sizing via `new PageInfo` is unchanged.
+            if (_page is not null && !value) return;
             (Width, Height) = (Height, Width);
         }
     }
@@ -79,7 +86,7 @@ public sealed class PageInfo
     /// <summary>Page margins.</summary>
     public MarginInfo Margin { get; set; } = new MarginInfo();
 
-    /// <summary>Whichever margin is currently active for layout passes; Aspose.PDF for .NET alias for <see cref="Margin"/>.</summary>
+    /// <summary>Whichever margin is currently active for layout passes; Aspose.Pdf alias for <see cref="Margin"/>.</summary>
     public MarginInfo AnyMargin
     {
         get => Margin;

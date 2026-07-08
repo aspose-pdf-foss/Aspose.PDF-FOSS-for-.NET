@@ -1,5 +1,8 @@
 namespace Aspose.Pdf.Security;
 
+/// <summary>Signing-key algorithm family of a <see cref="PdfCertificate"/>.</summary>
+internal enum SignatureKeyKind { Rsa, Dsa, Ecdsa }
+
 /// <summary>
 /// Represents a certificate + private key for PDF signing.
 /// Replaces System.Security.Cryptography.X509Certificates.X509Certificate2.
@@ -8,7 +11,19 @@ namespace Aspose.Pdf.Security;
 public sealed class PdfCertificate
 {
     internal byte[] CertificateDer { get; }
-    internal RsaKey PrivateKey { get; }
+
+    /// <summary>Hand-rolled RSA private key — set only for the RSA path. Null when
+    /// the key is DSA/ECDSA (those delegate to <see cref="DotNetCert"/>).</summary>
+    internal RsaKey? PrivateKey { get; }
+
+    /// <summary>The signing-key algorithm family.</summary>
+    internal SignatureKeyKind KeyKind { get; }
+
+    /// <summary>.NET certificate handle carrying the DSA/ECDSA private key. Set only
+    /// when the hand-rolled RSA loader can't handle the key (non-RSA, or an RSA PFX
+    /// whose PKCS#12 encoding the hand-rolled parser doesn't support). Null for the
+    /// hand-rolled RSA path.</summary>
+    internal System.Security.Cryptography.X509Certificates.X509Certificate2? DotNetCert { get; }
 
     /// <summary>The subject name extracted from the certificate (CN or O).</summary>
     public string SubjectName { get; }
@@ -22,8 +37,10 @@ public sealed class PdfCertificate
     /// <summary>The raw DER-encoded issuer distinguished name.</summary>
     internal byte[] IssuerDer { get; }
 
-    private PdfCertificate(byte[] certDer, RsaKey privateKey,
-        string subjectName, string issuerName, byte[] serialNumber, byte[] issuerDer)
+    private PdfCertificate(byte[] certDer, RsaKey? privateKey,
+        string subjectName, string issuerName, byte[] serialNumber, byte[] issuerDer,
+        SignatureKeyKind keyKind = SignatureKeyKind.Rsa,
+        System.Security.Cryptography.X509Certificates.X509Certificate2? dotNetCert = null)
     {
         CertificateDer = certDer;
         PrivateKey = privateKey;
@@ -31,13 +48,45 @@ public sealed class PdfCertificate
         IssuerName = issuerName;
         SerialNumber = serialNumber;
         IssuerDer = issuerDer;
+        KeyKind = keyKind;
+        DotNetCert = dotNetCert;
     }
 
     /// <summary>Load a certificate and private key from a PFX/PKCS#12 file.</summary>
     public static PdfCertificate FromPfx(byte[] pfxData, string password)
     {
-        var (certDer, key) = Pkcs12Parser.Parse(pfxData, password);
-        return FromDer(certDer, key);
+        // Fast path: the hand-rolled RSA loader. It only understands RSA keys in the
+        // PKCS#12 encodings it implements; anything else (DSA/ECDSA keys, or an RSA
+        // PFX in an unsupported shrouding) throws — fall back to the platform loader,
+        // which handles every key algorithm and PKCS#12 variant.
+        try
+        {
+            var (certDer, key) = Pkcs12Parser.Parse(pfxData, password);
+            return FromDer(certDer, key);
+        }
+        catch
+        {
+            return FromDotNet(pfxData, password);
+        }
+    }
+
+    /// <summary>Fallback loader that uses the platform PKCS#12 reader. Supports
+    /// DSA/ECDSA keys (and RSA PFX variants the hand-rolled parser rejects); the
+    /// resulting <see cref="DotNetCert"/> carries the private key for signing.</summary>
+    private static PdfCertificate FromDotNet(byte[] pfxData, string password)
+    {
+        var flags = System.Security.Cryptography.X509Certificates.X509KeyStorageFlags.Exportable
+                    | System.Security.Cryptography.X509Certificates.X509KeyStorageFlags.EphemeralKeySet;
+        var cert = new System.Security.Cryptography.X509Certificates.X509Certificate2(pfxData, password, flags);
+        var kind = cert.GetKeyAlgorithm() switch
+        {
+            "1.2.840.10040.4.1" => SignatureKeyKind.Dsa,   // id-dsa
+            "1.2.840.10045.2.1" => SignatureKeyKind.Ecdsa, // id-ecPublicKey
+            _ => SignatureKeyKind.Rsa,
+        };
+        var (subject, issuer, serial, issuerDer) = ParseCertMetadata(cert.RawData);
+        return new PdfCertificate(cert.RawData, privateKey: null, subject, issuer, serial, issuerDer,
+            kind, cert);
     }
 
     /// <summary>Load from a PFX file path.</summary>
@@ -50,7 +99,15 @@ public sealed class PdfCertificate
 
     internal static PdfCertificate FromDer(byte[] certDer, RsaKey privateKey)
     {
-        // Parse X.509 certificate to extract subject, issuer, serial
+        var (subjectName, issuerName, serial, issuerDer) = ParseCertMetadata(certDer);
+        return new PdfCertificate(certDer, privateKey, subjectName, issuerName, serial, issuerDer);
+    }
+
+    /// <summary>Parse subject/issuer/serial and the raw issuer DN from an X.509
+    /// certificate's DER.</summary>
+    private static (string subject, string issuer, byte[] serial, byte[] issuerDer)
+        ParseCertMetadata(byte[] certDer)
+    {
         var cert = new Asn1Reader(certDer).ReadSequence(); // Certificate
         var tbsCert = cert.ReadSequence(); // TBSCertificate
 
@@ -74,7 +131,7 @@ public sealed class PdfCertificate
         var subjectDer = tbsCert.ReadRawTlv();
         var subjectName = ParseDistinguishedName(subjectDer);
 
-        return new PdfCertificate(certDer, privateKey, subjectName, issuerName, serial, issuerDer);
+        return (subjectName, issuerName, serial, issuerDer);
     }
 
     private static string ParseDistinguishedName(byte[] der)

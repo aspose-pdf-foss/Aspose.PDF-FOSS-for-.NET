@@ -41,6 +41,26 @@ internal static class StreamFilter
         return data;
     }
 
+    /// <summary>Decode at most <paramref name="maxBytes"/> of the stream's leading content.
+    /// For the common single-FlateDecode (or uncompressed) case this inflates only the
+    /// requested prefix, so a huge payload isn't fully materialised when a caller only needs
+    /// to sniff its header; other / chained filter pipelines fall back to a full decode.</summary>
+    public static byte[] DecodePrefix(byte[] data, PdfDictionary streamDict, int maxBytes)
+    {
+        if (maxBytes <= 0) return System.Array.Empty<byte>();
+
+        var filterObj = streamDict.Get("Filter");
+        if (filterObj is null)
+            return data.Length <= maxBytes ? data : data[..maxBytes];
+
+        if (filterObj is PdfName single && single.Value is "FlateDecode" or "Fl")
+            return FlateDecodeFilter.DecodePrefix(data, streamDict.Get("DecodeParms") as PdfDictionary, maxBytes);
+
+        // Other / chained filters: decode fully then slice (uncommon for large attachments).
+        var full = Decode(data, streamDict);
+        return full.Length <= maxBytes ? full : full[..maxBytes];
+    }
+
     private static byte[] ApplyFilter(byte[] data, string filterName, PdfDictionary? parms)
     {
         return filterName switch

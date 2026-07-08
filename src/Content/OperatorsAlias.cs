@@ -5,5 +5,5 @@ namespace Aspose.Pdf.Operators;
 /// operator subclasses (GSave, BT, ET, …) in this namespace continue to
 /// bind. New public API surfaces should use the top-level
 /// <see cref="Aspose.Pdf.Operator"/> base directly to match the
-/// Aspose.PDF for .NET reflection surface.</summary>
+/// Aspose.Pdf reflection surface.</summary>
 public abstract class Operator : Aspose.Pdf.Operator { }

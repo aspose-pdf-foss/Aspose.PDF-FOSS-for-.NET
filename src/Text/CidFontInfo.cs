@@ -68,6 +68,8 @@ internal sealed class CidFontInfo
         932 => lead is (>= 0x81 and <= 0x9F) or (>= 0xE0 and <= 0xFC) ? 2 : 1,
         // EUC-KR / UHC: a lead byte of 0x81-0xFE starts a 2-byte code.
         949 => lead is >= 0x81 and <= 0xFE ? 2 : 1,
+        // Big5: a lead byte of 0x81-0xFE starts a 2-byte code.
+        950 => lead is >= 0x81 and <= 0xFE ? 2 : 1,
         _ => 1,
     };
 
@@ -75,11 +77,16 @@ internal sealed class CidFontInfo
     /// Decode one national byte-code to a Unicode codepoint via the embedded table
     /// for this font's legacy codepage. Returns null when unmapped/unsupported.
     /// </summary>
-    public int? LegacyToUnicode(int code) => LegacyCodepage switch
+    public int? LegacyToUnicode(int code) => LegacyLookup(LegacyCodepage, code);
+
+    /// <summary>Static form of <see cref="LegacyToUnicode"/> for callers that have a
+    /// codepage but no CidFontInfo (e.g. decoding a CJK-encoded /BaseFont name).</summary>
+    internal static int? LegacyLookup(int codepage, int code) => codepage switch
     {
         936 => GbkTable.ToUnicode(code),
         932 => SjisTable.ToUnicode(code),
         949 => KscTable.ToUnicode(code),
+        950 => Big5Table.ToUnicode(code),
         _ => null,
     };
 
@@ -171,6 +178,8 @@ internal sealed class CidFontInfo
         // and /CIDSystemInfo.
         int[]? cidToGid = null;
         string? ordering = null;
+        double vertOriginY = 880, vertAdvance = -1000;
+        Dictionary<int, (double, double, double)>? w2 = null;
         var descendantsObj = reader.Resolve(fontDict.Get("DescendantFonts"));
         if (descendantsObj is PdfArray descArr && descArr.Count > 0)
         {
@@ -182,6 +191,14 @@ internal sealed class CidFontInfo
                 var sysInfo = reader.ResolveDict(cidFontDict.Get("CIDSystemInfo"));
                 if (sysInfo is not null && sysInfo.Get("Ordering") is PdfString os)
                     ordering = os.ToText();
+                // Vertical-writing defaults (/DW2 = [vy w1], default [880 -1000],
+                // PDF 32000 §9.7.4.3) and the per-CID /W2 overrides.
+                if (reader.Resolve(cidFontDict.Get("DW2")) is PdfArray dw2 && dw2.Count >= 2)
+                {
+                    vertOriginY = NumOf(dw2[0]);
+                    vertAdvance = NumOf(dw2[1]);
+                }
+                w2 = ReadW2(cidFontDict, reader);
             }
         }
 
@@ -203,8 +220,69 @@ internal sealed class CidFontInfo
             LegacyCodepage = legacyCodepage,
             CjkBaseFont = fontDict.GetName("BaseFont"),
             IsVertical = encoding is not null && encoding.EndsWith("-V", StringComparison.Ordinal),
+            VertOriginY = vertOriginY,
+            VertAdvance = vertAdvance,
+            W2 = w2,
         };
     }
+
+    /// <summary>Default vertical origin Y (/DW2[0], glyph-space 1/1000 em).</summary>
+    public double VertOriginY { get; init; } = 880;
+
+    /// <summary>Default vertical displacement (/DW2[1], negative = downward).</summary>
+    public double VertAdvance { get; init; } = -1000;
+
+    /// <summary>Per-CID vertical metrics from /W2: CID → (w1y, vx, vy). Null when absent.</summary>
+    public Dictionary<int, (double w1y, double vx, double vy)>? W2 { get; init; }
+
+    /// <summary>Vertical metrics for one CID: displacement w1 (negative down), position
+    /// vector v = (vx, vy) from the glyph origin to the vertical writing origin.
+    /// Defaults per §9.7.4.3: v = (w0/2, /DW2 vy), w1 = /DW2 w1.</summary>
+    public (double w1y, double vx, double vy) VerticalMetrics(int cid, double w0)
+    {
+        if (W2 is not null && W2.TryGetValue(cid, out var m)) return m;
+        return (VertAdvance, w0 / 2.0, VertOriginY);
+    }
+
+    /// <summary>Parse the /W2 array (PDF 32000 §9.7.4.3): entries are either
+    /// «cFirst cLast w1y vx vy» (range) or «c [w1y₁ vx₁ vy₁ w1y₂ vx₂ vy₂ …]» (list).</summary>
+    private static Dictionary<int, (double, double, double)>? ReadW2(PdfDictionary cidFontDict, PdfReader reader)
+    {
+        if (reader.Resolve(cidFontDict.Get("W2")) is not PdfArray w2) return null;
+        var map = new Dictionary<int, (double, double, double)>();
+        var i = 0;
+        while (i < w2.Count)
+        {
+            if (reader.Resolve(w2[i]) is not PdfInteger cFirst) break;
+            if (i + 1 >= w2.Count) break;
+            var second = reader.Resolve(w2[i + 1]);
+            if (second is PdfArray list)
+            {
+                var cid = (int)cFirst.Value;
+                for (var k = 0; k + 2 < list.Count; k += 3)
+                    map[cid++] = (NumOf(list[k]), NumOf(list[k + 1]), NumOf(list[k + 2]));
+                i += 2;
+            }
+            else if (second is PdfInteger cLast && i + 4 < w2.Count)
+            {
+                var w1y = NumOf(w2[i + 2]);
+                var vx = NumOf(w2[i + 3]);
+                var vy = NumOf(w2[i + 4]);
+                for (var c = (int)cFirst.Value; c <= (int)cLast.Value; c++)
+                    map[c] = (w1y, vx, vy);
+                i += 5;
+            }
+            else break;
+        }
+        return map.Count > 0 ? map : null;
+    }
+
+    private static double NumOf(PdfObject? o) => o switch
+    {
+        PdfInteger pi => pi.Value,
+        PdfReal pr => pr.Value,
+        _ => 0,
+    };
 
     /// <summary>
     /// Map a predefined CJK CMap name (PDF 32000-1:2008 Table 118) to the codepage
@@ -232,8 +310,18 @@ internal sealed class CidFontInfo
         if (name.StartsWith("KSC-EUC", StringComparison.Ordinal)
             || name.StartsWith("KSCms-UHC", StringComparison.Ordinal)
             || name.StartsWith("KSCpc-EUC", StringComparison.Ordinal)) return 949;
+        // Adobe-CNS1 (Traditional Chinese) — Big5 byte codes (NOT CNS-EUC, which is EUC-TW).
+        if (name.StartsWith("ETen-B5", StringComparison.Ordinal)
+            || name.StartsWith("ETenms-B5", StringComparison.Ordinal)
+            || name.StartsWith("B5pc", StringComparison.Ordinal)
+            || name.StartsWith("B5-", StringComparison.Ordinal)
+            || name.StartsWith("HKscs-B5", StringComparison.Ordinal)) return 950;
         return 0;
     }
+
+    /// <summary>Expose <see cref="CodepageForCMap"/> for callers that only have the
+    /// /Encoding CMap name (e.g. decoding a CJK-encoded /BaseFont display name).</summary>
+    internal static int CodepageForCMapName(string? name) => CodepageForCMap(name);
 
     private static int[]? ReadCidToGidMap(PdfDictionary cidFontDict, PdfReader reader)
     {

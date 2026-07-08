@@ -421,6 +421,16 @@ public sealed class PdfFileInfo : IDisposable
         if (info.Producer is not null) meta.Set("pdf:Producer", info.Producer);
         if (info.CreationDate != DateTime.MinValue) meta.Set("xmp:CreateDate", info.CreationDate.ToString("yyyy-MM-ddTHH:mm:sszzz"));
         if (info.ModDate != DateTime.MinValue) meta.Set("xmp:ModifyDate", info.ModDate.ToString("yyyy-MM-ddTHH:mm:sszzz"));
+
+        // Custom (non-predefined) /Info entries are mirrored into the Adobe PDFX
+        // schema (pdfx:Key) so document-property indexers that read XMP first — and
+        // search indexers (the original SharePoint scenario) — surface them. The
+        // pdfx prefix → URI binding is built into the XMP serializer.
+        foreach (var key in info.Keys)
+        {
+            if (DocumentInfo.IsPredefinedKey(key)) continue;
+            if (info[key] is { } v) meta.Set($"pdfx:{key}", v);
+        }
     }
 
     /// <summary>The creation date in PDF native format
@@ -480,7 +490,7 @@ public sealed class PdfFileInfo : IDisposable
     public string? PdfVersion => _doc?.PdfVersion;
 
     /// <summary>Method-form alias of <see cref="PdfVersion"/> matching the
-    /// Aspose.PDF for .NET PdfFileInfo.GetPdfVersion() public surface.</summary>
+    /// Aspose.Pdf PdfFileInfo.GetPdfVersion() public surface.</summary>
     public string? GetPdfVersion() => PdfVersion;
 
     /// <summary>Whether the document is encrypted.</summary>
@@ -661,9 +671,28 @@ public sealed class PdfFileInfo : IDisposable
 
     /// <summary>
     /// Whether the bound document is a valid PDF file (instance property).
-    /// Property form mirrors the Aspose.PDF for .NET PdfFileInfo.IsPdfFile public surface.
+    /// Property form mirrors the Aspose.Pdf PdfFileInfo.IsPdfFile public surface.
     /// </summary>
-    public bool IsPdfFile => _doc != null && (!UseStrictValidation || _headerLooksLikePdf);
+    public bool IsPdfFile => _doc != null
+        && (!UseStrictValidation || _headerLooksLikePdf)
+        && IsStructurallyValidPdf(_doc);
+
+    /// <summary>
+    /// A successful parse alone is not enough: the lenient reader recovers a
+    /// <see cref="Document"/> even from a file whose page tree is broken (e.g. a
+    /// truncated <c>/Pages</c> object with no <c>/Kids</c>), which would then read
+    /// back as zero pages. A valid PDF must resolve at least one page, so reject a
+    /// document that parsed but exposes no page tree. An encrypted document that
+    /// could not be decrypted (an open/user password is required) is exempt — its
+    /// page tree cannot be walked without the password, so the parse alone stands.
+    /// </summary>
+    private static bool IsStructurallyValidPdf(Document doc)
+    {
+        if (doc.IsEncrypted && !doc.IsDecrypted)
+            return true;
+        try { return doc.PageCount > 0; }
+        catch { return false; }
+    }
 
     /// <summary>
     /// Save the bound document to a stream.

@@ -237,24 +237,23 @@ public sealed class CoonsPatchShading : ShadingBase
         return patches.ToArray();
     }
 
+    // Grid [u,v] slot for each of the 16 tensor control points in PDF stream order
+    // (§8.7.4.5.8): p11 p12 p13 p14 p24 p34 p44 p43 p42 p41 p31 p21 p22 p23 p33 p32.
+    private static readonly int[] TensorU = { 0, 0, 0, 0, 1, 2, 3, 3, 3, 3, 2, 1, 1, 1, 2, 2 };
+    private static readonly int[] TensorV = { 0, 1, 2, 3, 3, 3, 3, 2, 1, 0, 0, 0, 1, 2, 2, 1 };
+
     private static void BuildPatch(MeshPatch p, (double x, double y)[] pts, bool tensor)
     {
         if (tensor)
         {
-            // Tensor: 16 points in column-major order per §8.7.4.5.8.
-            // PDF uses the boustrophedon ordering p00 p10 p20 p30 p31 p21 p11 p01 p02 p12 p22 p32 p33 p23 p13 p03.
-            int[] idxMap = {
-                 0,  1,  2,  3,
-                 7,  6,  5,  4,
-                 8,  9, 10, 11,
-                15, 14, 13, 12,
-            };
-            for (var i = 0; i < 16; i++)
+            // Tensor: 16 control points read in the boustrophedon order of §8.7.4.5.8
+            //   p11 p12 p13 p14  p24 p34 p44  p43 p42 p41  p31 p21  p22 p23 p33 p32
+            // (1-based p_ij). Map each stream point k onto its [u,v] grid slot
+            // (0-based, u↔first index, v↔second). Points 12-15 are the interior.
+            for (var k = 0; k < 16 && k < pts.Length; k++)
             {
-                var src = idxMap[i];
-                var u = i % 4; var v = i / 4;
-                p.Px[u, v] = pts[src].x;
-                p.Py[u, v] = pts[src].y;
+                p.Px[TensorU[k], TensorV[k]] = pts[k].x;
+                p.Py[TensorU[k], TensorV[k]] = pts[k].y;
             }
         }
         else

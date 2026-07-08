@@ -101,7 +101,7 @@ public class Table : BaseParagraph
     public Rows Rows { get; }
 
     /// <summary>Default column-width used when <see cref="ColumnWidths"/>
-    /// is empty. Stored as a string (e.g. <c>"100"</c>) to mirror Aspose.PDF for .NET.</summary>
+    /// is empty. Stored as a string (e.g. <c>"100"</c>) to mirror Aspose.Pdf.</summary>
     public string? DefaultColumnWidth { get; set; }
 
     /// <summary>Corner-rounding style applied to the table's border box.</summary>
@@ -141,11 +141,16 @@ public class Table : BaseParagraph
         return total;
     }
 
+    /// <summary>Approximate rendered height of the table, independent of any
+    /// hosting page. Read-only: querying the height never mutates cell
+    /// formatting (font size, style) of the rows it inspects.</summary>
+    public double GetHeight() => GetHeight(null);
+
     /// <summary>Approximate rendered height of the table on
     /// <paramref name="parentPage"/>. Sums each row's fixed or estimated
     /// height; the result is used by the paginator to decide whether the
     /// whole table fits on the page.</summary>
-    public double GetHeight(Page parentPage)
+    public double GetHeight(Page? parentPage)
     {
         _ = parentPage;
         double total = 0;
@@ -178,7 +183,7 @@ public class Table : BaseParagraph
     }
 
     /// <summary>Shallow clone of the table. The Rows collection is reused
-    /// (the contents are not deep-copied) which matches the Aspose.PDF for .NET
+    /// (the contents are not deep-copied) which matches the Aspose.Pdf
     /// <c>object Clone()</c> contract.</summary>
     public override object Clone()
     {
@@ -191,20 +196,69 @@ public class Table : BaseParagraph
     // Each ImportDataTable / ImportDataView overload converts the source's
     // string-rendered cells into Row/Cell instances inserted starting at the
     // 1-based (firstFilledRow, firstFilledColumn) offset. The overloads
-    // returning void match the Aspose.PDF for .NET reflection signature exactly.
+    // returning void match the Aspose.Pdf reflection signature exactly.
 
-    /// <summary>Import a 2-D object array into the table.</summary>
+    /// <summary>Import a one-dimensional object array into the table, wrapping the
+    /// values into rows by the table's column count. Filling starts at the 1-based
+    /// (firstFilledRow, firstFilledColumn) offset and continues on the next row at
+    /// column 1 once a row is full — so a long array spans many rows (and paginates
+    /// when the table is broken) rather than a single very wide row.</summary>
     public void ImportArray(object?[] importedArray, int firstFilledRow, int firstFilledColumn, bool isLeftColumnsFilled)
     {
         if (importedArray is null) return;
         _ = isLeftColumnsFilled;
-        EnsureRowsAndColumns(firstFilledRow, firstFilledColumn + importedArray.Length);
-        for (int i = 0; i < importedArray.Length; i++)
+
+        // Column count drives the wrap. When the table declares no columns yet,
+        // fall back to a single row (the whole array) so callers that rely on a
+        // column-less table keep the prior one-row behaviour.
+        var columnCount = ResolveImportColumnCount();
+        if (columnCount <= 0) columnCount = importedArray.Length;
+        if (columnCount <= 0) return;
+
+        var row = Math.Max(1, firstFilledRow);
+        var col = Math.Min(Math.Max(1, firstFilledColumn), columnCount);
+        foreach (var value in importedArray)
         {
-            var row = Rows[firstFilledRow - 1];
+            EnsureRowsAndColumns(row, columnCount);
+            var r = Rows[row - 1];
+            EnsureCellCount(r, col);
+            r.Cells[col - 1].Text = value?.ToString() ?? string.Empty;
+            if (++col > columnCount) { col = 1; row++; }
+        }
+    }
+
+    /// <summary>The table's column count used when wrapping an imported array:
+    /// the number of declared <see cref="ColumnWidths"/>, else the widest existing
+    /// row, else zero (no columns declared yet).</summary>
+    private int ResolveImportColumnCount()
+    {
+        if (!string.IsNullOrEmpty(ColumnWidths))
+        {
+            var n = ColumnWidths.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).Length;
+            if (n > 0) return n;
+        }
+        var max = 0;
+        foreach (var r in Rows)
+            if (r.Cells.Count > max) max = r.Cells.Count;
+        return max;
+    }
+
+    /// <summary>Place a sequence of values into a single table row starting at the
+    /// 1-based (firstFilledRow, firstFilledColumn) offset — the per-row fill used by
+    /// the DataTable / DataView importers, which already iterate row by row and so
+    /// must not wrap.</summary>
+    private void FillSingleRow(object?[] values, int firstFilledRow, int firstFilledColumn)
+    {
+        // The reference API accepts 0 (or 1) as "first position"; both are 1-based here.
+        if (firstFilledRow < 1) firstFilledRow = 1;
+        if (firstFilledColumn < 1) firstFilledColumn = 1;
+        EnsureRowsAndColumns(firstFilledRow, firstFilledColumn + values.Length);
+        var row = Rows[firstFilledRow - 1];
+        for (int i = 0; i < values.Length; i++)
+        {
             var cellIdx = firstFilledColumn - 1 + i;
             EnsureCellCount(row, cellIdx + 1);
-            row.Cells[cellIdx].Text = importedArray[i]?.ToString() ?? string.Empty;
+            row.Cells[cellIdx].Text = values[i]?.ToString() ?? string.Empty;
         }
     }
 
@@ -213,12 +267,12 @@ public class Table : BaseParagraph
         int firstFilledRow, int firstFilledColumn)
     {
         if (importedDataTable is null) return;
-        var startRow = firstFilledRow;
+        var startRow = firstFilledRow < 1 ? 1 : firstFilledRow;
         if (isColumnNamesImported)
         {
             var header = importedDataTable.Columns.Cast<System.Data.DataColumn>()
                 .Select(c => (object)c.ColumnName).ToArray();
-            ImportArray(header, startRow, firstFilledColumn, isLeftColumnsFilled: false);
+            FillSingleRow(header, startRow, firstFilledColumn);
             startRow++;
         }
         for (int r = 0; r < importedDataTable.Rows.Count; r++)
@@ -227,7 +281,7 @@ public class Table : BaseParagraph
             // Coerce DBNull to empty string so .ToString() doesn't surface "System.DBNull".
             for (int i = 0; i < values.Length; i++)
                 if (values[i] is null || values[i] is System.DBNull) values[i] = string.Empty;
-            ImportArray(values, startRow + r, firstFilledColumn, isLeftColumnsFilled: false);
+            FillSingleRow(values, startRow + r, firstFilledColumn);
         }
     }
 
@@ -237,13 +291,13 @@ public class Table : BaseParagraph
     {
         if (importedDataTable is null) return;
         _ = maxColumns; _ = isHtmlSupported;
-        var startRow = firstFilledRow;
+        var startRow = firstFilledRow < 1 ? 1 : firstFilledRow;
         if (isColumnNamesShown)
         {
             var header = importedDataTable.Columns.Cast<System.Data.DataColumn>()
                 .Take(maxColumns > 0 ? maxColumns : int.MaxValue)
                 .Select(c => (object)c.ColumnName).ToArray();
-            ImportArray(header, startRow, firstFilledColumn, isLeftColumnsFilled: false);
+            FillSingleRow(header, startRow, firstFilledColumn);
             startRow++;
         }
         var rowCap = maxRows > 0 ? Math.Min(maxRows, importedDataTable.Rows.Count) : importedDataTable.Rows.Count;
@@ -252,7 +306,7 @@ public class Table : BaseParagraph
             var values = importedDataTable.Rows[r].ItemArray;
             for (int i = 0; i < values.Length; i++)
                 if (values[i] is null || values[i] is System.DBNull) values[i] = string.Empty;
-            ImportArray(values, startRow + r, firstFilledColumn, isLeftColumnsFilled: false);
+            FillSingleRow(values, startRow + r, firstFilledColumn);
         }
     }
 
@@ -264,14 +318,14 @@ public class Table : BaseParagraph
     {
         if (importedDataTable is null || sourceRowList is null || sourceColumnList is null) return;
         _ = isHtmlSupported;
-        var startRow = firstFilledRow;
+        var startRow = firstFilledRow < 1 ? 1 : firstFilledRow;
         if (showColumnNamesAsFirstRow)
         {
             var header = sourceColumnList
                 .Where(c => c >= 0 && c < importedDataTable.Columns.Count)
                 .Select(c => (object)importedDataTable.Columns[c].ColumnName)
                 .ToArray();
-            ImportArray(header, startRow, firstFilledColumn, isLeftColumnsFilled: false);
+            FillSingleRow(header, startRow, firstFilledColumn);
             startRow++;
         }
         for (int r = 0; r < sourceRowList.Length; r++)
@@ -283,7 +337,7 @@ public class Table : BaseParagraph
                 .Where(c => c >= 0 && c < importedDataTable.Columns.Count)
                 .Select(c => (object)(row[c] is System.DBNull ? string.Empty : row[c]?.ToString() ?? string.Empty))
                 .ToArray();
-            ImportArray(values, startRow + r, firstFilledColumn, isLeftColumnsFilled: false);
+            FillSingleRow(values, startRow + r, firstFilledColumn);
         }
     }
 
@@ -292,14 +346,14 @@ public class Table : BaseParagraph
         int firstFilledRow, int firstFilledColumn, int maxRows, int maxColumns)
     {
         if (sourceDataView is null) return;
-        var startRow = firstFilledRow;
+        var startRow = firstFilledRow < 1 ? 1 : firstFilledRow;
         var cols = sourceDataView.Table?.Columns.Cast<System.Data.DataColumn>().ToList()
                    ?? new System.Collections.Generic.List<System.Data.DataColumn>();
         if (maxColumns > 0 && maxColumns < cols.Count) cols = cols.GetRange(0, maxColumns);
         if (isColumnNamesImported)
         {
             var header = cols.Select(c => (object)c.ColumnName).ToArray();
-            ImportArray(header, startRow, firstFilledColumn, isLeftColumnsFilled: false);
+            FillSingleRow(header, startRow, firstFilledColumn);
             startRow++;
         }
         var rowCap = maxRows > 0 ? Math.Min(maxRows, sourceDataView.Count) : sourceDataView.Count;
@@ -310,14 +364,20 @@ public class Table : BaseParagraph
                 var v = sourceDataView[r][c.ColumnName];
                 return (object?)(v is System.DBNull ? string.Empty : v?.ToString() ?? string.Empty);
             }).ToArray();
-            ImportArray(values, startRow + r, firstFilledColumn, isLeftColumnsFilled: false);
+            FillSingleRow(values, startRow + r, firstFilledColumn);
         }
     }
 
     private void EnsureRowsAndColumns(int rowCount, int colCount)
     {
         while (Rows.Count < rowCount) Rows.Add();
-        _ = colCount;
+        // Keep the grid rectangular: every row carries at least the declared column
+        // count (from ColumnWidths) or the width this fill needs, whichever is larger —
+        // the reference importers leave the un-imported trailing columns as empty cells.
+        var cols = Math.Max(colCount, ResolveImportColumnCount());
+        if (cols > 0)
+            foreach (var r in Rows)
+                EnsureCellCount(r, cols);
     }
 
     private static void EnsureCellCount(Row row, int count)
@@ -442,6 +502,54 @@ public class Table : BaseParagraph
         var fullPageTopY = pageHeight - (topMargin > 0 ? topMargin : marginTop);
         var pageBottom = bottomMargin;
 
+        // RowSpan grid placement — only for the plain (identity-mapped) layout; the
+        // column-chunk slicing path keeps the legacy cell-index mapping.
+        var identityMap = true;
+        for (var i = 0; i < cellMap.Length; i++)
+            if (cellMap[i] != i) { identityMap = false; break; }
+        var grid = identityMap ? ComputeGrid() : null;
+        List<SpanBlock>? spanBlocks = null;
+        if (grid is { } g)
+        {
+            // The grid may need more columns than the cell-count-derived widths
+            // provide (cells shifted right past active spans); extend with the
+            // last width so every grid column has one.
+            if (g.gridCols > colWidths.Length)
+            {
+                var extended = new double[g.gridCols];
+                Array.Copy(colWidths, extended, colWidths.Length);
+                for (var i = colWidths.Length; i < g.gridCols; i++)
+                    extended[i] = colWidths[colWidths.Length - 1];
+                colWidths = extended;
+            }
+            spanBlocks = g.blocks;
+            foreach (var b in spanBlocks) BuildSpanBlockLines(b, colWidths);
+
+            // The generator paginates row-spanning tables against the page's
+            // real bottom margin (72pt by default), not the flow's tighter 36pt
+            // overflow inset — measured from its output for this exact layout.
+            // Only the flow's default inset is raised: header/footer builds pass a
+            // negative margin and HTML conversion passes the author's real margins,
+            // and both must keep their own boundary.
+            if (Math.Abs(bottomMargin - 36) < 0.5)
+            {
+                var pb = page.PageInfo?.Margin?.Bottom ?? 0;
+                if (pb <= 0) pb = 72;
+                if (pb > pageBottom) pageBottom = pb;
+            }
+        }
+
+        // Bundle map for keep-together pagination: rows chained by any rowspan form a
+        // bundle. link[r] == true → rows r and r+1 belong to the same bundle.
+        bool[]? bundleLink = null;
+        if (spanBlocks is { Count: > 0 })
+        {
+            bundleLink = new bool[Rows.Count];
+            foreach (var b in spanBlocks)
+                for (var r = Math.Max(0, b.StartRow); r < Math.Min(b.EndRow, Rows.Count) - 1; r++)
+                    bundleLink[r] = true;
+        }
+
         // Pre-compute per-row content plans. Each plan carries the cells' wrapped
         // lines, uniform line height, vertical padding and the min (one-line) chunk
         // height — the paginator uses these to chop a row across pages when it
@@ -450,7 +558,9 @@ public class Table : BaseParagraph
         for (var i = 0; i < Rows.Count; i++)
         {
             Rows.At(i).IsInNewPage = false;
-            rowPlans.Add(BuildRowPlan(Rows.At(i), colWidths, cellMap));
+            rowPlans.Add(grid is { } gg
+                ? BuildRowPlan(Rows.At(i), colWidths, cellMap, gg.gridToCell[i], gg.effRowSpan[i])
+                : BuildRowPlan(Rows.At(i), colWidths, cellMap));
         }
 
         // Walk rows, emit slices, spill to new pages as needed.
@@ -468,6 +578,37 @@ public class Table : BaseParagraph
         {
             var plan = rowPlans[i];
             var lineIdx = 0;
+
+            // RowSpan keep-together (reference-derived): rows chained by rowspans form a
+            // bundle. When the bundle doesn't fit the space left on this page, a small
+            // bundle (≤ 8 rows) moves to the next page whole; a larger one may split but
+            // only if at least 4 of its rows stay on this page — else it moves too.
+            var forceBreak = false;
+            if (bundleLink is not null && i < bundleLink.Length && bundleLink[i]
+                && (i == 0 || !bundleLink[i - 1])
+                && currentY < fullPageTopY - 1e-3)
+            {
+                var bEnd = i + 1;
+                while (bEnd < rowPlans.Count && bundleLink[bEnd - 1]) bEnd++;
+                var bundleRows = bEnd - i;
+                var avail = currentY - pageBottom;
+                double need = 0;
+                var fit = 0;
+                for (var r = i; r < bEnd; r++)
+                {
+                    var hp = rowPlans[r];
+                    var contentH = hp.LineCount == 0
+                        ? hp.MinBlankHeight
+                        : (hp.LineCount - 1) * hp.LineHeight + hp.TightLine;
+                    var hRow = hp.LineCount == 0 || hp.IsBlankRow ? contentH : contentH + hp.VertPadding;
+                    if (hp.Row.MinRowHeight > hRow) hRow = hp.Row.MinRowHeight;
+                    need += hRow;
+                    if (need <= avail + 1e-3) fit++;
+                }
+                if (fit < bundleRows && (bundleRows <= 8 || fit < 4))
+                    forceBreak = true;
+            }
+
             while (lineIdx < plan.LineCount || (plan.LineCount == 0 && lineIdx == 0))
             {
                 var usable = currentY - pageBottom - plan.VertPadding;
@@ -488,11 +629,13 @@ public class Table : BaseParagraph
                 // we're already on a fresh page, where it must be placed regardless).
                 if (plan.CellImages is not null && !atFreshPage && linesFit < plan.LineCount)
                     linesFit = 0;
+                if (forceBreak) { linesFit = 0; forceBreak = false; }
+                if (linesFit <= 0 && atFreshPage) linesFit = Math.Max(1, plan.LineCount - lineIdx);
                 if (linesFit <= 0)
                 {
                     // No room on current page — close it and open a new one.
                     result.Add(BuildSlicesContent(slices, colWidths, tableX, fontName, cellMap,
-                        firstPageDone ? null : page));
+                        firstPageDone ? null : page, spanBlocks));
                     firstPageDone = true;
                     slices.Clear();
                     // Seat the first row of the fresh page so its content (text/image,
@@ -512,8 +655,13 @@ public class Table : BaseParagraph
                             var hp = rowPlans[h];
                             var hContentH = hp.LineCount == 0
                                 ? hp.MinBlankHeight
-                                : hp.LineCount * hp.LineHeight;
+                                : (hp.LineCount - 1) * hp.LineHeight + hp.TightLine;
                             var hSliceH = hp.LineCount == 0 || hp.IsBlankRow ? hContentH : hContentH + hp.VertPadding;
+                            // Apply the row's MinRowHeight floor to the repeated header too, so a
+                            // continuation page's header matches the body row pitch (otherwise the
+                            // header is its natural height and every data row below shifts up).
+                            if (hp.Row.MinRowHeight > hSliceH)
+                                hSliceH = hp.Row.MinRowHeight;
                             slices.Add(new RowSlice
                             {
                                 Plan = hp,
@@ -521,6 +669,7 @@ public class Table : BaseParagraph
                                 LineCount = hp.LineCount,
                                 TopY = currentY,
                                 Height = hSliceH,
+                                RowIndex = h,
                             });
                             currentY -= hSliceH;
                         }
@@ -532,12 +681,17 @@ public class Table : BaseParagraph
                 var take = plan.LineCount == 0 ? 0 : Math.Min(remaining, linesFit);
                 var sliceContentH = (plan.LineCount == 0)
                     ? plan.MinBlankHeight
-                    : take * plan.LineHeight;
+                    : (take - 1) * plan.LineHeight + plan.TightLine;
                 // Spacer rows (content-less or whitespace-only) reserve just their line with
-                // no cell padding, matching the reference engine; content rows keep padding.
+                // no cell padding, matching the generator; content rows keep padding.
                 var sliceH = plan.LineCount == 0 || plan.IsBlankRow
                     ? sliceContentH
                     : sliceContentH + plan.VertPadding;
+                // Honour a row's minimum height as a floor for content rows too (not just
+                // empty ones), but only when the whole row fits in this slice.
+                var wholeRowInSlice = lineIdx == 0 && take == plan.LineCount;
+                if (wholeRowInSlice && plan.Row.MinRowHeight > sliceH && sliceH <= usable)
+                    sliceH = Math.Min(plan.Row.MinRowHeight, currentY - pageBottom);
                 slices.Add(new RowSlice
                 {
                     Plan = plan,
@@ -545,6 +699,7 @@ public class Table : BaseParagraph
                     LineCount = take,
                     TopY = currentY,
                     Height = sliceH,
+                    RowIndex = i,
                 });
                 currentY -= sliceH;
                 lineIdx += (plan.LineCount == 0 ? 1 : take);
@@ -553,7 +708,7 @@ public class Table : BaseParagraph
         }
         if (slices.Count > 0)
             result.Add(BuildSlicesContent(slices, colWidths, tableX, fontName, cellMap,
-                firstPageDone ? null : page));
+                firstPageDone ? null : page, spanBlocks));
         if (result.Count == 0) result.Add(Array.Empty<byte>());
         // Height consumed on the (first/only) page — meaningful for the single-page
         // case the flow dispatcher uses to advance a shared cursor; multi-page tables
@@ -569,6 +724,8 @@ public class Table : BaseParagraph
         public Row Row = null!;
         public List<List<CellLine>> CellLines = new();  // [cell][line]
         public double LineHeight;        // uniform per-row line height (max across cells)
+        public double TightLine;         // tight (no-leading) height of the tallest line; used so a
+                                         // block of n lines is (n-1)·LineHeight + TightLine tall
         public double VertPadding;       // max (padTop + padBottom) across cells
         public int LineCount;            // max line count across cells; 0 = empty row
         public double MinBlankHeight;    // height for an empty row (FixedRowHeight/MinRowHeight)
@@ -579,6 +736,12 @@ public class Table : BaseParagraph
         // mix Graph paragraphs with inline text; null when the cell has no graph.
         public Dictionary<int, List<List<InlineItem>>>? CellInline;
         public bool IsBlankRow;          // content is whitespace only — rendered tight (no padding)
+        // RowSpan grid mode (null otherwise): grid column → cell index starting there
+        // (-1 vacant/foreign-span, -2 covered by this row's own ColSpan), and each cell's
+        // effective (clamped) row span. Cells with EffRowSpan > 1 are drawn by the
+        // span-block pass, not the per-row slice render.
+        public int[]? GridToCell;
+        public int[]? EffRowSpan;
     }
 
     /// <summary>One item on an inline cell line: either a text run or a Graph, with its
@@ -592,6 +755,11 @@ public class Table : BaseParagraph
         public double X;                            // offset from the cell content-left
         public double Width;
         public double Height;
+        public double BaseFontSize;                 // line baseline reference size (pre sub/super shrink)
+        public double BaselineShift;                // baseline Y shift (+super / -sub); 0 = normal
+        public bool Empty;                          // emit an empty show-text run at this position
+        public byte[]? Ttf;                         // per-run embedded TrueType (Type0) — null = table default font
+        public string? FontName;                    // base font name for the embedded run
     }
 
     /// <summary>An <see cref="Image"/> paragraph placed inside a table cell. Carries the
@@ -603,6 +771,42 @@ public class Table : BaseParagraph
         public double Width;
         public double Height;
         public HorizontalAlignment Align;
+
+        /// <summary>Number of text/content lines preceding this image in the cell, so the
+        /// render pass seats the image on its own line below them instead of at the cell top
+        /// (e.g. a title line above a centred logo).</summary>
+        public int LineOffset;
+    }
+
+    /// <summary>True when the text contains a CJK / Han / Kana / Hangul character — the only
+    /// case where a fragment's embedded font must override the table's Standard-14 render path
+    /// (a plain embedded Latin font keeps the existing path to avoid changing green layouts).</summary>
+    private static bool IsCjk(int o) =>
+        (o >= 0x3400 && o <= 0x9FFF) || (o >= 0x3000 && o <= 0x30FF)
+        || (o >= 0xF900 && o <= 0xFAFF) || (o >= 0xAC00 && o <= 0xD7AF);
+
+    /// <summary>True when the text contains any CJK ideograph, kana, or Hangul character.</summary>
+    private static bool ContainsCjk(string s)
+    {
+        foreach (var c in s) if (IsCjk(c)) return true;
+        return false;
+    }
+
+    /// <summary>True when the text has CJK content AND the embedded font actually covers every
+    /// CJK glyph. Only then does routing through Type0/CID help — a font without the glyphs
+    /// (e.g. Arial on Japanese) must keep the existing path so its layout is unchanged.</summary>
+    private static bool CjkCoveredBy(string s, byte[] ttf)
+    {
+        var gp = GetInlineGlyphParser(ttf);
+        if (gp is null) return false;
+        var any = false;
+        foreach (var ch in s)
+        {
+            if (!IsCjk(ch)) continue;
+            any = true;
+            if (!gp.CMap.TryGetValue(ch, out var g) || g == 0) return false;
+        }
+        return any;
     }
 
     /// <summary>A cell line: already-wrapped text with per-line font/color.</summary>
@@ -623,6 +827,23 @@ public class Table : BaseParagraph
         /// <summary>Hyperlink carried by the source fragment, if any. Rendered as a
         /// link annotation over the line's text rectangle.</summary>
         public Hyperlink? Hyperlink;
+
+        /// <summary>When set, this line holds already-shaped Arabic/Unicode text (visual order)
+        /// that must be drawn with the embedded TrueType program here as a Type0/CID font (the
+        /// table's default Standard-14 font can't display it). The render pass embeds the font
+        /// and emits the line as hex glyph IDs.</summary>
+        public byte[]? Type0Ttf;
+        public string? Type0FontName;
+        // When set, the Type0 render emits each space-separated token as its own positioned
+        // run (space-separated CJK), so the absorber surfaces per-token fragments. Not set for
+        // shaped Arabic (which is one visual-order run and must not be re-split).
+        public bool Type0SplitTokens;
+
+        /// <summary>Horizontal alignment for this individual line within the cell content box.
+        /// Cell text and TextFragments inherit the cell's resolved alignment (cell → row →
+        /// table DefaultCellTextState); an HtmlFragment keeps its own block alignment (left
+        /// unless its style requests centre/right), so a single cell can mix alignments.</summary>
+        public HorizontalAlignment Align = HorizontalAlignment.Left;
     }
 
     /// <summary>One slice of a row on one page. A row with content taller than the
@@ -634,39 +855,277 @@ public class Table : BaseParagraph
         public int LineCount;
         public double TopY;
         public double Height;
+        public int RowIndex;
     }
 
-    private RowPlan BuildRowPlan(Row row, double[] colWidths, int[] cellMap)
+    /// <summary>A cell spanning multiple rows (RowSpan &gt; 1). Its background, border and
+    /// content are drawn once per page over the union of its rows' slices; the rows below
+    /// the start row leave the spanned grid columns vacant.</summary>
+    private sealed class SpanBlock
     {
-        var plan = new RowPlan { Row = row };
+        public int StartRow;             // first row index (inclusive)
+        public int EndRow;               // last row index (exclusive), clamped to Rows.Count
+        public int GridCol;              // starting grid column
+        public int ColSpan;              // grid columns covered
+        public Cell Cell = null!;
+        public Row Row = null!;
+        public List<CellLine> Lines = new();
+        public double LineHeight;
+        public double TightLine;
+    }
+
+    /// <summary>Grid placement for tables using RowSpan: assigns every cell its grid column
+    /// the way an HTML table does (cells flow left-to-right past columns still occupied by
+    /// spans from earlier rows). Returns null when no cell spans rows — the legacy
+    /// column-index-equals-cell-index layout stays in effect for those tables.</summary>
+    private (int[][] gridToCell, int[][] effRowSpan, int gridCols, List<SpanBlock> blocks)? ComputeGrid()
+    {
+        var anySpan = false;
+        for (var r = 0; r < Rows.Count && !anySpan; r++)
+        {
+            var row = Rows.At(r);
+            for (var c = 0; c < row.Cells.Count; c++)
+                if (row.Cells.At(c).RowSpan > 1) { anySpan = true; break; }
+        }
+        if (!anySpan) return null;
+
+        var gridToCell = new int[Rows.Count][];
+        var effRowSpan = new int[Rows.Count][];
+        var blocks = new List<SpanBlock>();
+        // Columns still held by rowspans from earlier rows: (colStart, colSpan, rowsLeft).
+        var pending = new List<(int colStart, int colSpan, int remaining)>();
+        var gridCols = 1;
+
+        for (var r = 0; r < Rows.Count; r++)
+        {
+            var row = Rows.At(r);
+            var occupied = new List<bool>();
+            void Reserve(int col) { while (occupied.Count <= col) occupied.Add(false); occupied[col] = true; }
+            foreach (var (colStart, colSpan, _) in pending)
+                for (var k = 0; k < colSpan; k++) Reserve(colStart + k);
+
+            // -1 = vacant or held by a foreign rowspan (advance x by the column width);
+            // -2 = covered by this row's own ColSpan cell (x already advanced by the span).
+            var mapping = new List<int>();
+            void Put(int col, int val)
+            {
+                while (mapping.Count <= col) mapping.Add(-1);
+                mapping[col] = val;
+            }
+            var eff = new int[row.Cells.Count];
+            var cursor = 0;
+            // Spans placed in THIS row start covering rows at r+1; they must not be
+            // decremented at the end of row r, so collect them separately.
+            var placedThisRow = new List<(int colStart, int colSpan, int remaining)>();
+            for (var ci = 0; ci < row.Cells.Count; ci++)
+            {
+                var cell = row.Cells.At(ci);
+                var colSpan = Math.Max(1, cell.ColSpan);
+                bool Fits(int at)
+                {
+                    for (var k = 0; k < colSpan; k++)
+                        if (at + k < occupied.Count && occupied[at + k]) return false;
+                    return true;
+                }
+                while (!Fits(cursor)) cursor++;
+                Put(cursor, ci);
+                for (var k = 1; k < colSpan; k++) Put(cursor + k, -2);
+                eff[ci] = Math.Min(Math.Max(1, cell.RowSpan), Rows.Count - r);
+                if (eff[ci] > 1)
+                {
+                    placedThisRow.Add((cursor, colSpan, eff[ci] - 1));
+                    blocks.Add(new SpanBlock
+                    {
+                        StartRow = r, EndRow = r + eff[ci],
+                        GridCol = cursor, ColSpan = colSpan,
+                        Cell = cell, Row = row,
+                    });
+                }
+                cursor += colSpan;
+            }
+            if (mapping.Count > gridCols) gridCols = mapping.Count;
+            if (occupied.Count > gridCols) gridCols = occupied.Count;
+            gridToCell[r] = mapping.ToArray();
+            effRowSpan[r] = eff;
+            for (var p = pending.Count - 1; p >= 0; p--)
+            {
+                var (cs, csp, rem) = pending[p];
+                if (rem <= 1) pending.RemoveAt(p);
+                else pending[p] = (cs, csp, rem - 1);
+            }
+            pending.AddRange(placedThisRow);
+        }
+
+        // Pad every row's mapping to the full grid width (vacant → -1).
+        for (var r = 0; r < Rows.Count; r++)
+        {
+            if (gridToCell[r].Length == gridCols) continue;
+            var padded = new int[gridCols];
+            for (var c = 0; c < gridCols; c++) padded[c] = c < gridToCell[r].Length ? gridToCell[r][c] : -1;
+            gridToCell[r] = padded;
+        }
+        return (gridToCell, effRowSpan, gridCols, blocks);
+    }
+
+    /// <summary>Wrapped content lines for a row-spanning cell (text-only: TextFragment /
+    /// HtmlFragment). Mirrors the plain-text path of <see cref="BuildRowPlan"/>.</summary>
+    private void BuildSpanBlockLines(SpanBlock block, double[] colWidths)
+    {
+        var cell = block.Cell;
+        var row = block.Row;
+        var padding = cell.Margin ?? row.DefaultCellPadding ?? DefaultCellPadding;
+        var dp = DefaultPad(cell, row);
+        var padLeft = padding?.Left ?? dp;
+        var padRight = padding?.Right ?? dp;
+        var width = GetCellWidth(colWidths, block.GridCol, block.ColSpan);
+        var availWidth = width - padLeft - padRight;
+
+        var textState = cell.DefaultCellTextState ?? row.DefaultCellTextState ?? DefaultCellTextState;
+        var defaultFontSize = textState?.FontSize > 0 ? textState.FontSize : 12;
+        var cellAlign = ResolveCellAlignment(cell, row);
+        double maxLine = 0, tight = 0;
+
+        foreach (var paragraph in cell.Paragraphs)
+        {
+            string? text = null;
+            double fragFontSize = defaultFontSize;
+            Color? color = null;
+            if (paragraph is TextFragment tf)
+            {
+                text = tf.Text;
+                fragFontSize = ResolveFragmentFontSize(tf, defaultFontSize);
+                color = tf.TextState.ForegroundColor ?? textState?.ForegroundColor;
+            }
+            else if (paragraph is HtmlFragment html)
+            {
+                text = HtmlFragment.StripHtmlTags(html.HtmlContent ?? "");
+                color = textState?.ForegroundColor;
+            }
+            if (string.IsNullOrEmpty(text)) continue;
+            if (fragFontSize * 1.2 > maxLine) { maxLine = fragFontSize * 1.2; tight = fragFontSize; }
+            foreach (var segment in text.Split('\n'))
+            {
+                if (segment.Length == 0) continue;
+                if (cell.IsWordWrapped || MeasureWidth(segment, fragFontSize) > availWidth)
+                {
+                    foreach (var l in WrapText(segment, fragFontSize, availWidth))
+                        block.Lines.Add(new CellLine { Text = l, FontSize = fragFontSize, ForegroundColor = color, Align = cellAlign });
+                }
+                else
+                    block.Lines.Add(new CellLine { Text = segment, FontSize = fragFontSize, ForegroundColor = color, Align = cellAlign });
+            }
+        }
+        block.LineHeight = maxLine > 0 ? maxLine : defaultFontSize * 1.2;
+        block.TightLine = tight > 0 ? tight : block.LineHeight;
+    }
+
+    /// <summary>Resolve a cell's effective horizontal text alignment by walking
+    /// cell → row → table. The default (<see cref="HorizontalAlignment.Left"/>/None) at a
+    /// level means "inherit", so a table-wide <c>DefaultCellTextState.HorizontalAlignment =
+    /// Center</c> reaches cells that don't override it — previously the cell's auto-created
+    /// <c>DefaultCellTextState</c> (Left) shadowed the table default wholesale.</summary>
+    private HorizontalAlignment ResolveCellAlignment(Cell cell, Row row)
+    {
+        static bool Set(HorizontalAlignment a) =>
+            a != HorizontalAlignment.Left && a != HorizontalAlignment.None;
+
+        if (Set(cell.Alignment)) return cell.Alignment;
+        if (cell.DefaultCellTextState is { } cts && Set(cts.HorizontalAlignment)) return cts.HorizontalAlignment;
+        if (row.DefaultCellTextState is { } rts && Set(rts.HorizontalAlignment)) return rts.HorizontalAlignment;
+        if (DefaultCellTextState is { } tts && tts.HorizontalAlignment != HorizontalAlignment.None)
+            return tts.HorizontalAlignment;
+        return HorizontalAlignment.Left;
+    }
+
+    /// <summary>Best-effort horizontal alignment for an HtmlFragment from its inline CSS.
+    /// A block-level HtmlFragment defaults to left and does NOT inherit the cell's text
+    /// alignment (matching the generator, where a plain HtmlFragment stays left in a
+    /// centred cell while a <c>justify-content:center</c>/<c>text-align:center</c> one centres).</summary>
+    private static HorizontalAlignment ParseHtmlAlignment(string? html)
+    {
+        if (string.IsNullOrEmpty(html)) return HorizontalAlignment.Left;
+        var h = html.Replace(" ", string.Empty);
+        if (h.IndexOf("text-align:center", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            h.IndexOf("justify-content:center", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            h.IndexOf("align=\"center\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            h.IndexOf("align='center'", StringComparison.OrdinalIgnoreCase) >= 0)
+            return HorizontalAlignment.Center;
+        if (h.IndexOf("text-align:right", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            h.IndexOf("justify-content:flex-end", StringComparison.OrdinalIgnoreCase) >= 0)
+            return HorizontalAlignment.Right;
+        return HorizontalAlignment.Left;
+    }
+
+    /// <summary>Default per-side cell padding when no explicit padding is set. A "bare" cell —
+    /// no border and no explicit margin/cell-padding anywhere in the cell → row → table chain —
+    /// gets 0, matching the generator (its borderless default cell seats text at the
+    /// content edge and its row pitch is just the font size). Cells that carry a border or
+    /// explicit padding keep the historical 2pt default (their templates depend on it).</summary>
+    private double DefaultPad(Cell cell, Row row)
+    {
+        var hasBorder = (cell.Border ?? row.DefaultCellBorder ?? row.Border ?? DefaultCellBorder) is not null
+            || Border is not null;
+        var hasPad = cell.Margin is not null || row.DefaultCellPadding is not null || DefaultCellPadding is not null;
+        return (!hasBorder && !hasPad) ? 0.0 : 2.0;
+    }
+
+    private RowPlan BuildRowPlan(Row row, double[] colWidths, int[] cellMap,
+        int[]? gridToCell = null, int[]? effRowSpan = null)
+    {
+        var plan = new RowPlan { Row = row, GridToCell = gridToCell, EffRowSpan = effRowSpan };
         var defaultPad = row.DefaultCellPadding ?? DefaultCellPadding;
         double maxLineHeight = 0;
+        // Tight (no-leading) height of whatever set maxLineHeight. A block of n lines occupies
+        // (n-1)·LineHeight + TightLine, so a single text line takes its glyph height (≈ FontSize)
+        // rather than a full 1.2× leading slot — matching the generator's row height.
+        // Non-text content (images, control glyphs) keeps its full height as the tight value.
+        double tightForMax = 0;
+        void Consider(double lineHeight, double tight)
+        {
+            if (lineHeight > maxLineHeight) { maxLineHeight = lineHeight; tightForMax = tight; }
+        }
         double maxVertPad = 0;
         double maxTopPad = 0;
 
         for (var col = 0; col < colWidths.Length; col++)
         {
-            var origIdx = cellMap[col];
-            if (origIdx >= row.Cells.Count) { plan.CellLines.Add(new List<CellLine>()); continue; }
+            int origIdx;
+            if (gridToCell is not null)
+            {
+                origIdx = col < gridToCell.Length ? gridToCell[col] : -1;
+                if (origIdx < 0 || origIdx >= row.Cells.Count) { plan.CellLines.Add(new List<CellLine>()); continue; }
+                // A row-spanning cell's content, padding and metrics belong to the span
+                // block, not this row's plan — its grid columns stay blank here.
+                if (effRowSpan is not null && effRowSpan[origIdx] > 1)
+                { plan.CellLines.Add(new List<CellLine>()); continue; }
+            }
+            else
+            {
+                origIdx = cellMap[col];
+                if (origIdx >= row.Cells.Count) { plan.CellLines.Add(new List<CellLine>()); continue; }
+            }
             var cell = row.Cells.At(origIdx);
             var padding = cell.Margin ?? defaultPad;
-            var padV = (padding?.Top ?? 2) + (padding?.Bottom ?? 2);
+            var dp = DefaultPad(cell, row);
+            var padV = (padding?.Top ?? dp) + (padding?.Bottom ?? dp);
             if (padV > maxVertPad) maxVertPad = padV;
-            if ((padding?.Top ?? 2) > maxTopPad) maxTopPad = padding?.Top ?? 2;
+            if ((padding?.Top ?? dp) > maxTopPad) maxTopPad = padding?.Top ?? dp;
 
-            var padLeft = padding?.Left ?? 2;
-            var padRight = padding?.Right ?? 2;
+            var padLeft = padding?.Left ?? dp;
+            var padRight = padding?.Right ?? dp;
             var span = Math.Max(1, Math.Min(cell.ColSpan, colWidths.Length - col));
             var cellWidth = GetCellWidth(colWidths, col, span);
             var availWidth = cellWidth - padLeft - padRight;
 
             var textState = cell.DefaultCellTextState ?? row.DefaultCellTextState ?? DefaultCellTextState;
             var defaultFontSize = textState?.FontSize > 0 ? textState.FontSize : 12;
+            var cellAlign = ResolveCellAlignment(cell, row);
             var lines = new List<CellLine>();
 
             var cellNeedsInline = false;
             foreach (var gp in cell.Paragraphs)
-                if (gp is Aspose.Pdf.Drawing.Graph || IsInlineParagraph(gp)) { cellNeedsInline = true; break; }
+                if (gp is Aspose.Pdf.Drawing.Graph || IsInlineParagraph(gp) || IsMultiSegmentFragment(gp))
+                { cellNeedsInline = true; break; }
             if (cellNeedsInline)
             {
                 // Cells mixing Graph paragraphs with inline text (e.g. a colour-swatch
@@ -675,7 +1134,7 @@ public class Table : BaseParagraph
                 var inlineRows = BuildInlineCellLayout(cell, availWidth, defaultFontSize, textState, out var inlineH);
                 (plan.CellInline ??= new())[col] = inlineRows;
                 foreach (var _ in inlineRows) lines.Add(new CellLine { Text = "", FontSize = defaultFontSize });
-                if (inlineH > maxLineHeight) maxLineHeight = inlineH;
+                Consider(inlineH, inlineH);
             }
             else
             foreach (var paragraph in cell.Paragraphs)
@@ -693,7 +1152,7 @@ public class Table : BaseParagraph
                     // true visual extent. Each inner row contributes at least one
                     // line per non-empty segment.
                     var innerRows = inner.Rows;
-                    if (defaultFontSize * 1.2 > maxLineHeight) maxLineHeight = defaultFontSize * 1.2;
+                    Consider(defaultFontSize * 1.2, defaultFontSize);
                     for (int ri = 0; ri < innerRows.Count; ri++)
                     {
                         var irow = innerRows.At(ri);
@@ -778,9 +1237,10 @@ public class Table : BaseParagraph
                     (plan.CellImages ??= new Dictionary<int, CellImage>())[col] = new CellImage
                     {
                         Data = imgBytes, Width = dispW, Height = dispH, Align = cellImg.HorizontalAlignment,
+                        LineOffset = lines.Count,
                     };
                     var imgLineH = defaultFontSize * 1.2;
-                    if (imgLineH > maxLineHeight) maxLineHeight = imgLineH;
+                    Consider(imgLineH, imgLineH);
                     var imgLines = Math.Max(1, (int)Math.Ceiling(dispH / imgLineH));
                     for (var k = 0; k < imgLines; k++)
                         lines.Add(new CellLine { Text = "", FontSize = defaultFontSize });
@@ -799,7 +1259,7 @@ public class Table : BaseParagraph
                     // A control row is sized to its glyph/caption without the extra
                     // text leading — the glyph is a fixed box, not a line of type.
                     var lh = Math.Max(glyphH, capSize);
-                    if (lh > maxLineHeight) maxLineHeight = lh;
+                    Consider(lh, lh);
                     lines.Add(new CellLine
                     {
                         Text = opt.Caption?.Text ?? "",
@@ -815,7 +1275,7 @@ public class Table : BaseParagraph
                 if (paragraph is Aspose.Pdf.Forms.CheckboxField cbf)
                 {
                     var boxH = cbf.Height > 0 ? cbf.Height : defaultFontSize;
-                    if (boxH > maxLineHeight) maxLineHeight = boxH;
+                    Consider(boxH, boxH);
                     lines.Add(new CellLine { Text = "", FontSize = defaultFontSize, Checkbox = cbf });
                     continue;
                 }
@@ -824,21 +1284,35 @@ public class Table : BaseParagraph
                 double fragFontSize = defaultFontSize;
                 Color? color = null;
                 Hyperlink? fragLink = null;
+                // A fragment-level embedded font (e.g. a CJK Unicode fallback assigned when the
+                // cell text has chars outside WinAnsi) — drawn as Type0/CID by the render pass.
+                byte[]? fragEmbeddedTtf = null;
+                string? fragEmbeddedName = null;
+                // Cell text / TextFragments follow the cell's resolved alignment; a fragment
+                // that sets its own non-default alignment wins. An HtmlFragment keeps its own
+                // block alignment (left unless its style centres/right-aligns).
+                var lineAlign = cellAlign;
                 if (paragraph is TextFragment tf)
                 {
                     text = tf.Text;
                     fragFontSize = ResolveFragmentFontSize(tf, defaultFontSize);
                     color = tf.TextState.ForegroundColor ?? textState?.ForegroundColor;
                     fragLink = tf.HyperlinkValue;
+                    fragEmbeddedTtf = tf.TextState.Font?.SourceFontData?.TtfData;
+                    fragEmbeddedName = tf.TextState.Font?.FontName;
+                    if (tf.TextState.HorizontalAlignment != HorizontalAlignment.Left &&
+                        tf.TextState.HorizontalAlignment != HorizontalAlignment.None)
+                        lineAlign = tf.TextState.HorizontalAlignment;
                 }
                 else if (paragraph is HtmlFragment html)
                 {
                     text = HtmlFragment.StripHtmlTags(html.HtmlContent ?? "");
                     color = textState?.ForegroundColor;
+                    lineAlign = ParseHtmlAlignment(html.HtmlContent);
                 }
                 if (text is null) continue;
                 var thisLineHeight = fragFontSize * 1.2;
-                if (thisLineHeight > maxLineHeight) maxLineHeight = thisLineHeight;
+                Consider(thisLineHeight, fragFontSize);
 
                 // An empty TextFragment is a deliberate spacer in many cell
                 // layouts (e.g. TextFragment with LineSpacing set and no
@@ -847,8 +1321,79 @@ public class Table : BaseParagraph
                 // collapse vertical padding that tests rely on.
                 if (text.Length == 0)
                 {
-                    lines.Add(new CellLine { Text = "", FontSize = fragFontSize, ForegroundColor = color });
+                    lines.Add(new CellLine { Text = "", FontSize = fragFontSize, ForegroundColor = color, Align = lineAlign });
                     continue;
+                }
+
+                // Arabic/RTL cell text: the table draws cells with a single Standard-14 font in
+                // single-byte encoding, which has no Arabic glyphs. Shape the text (contextual
+                // presentation forms + visual bidi order) and emit it as one line flagged to be
+                // drawn with an embedded Arabic-capable font (Type0/CID) by the render pass.
+                if (Aspose.Pdf.Text.ArabicTextShaper.ContainsArabic(text))
+                {
+                    var arabicFont = Aspose.Pdf.Text.FontRepository.FindFont("Arial");
+                    var arabicTtf = arabicFont?.SourceFontData?.TtfData;
+                    if (arabicTtf is not null)
+                    {
+                        lines.Add(new CellLine
+                        {
+                            Text = Aspose.Pdf.Text.ArabicTextShaper.Shape(text),
+                            FontSize = fragFontSize,
+                            ForegroundColor = color,
+                            Align = lineAlign,
+                            Type0Ttf = arabicTtf,
+                            Type0FontName = arabicFont!.FontName,
+                        });
+                        continue;
+                    }
+                }
+
+                // Cell text carrying a fragment-level embedded font AND CJK content: draw each
+                // newline-split line as Type0/CID with that font. Scoped to CJK so a fragment
+                // that merely carries an embedded Latin font keeps the existing Standard-14 path.
+                if (fragEmbeddedTtf is not null && CjkCoveredBy(text, fragEmbeddedTtf))
+                {
+                    foreach (var segment in text.Split('\n'))
+                    {
+                        if (segment.Length == 0) continue;
+                        lines.Add(new CellLine
+                        {
+                            Text = segment, FontSize = fragFontSize, ForegroundColor = color, Align = lineAlign,
+                            Type0Ttf = fragEmbeddedTtf, Type0FontName = fragEmbeddedName, Type0SplitTokens = true,
+                        });
+                    }
+                    continue;
+                }
+
+                // CJK cell text whose fragment font can't cover it — either no font resolved or
+                // the named face is unavailable (e.g. "Arial Unicode MS" isn't installed). The
+                // Standard-14 path below has no CJK glyphs and would emit '?'. Substitute an
+                // installed system CJK font (the reference substitutes MS Gothic) and draw as
+                // Type0/CID, mirroring the Arabic fallback above.
+                if (ContainsCjk(text))
+                {
+                    var cjkTtf = Aspose.Pdf.Text.CjkFallbackFont.ResolveEmbeddableBytes(text);
+                    if (cjkTtf is not null && CjkCoveredBy(text, cjkTtf))
+                    {
+                        foreach (var segment in text.Split('\n'))
+                        {
+                            if (segment.Length == 0) continue;
+                            // Char-level width wrap (CJK has no ASCII spaces to break at),
+                            // measured with the fallback font, so long CJK cell text stays
+                            // inside the column. Every character — including spaces — is kept,
+                            // so mixed CJK+ASCII like "繋がって or つながって" still reconstructs
+                            // fully across the wrapped lines. Each line draws as one Type0/CID run.
+                            foreach (var lineText in WrapCjkToWidth(segment, fragFontSize, availWidth, cjkTtf))
+                            {
+                                lines.Add(new CellLine
+                                {
+                                    Text = lineText, FontSize = fragFontSize, ForegroundColor = color, Align = lineAlign,
+                                    Type0Ttf = cjkTtf, Type0FontName = "MSGothic",
+                                });
+                            }
+                        }
+                        continue;
+                    }
                 }
 
                 // Always wrap when text would overflow the column; IsWordWrapped=false
@@ -863,11 +1408,11 @@ public class Table : BaseParagraph
                     if (cell.IsWordWrapped || estWidth > availWidth)
                     {
                         foreach (var l in WrapText(segment, fragFontSize, availWidth))
-                            lines.Add(new CellLine { Text = l, FontSize = fragFontSize, ForegroundColor = color, Hyperlink = fragLink });
+                            lines.Add(new CellLine { Text = l, FontSize = fragFontSize, ForegroundColor = color, Hyperlink = fragLink, Align = lineAlign });
                     }
                     else
                     {
-                        lines.Add(new CellLine { Text = segment, FontSize = fragFontSize, ForegroundColor = color, Hyperlink = fragLink });
+                        lines.Add(new CellLine { Text = segment, FontSize = fragFontSize, ForegroundColor = color, Hyperlink = fragLink, Align = lineAlign });
                     }
                 }
             }
@@ -875,11 +1420,12 @@ public class Table : BaseParagraph
             if (lines.Count > plan.LineCount) plan.LineCount = lines.Count;
         }
         plan.LineHeight = maxLineHeight > 0 ? maxLineHeight : 14.4;
+        plan.TightLine = tightForMax > 0 ? tightForMax : plan.LineHeight;
         plan.VertPadding = maxVertPad;
         plan.TopPad = maxTopPad;
         plan.MinBlankHeight = Math.Max(row.FixedRowHeight, row.MinRowHeight);
         // A content-less row reserves a single line (no padding, see the slice loop) —
-        // matching the reference engine's tight spacer rows rather than a full row.
+        // matching the generator's tight spacer rows rather than a full row.
         if (plan.MinBlankHeight <= 0) plan.MinBlankHeight = plan.LineCount == 0 ? plan.LineHeight : 20;
         // A whitespace-only row (e.g. a " " spacer) is likewise a tight spacer drawn
         // without cell padding so it reserves just its line.
@@ -914,6 +1460,12 @@ public class Table : BaseParagraph
         Aspose.Pdf.Text.TextFragment tf => tf.IsInLineParagraph,
         _ => p.IsInLineParagraph,
     };
+
+    /// <summary>A TextFragment carrying more than one non-empty segment — each segment has its own
+    /// TextState (size/colour/super-subscript) and is laid out as a distinct inline run.</summary>
+    private static bool IsMultiSegmentFragment(BaseParagraph p) =>
+        p is Aspose.Pdf.Text.TextFragment tf
+        && System.Linq.Enumerable.Count(tf.Segments, s => !string.IsNullOrEmpty(s.Text)) > 1;
 
     /// <summary>Lay a graph-bearing cell out into left-to-right inline rows, wrapping at
     /// the cell's content width. Each row is positioned <see cref="InlineItem"/>s (a text
@@ -950,17 +1502,121 @@ public class Table : BaseParagraph
             }
             else if (para is Aspose.Pdf.Text.TextFragment tf)
             {
-                var text = tf.Text ?? string.Empty;
-                var fs = ResolveFragmentFontSize(tf, defaultFontSize);
-                var color = tf.TextState.ForegroundColor ?? cellTextState?.ForegroundColor;
                 var marginL = tf.Margin?.Left ?? 0;
                 if (!tf.IsInLineParagraph) Flush();
-                var w = MeasureWidthExact(text, fs);
-                if (current.Count > 0 && x + marginL + w > contentW) Flush();
-                x += marginL;
-                current.Add(new InlineItem { Text = text, FontSize = fs, Color = color, X = x, Width = w, Height = fs * 1.2 });
-                x += w;
-                if (fs * 1.2 > maxH) maxH = fs * 1.2;
+
+                // A multi-segment fragment lays its segments out as consecutive inline runs on
+                // the SAME line, each keeping its own size / colour / baseline (sub-superscript),
+                // instead of being flattened to one merged run. Every segment is emitted —
+                // including the parameterless TextFragment() ctor's default empty leading segment,
+                // which the generator renders as an empty run (a leading empty fragment).
+                var segs = System.Linq.Enumerable.ToList(tf.Segments);
+                var textCount = System.Linq.Enumerable.Count(segs, s => !string.IsNullOrEmpty(s.Text));
+                if (textCount > 1)
+                {
+                    x += marginL;
+                    foreach (var seg in segs)
+                    {
+                        var ss = seg.TextState;
+                        var baseFs = ss.FontSize > 0 ? ss.FontSize
+                            : (tf.TextState.FontSize > 0 ? tf.TextState.FontSize : defaultFontSize);
+                        var segColor = ss.ForegroundColor ?? tf.TextState.ForegroundColor ?? cellTextState?.ForegroundColor;
+                        if (string.IsNullOrEmpty(seg.Text))
+                        {
+                            current.Add(new InlineItem { Text = "", Empty = true, FontSize = baseFs, Color = segColor, X = x, Width = 0, Height = baseFs * 1.2 });
+                            if (baseFs * 1.2 > maxH) maxH = baseFs * 1.2;
+                            continue;
+                        }
+
+                        // Per-segment embedded font (e.g. NotoSans / NotoSansArabic supplied on the
+                        // segment's TextState): the run is drawn with that font embedded as Type0, so
+                        // it is measured with the font's real glyph advances. Arabic is shaped first
+                        // (contextual presentation forms + bidi visual order) and kept as one run.
+                        var segTtf = ss.Font?.SourceFontData?.TtfData;
+                        var segFontName = ss.Font?.FontName;
+                        var isArabic = Aspose.Pdf.Text.ArabicTextShaper.ContainsArabic(seg.Text);
+                        if (segTtf is not null && isArabic)
+                        {
+                            var shaped = Aspose.Pdf.Text.ArabicTextShaper.Shape(seg.Text!);
+                            var aw = MeasureWidthWithFont(shaped, baseFs, segTtf);
+                            if (current.Count > 0 && x + aw > contentW) { Flush(); x += marginL; }
+                            current.Add(new InlineItem
+                            {
+                                Text = shaped, FontSize = baseFs, Color = segColor, X = x, Width = aw,
+                                Height = baseFs * 1.2, BaseFontSize = baseFs, Ttf = segTtf, FontName = segFontName,
+                            });
+                            x += aw;
+                            if (baseFs * 1.2 > maxH) maxH = baseFs * 1.2;
+                            continue;
+                        }
+                        if (segTtf is not null)
+                        {
+                            // Latin/other run with an embedded font: word-wrap at the cell width
+                            // using the font's real advances.
+                            foreach (var token in SplitKeepingSpaces(seg.Text!))
+                            {
+                                var tw = MeasureWidthWithFont(token, baseFs, segTtf);
+                                if (current.Count > 0 && x + tw > contentW) { Flush(); x += marginL; }
+                                current.Add(new InlineItem
+                                {
+                                    Text = token, FontSize = baseFs, Color = segColor, X = x, Width = tw,
+                                    Height = baseFs * 1.2, BaseFontSize = baseFs, Ttf = segTtf, FontName = segFontName,
+                                });
+                                x += tw;
+                            }
+                            if (baseFs * 1.2 > maxH) maxH = baseFs * 1.2;
+                            continue;
+                        }
+
+                        // No per-segment font: keep the existing Standard-14 path (sub/superscript
+                        // at a reduced size with a baseline shift).
+                        var sup = ss.Superscript; var sub = ss.Subscript;
+                        var segFs = (sup || sub) ? baseFs * SubSuperScale : baseFs;
+                        var shift = sup ? baseFs * SuperscriptRise : sub ? -baseFs * SubscriptRise : 0.0;
+                        var sw = MeasureWidthExact(seg.Text!, segFs);
+                        if (current.Count > 0 && x + sw > contentW) { Flush(); x += marginL; }
+                        current.Add(new InlineItem
+                        {
+                            Text = seg.Text, FontSize = segFs, Color = segColor,
+                            X = x, Width = sw, Height = baseFs * 1.2, BaseFontSize = baseFs, BaselineShift = shift,
+                        });
+                        x += sw;
+                        if (baseFs * 1.2 > maxH) maxH = baseFs * 1.2;
+                    }
+                }
+                else
+                {
+                    var text = tf.Text ?? string.Empty;
+                    var fs = ResolveFragmentFontSize(tf, defaultFontSize);
+                    var color = tf.TextState.ForegroundColor ?? cellTextState?.ForegroundColor;
+                    // Fragment-level embedded font AND CJK content: draw it as Type0/CID with the
+                    // font's real advances instead of the Standard-14 path (which would emit '?').
+                    // Scoped to CJK so an embedded Latin font keeps the existing inline path.
+                    var fragTtf = tf.TextState.Font?.SourceFontData?.TtfData;
+                    if (fragTtf is not null && CjkCoveredBy(text, fragTtf))
+                    {
+                        var w0 = MeasureWidthWithFont(text, fs, fragTtf);
+                        if (current.Count > 0 && x + marginL + w0 > contentW) Flush();
+                        x += marginL;
+                        current.Add(new InlineItem
+                        {
+                            Text = text, FontSize = fs, Color = color, X = x, Width = w0,
+                            Height = fs * 1.2, BaseFontSize = fs, Ttf = fragTtf,
+                            FontName = tf.TextState.Font?.FontName,
+                        });
+                        x += w0;
+                        if (fs * 1.2 > maxH) maxH = fs * 1.2;
+                    }
+                    else
+                    {
+                        var w = MeasureWidthExact(text, fs);
+                        if (current.Count > 0 && x + marginL + w > contentW) Flush();
+                        x += marginL;
+                        current.Add(new InlineItem { Text = text, FontSize = fs, Color = color, X = x, Width = w, Height = fs * 1.2 });
+                        x += w;
+                        if (fs * 1.2 > maxH) maxH = fs * 1.2;
+                    }
+                }
                 if (!tf.IsInLineParagraph) Flush();
             }
             // Other paragraph kinds inside a graph cell are not laid out inline.
@@ -1001,6 +1657,7 @@ public class Table : BaseParagraph
     /// rewinding a seekable stream so a second build pass still sees the data.</summary>
     private static byte[]? ReadImageBytes(Image img)
     {
+        byte[]? raw = null;
         if (img.ImageStream is not null)
         {
             var stream = img.ImageStream;
@@ -1010,21 +1667,42 @@ public class Table : BaseParagraph
                 if (stream.CanSeek) stream.Position = 0;
                 using var ms = new MemoryStream();
                 stream.CopyTo(ms);
-                return ms.ToArray();
+                raw = ms.ToArray();
             }
             finally
             {
                 if (pos >= 0) stream.Position = pos;
             }
         }
-        if (!string.IsNullOrEmpty(img.File) && System.IO.File.Exists(img.File))
-            return System.IO.File.ReadAllBytes(img.File);
-        return null;
+        else if (!string.IsNullOrEmpty(img.File) && System.IO.File.Exists(img.File))
+        {
+            raw = System.IO.File.ReadAllBytes(img.File);
+        }
+
+        // Page.AddImage only accepts raster formats. An SVG source (FileType=Svg or
+        // detected from the bytes) is rasterised first so a vector image embedded in
+        // a cell renders instead of throwing "Unsupported image format".
+        if (raw is { Length: > 0 } && IsSvg(img, raw))
+            return ImageRasterizer.RasterizeSvg(raw) ?? raw;
+        return raw;
+    }
+
+    private static bool IsSvg(Image img, byte[] data)
+    {
+        if (img.FileType == ImageFileType.Svg) return true;
+        // Sniff: an SVG file starts with an XML prolog or the <svg root, possibly
+        // after a UTF-8 BOM / leading whitespace.
+        int i = 0;
+        if (data.Length >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) i = 3;
+        while (i < data.Length && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
+        var head = System.Text.Encoding.ASCII.GetString(data, i, System.Math.Min(512, data.Length - i));
+        return head.StartsWith("<?xml") ? head.Contains("<svg") : head.StartsWith("<svg");
     }
 
     /// <summary>Emit content for the slices that landed on the current page.</summary>
     private byte[] BuildSlicesContent(List<RowSlice> slices, double[] colWidths,
-        double tableX, string fontName, int[] cellMap, Page? linkPage = null)
+        double tableX, string fontName, int[] cellMap, Page? linkPage = null,
+        List<SpanBlock>? spanBlocks = null)
     {
         var builder = new ContentStreamBuilder();
         var links = linkPage is not null ? new List<(Rectangle rect, Hyperlink link)>() : null;
@@ -1036,9 +1714,98 @@ public class Table : BaseParagraph
         var pageGraphs = new List<byte[]>();
         builder.SaveState();
         foreach (var slice in slices)
-            RenderRowSlice(builder, slice, colWidths, tableX, fontName, cellMap, links, pageImages, optionSink, pageGraphs, checkboxSink);
+            RenderRowSlice(builder, slice, colWidths, tableX, fontName, cellMap, links, pageImages, optionSink, pageGraphs, checkboxSink, linkPage);
         _pageImages.Add(pageImages);
         _pageGraphs.Add(pageGraphs);
+
+        // Row-spanning cells: draw each block once over the union of its rows' slices
+        // on this page. A block split by a page break re-draws its background, border
+        // and (re-centred) content in the portion visible on each page — matching the
+        // generator's continuation rendering.
+        if (spanBlocks is { Count: > 0 })
+        {
+            foreach (var block in spanBlocks)
+            {
+                double top = double.MinValue, bottom = double.MaxValue;
+                int minRow = int.MaxValue, maxRow = int.MinValue;
+                foreach (var slice in slices)
+                {
+                    if (slice.RowIndex < block.StartRow || slice.RowIndex >= block.EndRow) continue;
+                    if (slice.TopY > top) top = slice.TopY;
+                    if (slice.TopY - slice.Height < bottom) bottom = slice.TopY - slice.Height;
+                    if (slice.RowIndex < minRow) minRow = slice.RowIndex;
+                    if (slice.RowIndex > maxRow) maxRow = slice.RowIndex;
+                }
+                if (top <= double.MinValue) continue;   // no rows of this span on this page
+                // A block split by a page break draws its content once, on the page
+                // holding the block's middle row (the generator's behaviour);
+                // the other pages get background and border only.
+                var midRow = (int)Math.Round((block.StartRow + block.EndRow - 1) / 2.0,
+                    MidpointRounding.AwayFromZero);
+                var drawContent = midRow >= minRow && midRow <= maxRow;
+
+                var x = tableX;
+                for (var c = 0; c < block.GridCol && c < colWidths.Length; c++) x += colWidths[c];
+                var w = GetCellWidth(colWidths, block.GridCol, block.ColSpan);
+                var h = top - bottom;
+                var cell = block.Cell;
+                var row = block.Row;
+
+                var bgColor = cell.BackgroundColor ?? row.BackgroundColor;
+                if (bgColor is not null)
+                {
+                    builder.SetFillColor(bgColor);
+                    builder.Rectangle(x, bottom, w, h);
+                    builder.Fill();
+                }
+                if (!cell.IsNoBorder)
+                {
+                    var cellBorder = cell.Border ?? row.DefaultCellBorder ?? row.Border ?? DefaultCellBorder;
+                    if (cellBorder is not null)
+                        DrawBorder(builder, cellBorder, x, bottom, w, h);
+                }
+
+                // Record the block's page-space rect (union across pages) for Cell.Rect readers.
+                cell.Width = w;
+                var blockRect = new Rectangle(x, bottom, x + w, top);
+                cell.Rect = cell.Rect is null
+                    ? blockRect
+                    : new Rectangle(
+                        Math.Min(cell.Rect.LLX, blockRect.LLX), Math.Min(cell.Rect.LLY, blockRect.LLY),
+                        Math.Max(cell.Rect.URX, blockRect.URX), Math.Max(cell.Rect.URY, blockRect.URY));
+
+                if (block.Lines.Count == 0 || !drawContent) continue;
+                var padding = cell.Margin ?? row.DefaultCellPadding ?? DefaultCellPadding;
+                var dp = DefaultPad(cell, row);
+                var padLeft = padding?.Left ?? dp;
+                var padRight = padding?.Right ?? dp;
+                var padTop = padding?.Top ?? dp;
+                var blockH = (block.Lines.Count - 1) * block.LineHeight + block.TightLine;
+                // The generator centres a spanning cell's content vertically in the
+                // portion visible on the page (Bottom stays supported via the cell setting).
+                var effVA = cell.VerticalAlignment != VerticalAlignment.Top ? cell.VerticalAlignment : row.VerticalAlignment;
+                var offset = effVA == VerticalAlignment.Bottom
+                    ? Math.Max(padTop, h - (padding?.Bottom ?? dp) - blockH)
+                    : Math.Max(padTop, (h - blockH) / 2);
+                for (var li = 0; li < block.Lines.Count; li++)
+                {
+                    var line = block.Lines[li];
+                    if (line.Text.Length == 0) continue;
+                    var tw = MeasureWidth(line.Text, line.FontSize);
+                    var lineX = line.Align == HorizontalAlignment.Center
+                        ? x + Math.Max(padLeft, (w - tw) / 2)
+                        : line.Align == HorizontalAlignment.Right
+                            ? Math.Max(x + padLeft, x + w - padRight - tw)
+                            : x + padLeft;
+                    builder.BeginText();
+                    builder.SetFont(fontName, line.FontSize);
+                    ApplyColor(builder, line.ForegroundColor);
+                    builder.MoveTextPosition(lineX, top - offset - li * block.LineHeight - line.FontSize);
+                    builder.ShowText(line.Text);
+                    builder.EndText();
+                }
+            }
+        }
 
         // Outer table.Border wraps the slices that landed on this page.
         // Drawn after slices so it sits on top of cell backgrounds/borders.
@@ -1087,24 +1854,42 @@ public class Table : BaseParagraph
         List<(byte[] data, Rectangle rect)>? imageSink = null,
         List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>? optionSink = null,
         List<byte[]>? graphSink = null,
-        List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>? checkboxSink = null)
+        List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>? checkboxSink = null,
+        Page? page = null)
     {
         var row = slice.Plan.Row;
         var defaultPad = row.DefaultCellPadding ?? DefaultCellPadding;
         var cellX = tableX;
 
+        var gridToCell = slice.Plan.GridToCell;
         for (var col = 0; col < colWidths.Length; col++)
         {
-            var origIdx = cellMap[col];
-            if (origIdx >= row.Cells.Count) { cellX += colWidths[col]; continue; }
+            int origIdx;
+            if (gridToCell is not null)
+            {
+                origIdx = col < gridToCell.Length ? gridToCell[col] : -1;
+                if (origIdx == -2) continue;                       // own ColSpan cover — x already advanced
+                if (origIdx < 0 || origIdx >= row.Cells.Count) { cellX += colWidths[col]; continue; }
+            }
+            else
+            {
+                origIdx = cellMap[col];
+                if (origIdx >= row.Cells.Count) { cellX += colWidths[col]; continue; }
+            }
             var cell = row.Cells.At(origIdx);
             // Clamp ColSpan to the slice's remaining columns so chunked rendering
             // doesn't read past the end of the slice's colWidths.
             var span = Math.Max(1, Math.Min(cell.ColSpan, colWidths.Length - col));
             var cellWidth = GetCellWidth(colWidths, col, span);
+            // A row-spanning cell is drawn by the span-block pass (its rect covers
+            // several rows); reserve its columns and move on.
+            if (gridToCell is not null && slice.Plan.EffRowSpan is not null &&
+                slice.Plan.EffRowSpan[origIdx] > 1)
+            { cellX += cellWidth; continue; }
             var padding = cell.Margin ?? defaultPad;
-            var padLeft = padding?.Left ?? 2;
-            var padTop = padding?.Top ?? 2;
+            var dp = DefaultPad(cell, row);
+            var padLeft = padding?.Left ?? dp;
+            var padTop = padding?.Top ?? dp;
 
             // Record the cell's laid-out rectangle (page space) for callers that
             // query Cell.Rect/Width after save. Union across slices when a row is
@@ -1134,52 +1919,133 @@ public class Table : BaseParagraph
                     DrawBorder(builder, cellBorder, cellX, slice.TopY - slice.Height, cellWidth, slice.Height);
             }
 
-            // Text content — render the slice's line window for this cell.
+            // Text content — render the slice's line window for this cell. Inline cells carry only
+            // blank placeholder lines here (their text is drawn by the inline pass below); skip them
+            // so the line-based path doesn't emit empty show-text runs that read back as stray
+            // (empty) text fragments.
+            var cellIsInline = slice.Plan.CellInline?.ContainsKey(col) ?? false;
             var cellLines = col < slice.Plan.CellLines.Count ? slice.Plan.CellLines[col] : null;
-            if (cellLines is { Count: > 0 } && slice.LineCount > 0)
+
+            // Vertical alignment: when the slice is taller than the cell's content block
+            // (e.g. a MinRowHeight-floored row), Center/Bottom shift the text down within
+            // the cell. Top (the default) keeps the historical top-seated placement.
+            var padBot = padding?.Bottom ?? dp;
+            var effVA = cell.VerticalAlignment != VerticalAlignment.Top ? cell.VerticalAlignment : row.VerticalAlignment;
+            var vaOffset = 0.0;
+            if ((effVA is VerticalAlignment.Center or VerticalAlignment.Bottom) && cellLines is { Count: > 0 } && slice.LineCount > 0)
+            {
+                var visLines = Math.Max(0, Math.Min(slice.LineCount, cellLines.Count - slice.LineStart));
+                var blockH = visLines <= 0 ? 0 : (visLines - 1) * slice.Plan.LineHeight + slice.Plan.TightLine;
+                var avail = slice.Height - padTop - padBot;
+                if (avail > blockH)
+                    vaOffset = effVA == VerticalAlignment.Center ? (avail - blockH) / 2 : (avail - blockH);
+            }
+            var contentTop = padTop + vaOffset;
+
+            if (!cellIsInline && cellLines is { Count: > 0 } && slice.LineCount > 0)
             {
                 var firstLine = slice.LineStart;
                 var lastLine = Math.Min(firstLine + slice.LineCount, cellLines.Count);
                 if (firstLine < lastLine)
                 {
                     var hasOption = false;
+                    var anyNonLeft = false;
+                    var anyType0 = false;
                     for (var li = firstLine; li < lastLine; li++)
-                        if (cellLines[li].Option is not null || cellLines[li].Checkbox is not null) { hasOption = true; break; }
+                    {
+                        var cl = cellLines[li];
+                        if (cl.Option is not null || cl.Checkbox is not null) { hasOption = true; break; }
+                        if (cl.Align is HorizontalAlignment.Center or HorizontalAlignment.Right) anyNonLeft = true;
+                        if (cl.Type0Ttf is not null) anyType0 = true;
+                    }
 
                     if (hasOption)
                     {
                         // Form-control lines need path drawing (the glyph) interleaved with
                         // text, which a single text object can't hold — render line by line.
                         RenderControlLines(builder, cellLines, firstLine, lastLine,
-                            cellX + padLeft, slice.TopY - padTop, slice.Plan.LineHeight, fontName, optionSink, checkboxSink);
+                            cellX + padLeft, slice.TopY - contentTop, slice.Plan.LineHeight, fontName, optionSink, checkboxSink);
                     }
-                    else if (cell.Alignment is HorizontalAlignment.Center or HorizontalAlignment.Right)
+                    else if (anyNonLeft || anyType0)
                     {
-                        // Centre / right-align each line within the cell content box.
-                        // Lines can differ in width, so each is positioned absolutely.
-                        var padRight = padding?.Right ?? 2;
+                        // The cell mixes alignments (e.g. a centred title above a left HtmlFragment)
+                        // or carries an embedded-font (Arabic/Type0) line, so each line is positioned
+                        // absolutely. Lines can differ in width, hence per-line placement.
+                        var padRight = padding?.Right ?? dp;
                         for (var li = firstLine; li < lastLine; li++)
                         {
                             var line = cellLines[li];
                             if (line.Text.Length == 0) continue;
                             var w = MeasureWidth(line.Text, line.FontSize);
-                            var lineX = cell.Alignment == HorizontalAlignment.Center
+                            var lineX = line.Align == HorizontalAlignment.Center
                                 ? cellX + Math.Max(padLeft, (cellWidth - w) / 2)
-                                : Math.Max(cellX + padLeft, cellX + cellWidth - padRight - w);
-                            var lineTop = slice.TopY - padTop - (li - firstLine) * slice.Plan.LineHeight;
+                                : line.Align == HorizontalAlignment.Right
+                                    ? Math.Max(cellX + padLeft, cellX + cellWidth - padRight - w)
+                                    : cellX + padLeft;
+                            var lineTop = slice.TopY - contentTop - (li - firstLine) * slice.Plan.LineHeight;
+                            // Embedded-font line (Arabic/Unicode): embed the TrueType as a Type0/CID
+                            // font on this page and draw the shaped glyphs as hex glyph IDs.
+                            if (line.Type0Ttf is not null && page is not null)
+                            {
+                                var fontDict = ResolvePageFontDict(page);
+                                if (line.Type0SplitTokens)
+                                {
+                                    // Space-separated CJK: emit each token as its own positioned
+                                    // Type0 run so the absorber surfaces per-token fragments. Embed
+                                    // the font ONCE for the whole line and slice the returned hex per
+                                    // token — embedding per token would duplicate the full font
+                                    // program for every glyph (pathological on large documents).
+                                    var (rn, fullHex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
+                                        fontDict, line.Type0Ttf, line.Type0FontName ?? "Arial", line.Text,
+                                        stripSpacesInBaseFont: true);
+                                    var tokX = lineX;
+                                    var spaceW = MeasureWidthWithFont(" ", line.FontSize, line.Type0Ttf);
+                                    var charIdx = 0; // char index into line.Text (2 hex bytes per char)
+                                    foreach (var token in line.Text.Split(' '))
+                                    {
+                                        if (token.Length > 0 && (charIdx + token.Length) * 2 <= fullHex.Length)
+                                        {
+                                            var tokHex = new byte[token.Length * 2];
+                                            System.Array.Copy(fullHex, charIdx * 2, tokHex, 0, tokHex.Length);
+                                            builder.BeginText();
+                                            builder.SetFont(rn, line.FontSize);
+                                            ApplyColor(builder, line.ForegroundColor);
+                                            builder.MoveTextPosition(tokX, lineTop - line.FontSize);
+                                            builder.ShowTextHex(tokHex);
+                                            builder.EndText();
+                                            tokX += MeasureWidthWithFont(token, line.FontSize, line.Type0Ttf);
+                                        }
+                                        charIdx += token.Length + 1; // token chars + the space separator
+                                        tokX += spaceW;
+                                    }
+                                    continue;
+                                }
+                                var (resName, hex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
+                                    fontDict, line.Type0Ttf, line.Type0FontName ?? "Arial", line.Text,
+                                    stripSpacesInBaseFont: true);
+                                builder.BeginText();
+                                builder.SetFont(resName, line.FontSize);
+                                ApplyColor(builder, line.ForegroundColor);
+                                builder.MoveTextPosition(lineX, lineTop - line.FontSize);
+                                builder.ShowTextHex(hex);
+                                builder.EndText();
+                                continue;
+                            }
                             builder.BeginText();
                             builder.SetFont(fontName, line.FontSize);
                             ApplyColor(builder, line.ForegroundColor);
                             builder.MoveTextPosition(lineX, lineTop - line.FontSize);
                             builder.ShowText(line.Text);
                             builder.EndText();
+                            if (links is not null && line.Hyperlink is not null)
+                                links.Add((new Rectangle(lineX, lineTop - line.FontSize, lineX + w, lineTop), line.Hyperlink));
                         }
                     }
                     else
                     {
                         var first = cellLines[firstLine];
                         var textX = cellX + padLeft;
-                        var textY = slice.TopY - padTop - first.FontSize;
+                        var textY = slice.TopY - contentTop - first.FontSize;
 
                         builder.BeginText();
                         builder.SetFont(fontName, first.FontSize);
@@ -1209,7 +2075,7 @@ public class Table : BaseParagraph
                             {
                                 var line = cellLines[li];
                                 if (line.Hyperlink is null || line.Text.Length == 0) continue;
-                                var lineTop = slice.TopY - padTop - (li - firstLine) * slice.Plan.LineHeight;
+                                var lineTop = slice.TopY - contentTop - (li - firstLine) * slice.Plan.LineHeight;
                                 var lineBottom = lineTop - line.FontSize;
                                 var w = MeasureWidth(line.Text, line.FontSize);
                                 links.Add((new Rectangle(textX, lineBottom, textX + w, lineTop), line.Hyperlink));
@@ -1226,13 +2092,15 @@ public class Table : BaseParagraph
             if (imageSink is not null && slice.LineStart == 0 &&
                 slice.Plan.CellImages is { } imgs && imgs.TryGetValue(col, out var ci))
             {
-                var padRight = padding?.Right ?? 2;
+                var padRight = padding?.Right ?? dp;
                 var imgX = cellX + padLeft;
                 if (ci.Align == HorizontalAlignment.Center)
                     imgX = cellX + Math.Max(0, (cellWidth - ci.Width) / 2);
                 else if (ci.Align == HorizontalAlignment.Right)
                     imgX = cellX + Math.Max(0, cellWidth - padRight - ci.Width);
-                var imgTopY = slice.TopY - padTop;
+                // Seat the image below any text lines that precede it in the cell (e.g. a
+                // title line above a centred logo) rather than at the cell top.
+                var imgTopY = slice.TopY - padTop - ci.LineOffset * slice.Plan.LineHeight;
                 imageSink.Add((ci.Data, new Rectangle(imgX, imgTopY - ci.Height, imgX + ci.Width, imgTopY)));
             }
 
@@ -1250,12 +2118,41 @@ public class Table : BaseParagraph
                         var ix = cellX + padLeft + item.X;
                         if (item.Graph is { } g)
                             graphSink?.Add(g.Build(null, ix, lineTop - slice.Plan.LineHeight));
+                        else if (item.Empty)
+                        {
+                            // Emit an explicit empty run so the generator's leading empty
+                            // segment round-trips as an (empty) text fragment.
+                            builder.BeginText();
+                            builder.SetFont(fontName, item.FontSize);
+                            builder.MoveTextPosition(ix, lineTop - item.FontSize);
+                            builder.ShowText("");
+                            builder.EndText();
+                        }
                         else if (item.Text is { Length: > 0 } t)
                         {
+                            // Seat the run on the line baseline (the pre-shrink size), then apply any
+                            // sub/superscript shift — so a reduced-size super/subscript glyph still
+                            // hangs off the common baseline rather than its own smaller box.
+                            var baseSize = item.BaseFontSize > 0 ? item.BaseFontSize : item.FontSize;
+                            // Per-run embedded font (e.g. NotoSans / NotoSansArabic): embed it as a
+                            // Type0/CID font and emit the run as hex glyph IDs.
+                            if (item.Ttf is not null && page is not null)
+                            {
+                                var fontDict = ResolvePageFontDict(page);
+                                var (resName, hex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
+                                    fontDict, item.Ttf, item.FontName ?? "Font", t, stripSpacesInBaseFont: true);
+                                builder.BeginText();
+                                builder.SetFont(resName, item.FontSize);
+                                ApplyColor(builder, item.Color);
+                                builder.MoveTextPosition(ix, lineTop - baseSize + item.BaselineShift);
+                                builder.ShowTextHex(hex);
+                                builder.EndText();
+                                continue;
+                            }
                             builder.BeginText();
                             builder.SetFont(fontName, item.FontSize);
                             ApplyColor(builder, item.Color);
-                            builder.MoveTextPosition(ix, lineTop - item.FontSize);
+                            builder.MoveTextPosition(ix, lineTop - baseSize + item.BaselineShift);
                             builder.ShowText(t);
                             builder.EndText();
                         }
@@ -1726,72 +2623,115 @@ public class Table : BaseParagraph
 
     private static void DrawBorder(ContentStreamBuilder builder, BorderInfo border, double x, double y, double w, double h)
     {
-        builder.SetLineWidth(border.Width);
-        builder.SetStrokeColor(border.Color);
-
-        if (border.Side.HasFlag(BorderSide.Bottom) || border.Bottom is not null)
+        // Rounded box: when a radius is set on a full-box border, stroke a single rounded-corner
+        // rectangle path instead of four straight sides (BorderInfo.RoundedBorderRadius).
+        if (border.RoundedBorderRadius > 0 && border.Side.HasFlag(BorderSide.Box))
         {
-            var gi = border.Bottom;
-            if (gi is not null)
-            {
-                builder.SetLineWidth(gi.LineWidth);
-                if (gi.StrokeColor is not null)
-                    builder.SetStrokeColor(gi.StrokeColor.R, gi.StrokeColor.G, gi.StrokeColor.B);
-            }
-            builder.MoveTo(x, y).LineTo(x + w, y).Stroke();
-            // Reset to default border settings
-            if (gi is not null)
-            {
-                builder.SetLineWidth(border.Width);
+            DrawRoundedBox(builder, border, x, y, w, h);
+            return;
+        }
+
+        // A uniformly-styled full box with a dash pattern is stroked as one continuous rectangle
+        // path so the dashes wrap around the corners in phase — matching the generator.
+        // Drawing the four sides separately would restart the dash at every corner and drift the
+        // segments out of alignment with the template.
+        if (border.Side.HasFlag(BorderSide.Box) && IsUniformBox(border) && border.RawTop?.DashArray is { Length: > 0 })
+        {
+            var gi = border.RawTop!;
+            builder.SetLineWidth(gi.LineWidth);
+            if (gi.StrokeColor is { } bsc)
+                builder.SetStrokeColor(bsc.R, bsc.G, bsc.B);
+            else
                 builder.SetStrokeColor(border.Color);
-            }
+            builder.SetDashPattern(Array.ConvertAll(gi.DashArray!, d => (double)d), gi.DashPhase);
+            builder.Rectangle(x, y, w, h).Stroke();
+            builder.SetDashPattern(Array.Empty<double>(), 0);
+            return;
         }
 
-        if (border.Side.HasFlag(BorderSide.Top) || border.Top is not null)
-        {
-            var gi = border.Top;
-            if (gi is not null)
-            {
-                builder.SetLineWidth(gi.LineWidth);
-                if (gi.StrokeColor is not null)
-                    builder.SetStrokeColor(gi.StrokeColor.R, gi.StrokeColor.G, gi.StrokeColor.B);
-            }
-            builder.MoveTo(x, y + h).LineTo(x + w, y + h).Stroke();
-            if (gi is not null)
-            {
-                builder.SetLineWidth(border.Width);
-                builder.SetStrokeColor(border.Color);
-            }
-        }
+        // Whether a side is drawn is decided purely by the Side flags; a per-side GraphInfo,
+        // when set, only supplies stroke styling (width, colour, dash pattern) for that side.
+        if (border.Side.HasFlag(BorderSide.Bottom))
+            DrawSide(builder, border, border.RawBottom, x, y, x + w, y);
+        if (border.Side.HasFlag(BorderSide.Top))
+            DrawSide(builder, border, border.RawTop, x, y + h, x + w, y + h);
+        if (border.Side.HasFlag(BorderSide.Left))
+            DrawSide(builder, border, border.RawLeft, x, y, x, y + h);
+        if (border.Side.HasFlag(BorderSide.Right))
+            DrawSide(builder, border, border.RawRight, x + w, y, x + w, y + h);
+    }
 
-        if (border.Side.HasFlag(BorderSide.Left) || border.Left is not null)
-        {
-            var gi = border.Left;
-            if (gi is not null)
-            {
-                builder.SetLineWidth(gi.LineWidth);
-                if (gi.StrokeColor is not null)
-                    builder.SetStrokeColor(gi.StrokeColor.R, gi.StrokeColor.G, gi.StrokeColor.B);
-            }
-            builder.MoveTo(x, y).LineTo(x, y + h).Stroke();
-            if (gi is not null)
-            {
-                builder.SetLineWidth(border.Width);
-                builder.SetStrokeColor(border.Color);
-            }
-        }
+    // True when every side carries the same styling — either no per-side GraphInfo at all, or the
+    // single shared instance produced by the BorderInfo(BorderSide, GraphInfo) constructor.
+    private static bool IsUniformBox(BorderInfo border)
+    {
+        var t = border.RawTop;
+        return ReferenceEquals(t, border.RawBottom)
+            && ReferenceEquals(t, border.RawLeft)
+            && ReferenceEquals(t, border.RawRight);
+    }
 
-        if (border.Side.HasFlag(BorderSide.Right) || border.Right is not null)
-        {
-            var gi = border.Right;
-            if (gi is not null)
-            {
-                builder.SetLineWidth(gi.LineWidth);
-                if (gi.StrokeColor is not null)
-                    builder.SetStrokeColor(gi.StrokeColor.R, gi.StrokeColor.G, gi.StrokeColor.B);
-            }
-            builder.MoveTo(x + w, y).LineTo(x + w, y + h).Stroke();
-        }
+    private static void DrawSide(ContentStreamBuilder builder, BorderInfo border, GraphInfo? gi,
+        double x1, double y1, double x2, double y2)
+    {
+        builder.SetLineWidth(gi is not null ? gi.LineWidth : border.Width);
+        if (gi?.StrokeColor is { } sc)
+            builder.SetStrokeColor(sc.R, sc.G, sc.B);
+        else
+            builder.SetStrokeColor(border.Color);
+
+        var dash = gi?.DashArray;
+        var dashed = dash is { Length: > 0 };
+        if (dashed)
+            builder.SetDashPattern(Array.ConvertAll(dash!, d => (double)d), gi!.DashPhase);
+
+        builder.MoveTo(x1, y1).LineTo(x2, y2).Stroke();
+
+        if (dashed)
+            builder.SetDashPattern(Array.Empty<double>(), 0); // reset to a solid line
+    }
+
+    // 0.5523 ≈ (4/3)·(√2−1): the Bézier control-point ratio that approximates a quarter circle.
+    private const double RoundCornerKappa = 0.5522847498307936;
+
+    // Super/subscript segments in a cell render at a reduced size with a baseline shift
+    // (fractions of the base font size), matching the generator's metrics.
+    private const double SubSuperScale = 0.583;
+    private const double SuperscriptRise = 0.421;
+    private const double SubscriptRise = 0.245;
+
+    private static void DrawRoundedBox(ContentStreamBuilder builder, BorderInfo border, double x, double y, double w, double h)
+    {
+        var gi = border.RawTop; // a box created from a GraphInfo shares one instance across all sides
+        builder.SetLineWidth(gi is not null ? gi.LineWidth : border.Width);
+        if (gi?.StrokeColor is { } sc)
+            builder.SetStrokeColor(sc.R, sc.G, sc.B);
+        else
+            builder.SetStrokeColor(border.Color);
+
+        var dash = gi?.DashArray;
+        var dashed = dash is { Length: > 0 };
+        if (dashed)
+            builder.SetDashPattern(Array.ConvertAll(dash!, d => (double)d), gi!.DashPhase);
+
+        // Clamp the radius so the corner arcs never overlap on a small box.
+        var r = Math.Min(border.RoundedBorderRadius, Math.Min(w, h) / 2);
+        var k = r * RoundCornerKappa;
+
+        builder.MoveTo(x + r, y)
+            .LineTo(x + w - r, y)
+            .CurveTo(x + w - r + k, y, x + w, y + r - k, x + w, y + r) // bottom-right
+            .LineTo(x + w, y + h - r)
+            .CurveTo(x + w, y + h - r + k, x + w - r + k, y + h, x + w - r, y + h) // top-right
+            .LineTo(x + r, y + h)
+            .CurveTo(x + r - k, y + h, x, y + h - r + k, x, y + h - r) // top-left
+            .LineTo(x, y + r)
+            .CurveTo(x, y + r - k, x + r - k, y, x + r, y) // bottom-left
+            .ClosePath()
+            .Stroke();
+
+        if (dashed)
+            builder.SetDashPattern(Array.Empty<double>(), 0);
     }
 
     /// <summary>
@@ -1852,7 +2792,7 @@ public class Table : BaseParagraph
     /// text units scaled by font size). Arial is what GDI+ defaults to for
     /// HTML/table text when no explicit font is set, and it is ~8% wider
     /// than Helvetica on mixed lowercase text. Using Arial widths here
-    /// puts our wrap breakpoints in line with the reference template.
+    /// puts our wrap breakpoints in line with the expected layout.
     /// Characters outside WinAnsi fall back to the font's default width.
     /// </summary>
     private static double MeasureWidth(string s, double fontSize)
@@ -1881,7 +2821,73 @@ public class Table : BaseParagraph
     }
 
     /// <summary>Exact Standard-14 advance width (no wrap-inflation) for positioning inline
-    /// cell runs, so a graph/text sequence lands where the reference engine places it.</summary>
+    /// cell runs, so a graph/text sequence lands where the generator places it.</summary>
+    // Cache of glyph-outline parsers keyed by the raw TTF bytes, so a per-segment embedded
+    // font (e.g. NotoSans / NotoSansArabic) is measured with its real advances once.
+    private static readonly Dictionary<byte[], Aspose.Pdf.Text.GlyphOutlineParser?> _inlineGlyphParsers =
+        new(ReferenceEqualityComparer.Instance);
+
+    private static Aspose.Pdf.Text.GlyphOutlineParser? GetInlineGlyphParser(byte[] ttf)
+    {
+        if (_inlineGlyphParsers.TryGetValue(ttf, out var cached)) return cached;
+        Aspose.Pdf.Text.GlyphOutlineParser? p = null;
+        try { p = new Aspose.Pdf.Text.GlyphOutlineParser(ttf); } catch { }
+        _inlineGlyphParsers[ttf] = p;
+        return p;
+    }
+
+    /// <summary>Width of <paramref name="s"/> in points using an embedded font's real glyph
+    /// advances (cmap → hmtx), for laying out a per-segment Type0 inline run.</summary>
+    private static double MeasureWidthWithFont(string s, double fontSize, byte[] ttf)
+    {
+        var gp = GetInlineGlyphParser(ttf);
+        if (gp is null) return MeasureWidthExact(s, fontSize);
+        var upm = gp.UnitsPerEm > 0 ? gp.UnitsPerEm : 1000;
+        double total = 0;
+        foreach (var ch in s)
+        {
+            var gid = gp.CMap.TryGetValue(ch, out var g) ? g : 0;
+            total += gp.GetAdvanceWidth(gid);
+        }
+        return total * fontSize / upm;
+    }
+
+    /// <summary>Greedy character-level width wrap for CJK cell text (which has no ASCII spaces
+    /// to break at), measured with the given fallback font. Every character is preserved —
+    /// including spaces at a break — so the concatenated lines reconstruct the input exactly.
+    /// A single character wider than the box is left on its own overflowing line.</summary>
+    private static List<string> WrapCjkToWidth(string s, double fontSize, double availWidth, byte[] ttf)
+    {
+        var lines = new List<string>();
+        if (availWidth <= 0) { lines.Add(s); return lines; }
+        var cur = new System.Text.StringBuilder();
+        double curW = 0;
+        foreach (var ch in s)
+        {
+            double chW = MeasureWidthWithFont(ch.ToString(), fontSize, ttf);
+            if (cur.Length > 0 && curW + chW > availWidth)
+            {
+                lines.Add(cur.ToString());
+                cur.Clear();
+                curW = 0;
+            }
+            cur.Append(ch);
+            curW += chW;
+        }
+        if (cur.Length > 0) lines.Add(cur.ToString());
+        return lines;
+    }
+
+    /// <summary>Split text into wrap tokens, each keeping its trailing space, so word-wrapping
+    /// an inline run preserves inter-word spacing (e.g. "a b " → ["a ", "b "]).</summary>
+    private static IEnumerable<string> SplitKeepingSpaces(string s)
+    {
+        var start = 0;
+        for (var i = 0; i < s.Length; i++)
+            if (s[i] == ' ') { yield return s.Substring(start, i - start + 1); start = i + 1; }
+        if (start < s.Length) yield return s.Substring(start);
+    }
+
     private static double MeasureWidthExact(string s, double fontSize)
     {
         var total = 0;
@@ -1898,6 +2904,17 @@ public class Table : BaseParagraph
     /// <summary>
     /// Register a Helvetica font in the page resources and return the font resource name.
     /// </summary>
+    /// <summary>Resolve (creating if needed) the page's /Resources /Font dictionary, used to
+    /// register an embedded Type0 font for Arabic/Unicode cell text.</summary>
+    private static PdfDictionary ResolvePageFontDict(Page page)
+    {
+        var resources = page.Reader.ResolveDict(page.Dict.Get("Resources"));
+        if (resources is null) { resources = new PdfDictionary(); page.Dict.Set("Resources", resources); }
+        var fontDict = page.Reader.ResolveDict(resources.Get("Font"));
+        if (fontDict is null) { fontDict = new PdfDictionary(); resources.Set("Font", fontDict); }
+        return fontDict;
+    }
+
     internal static string RegisterFont(Page page) => RegisterFont(page, "Helvetica");
 
     /// <summary>Register a standard Type1 base font (e.g. "Helvetica",
@@ -1942,6 +2959,10 @@ public class Table : BaseParagraph
         font.Set("Type", new PdfName("Font"));
         font.Set("Subtype", new PdfName("Type1"));
         font.Set("BaseFont", new PdfName(baseFont));
+        // Cell text is written as WinAnsi bytes (see ContentStreamBuilder.ToWinAnsi);
+        // without the matching /Encoding the CP1252 0x80-0x9F range (€, dashes,
+        // curly quotes) is undefined in the font's default StandardEncoding.
+        font.Set("Encoding", new PdfName("WinAnsiEncoding"));
         fontDict.Set(name, font);
         return name;
     }
@@ -2184,10 +3205,16 @@ public sealed class Rows : IEnumerable<Row>, IDisposable
     /// <summary>Get a row by index.</summary>
     public Row At(int index) => _rows[index];
 
-    /// <summary>Indexer with get/set for Aspose.PDF for .NET parity.</summary>
+    /// <summary>Indexer with get/set for Aspose.Pdf parity. Reading past
+    /// the end auto-extends the collection with empty rows (the reference Table
+    /// grows on demand, so callers may address a cell before filling it).</summary>
     public Row this[int index]
     {
-        get => _rows[index];
+        get
+        {
+            while (index >= 0 && _rows.Count <= index) _rows.Add(new Row());
+            return _rows[index];
+        }
         set => _rows[index] = value;
     }
 
@@ -2291,10 +3318,16 @@ public sealed class Cells : IEnumerable<Cell>
     /// <summary>Add an existing cell.</summary>
     public void Add(Cell cell) => _cells.Add(cell);
 
-    /// <summary>Indexer access to the cell at the given zero-based index.</summary>
+    /// <summary>Indexer access to the cell at the given zero-based index. Reading
+    /// past the end auto-extends the row with empty cells (the reference Row grows
+    /// on demand, so a cell may be styled before the row is fully populated).</summary>
     public Cell this[int index]
     {
-        get => _cells[index];
+        get
+        {
+            while (index >= 0 && _cells.Count <= index) _cells.Add(new Cell());
+            return _cells[index];
+        }
         set => _cells[index] = value;
     }
 

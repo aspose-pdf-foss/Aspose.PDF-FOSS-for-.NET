@@ -55,11 +55,15 @@ internal sealed class RsaKey
     }
 
     /// <summary>Sign a SHA-256 hash with PKCS#1 v1.5 padding.</summary>
-    public byte[] SignSha256(byte[] hash)
-    {
-        // DigestInfo for SHA-256: SEQUENCE { SEQUENCE { OID 2.16.840.1.101.3.4.2.1, NULL }, OCTET STRING hash }
-        var digestInfo = BuildDigestInfoSha256(hash);
+    public byte[] SignSha256(byte[] hash) => SignDigestInfo(BuildDigestInfoSha256(hash));
 
+    /// <summary>Sign a SHA-1 hash with PKCS#1 v1.5 padding (adbe.pkcs7.sha1 / adbe.x509.rsa_sha1).</summary>
+    public byte[] SignSha1(byte[] hash) => SignDigestInfo(BuildDigestInfoSha1(hash));
+
+    /// <summary>Apply PKCS#1 v1.5 signature padding to a pre-built DigestInfo and
+    /// perform the RSA private-key operation.</summary>
+    private byte[] SignDigestInfo(byte[] digestInfo)
+    {
         // PKCS#1 v1.5 padding: 0x00 0x01 [0xFF.] 0x00 [digestInfo]
         var keyLen = Modulus.Length;
         var padded = new byte[keyLen];
@@ -109,6 +113,20 @@ internal sealed class RsaKey
             Array.Copy(result, 0, padResult, keyLen - result.Length, result.Length);
             return padResult;
         }
+        return result;
+    }
+
+    private static byte[] BuildDigestInfoSha1(byte[] hash)
+    {
+        // SEQUENCE { SEQUENCE { OID 1.3.14.3.2.26 (SHA-1), NULL }, OCTET STRING(20) }
+        byte[] prefix =
+        [
+            0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2B, 0x0E,
+            0x03, 0x02, 0x1A, 0x05, 0x00, 0x04, 0x14,
+        ];
+        var result = new byte[prefix.Length + hash.Length];
+        prefix.CopyTo(result, 0);
+        hash.CopyTo(result, prefix.Length);
         return result;
     }
 

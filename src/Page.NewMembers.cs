@@ -3,7 +3,7 @@ using Aspose.Pdf.Vector;
 
 namespace Aspose.Pdf;
 
-/// <summary>Aspose.PDF for .NET-shape additions to <see cref="Page"/> — every method
+/// <summary>Aspose.Pdf-shape additions to <see cref="Page"/> — every method
 /// either delegates to a real working pipeline or throws
 /// NotSupportedException with a clear message about the missing capability.</summary>
 public sealed partial class Page
@@ -19,7 +19,7 @@ public sealed partial class Page
 
     /// <summary>Internal hook called by <see cref="Document"/>'s save pipeline.
     /// Public mutability isn't exposed — the event slot is reflection-only
-    /// via the Aspose.PDF for .NET-shape <c>event</c> declaration.</summary>
+    /// via the Aspose.Pdf-shape <c>event</c> declaration.</summary>
     internal void RaiseBeforePageGenerate() => OnBeforePageGenerate?.Invoke(this);
 
     /// <summary>Render this page through a <see cref="PageDevice"/> to a stream.</summary>
@@ -44,14 +44,25 @@ public sealed partial class Page
         stamp.Put(this);
     }
 
-    /// <summary>Vector-element emission is not implemented in this FOSS
-    /// branch — the renderer doesn't yet consume <see cref="GraphicElementCollection"/>.
-    /// Throws so callers don't silently get no output.</summary>
+    /// <summary>Append the given vector elements (typically produced by
+    /// <see cref="Aspose.Pdf.Vector.GraphicsAbsorber"/>) to this page's content
+    /// stream, reproducing each element's geometry in page space.</summary>
+    public void AddGraphics(GraphicElementCollection elements)
+    {
+        if (elements is null || elements.Count == 0) return;
+        var sb = new System.Text.StringBuilder();
+        foreach (var element in elements)
+            sb.Append(element.ToContent());
+        if (sb.Length == 0) return;
+        AddContentStream(System.Text.Encoding.ASCII.GetBytes(sb.ToString()));
+    }
+
+    /// <summary>Append vector elements; <paramref name="rectangle"/> is advisory
+    /// (the elements are emitted in full, carrying their own geometry).</summary>
     public void AddGraphics(GraphicElementCollection elements, Rectangle rectangle)
     {
-        _ = elements; _ = rectangle;
-        throw new System.NotSupportedException(
-            "Page.AddGraphics is not implemented in this FOSS branch — vector-element emission requires a path-builder pass that hasn't been wired into the renderer.");
+        _ = rectangle;
+        AddGraphics(elements);
     }
 
     /// <summary>Same — vector-element removal isn't wired.</summary>
@@ -80,6 +91,13 @@ public sealed partial class Page
                 _layerFacades = new System.Collections.Generic.List<Layer>();
                 foreach (var group in OcgLayers)
                     _layerFacades.Add(new Layer(group, _layerFacades));
+            }
+            else
+            {
+                // Purge layers deleted/flattened since the last access. Done here
+                // (between enumerations) rather than inside Delete/Flatten so that
+                // `foreach (var l in page.Layers) l.Flatten()` stays valid.
+                _layerFacades.RemoveAll(l => l is not null && l.IsRemoved);
             }
             return _layerFacades;
         }

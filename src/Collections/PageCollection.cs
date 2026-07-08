@@ -18,12 +18,101 @@ public sealed class PageCollection : IEnumerable<Page>
     // Cache of cloned objects per source reader, so shared resources (images, fonts)
     // referenced by multiple pages from the same source document are cloned only once.
     // This prevents output bloat when adding many pages that share the same resources.
-    private readonly Dictionary<PdfReader, Dictionary<int, PdfObject>> _cloneCache = new();
+    // Keyed WEAKLY on the source reader: the dedup cache survives while the caller is
+    // still importing from that source, but a strong key would pin every merged-in
+    // document's reader/stream/byte[] for the destination's lifetime.
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfReader, Dictionary<int, PdfObject>> _cloneCache = new();
+
+    // A GoTo/Link annotation on an imported page targets another page via an indirect
+    // reference. Following that reference during RemapObject would deep-import the whole
+    // target page (its contents, resources, images) — bloating a few-page copy to the
+    // source document's full size. Instead each source page object
+    // number is mapped to a reserved "slot" object number: the destination reference is
+    // pointed at the slot and the page itself, when it is among the copied pages, is
+    // written at that slot (see RebuildPagesTree) so the destination resolves to the
+    // imported page. Slots for pages that were not copied resolve to null (a valid, empty
+    // PDF destination), matching Aspose.Pdf.
+    //
+    // Keyed WEAKLY on the source reader (like _cloneCache): a strong key would pin every
+    // merged-in source document's reader/stream/byte[] for the destination's lifetime
+    // Dedup only needs to hold while the caller is still importing from
+    // that source; the allocated slot numbers live on independently (Page.ImportSlotObjNum
+    // and the int refs already written into destination arrays).
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfReader, Dictionary<int, int>> _importPageSlots = new();
+
+    // Total slots allocated and the highest slot number, tracked outside the weak table so
+    // object-number allocation and the writer's reservation don't need to enumerate it.
+    private int _slotCount;
+    private int _maxSlotObjNum;
+
+    // Slots already bound to a written page. The same source page may be imported several
+    // times (e.g. a template page copied per output page); only the FIRST copy is written
+    // at the shared destination slot, so later copies must take their own object number or
+    // all copies would collide at one number and the file would show a single page.
+    private readonly HashSet<int> _claimedSlots = new();
 
     internal PageCollection(PdfReader reader)
     {
         _reader = reader;
     }
+
+    /// <summary>The first free object number in the cross-document import space: past the
+    /// destination's existing xref and every already-allocated imported object and page
+    /// slot. Imported objects and page-destination slots draw from this one space so they
+    /// never collide.</summary>
+    private int ImportObjNumBase() =>
+        _reader.XRefTable.Entries.Keys.DefaultIfEmpty(0).Max()
+        + _importedObjects.Count + _slotCount + 1;
+
+    /// <summary>Record a freshly allocated slot number for the running counters.</summary>
+    private void RegisterSlot(int slot)
+    {
+        _slotCount++;
+        if (slot > _maxSlotObjNum) _maxSlotObjNum = slot;
+    }
+
+    /// <summary>Reserve (or reuse) the destination-slot object number for a source page,
+    /// for slots allocated outside <see cref="RemapObject"/> (i.e. after its stack has
+    /// fully drained, so <c>_importedObjects</c> is up to date).</summary>
+    private int SlotForSourcePage(PdfReader reader, int sourceObjNum)
+    {
+        var map = _importPageSlots.GetValue(reader, static _ => new Dictionary<int, int>());
+        if (!map.TryGetValue(sourceObjNum, out var slot))
+        {
+            slot = ImportObjNumBase();
+            map[sourceObjNum] = slot;
+            RegisterSlot(slot);
+        }
+        return slot;
+    }
+
+    /// <summary>Whether <paramref name="dict"/> is a page-tree object (a leaf /Page or an
+    /// intermediate /Pages node) — the targets of GoTo/Link destinations and widget /P
+    /// references that page-import must slot rather than deep-clone.</summary>
+    private static bool IsPageTreeNode(PdfDictionary dict)
+    {
+        var type = dict.GetName("Type");
+        return type == "Page" || type == "Pages";
+    }
+
+    /// <summary>Bind a freshly imported page to the destination slot reserved for its
+    /// source page, so a GoTo/Link destination that targets it resolves to this copy.
+    /// Cross-document imports only; same-document copies keep the reader's own objects.</summary>
+    private void BindImportedPageSlot(Page added, PdfReader sourceReader, int sourceObjNum)
+    {
+        if (sourceReader == _reader || sourceObjNum <= 0) return;
+        var slot = SlotForSourcePage(sourceReader, sourceObjNum);
+        // Only the first imported copy of a given source page lives at the shared slot (so
+        // destinations targeting that page resolve to it). Further copies keep
+        // ImportSlotObjNum = 0 and get a fresh writer-allocated number in RebuildPagesTree.
+        if (_claimedSlots.Add(slot))
+            added.ImportSlotObjNum = slot;
+    }
+
+    /// <summary>The highest reserved page-destination slot object number, exposed so the
+    /// save path can reserve the writer's number space above every slot (including
+    /// destination-only slots that are referenced but never written).</summary>
+    internal int ImportSlotHighWater => _maxSlotObjNum;
 
     /// <summary>The document that owns this page collection.</summary>
     internal Document? OwnerDocument { get; set; }
@@ -165,6 +254,7 @@ public sealed class PageCollection : IEnumerable<Page>
         var clonedDict = ClonePageForImport(entity.Dict, entity.Reader);
         clonedDict.Remove("Parent");
         var added = AddFromDict(clonedDict);
+        BindImportedPageSlot(added, entity.Reader, entity.SourceObjectNumber);
         ImportFormFieldsFromPage(clonedDict, entity.Dict, entity.Reader);
         CarryOverPendingContent(entity, added);
         return added;
@@ -187,17 +277,26 @@ public sealed class PageCollection : IEnumerable<Page>
     /// </summary>
     public void Add(PageCollection otherPages)
     {
-        // Snapshot to avoid issues when otherPages == this (self-copy)
-        var snapshot = new List<(PdfDictionary dict, PdfReader reader)>();
-        foreach (var page in otherPages)
-            snapshot.Add((page.Dict, page.Reader));
+        // Flush the source document's pending generator content (Paragraphs, Headers,
+        // Footers) into its page content streams before importing, so DOM paragraphs
+        // added to the source pages survive the merge — the source document may never
+        // be saved on its own, and the import clones the raw page content stream.
+        // ProcessParagraphs is idempotent (per-page LayoutApplied gate).
+        if (!ReferenceEquals(otherPages, this))
+            otherPages.OwnerDocument?.ProcessParagraphs();
 
-        foreach (var (dict, reader) in snapshot)
+        // Snapshot to avoid issues when otherPages == this (self-copy)
+        var snapshot = new List<(PdfDictionary dict, PdfReader reader, int srcObjNum)>();
+        foreach (var page in otherPages)
+            snapshot.Add((page.Dict, page.Reader, page.SourceObjectNumber));
+
+        foreach (var (dict, reader, srcObjNum) in snapshot)
         {
             EnsurePages();
             var clonedDict = ClonePageForImport(dict, reader);
             clonedDict.Remove("Parent");
-            AddFromDict(clonedDict);
+            var added = AddFromDict(clonedDict);
+            BindImportedPageSlot(added, reader, srcObjNum);
             ImportFormFieldsFromPage(clonedDict, dict, reader);
         }
     }
@@ -220,16 +319,17 @@ public sealed class PageCollection : IEnumerable<Page>
 
     private void AddPagesFromEnumerable(IEnumerable<Page> pages)
     {
-        var snapshot = new List<(PdfDictionary dict, PdfReader reader)>();
+        var snapshot = new List<(PdfDictionary dict, PdfReader reader, int srcObjNum)>();
         foreach (var page in pages)
-            snapshot.Add((page.Dict, page.Reader));
+            snapshot.Add((page.Dict, page.Reader, page.SourceObjectNumber));
 
-        foreach (var (dict, reader) in snapshot)
+        foreach (var (dict, reader, srcObjNum) in snapshot)
         {
             EnsurePages();
             var clonedDict = ClonePageForImport(dict, reader);
             clonedDict.Remove("Parent");
-            AddFromDict(clonedDict);
+            var added = AddFromDict(clonedDict);
+            BindImportedPageSlot(added, reader, srcObjNum);
             ImportFormFieldsFromPage(clonedDict, dict, reader);
         }
     }
@@ -356,6 +456,7 @@ public sealed class PageCollection : IEnumerable<Page>
         var clonedDict = ClonePageForImport(entity.Dict, entity.Reader);
         clonedDict.Remove("Parent");
         var inserted = InsertFromDict(pageNumber, clonedDict);
+        BindImportedPageSlot(inserted, entity.Reader, entity.SourceObjectNumber);
         ImportFormFieldsFromPage(clonedDict, entity.Dict, entity.Reader);
         CarryOverPendingContent(entity, inserted);
         return inserted;
@@ -379,17 +480,18 @@ public sealed class PageCollection : IEnumerable<Page>
 
     private void InsertPagesFromEnumerable(int pageNumber, IEnumerable<Page> pages)
     {
-        var snapshot = new List<(PdfDictionary dict, PdfReader reader)>();
+        var snapshot = new List<(PdfDictionary dict, PdfReader reader, int srcObjNum)>();
         foreach (var page in pages)
-            snapshot.Add((page.Dict, page.Reader));
+            snapshot.Add((page.Dict, page.Reader, page.SourceObjectNumber));
 
         for (var i = 0; i < snapshot.Count; i++)
         {
-            var (dict, reader) = snapshot[i];
+            var (dict, reader, srcObjNum) = snapshot[i];
             EnsurePages();
             var clonedDict = ClonePageForImport(dict, reader);
             clonedDict.Remove("Parent");
-            InsertFromDict(pageNumber + i, clonedDict);
+            var inserted = InsertFromDict(pageNumber + i, clonedDict);
+            BindImportedPageSlot(inserted, reader, srcObjNum);
         }
     }
 
@@ -484,44 +586,46 @@ public sealed class PageCollection : IEnumerable<Page>
         }
 
         var pageList = new List<Page>();
-        CollectPages(pagesDict, pageList);
+        var pagesObjNum = (catalog.Get("Pages") as PdfIndirectRef)?.ObjectNumber ?? -1;
+        CollectPages(pagesDict, pageList, pagesObjNum);
         _pages = pageList;
     }
 
-    private void CollectPages(PdfDictionary node, List<Page> result)
+    private void CollectPages(PdfDictionary node, List<Page> result, int nodeObjNum)
     {
         var type = node.GetName("Type");
 
         // Check for /Kids first — a corrupt PDF may have /Type /Page on a
-        // tree node that actually has children (e.g., 37914.pdf).
+        // tree node that actually has children.
         var kids = _reader.Resolve(node.Get("Kids")) as PdfArray;
 
         if (type == "Page" && kids is null)
         {
-            result.Add(new Page(node, _reader, result.Count));
+            result.Add(new Page(node, _reader, result.Count) { SourceObjectNumber = nodeObjNum });
             return;
         }
         if (kids is null)
         {
             // No /Kids — if the node has page-like properties (Contents, Resources),
-            // treat it as a leaf page despite wrong /Type (e.g. "Pages" typo in 46507.pdf)
+            // treat it as a leaf page despite a wrong /Type (e.g. a "Pages" typo on a leaf)
             if (node.ContainsKey("Contents") || node.ContainsKey("Resources"))
-                result.Add(new Page(node, _reader, result.Count));
+                result.Add(new Page(node, _reader, result.Count) { SourceObjectNumber = nodeObjNum });
             return;
         }
 
         foreach (var kid in kids)
         {
+            var kidObjNum = (kid as PdfIndirectRef)?.ObjectNumber ?? -1;
             var kidDict = _reader.ResolveDict(kid);
             if (kidDict is not null)
-                CollectPages(kidDict, result);
+                CollectPages(kidDict, result, kidObjNum);
             else
             {
                 // Unresolvable kid (corrupt/zeroed-out object stream) — add a placeholder page so
                 // PageCount matches the declared page tree structure for partially corrupt PDFs.
                 var placeholder = new PdfDictionary();
                 placeholder.Set("Type", new PdfName("Page"));
-                result.Add(new Page(placeholder, _reader, result.Count));
+                result.Add(new Page(placeholder, _reader, result.Count) { SourceObjectNumber = kidObjNum });
             }
         }
     }
@@ -537,11 +641,11 @@ public sealed class PageCollection : IEnumerable<Page>
             var docInfo = OwnerDocument?.PageInfo;
             if (docInfo is not null)
                 return (docInfo.Width, docInfo.Height);
-            return (595, 842); // A4, the Aspose.PDF for .NET default
+            return (595, 842); // A4, the Aspose.Pdf default
         }
 
         // Find most frequent page size from a bounded sample (avoids O(n²) on bulk Add).
-        // On ties, use first page's size (Aspose.PDF for .NET behavior).
+        // On ties, use first page's size (Aspose.Pdf behavior).
         var sampleCount = Math.Min(_pages!.Count, 100);
         var counts = new Dictionary<(double w, double h), int>();
         for (int i = 0; i < sampleCount; i++)
@@ -585,12 +689,7 @@ public sealed class PageCollection : IEnumerable<Page>
     /// </summary>
     private Dictionary<int, PdfObject> GetOrCreateCloneCache(PdfReader reader)
     {
-        if (!_cloneCache.TryGetValue(reader, out var visited))
-        {
-            visited = new Dictionary<int, PdfObject>();
-            _cloneCache[reader] = visited;
-        }
-        return visited;
+        return _cloneCache.GetValue(reader, static _ => new Dictionary<int, PdfObject>());
     }
 
     /// <summary>
@@ -715,8 +814,9 @@ public sealed class PageCollection : IEnumerable<Page>
     {
         var stack = new Stack<(PdfObject source, Action<PdfObject> setter)>();
         var visitedIdentity = new HashSet<object>(ReferenceEqualityComparer.Instance);
-        // Allocate object numbers from a counter that starts past the existing xref
-        var nextObjNum = _reader.XRefTable.Entries.Keys.DefaultIfEmpty(0).Max() + _importedObjects.Count + 1;
+        // Allocate object numbers from a counter that starts past the existing xref and
+        // every prior import/slot. Slots allocated below share this space via _importPageSlots.
+        var nextObjNum = ImportObjNumBase();
         PdfObject? root = null;
 
         void Process(PdfObject src, Action<PdfObject> setter)
@@ -734,6 +834,26 @@ public sealed class PageCollection : IEnumerable<Page>
                     // Resolve from source, allocate new obj number, register for writing
                     var resolved = sourceReader.Resolve(iref);
                     if (resolved is null) { setter(src); return; }
+
+                    // A reference to another PAGE (a leaf /Page or a /Pages tree node) is a
+                    // navigation target — a GoTo/Link destination or a widget's /P — not
+                    // content to copy. Cloning it would drag the whole target page's object
+                    // graph (its images, fonts) into this import. Point it at a reserved
+                    // destination slot instead; the page, if copied, is written there.
+                    if (resolved is PdfDictionary pd && IsPageTreeNode(pd))
+                    {
+                        var slotMap = _importPageSlots.GetValue(sourceReader, static _ => new Dictionary<int, int>());
+                        if (!slotMap.TryGetValue(iref.ObjectNumber, out var slot))
+                        {
+                            slot = nextObjNum++;
+                            slotMap[iref.ObjectNumber] = slot;
+                            RegisterSlot(slot);
+                        }
+                        var slotRef = new PdfIndirectRef(slot, 0);
+                        remap[iref.ObjectNumber] = slotRef;
+                        setter(slotRef);
+                        return;
+                    }
 
                     var newObjNum = nextObjNum++;
                     var newRef = new PdfIndirectRef(newObjNum, 0);
@@ -856,6 +976,11 @@ public sealed class PageCollection : IEnumerable<Page>
         var existingNames = new HashSet<string>();
         CollectFieldNames(fieldsArr, existingNames);
 
+        // A distinct /Annots array for the inserted page, materialised lazily when a
+        // same-document widget slot must be re-pointed at a synthesized kid (so the
+        // source page's shared /Annots array is left untouched).
+        PdfArray? distinctAnnots = null;
+
         for (int i = 0; i < annots.Count; i++)
         {
             var annotObj = annots[i];
@@ -886,6 +1011,38 @@ public sealed class PageCollection : IEnumerable<Page>
             // (same field appearing on multiple pages within one document)
             if (existingNames.Contains(partialName))
             {
+                // Same-document page copy/insert: the inserted page's /Annots still
+                // points at the SOURCE field's own widget dict (the shallow page clone
+                // shares it). Instead of renaming it into a separate field, give the
+                // existing field a fresh DISTINCT kid widget for the new page and link
+                // it into /Kids — so Field.Count grows by one and the original field
+                // keeps its name (FindByName still resolves it).
+                if (sourceReader == _reader
+                    && OwnerDocument.FindObjectNumber(annotDict) is int fieldObjNum && fieldObjNum >= 0)
+                {
+                    var kid = new PdfDictionary();
+                    kid.Set("Type", new PdfName("Annot"));
+                    kid.Set("Subtype", new PdfName("Widget"));
+                    foreach (var vk in new[] { "Rect", "AP", "MK", "DA", "BS", "Border", "F", "Q", "H", "AS", "DV" })
+                        if (annotDict.Get(vk) is { } vv) kid.Set(vk, vv);
+                    kid.Set("Parent", new PdfIndirectRef(fieldObjNum, 0));
+
+                    var kidObjNum = ImportObjNumBase();
+                    _importedObjects.Add((kidObjNum, kid));
+
+                    // Promote the merged leaf to "merged-self + one kid": the field keeps
+                    // its own /Rect+/AP on the source page and gains the new page's kid.
+                    var kids = _reader.Resolve(annotDict.Get("Kids")) as PdfArray;
+                    if (kids is null) { kids = new PdfArray(); annotDict.Set("Kids", kids); }
+                    kids.Add(new PdfIndirectRef(kidObjNum, 0));
+
+                    // Re-point the inserted page's /Annots slot at the fresh kid, on a
+                    // distinct array so the source page's /Annots is not mutated.
+                    distinctAnnots ??= CloneAnnotArray(annots, clonedPageDict);
+                    distinctAnnots.ReplaceAt(i, new PdfIndirectRef(kidObjNum, 0));
+                    continue;
+                }
+
                 // Check if this is a same-source duplicate (same reader = same document)
                 // vs a different-source field needing rename
                 bool isSameSourceDuplicate = false;
@@ -928,6 +1085,17 @@ public sealed class PageCollection : IEnumerable<Page>
 
         // Invalidate the cached Form object so it re-reads from the updated AcroForm
         OwnerDocument.InvalidateForm();
+    }
+
+    /// <summary>Replace <paramref name="pageDict"/>'s /Annots with a fresh array holding
+    /// the same entries, so per-slot edits don't mutate a /Annots array shared with the
+    /// source page (same-document shallow page clone). Returns the new array.</summary>
+    private static PdfArray CloneAnnotArray(PdfArray source, PdfDictionary pageDict)
+    {
+        var copy = new PdfArray();
+        foreach (var e in source) copy.Add(e);
+        pageDict.Set("Annots", copy);
+        return copy;
     }
 
     /// <summary>Get full field name by walking /Parent chain in the source document.</summary>

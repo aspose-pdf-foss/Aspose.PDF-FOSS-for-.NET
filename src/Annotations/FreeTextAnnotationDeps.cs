@@ -63,7 +63,7 @@ public class TextStyle
     /// <summary>Annotation-specific text alignment.</summary>
     public TextAlignment Alignment { get; set; } = TextAlignment.Left;
 
-    /// <summary>Top-level horizontal alignment (the Aspose.PDF for .NET surface
+    /// <summary>Top-level horizontal alignment (the Aspose.Pdf surface
     /// exposes both <see cref="Alignment"/> and this one; they're not
     /// linked — callers may set each independently).</summary>
     public Aspose.Pdf.HorizontalAlignment HorizontalAlignment { get; set; }

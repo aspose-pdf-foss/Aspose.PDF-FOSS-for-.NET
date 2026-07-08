@@ -6,7 +6,7 @@ namespace Aspose.Pdf.Converters;
 public sealed class MdLoadOptions : LoadOptions
 {
     /// <summary>Page size info (width, height, margins).</summary>
-    public PageSizeInfo? PageInfo { get; set; }
+    public PageSizeInfo PageInfo { get; set; } = new PageSizeInfo();
 
     /// <summary>Custom CSS styles to apply to the rendered content.</summary>
     public string? CssStyles { get; set; }

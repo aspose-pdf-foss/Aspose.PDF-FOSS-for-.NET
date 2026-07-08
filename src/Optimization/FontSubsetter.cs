@@ -16,7 +16,8 @@ internal static class FontSubsetter
     /// Otherwise, implements a simplified approach: removes font programs for
     /// Standard 14 fonts (which are always available in PDF viewers).
     /// </summary>
-    public static void SubsetFonts(PdfReader reader, bool subsetEmbedded = false)
+    public static void SubsetFonts(PdfReader reader, bool subsetEmbedded = false,
+        Func<int, PdfStream?>? resolveNewStream = null)
     {
         // Collect all font dictionaries referenced by pages
         foreach (var entry in reader.XRefTable.Entries.Values)
@@ -55,67 +56,110 @@ internal static class FontSubsetter
         // Perform actual TrueType subsetting if requested
         if (subsetEmbedded)
         {
-            SubsetEmbeddedFonts(reader);
+            SubsetEmbeddedFonts(reader, resolveNewStream);
         }
     }
 
     /// <summary>
     /// Collect character codes used by each font across all pages.
     /// Returns a mapping from font dictionary reference (by object number) to the set of used character codes.
+    /// Walks the page tree recursively and follows text into Form XObjects and
+    /// annotation appearance streams — a font used ONLY inside a form/appearance
+    /// (or a code used only there) must not lose its glyphs to the subset.
     /// </summary>
     public static Dictionary<int, HashSet<int>> CollectUsedGlyphs(PdfReader reader)
     {
         // Map: font object number → used character codes
         var usedCodes = new Dictionary<int, HashSet<int>>();
+        var visitedForms = new HashSet<PdfDictionary>();
 
-        // Iterate all pages
-        var catalog = reader.Catalog;
-        var pagesRef = catalog.Get("Pages");
-        var pagesDict = reader.ResolveDict(pagesRef);
-        if (pagesDict is null) return usedCodes;
-
-        var kids = reader.Resolve(pagesDict.Get("Kids")) as PdfArray;
-        if (kids is null) return usedCodes;
-
-        foreach (var kidRef in kids)
+        void WalkPageTree(PdfDictionary? node)
         {
-            var pageDict = reader.ResolveDict(kidRef);
-            if (pageDict is null) continue;
+            if (node is null) return;
+            if (reader.Resolve(node.Get("Kids")) is PdfArray kids)
+            {
+                foreach (var kidRef in kids)
+                    WalkPageTree(reader.ResolveDict(kidRef));
+                return;
+            }
 
-            // Get font resources for this page
-            var resources = reader.ResolveDict(pageDict.Get("Resources"));
-            var fontResources = resources is not null ? reader.ResolveDict(resources.Get("Font")) : null;
-            if (fontResources is null) continue;
+            var resources = reader.ResolveDict(node.Get("Resources"));
+            foreach (var streamBytes in GetContentStreams(node, reader))
+                CollectFromContext(streamBytes, resources, reader, usedCodes, visitedForms);
 
-            // Build a mapping from font resource name to (font dict, object number)
-            var fontMap = new Dictionary<string, (PdfDictionary dict, int objNum)>();
+            // Annotation appearance streams draw with their own resources.
+            if (reader.Resolve(node.Get("Annots")) is PdfArray annots)
+                foreach (var annotRef in annots)
+                {
+                    var annot = reader.ResolveDict(annotRef);
+                    var ap = annot is null ? null : reader.ResolveDict(annot.Get("AP"));
+                    var n = ap is null ? null : reader.Resolve(ap.Get("N"));
+                    if (n is not PdfStream apStream) continue;
+                    byte[] data;
+                    try { data = reader.DecodeStream(apStream); } catch { continue; }
+                    var apRes = reader.ResolveDict(apStream.Dict.Get("Resources")) ?? resources;
+                    CollectFromContext(data, apRes, reader, usedCodes, visitedForms);
+                }
+        }
+
+        WalkPageTree(reader.ResolveDict(reader.Catalog.Get("Pages")));
+        return usedCodes;
+    }
+
+    /// <summary>Scan one content stream for text-show codes against its resource
+    /// context, recursing through Form XObjects invoked with Do.</summary>
+    private static void CollectFromContext(byte[] streamBytes, PdfDictionary? resources,
+        PdfReader reader, Dictionary<int, HashSet<int>> usedCodes, HashSet<PdfDictionary> visitedForms)
+    {
+        var fontResources = resources is not null ? reader.ResolveDict(resources.Get("Font")) : null;
+
+        // Font resource name → (dict, objNum, CID-keyed?). A composite (Type0)
+        // font's show-string bytes are 2-byte codes.
+        var fontMap = new Dictionary<string, (PdfDictionary dict, int objNum, bool isCid)>();
+        if (fontResources is not null)
             foreach (var fontKey in fontResources.Keys)
             {
                 var fontRef = fontResources.Get(fontKey);
                 int fontObjNum = fontRef is PdfIndirectRef iref ? iref.ObjectNumber : 0;
                 var fontDict = reader.ResolveDict(fontRef);
                 if (fontDict is not null && fontObjNum > 0)
-                    fontMap[fontKey] = (fontDict, fontObjNum);
+                    fontMap[fontKey] = (fontDict, fontObjNum, fontDict.GetName("Subtype") == "Type0");
             }
 
-            // Parse content streams
-            var contentStreams = GetContentStreams(pageDict, reader);
-            foreach (var streamBytes in contentStreams)
-            {
-                CollectUsedCodesFromStream(streamBytes, fontMap, usedCodes);
-            }
-        }
+        var xobjRes = resources is not null ? reader.ResolveDict(resources.Get("XObject")) : null;
 
-        return usedCodes;
+        CollectUsedCodesFromStream(streamBytes, fontMap, usedCodes, xobjName =>
+        {
+            if (xobjRes is null) return;
+            if (reader.Resolve(xobjRes.Get(xobjName)) is not PdfStream formStream) return;
+            if (formStream.Dict.GetName("Subtype") != "Form") return;
+            if (!visitedForms.Add(formStream.Dict)) return;
+            byte[] data;
+            try { data = reader.DecodeStream(formStream); } catch { return; }
+            var subRes = reader.ResolveDict(formStream.Dict.Get("Resources")) ?? resources;
+            CollectFromContext(data, subRes, reader, usedCodes, visitedForms);
+        });
     }
 
     /// <summary>
     /// Subset embedded TrueType fonts, keeping only glyphs used in the document.
     /// </summary>
-    public static void SubsetEmbeddedFonts(PdfReader reader)
+    public static void SubsetEmbeddedFonts(PdfReader reader, Func<int, PdfStream?>? resolveNewStream = null,
+        bool newlyEmbeddedOnly = false)
     {
         var usedCodes = CollectUsedGlyphs(reader);
         if (usedCodes.Count == 0) return;
+
+        // Composite (Type0/CID) fonts first: group by FontFile2 stream so a program
+        // shared between several font dictionaries is subset ONCE with the union of
+        // their used CIDs (subsetting per-dict would drop the other dict's glyphs).
+        SubsetCidFonts(reader, usedCodes, resolveNewStream, newlyEmbeddedOnly);
+
+        // Simple fonts, also grouped by FontFile2 stream: the PDF/A embedder shares one
+        // program object between identical faces referenced by several font dictionaries,
+        // and subsetting it per-dictionary would drop the other dictionaries' glyphs.
+        var byProgram = new Dictionary<PdfStream,
+            (HashSet<int> subsetCodes, List<(PdfDictionary fontDict, PdfDictionary descriptor, string baseFont, HashSet<int> ownCodes)> fonts, bool isPending)>();
 
         foreach (var (fontObjNum, charCodes) in usedCodes)
         {
@@ -124,6 +168,8 @@ internal static class FontSubsetter
 
             var baseFont = fontDict.GetName("BaseFont");
             if (baseFont is null) continue;
+
+            if (fontDict.GetName("Subtype") == "Type0") continue; // handled above
 
             // Skip Standard 14 fonts
             if (IsStandard14(baseFont)) continue;
@@ -138,9 +184,44 @@ internal static class FontSubsetter
             var fontFileRef = descriptor.Get("FontFile2");
             if (fontFileRef is null) continue;
 
+            // The program stream may be an original file object (resolvable through the
+            // reader) or one that a preceding pass (e.g. PDF/A font embedding) allocated but
+            // has not yet serialised — those live in the document's pending-object list and
+            // are only reachable through the supplied resolver.
             var fontFileStream = reader.ResolveStream(fontFileRef);
+            var isPendingProgram = fontFileStream is null;
+            if (fontFileStream is null && fontFileRef is PdfIndirectRef nref)
+                fontFileStream = resolveNewStream?.Invoke(nref.ObjectNumber);
             if (fontFileStream is null) continue;
 
+
+            // The content stream records single-byte character codes; the glyph cmap may be
+            // keyed by those raw codes (symbol/Mac cmaps common in Word subset fonts) or by
+            // Unicode (a (3,1) cmap, used by the system faces the PDF/A embedder substitutes
+            // in). Offer both the raw code and its WinAnsi→Unicode mapping so the subsetter
+            // keeps the right glyph whichever cmap the program carries — extra non-matching
+            // codes resolve to gid 0 and are ignored, so this never drops a used glyph.
+            var subsetCodes = new HashSet<int>(charCodes);
+            foreach (var code in charCodes)
+                if (code is >= 0 and <= 255)
+                {
+                    subsetCodes.Add(Cp1252.GetString(new[] { (byte)code })[0]);
+                    // Symbolic (3,0) cmaps — ubiquitous in Word-produced subset
+                    // fonts — key their glyphs at 0xF000+code.
+                    subsetCodes.Add(0xF000 | code);
+                }
+
+            if (!byProgram.TryGetValue(fontFileStream, out var entry))
+            {
+                entry = (new HashSet<int>(), new List<(PdfDictionary, PdfDictionary, string, HashSet<int>)>(), isPendingProgram);
+                byProgram[fontFileStream] = entry;
+            }
+            entry.subsetCodes.UnionWith(subsetCodes);
+            entry.fonts.Add((fontDict, descriptor, baseFont, charCodes));
+        }
+
+        foreach (var (fontFileStream, entry) in byProgram)
+        {
             // Decode the font stream
             byte[] fontData;
             try
@@ -166,22 +247,26 @@ internal static class FontSubsetter
                 continue; // Skip fonts that fail to parse
             }
 
-            // Map character codes to glyph IDs
-            var glyphIds = new HashSet<int> { 0 }; // Always include .notdef
-            foreach (var charCode in charCodes)
-            {
-                if (parser.CMap.TryGetValue(charCode, out var gid) && gid > 0)
-                    glyphIds.Add(gid);
-            }
+            // Only the programs THIS conversion just embedded are re-subset when
+            // the caller asks for the conservative mode: they come from
+            // cmap-complete system faces the subsetter's code model matches. A
+            // source's own embedded (usually already-subset) program uses
+            // producer-specific encodings — re-subsetting one has produced both
+            // tofu (unresolved codes) and mismapped glyphs (rebuilt-cmap key
+            // clashes) on Word-produced files.
+            if (newlyEmbeddedOnly && !entry.isPending) continue;
 
-            // Perform subsetting
-            TrueTypeSubsetter subsetter;
+            // Perform subsetting once for the shared program
             byte[] subsetData;
-            Dictionary<int, int> glyphMap;
             try
             {
-                subsetter = new TrueTypeSubsetter(fontData, parser);
-                (subsetData, glyphMap) = subsetter.Subset(charCodes);
+                var subsetter = new TrueTypeSubsetter(fontData, parser);
+                Dictionary<int, int> glyphMap;
+                (subsetData, glyphMap) = subsetter.Subset(entry.subsetCodes);
+                // Safety valve: codes were used but NONE resolved through the
+                // program's cmap — keep the full program.
+                if (glyphMap.Count <= 1 && entry.subsetCodes.Count > 0)
+                    continue;
             }
             catch
             {
@@ -198,14 +283,102 @@ internal static class FontSubsetter
             fontFileStream.Dict.Remove("DecodeParms");
             fontFileStream.Dict.Set("Length", new PdfInteger(subsetData.Length));
 
-            // Update Length1 in the font descriptor
-            descriptor.Set("Length1", new PdfInteger(subsetData.Length));
+            foreach (var (fontDict, descriptor, baseFont, ownCodes) in entry.fonts)
+            {
+                // Update Length1 in the font descriptor
+                descriptor.Set("Length1", new PdfInteger(subsetData.Length));
 
-            // Update Widths array based on used character range
-            UpdateWidths(fontDict, charCodes, parser, reader);
+                // Update Widths array based on used character range
+                UpdateWidths(fontDict, ownCodes, parser, reader);
 
-            // Add subset prefix to BaseFont name
-            AddSubsetPrefix(fontDict, descriptor, baseFont);
+                // Add subset prefix to BaseFont name
+                AddSubsetPrefix(fontDict, descriptor, baseFont);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sparse-subset the embedded programs of composite (Type0/CID) fonts to their
+    /// used CIDs. Glyph numbering is preserved (the content stream's CIDs must stay
+    /// valid), so unused glyphs just lose their outlines. Programs shared between
+    /// several font dictionaries are subset once with the union of their used CIDs.
+    /// </summary>
+    private static void SubsetCidFonts(PdfReader reader, Dictionary<int, HashSet<int>> usedCodes,
+        Func<int, PdfStream?>? resolveNewStream, bool newlyEmbeddedOnly = false)
+    {
+        // FontFile2 stream → (union of used GIDs, participating font dicts)
+        var byProgram = new Dictionary<PdfStream, (HashSet<int> gids, List<(PdfDictionary type0, PdfDictionary descriptor)> fonts)>();
+
+        foreach (var (fontObjNum, charCodes) in usedCodes)
+        {
+            if (reader.Resolve(new PdfIndirectRef(fontObjNum, 0)) is not PdfDictionary fontDict) continue;
+            if (fontDict.GetName("Subtype") != "Type0") continue;
+
+            var descendants = reader.Resolve(fontDict.Get("DescendantFonts")) as PdfArray;
+            var cidFont = descendants is { Count: > 0 } ? reader.ResolveDict(descendants[0]) : null;
+            var descriptor = cidFont is null ? null : reader.ResolveDict(cidFont.Get("FontDescriptor"));
+            var fontFileRef = descriptor?.Get("FontFile2");
+            if (fontFileRef is null) continue;
+            var fontFileStream = reader.ResolveStream(fontFileRef);
+            var isPendingProgram = fontFileStream is null;
+            if (fontFileStream is null && fontFileRef is PdfIndirectRef nref)
+                fontFileStream = resolveNewStream?.Invoke(nref.ObjectNumber);
+            if (fontFileStream is null) continue;
+            // Conversion-time subsetting touches only the programs this conversion
+            // just embedded (see the simple-font loop for the rationale).
+            if (newlyEmbeddedOnly && !isPendingProgram) continue;
+
+            // CID → GID: identity unless the descendant carries a CIDToGIDMap stream.
+            var gids = new HashSet<int>();
+            var mapRef = cidFont!.Get("CIDToGIDMap");
+            byte[]? cid2gid = null;
+            if (mapRef is not null and not PdfName)
+            {
+                var mapStream = reader.ResolveStream(mapRef);
+                if (mapStream is null && mapRef is PdfIndirectRef mref)
+                    mapStream = resolveNewStream?.Invoke(mref.ObjectNumber);
+                if (mapStream is not null)
+                    try { cid2gid = reader.DecodeStream(mapStream); } catch { }
+            }
+            foreach (var cid in charCodes)
+            {
+                if (cid2gid is null) { gids.Add(cid); continue; }
+                var off = cid * 2;
+                if (off + 1 < cid2gid.Length)
+                    gids.Add((cid2gid[off] << 8) | cid2gid[off + 1]);
+            }
+
+            if (!byProgram.TryGetValue(fontFileStream, out var entry))
+            {
+                entry = (new HashSet<int>(), new List<(PdfDictionary, PdfDictionary)>());
+                byProgram[fontFileStream] = entry;
+            }
+            entry.gids.UnionWith(gids);
+            entry.fonts.Add((fontDict, descriptor!));
+        }
+
+        foreach (var (stream, entry) in byProgram)
+        {
+            byte[] fontData;
+            try { fontData = reader.DecodeStream(stream); } catch { continue; }
+            if (fontData.Length < 12) continue;
+
+            byte[] subsetData;
+            try
+            {
+                var parser = new Text.TrueTypeParser(fontData);
+                parser.Parse();
+                subsetData = new Text.TrueTypeSubsetter(fontData, parser).SubsetSparse(entry.gids);
+            }
+            catch { continue; }
+
+            if (subsetData.Length >= fontData.Length) continue;
+
+            stream.ReplaceData(subsetData);
+            stream.Dict.Remove("Filter");
+            stream.Dict.Remove("DecodeParms");
+            stream.Dict.Set("Length", new PdfInteger(subsetData.Length));
+            stream.Dict.Set("Length1", new PdfInteger(subsetData.Length));
         }
     }
 
@@ -286,8 +459,9 @@ internal static class FontSubsetter
     /// Parse content streams from a page dictionary and collect character codes used by each font.
     /// </summary>
     private static void CollectUsedCodesFromStream(byte[] streamBytes,
-        Dictionary<string, (PdfDictionary dict, int objNum)> fontMap,
-        Dictionary<int, HashSet<int>> usedCodes)
+        Dictionary<string, (PdfDictionary dict, int objNum, bool isCid)> fontMap,
+        Dictionary<int, HashSet<int>> usedCodes,
+        Action<string>? onFormXObject = null)
     {
         var lexer = new PdfLexer(streamBytes);
         var operands = new List<PdfObject>();
@@ -349,6 +523,10 @@ internal static class FontSubsetter
                         case "\"" when operands.Count >= 3 && operands[2] is PdfString dqs:
                             CollectCodesFromString(dqs.Value, currentFontKey, fontMap, usedCodes);
                             break;
+
+                        case "Do" when operands.Count >= 1 && operands[0] is PdfName xobjName:
+                            onFormXObject?.Invoke(xobjName.Value);
+                            break;
                     }
 
                     operands.Clear();
@@ -365,7 +543,7 @@ internal static class FontSubsetter
     /// Collect character codes from a text string into the usedCodes map.
     /// </summary>
     private static void CollectCodesFromString(byte[] bytes, string? currentFontKey,
-        Dictionary<string, (PdfDictionary dict, int objNum)> fontMap,
+        Dictionary<string, (PdfDictionary dict, int objNum, bool isCid)> fontMap,
         Dictionary<int, HashSet<int>> usedCodes)
     {
         if (currentFontKey is null) return;
@@ -377,8 +555,17 @@ internal static class FontSubsetter
             usedCodes[fontInfo.objNum] = codes;
         }
 
-        foreach (var b in bytes)
-            codes.Add(b);
+        if (fontInfo.isCid)
+        {
+            // Composite font: 2-byte big-endian codes (CIDs).
+            for (var i = 0; i + 1 < bytes.Length; i += 2)
+                codes.Add((bytes[i] << 8) | bytes[i + 1]);
+        }
+        else
+        {
+            foreach (var b in bytes)
+                codes.Add(b);
+        }
     }
 
     /// <summary>
@@ -389,17 +576,20 @@ internal static class FontSubsetter
         var result = new List<byte[]>();
         var contents = reader.Resolve(pageDict.Get("Contents"));
 
+        // Best-effort: glyph collection must never abort the whole pass because one
+        // stream's filter chain fails to decode (e.g. an exotic LZW variant) — an
+        // uncollected stream just means its fonts keep their full glyph sets.
         switch (contents)
         {
             case PdfStream stream:
-                result.Add(reader.DecodeStream(stream));
+                try { result.Add(reader.DecodeStream(stream)); } catch { }
                 break;
             case PdfArray arr:
                 foreach (var item in arr)
                 {
                     var s = reader.ResolveStream(item);
-                    if (s is not null)
-                        result.Add(reader.DecodeStream(s));
+                    if (s is null) continue;
+                    try { result.Add(reader.DecodeStream(s)); } catch { }
                 }
                 break;
         }

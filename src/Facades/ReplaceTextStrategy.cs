@@ -2,7 +2,7 @@ namespace Aspose.Pdf.Facades;
 
 /// <summary>
 /// Configures how <see cref="PdfContentEditor.ReplaceText(string, string)"/>
-/// matches and substitutes text. Mirrors the Aspose.PDF for .NET API:
+/// matches and substitutes text. Mirrors the Aspose.Pdf API:
 /// <c>editor.ReplaceTextStrategy.IsRegularExpressionUsed</c> /
 /// <c>editor.ReplaceTextStrategy.ReplaceScope</c>.
 ///

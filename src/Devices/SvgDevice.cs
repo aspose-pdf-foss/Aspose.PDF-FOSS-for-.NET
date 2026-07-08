@@ -27,12 +27,11 @@ public sealed class SvgDevice
 
         var reader = page.Reader;
         var contentStreams = GetContentStreams(page.Dict, reader);
-        var fonts = ResolveFonts(page.Dict, reader);
-        var extGStates = ExtGState.ResolveRawFromPage(page.Dict, reader);
+        var resources = reader.ResolveDict(page.Dict.Get("Resources"));
 
         foreach (var stream in contentStreams)
         {
-            RenderToSvg(stream, fonts, extGStates, reader, sb);
+            RenderToSvg(stream, resources, reader, sb, 0);
         }
 
         sb.AppendLine("</g>");
@@ -70,6 +69,11 @@ public sealed class SvgDevice
         public string BlendMode = "Normal";
         public double FontSize = 12;
         public string FontName = "sans-serif";
+        // Font descriptor + ToUnicode CMap for the current font, so show-text
+        // byte strings (which for embedded/subset fonts are glyph codes, not
+        // Latin1 text) are decoded to real Unicode instead of garbage.
+        public PdfDictionary? FontDict;
+        public Dictionary<int, string>? ToUnicode;
         public double LineWidth = 1.0;
         public int LineCap; // 0=butt, 1=round, 2=square
         public int LineJoin; // 0=miter, 1=round, 2=bevel
@@ -89,6 +93,7 @@ public sealed class SvgDevice
                 FillAlpha = FillAlpha, StrokeAlpha = StrokeAlpha,
                 BlendMode = BlendMode,
                 FontSize = FontSize, FontName = FontName,
+                FontDict = FontDict, ToUnicode = ToUnicode,
                 LineWidth = LineWidth,
                 LineCap = LineCap, LineJoin = LineJoin,
                 DashArray = (double[])DashArray.Clone(),
@@ -99,17 +104,33 @@ public sealed class SvgDevice
         }
     }
 
-    private static void RenderToSvg(byte[] streamBytes, Dictionary<string, PdfDictionary> fonts,
-        Dictionary<string, PdfDictionary> extGStates, PdfReader reader, StringBuilder sb)
+    /// <summary>Guard against pathological or self-referential Form XObject nesting.</summary>
+    private const int MaxXObjectDepth = 12;
+
+    private static void RenderToSvg(byte[] streamBytes, PdfDictionary? resources,
+        PdfReader reader, StringBuilder sb, int depth)
     {
+        var fonts = ResolveFonts(resources, reader);
+        var extGStates = ResolveExtGStates(resources, reader);
         var lexer = new PdfLexer(streamBytes);
         var operands = new List<PdfObject>();
+        // Text position + matrices. tx/ty mirror the text-matrix translation
+        // (tm[4],tm[5]); tm is the text matrix, tlm the text line matrix. The
+        // effective glyph size is the Tf size scaled by the text matrix, so a
+        // "1 Tf" with an "N 0 0 N .. Tm" renders at N, not 1.
         double tx = 0, ty = 0;
+        double[] tm = { 1, 0, 0, 1, 0, 0 };
+        double[] tlm = { 1, 0, 0, 1, 0, 0 };
         var gs = new GState();
         var gsStack = new Stack<GState>();
         var pathData = new StringBuilder();
-        // Track open <g> elements from cm transforms so we can close them
+        // Track open <g> elements from cm transforms so we can close them. qGroupStack
+        // records how many were open at each `q`, so the matching `Q` closes only the
+        // groups opened within that q/Q pair — otherwise a cm issued before/around a
+        // q/Q block (e.g. a page-level flip) gets closed early and later content is no
+        // longer nested under it.
         int cmGroupDepth = 0;
+        var qGroupStack = new Stack<int>();
 
         while (true)
         {
@@ -134,12 +155,14 @@ public sealed class SvgDevice
                         // --- Graphics state stack ---
                         case "q":
                             gsStack.Push(gs.Clone());
+                            qGroupStack.Push(cmGroupDepth);
                             break;
                         case "Q":
                             if (gsStack.Count > 0)
                                 gs = gsStack.Pop();
-                            // Close any cm transform groups opened since last q
-                            while (cmGroupDepth > 0)
+                            // Close only the cm groups opened since the matching q.
+                            var target = qGroupStack.Count > 0 ? qGroupStack.Pop() : 0;
+                            while (cmGroupDepth > target)
                             {
                                 sb.AppendLine("</g>");
                                 cmGroupDepth--;
@@ -225,43 +248,62 @@ public sealed class SvgDevice
                             {
                                 if (operands[0] is PdfName fn)
                                 {
-                                    gs.FontName = fn.Value;
-                                    if (fonts.TryGetValue(gs.FontName, out var fd))
+                                    if (fonts.TryGetValue(fn.Value, out var fd))
                                     {
+                                        gs.FontDict = fd;
+                                        gs.ToUnicode = Text.TextAbsorber.ParseToUnicodeFromDict(fd, reader);
                                         var baseFont = fd.GetName("BaseFont") ?? "sans-serif";
                                         gs.FontName = MapFontName(baseFont);
+                                    }
+                                    else
+                                    {
+                                        gs.FontDict = null;
+                                        gs.ToUnicode = null;
+                                        gs.FontName = fn.Value;
                                     }
                                 }
                                 gs.FontSize = Num(operands[1]);
                             }
                             break;
 
-                        // --- Text positioning ---
+                        // --- Text object begin: reset text + line matrices ---
+                        case "BT":
+                            Array.Copy(Identity, tm, 6);
+                            Array.Copy(Identity, tlm, 6);
+                            tx = 0; ty = 0;
+                            break;
+
+                        // --- Text positioning (operate on the text line matrix) ---
                         case "Td":
                             if (operands.Count >= 2)
-                            { tx += Num(operands[0]); ty += Num(operands[1]); }
+                            {
+                                tlm = MulAffine(new[] { 1.0, 0, 0, 1, Num(operands[0]), Num(operands[1]) }, tlm);
+                                Array.Copy(tlm, tm, 6); tx = tm[4]; ty = tm[5];
+                            }
                             break;
                         case "TD":
                             if (operands.Count >= 2)
                             {
-                                var tdx = Num(operands[0]);
-                                var tdy = Num(operands[1]);
-                                tx += tdx;
-                                ty += tdy;
-                                gs.TextLeading = -tdy;
+                                gs.TextLeading = -Num(operands[1]);
+                                tlm = MulAffine(new[] { 1.0, 0, 0, 1, Num(operands[0]), Num(operands[1]) }, tlm);
+                                Array.Copy(tlm, tm, 6); tx = tm[4]; ty = tm[5];
                             }
                             break;
                         case "Tm":
                             if (operands.Count >= 6)
-                            { tx = Num(operands[4]); ty = Num(operands[5]); }
+                            {
+                                var m = new[] { Num(operands[0]), Num(operands[1]), Num(operands[2]),
+                                    Num(operands[3]), Num(operands[4]), Num(operands[5]) };
+                                Array.Copy(m, tm, 6); Array.Copy(m, tlm, 6); tx = tm[4]; ty = tm[5];
+                            }
                             break;
                         case "TL":
                             if (operands.Count >= 1)
                                 gs.TextLeading = Num(operands[0]);
                             break;
                         case "T*":
-                            tx = 0;
-                            ty -= gs.TextLeading;
+                            tlm = MulAffine(new[] { 1.0, 0, 0, 1, 0, -gs.TextLeading }, tlm);
+                            Array.Copy(tlm, tm, 6); tx = tm[4]; ty = tm[5];
                             break;
 
                         // --- Fill color (RGB) ---
@@ -312,14 +354,28 @@ public sealed class SvgDevice
                             }
                             break;
 
+                        // --- Colorspace-relative fill/stroke colour (sc/scn, SC/SCN) ---
+                        // The colorspace is set via cs/CS to a named space; rather than
+                        // resolve it, infer from the numeric operand count (1=gray,
+                        // 3=rgb, 4=cmyk). Without this, sc-coloured content (e.g. white
+                        // 1 1 1 sc interiors) all defaulted to black.
+                        case "sc":
+                        case "scn":
+                            SetColorFromComponents(operands, ref gs.FillR, ref gs.FillG, ref gs.FillB);
+                            break;
+                        case "SC":
+                        case "SCN":
+                            SetColorFromComponents(operands, ref gs.StrokeR, ref gs.StrokeG, ref gs.StrokeB);
+                            break;
+
                         // --- Text show: ' (move to next line then show) ---
                         case "'":
                             // Equivalent to T* then Tj
-                            tx = 0;
-                            ty -= gs.TextLeading;
+                            tlm = MulAffine(new[] { 1.0, 0, 0, 1, 0, -gs.TextLeading }, tlm);
+                            Array.Copy(tlm, tm, 6); tx = tm[4]; ty = tm[5];
                             if (operands.Count >= 1 && operands[0] is PdfString qs)
                             {
-                                EmitText(sb, gs, tx, ty, EscapeXml(Encoding.Latin1.GetString(qs.Value)));
+                                EmitTextRun(sb, gs, tm, EscapeXml(DecodeShow(qs.Value, gs, reader)));
                             }
                             break;
 
@@ -327,7 +383,7 @@ public sealed class SvgDevice
                         case "Tj":
                             if (operands.Count >= 1 && operands[0] is PdfString s)
                             {
-                                EmitText(sb, gs, tx, ty, EscapeXml(Encoding.Latin1.GetString(s.Value)));
+                                EmitTextRun(sb, gs, tm, EscapeXml(DecodeShow(s.Value, gs, reader)));
                             }
                             break;
                         case "TJ":
@@ -337,13 +393,13 @@ public sealed class SvgDevice
                                 foreach (var item in tja)
                                 {
                                     if (item is PdfString ts)
-                                        tjText.Append(Encoding.Latin1.GetString(ts.Value));
+                                        tjText.Append(DecodeShow(ts.Value, gs, reader));
                                     else if (item is PdfInteger ti && ti.Value < -200)
                                         tjText.Append(' ');
                                     else if (item is PdfReal tr2 && tr2.Value < -200)
                                         tjText.Append(' ');
                                 }
-                                EmitText(sb, gs, tx, ty, EscapeXml(tjText.ToString()));
+                                EmitTextRun(sb, gs, tm, EscapeXml(tjText.ToString()));
                             }
                             break;
 
@@ -438,6 +494,12 @@ public sealed class SvgDevice
                         case "n": // end path (no fill, no stroke)
                             pathData.Clear();
                             break;
+                        // --- XObject invocation (Form recursion) ---
+                        case "Do":
+                            if (operands.Count >= 1 && operands[0] is PdfName xn)
+                                RenderXObject(xn.Value, resources, reader, sb, depth);
+                            break;
+
                         case "BI":
                             SkipInlineImage(lexer);
                             operands.Clear();
@@ -461,9 +523,14 @@ public sealed class SvgDevice
     }
 
     /// <summary>
-    /// Emit a text element with current graphics state.
+    /// Emit one text run. The run is placed by its text matrix with the matrix's
+    /// y-column negated (<c>matrix(a,b,-c,-d,e,f)</c> == tm composed with a glyph
+    /// y-flip), which cancels the page's <c>scale(1,-1)</c> flip so the glyphs render
+    /// upright in a plain SVG viewer while still landing at the right place. Font size
+    /// stays the raw Tf size; the matrix carries the text-matrix scale/rotation/shear.
+    /// SvgToPdfConverter recovers the PDF text matrix by negating the y-column back.
     /// </summary>
-    private static void EmitText(StringBuilder sb, GState gs, double x, double y, string text)
+    private static void EmitTextRun(StringBuilder sb, GState gs, double[] tm, string text)
     {
         var fillColor = FormatRgb(gs.FillR, gs.FillG, gs.FillB);
         var style = new StringBuilder();
@@ -473,8 +540,12 @@ public sealed class SvgDevice
             style.Append($" fill-opacity=\"{F(gs.FillAlpha)}\"");
         if (gs.BlendMode != "Normal")
             style.Append($" style=\"mix-blend-mode:{MapBlendMode(gs.BlendMode)}\"");
-        sb.AppendLine($"<text x=\"{F(x)}\" y=\"{F(y)}\" {style}>{text}</text>");
+        var transform = $"matrix({F(tm[0])},{F(tm[1])},{F(Neg(tm[2]))},{F(Neg(tm[3]))},{F(tm[4])},{F(tm[5])})";
+        sb.AppendLine($"<text transform=\"{transform}\" {style}>{text}</text>");
     }
+
+    /// <summary>Negate, flushing -0 to 0 for tidy output.</summary>
+    private static double Neg(double v) => v == 0.0 ? 0.0 : -v;
 
     /// <summary>
     /// Emit a path element with current graphics state.
@@ -528,8 +599,43 @@ public sealed class SvgDevice
         sb.AppendLine($"<path {attrs} />");
     }
 
+    private static readonly double[] Identity = { 1, 0, 0, 1, 0, 0 };
+
+    /// <summary>Compose two affine matrices (PDF row-vector convention): m1 × m2.</summary>
+    private static double[] MulAffine(double[] m1, double[] m2) => new[]
+    {
+        m1[0] * m2[0] + m1[1] * m2[2],
+        m1[0] * m2[1] + m1[1] * m2[3],
+        m1[2] * m2[0] + m1[3] * m2[2],
+        m1[2] * m2[1] + m1[3] * m2[3],
+        m1[4] * m2[0] + m1[5] * m2[2] + m2[4],
+        m1[4] * m2[1] + m1[5] * m2[3] + m2[5],
+    };
+
     private static string FormatRgb(double r, double g, double b) =>
         $"rgb({(int)(r * 255)},{(int)(g * 255)},{(int)(b * 255)})";
+
+    /// <summary>
+    /// Set an RGB colour from the numeric operands of an <c>sc</c>/<c>scn</c>
+    /// operator, inferring the model from the component count. A trailing pattern
+    /// name (scn) or zero numeric operands leaves the colour unchanged.
+    /// </summary>
+    private static void SetColorFromComponents(List<PdfObject> operands, ref double r, ref double g, ref double b)
+    {
+        var nums = operands.Where(o => o is PdfInteger or PdfReal).Select(Num).ToList();
+        switch (nums.Count)
+        {
+            case 1:
+                r = g = b = nums[0];
+                break;
+            case 3:
+                r = nums[0]; g = nums[1]; b = nums[2];
+                break;
+            case 4:
+                CmykToRgb(nums[0], nums[1], nums[2], nums[3], out r, out g, out b);
+                break;
+        }
+    }
 
     private static void CmykToRgb(double c, double m, double y, double k,
         out double r, out double g, out double b)
@@ -581,13 +687,80 @@ public sealed class SvgDevice
         _ => "normal",
     };
 
-    private static string EscapeXml(string text) =>
-        text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+    /// <summary>
+    /// Decode a show-text byte string through the current font. For embedded/subset
+    /// fonts the raw bytes are glyph codes, so <c>Latin1.GetString</c> yields invalid
+    /// XML; route through the font's ToUnicode/encoding instead. Only when no font
+    /// dictionary is bound do we fall back to Latin1.
+    /// </summary>
+    private static string DecodeShow(byte[] bytes, GState gs, PdfReader reader)
+        => gs.FontDict is not null
+            ? Text.TextAbsorber.DecodeStringPublic(bytes, gs.ToUnicode, gs.FontDict, reader)
+            : Encoding.Latin1.GetString(bytes);
 
-    private static Dictionary<string, PdfDictionary> ResolveFonts(PdfDictionary pageDict, PdfReader reader)
+    /// <summary>
+    /// Render a named XObject. Form XObjects are decoded and recursed into with their
+    /// own /Resources (falling back to the parent's) and optional /Matrix. Image
+    /// XObjects are not yet emitted.
+    /// </summary>
+    private static void RenderXObject(string name, PdfDictionary? resources, PdfReader reader,
+        StringBuilder sb, int depth)
+    {
+        if (depth >= MaxXObjectDepth || resources is null) return;
+
+        var xobjDict = reader.ResolveDict(resources.Get("XObject"));
+        if (xobjDict is null) return;
+
+        var xobj = reader.ResolveStream(xobjDict.Get(name));
+        if (xobj is null) return;
+
+        var subtype = xobj.Dict.GetName("Subtype");
+        if (subtype != "Form") return; // Image XObjects unsupported for now
+
+        byte[] formBytes;
+        try { formBytes = reader.DecodeStream(xobj); }
+        catch { return; }
+
+        var formResources = reader.ResolveDict(xobj.Dict.Get("Resources")) ?? resources;
+
+        // Optional /Matrix maps form space into the current user space.
+        var matrix = reader.Resolve(xobj.Dict.Get("Matrix")) as PdfArray;
+        var wrapped = false;
+        if (matrix is not null && matrix.Count >= 6)
+        {
+            sb.AppendLine($"<g transform=\"matrix({F(Num(matrix[0]))},{F(Num(matrix[1]))}," +
+                $"{F(Num(matrix[2]))},{F(Num(matrix[3]))},{F(Num(matrix[4]))},{F(Num(matrix[5]))})\">");
+            wrapped = true;
+        }
+
+        RenderToSvg(formBytes, formResources, reader, sb, depth + 1);
+
+        if (wrapped) sb.AppendLine("</g>");
+    }
+
+    private static string EscapeXml(string text)
+    {
+        var sb = new StringBuilder(text.Length);
+        foreach (var ch in text)
+        {
+            // Drop characters that are illegal in XML 1.0: control chars below 0x20
+            // (except tab/LF/CR) and the non-characters U+FFFE/U+FFFF.
+            if (ch < 0x20 && ch is not ('\t' or '\n' or '\r')) continue;
+            if (ch is '￾' or '￿') continue;
+            switch (ch)
+            {
+                case '&': sb.Append("&amp;"); break;
+                case '<': sb.Append("&lt;"); break;
+                case '>': sb.Append("&gt;"); break;
+                default: sb.Append(ch); break;
+            }
+        }
+        return sb.ToString();
+    }
+
+    private static Dictionary<string, PdfDictionary> ResolveFonts(PdfDictionary? resources, PdfReader reader)
     {
         var result = new Dictionary<string, PdfDictionary>(StringComparer.Ordinal);
-        var resources = reader.ResolveDict(pageDict.Get("Resources"));
         if (resources is null) return result;
         var fontDict = reader.ResolveDict(resources.Get("Font"));
         if (fontDict is null) return result;
@@ -595,6 +768,20 @@ public sealed class SvgDevice
         {
             var font = reader.ResolveDict(fontDict.Get(key));
             if (font is not null) result[key] = font;
+        }
+        return result;
+    }
+
+    private static Dictionary<string, PdfDictionary> ResolveExtGStates(PdfDictionary? resources, PdfReader reader)
+    {
+        var result = new Dictionary<string, PdfDictionary>(StringComparer.Ordinal);
+        if (resources is null) return result;
+        var gsDict = reader.ResolveDict(resources.Get("ExtGState"));
+        if (gsDict is null) return result;
+        foreach (var key in gsDict.Keys)
+        {
+            var entryDict = reader.ResolveDict(gsDict.Get(key));
+            if (entryDict is not null) result[key] = entryDict;
         }
         return result;
     }

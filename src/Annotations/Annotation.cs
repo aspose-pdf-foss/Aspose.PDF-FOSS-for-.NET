@@ -166,6 +166,16 @@ public partial class Annotation : BaseParagraph
         _reader = reader;
     }
 
+    /// <summary>Detached ctor for a document-less annotation used purely as a
+    /// configuration holder (e.g. a generator <see cref="Forms.RadioButtonOptionField"/>
+    /// before it is placed into a real form). Backed by a fresh empty dict and the
+    /// shared empty reader; the object carries no page until it is added.</summary>
+    protected Annotation()
+    {
+        _dict = new PdfDictionary();
+        _reader = PdfReader.Empty;
+    }
+
     /// <summary>Constructor for creating new annotations programmatically.</summary>
     protected Annotation(Page page, Rectangle rect)
     {
@@ -237,6 +247,35 @@ public partial class Annotation : BaseParagraph
                 arr.Add(new PdfReal(value.URY));
                 _dict.Set("Rect", arr);
             }
+            OnRectChanged();
+        }
+    }
+
+    /// <summary>Hook invoked after the <see cref="Rect"/> setter writes a new rectangle.
+    /// The base is a no-op; form fields override it to regenerate their /AP appearance so
+    /// the value re-lays-out inside the resized widget box.</summary>
+    internal virtual void OnRectChanged() { }
+
+    /// <summary>The annotation rectangle inset by the /RD (rectangle differences) entry —
+    /// the region actually drawn inside <see cref="Rect"/>. /RD is [dLLX dLLY dURX dURY],
+    /// each the distance from the corresponding <see cref="Rect"/> edge inward. Equals
+    /// <see cref="Rect"/> when no /RD is present.</summary>
+    public Rectangle? InnerRect
+    {
+        get
+        {
+            if (Rect is not { } r) return null;
+            if (_reader.Resolve(_dict.Get("RD")) is PdfArray rd && rd.Count >= 4)
+            {
+                double N(int i) => _reader.Resolve(rd[i]) switch
+                {
+                    PdfReal pr => pr.Value,
+                    PdfInteger pi => pi.Value,
+                    _ => 0,
+                };
+                return new Rectangle(r.LLX + N(0), r.LLY + N(1), r.URX - N(2), r.URY - N(3));
+            }
+            return r;
         }
     }
 
@@ -323,7 +362,7 @@ public partial class Annotation : BaseParagraph
     /// rich text). Stored on the annotation directly as /Alignment.</summary>
     public TextAlignment Alignment { get; set; } = TextAlignment.Left;
 
-    /// <summary>Horizontal alignment (Aspose.PDF for .NET exposes this in addition
+    /// <summary>Horizontal alignment (Aspose.Pdf exposes this in addition
     /// to <see cref="Alignment"/>; the two are independently settable).</summary>
     public new Aspose.Pdf.HorizontalAlignment HorizontalAlignment { get; set; } = Aspose.Pdf.HorizontalAlignment.Left;
 
@@ -366,7 +405,14 @@ public partial class Annotation : BaseParagraph
             var obj = _reader.Resolve(ap.Get(key));
             if (obj is Core.PdfStream stream)
             {
-                _appearance[key] = new XForm(stream, _reader);
+                EnsureWidgetAppearanceDaFont(stream);
+                var form = new XForm(stream, _reader);
+                _appearance[key] = form;
+                // A direct /AP/N (or /D, /R) stream is itself the appearance for that
+                // key — expose it under the bare key in States too, so callers can read
+                // e.g. field.States["N"] on a plain text/push-button field (not just on
+                // state-keyed checkbox/radio widgets handled below).
+                _states[key] = form;
             }
             else if (obj is Core.PdfDictionary stateDict)
             {
@@ -374,6 +420,7 @@ public partial class Annotation : BaseParagraph
                 {
                     if (_reader.Resolve(stateDict.Get(stateKey)) is Core.PdfStream stStream)
                     {
+                        EnsureWidgetAppearanceDaFont(stStream);
                         var form = new XForm(stStream, _reader);
                         _appearance[key + "." + stateKey] = form;
                         _states[stateKey] = form;
@@ -381,6 +428,109 @@ public partial class Annotation : BaseParagraph
                 }
             }
         }
+    }
+
+    /// <summary>Acrobat's /DA short font aliases mapped to their Standard-14 PostScript
+    /// base font (PDF 32000 §12.7.3.3). Used to declare a synthesised appearance font when
+    /// a widget /DA names one of these but the appearance stream doesn't declare it.</summary>
+    private static readonly Dictionary<string, string> StandardDaAlias = new(StringComparer.Ordinal)
+    {
+        ["Helv"] = "Helvetica", ["HeBo"] = "Helvetica-Bold", ["HeOb"] = "Helvetica-Oblique", ["HeBO"] = "Helvetica-BoldOblique",
+        ["TiRo"] = "Times-Roman", ["TiBo"] = "Times-Bold", ["TiIt"] = "Times-Italic", ["TiBI"] = "Times-BoldItalic",
+        ["Cour"] = "Courier", ["CoBo"] = "Courier-Bold", ["CoOb"] = "Courier-Oblique", ["CoBO"] = "Courier-BoldOblique",
+        ["ZaDb"] = "ZapfDingbats", ["Symb"] = "Symbol",
+    };
+
+    /// <summary>A widget's /AP appearance paints its value with the font named in the field
+    /// /DA (e.g. <c>/MyriadPro-Regular 10 Tf</c>), but many authoring tools leave that font
+    /// undeclared in the appearance stream's own <c>/Resources/Font</c> — it lives only in the
+    /// AcroForm <c>/DR</c>. Declare it on the appearance stream so the appearance is
+    /// self-contained and the /DA font is discoverable via <c>GetResources().Fonts[name]</c>
+    /// (matching Acrobat / Aspose.PDF). A Standard-14 /DA alias (Helv, ZaDb, Cour…) is
+    /// synthesised to its PostScript base font; any other name is pulled — as a shared
+    /// indirect reference, never cloned — from the AcroForm <c>/DR/Font</c>. Existing entries
+    /// are left untouched, so this only ever fills a gap.</summary>
+    private void EnsureWidgetAppearanceDaFont(Core.PdfStream stream)
+    {
+        if (_dict.GetName("Subtype") != "Widget") return;
+
+        var daStr = ResolveInheritedDa();
+        if (string.IsNullOrEmpty(daStr)) return;
+        var fontName = ParseDaFontToken(daStr!);
+        if (string.IsNullOrEmpty(fontName)) return;
+
+        var res = _reader.ResolveDict(stream.Dict.Get("Resources"));
+        if (res is null) { res = new PdfDictionary(); stream.Dict.Set("Resources", res); }
+        var fonts = _reader.ResolveDict(res.Get("Font"));
+        if (fonts is null) { fonts = new PdfDictionary(); res.Set("Font", fonts); }
+        if (fonts.ContainsKey(fontName!)) return;
+
+        if (StandardDaAlias.TryGetValue(fontName!, out var baseFont))
+        {
+            var f = new PdfDictionary();
+            f.Set("Type", new PdfName("Font"));
+            f.Set("Subtype", new PdfName("Type1"));
+            f.Set("BaseFont", new PdfName(baseFont));
+            f.Set("Encoding", new PdfName("WinAnsiEncoding"));
+            fonts.Set(fontName!, f);
+            return;
+        }
+
+        var drFont = AcroFormDrFont(fontName!);
+        if (drFont is not null) fonts.Set(fontName!, drFont);
+    }
+
+    /// <summary>The effective /DA for this widget: its own, else inherited from an AcroForm
+    /// field /Parent chain, else the AcroForm-wide default. Null when none applies.</summary>
+    private string? ResolveInheritedDa()
+    {
+        var da = (_reader.Resolve(_dict.Get("DA")) as PdfString)?.ToText();
+        if (!string.IsNullOrEmpty(da)) return da;
+
+        var seen = new HashSet<int>();
+        var parentObj = _dict.Get("Parent");
+        while (parentObj is not null)
+        {
+            if (parentObj is PdfIndirectRef r && !seen.Add(r.ObjectNumber)) break;
+            var parent = _reader.ResolveDict(parentObj);
+            if (parent is null) break;
+            da = (_reader.Resolve(parent.Get("DA")) as PdfString)?.ToText();
+            if (!string.IsNullOrEmpty(da)) return da;
+            parentObj = parent.Get("Parent");
+        }
+
+        try
+        {
+            var acro = _reader.ResolveDict(_reader.Catalog?.Get("AcroForm"));
+            return (_reader.Resolve(acro?.Get("DA")) as PdfString)?.ToText();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Extract the font resource name (the token before <c>Tf</c>, sans leading
+    /// slash) from a /DA string. Empty when the string has no <c>… Tf</c> operator.</summary>
+    private static string ParseDaFontToken(string da)
+    {
+        var p = da.Split(new[] { ' ', '\n', '\t', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < p.Length; i++)
+            if (p[i] == "Tf" && i >= 2)
+                return p[i - 2].TrimStart('/');
+        return string.Empty;
+    }
+
+    /// <summary>The AcroForm <c>/DR/Font</c> entry for <paramref name="name"/> as the raw
+    /// stored object (a shared indirect reference, preserved so the appearance points at the
+    /// same font object rather than a clone). Null when absent.</summary>
+    private PdfObject? AcroFormDrFont(string name)
+    {
+        try
+        {
+            var acro = _reader.ResolveDict(_reader.Catalog?.Get("AcroForm"));
+            var dr = _reader.ResolveDict(acro?.Get("DR"));
+            var fonts = _reader.ResolveDict(dr?.Get("Font"));
+            return fonts?.Get(name);
+        }
+        catch { return null; }
     }
 
     /// <summary>
@@ -413,13 +563,13 @@ public partial class Annotation : BaseParagraph
     }
 
     /// <summary>Whether to regenerate the appearance stream when an annotation is saved
-    /// into a converted document. A global flag (static), matching the Aspose.PDF for .NET API
+    /// into a converted document. A global flag (static), matching the Aspose.Pdf API
     /// (set via <c>Annotation.UpdateAppearanceOnConvert</c> / <c>Field.UpdateAppearanceOnConvert</c>).
     /// Stored only.</summary>
     public static bool UpdateAppearanceOnConvert { get; set; } = true;
 
     /// <summary>Whether the embedded font (if any) should be subsetted.
-    /// Static global toggle in the Aspose.PDF for .NET API; stored only — the FOSS
+    /// Static global toggle in the Aspose.Pdf API; stored only — the FOSS
     /// appearance writer always embeds the full referenced glyph set.</summary>
     public static bool UseFontSubset { get; set; }
 
@@ -483,6 +633,99 @@ public partial class Annotation : BaseParagraph
         }
     }
 
+    /// <summary>Read the border width as an int for the write-through <see cref="Border.Width"/>
+    /// accessor: /BS /W, else /Border[2], else the default 1.</summary>
+    internal int GetBorderWidthValue()
+    {
+        var bs = _reader.ResolveDict(_dict.Get("BS"));
+        if (bs?.Get("W") is PdfInteger bi) return (int)bi.Value;
+        if (bs?.Get("W") is PdfReal br) return (int)System.Math.Round(br.Value);
+        if (_reader.Resolve(_dict.Get("Border")) is PdfArray arr && arr.Count >= 3)
+        {
+            if (arr[2] is PdfInteger ai) return (int)ai.Value;
+            if (arr[2] is PdfReal ar) return (int)System.Math.Round(ar.Value);
+        }
+        return 1;
+    }
+
+    /// <summary>Persist the border width to both /Border ([0 0 W]) and /BS (/W) so a later read
+    /// or appearance generation sees the explicit value — including an explicit 0.</summary>
+    internal void SetBorderWidthValue(int width)
+    {
+        var arr = new PdfArray();
+        arr.Add(new PdfInteger(0)); arr.Add(new PdfInteger(0)); arr.Add(new PdfInteger(width));
+        _dict.Set("Border", arr);
+        var bs = _reader.ResolveDict(_dict.Get("BS")) ?? new PdfDictionary();
+        bs.Set("W", new PdfInteger(width));
+        _dict.Set("BS", bs);
+    }
+
+    /// <summary>Read the border style (/BS /S) for the write-through
+    /// <see cref="Border.Style"/> accessor. Defaults to Solid.</summary>
+    internal Aspose.Pdf.Annotations.BorderStyle GetBorderStyleValue()
+    {
+        var bs = _reader.ResolveDict(_dict.Get("BS"));
+        return bs?.GetName("S") switch
+        {
+            "D" => Aspose.Pdf.Annotations.BorderStyle.Dashed,
+            "B" => Aspose.Pdf.Annotations.BorderStyle.Beveled,
+            "I" => Aspose.Pdf.Annotations.BorderStyle.Inset,
+            "U" => Aspose.Pdf.Annotations.BorderStyle.Underline,
+            _ => Aspose.Pdf.Annotations.BorderStyle.Solid,
+        };
+    }
+
+    /// <summary>Persist the border style to /BS /S for the write-through
+    /// <see cref="Border.Style"/> accessor.</summary>
+    internal void SetBorderStyleValue(Aspose.Pdf.Annotations.BorderStyle style)
+    {
+        var bs = _reader.ResolveDict(_dict.Get("BS")) ?? new PdfDictionary();
+        bs.Set("S", new PdfName(style switch
+        {
+            Aspose.Pdf.Annotations.BorderStyle.Dashed => "D",
+            Aspose.Pdf.Annotations.BorderStyle.Beveled => "B",
+            Aspose.Pdf.Annotations.BorderStyle.Inset => "I",
+            Aspose.Pdf.Annotations.BorderStyle.Underline => "U",
+            _ => "S",
+        }));
+        _dict.Set("BS", bs);
+    }
+
+    /// <summary>Read the border dash pattern (/BS /D) for the write-through
+    /// <see cref="Border.Dash"/> accessor, or null when none.</summary>
+    internal int[]? GetBorderDashValue()
+    {
+        var bs = _reader.ResolveDict(_dict.Get("BS"));
+        if (_reader.Resolve(bs?.Get("D")) is PdfArray d && d.Count > 0)
+        {
+            var res = new int[d.Count];
+            for (int i = 0; i < d.Count; i++)
+                res[i] = d[i] switch
+                {
+                    PdfInteger pi => (int)pi.Value,
+                    PdfReal pr => (int)System.Math.Round(pr.Value),
+                    _ => 0,
+                };
+            return res;
+        }
+        return null;
+    }
+
+    /// <summary>Persist the border dash pattern to /BS /D for the write-through
+    /// <see cref="Border.Dash"/> accessor (removes /D when null/empty).</summary>
+    internal void SetBorderDashValue(int[]? pattern)
+    {
+        var bs = _reader.ResolveDict(_dict.Get("BS")) ?? new PdfDictionary();
+        if (pattern is { Length: > 0 })
+        {
+            var d = new PdfArray();
+            foreach (var seg in pattern) d.Add(new PdfInteger(seg));
+            bs.Set("D", d);
+        }
+        else bs.Remove("D");
+        _dict.Set("BS", bs);
+    }
+
     /// <summary>The annotation border color (/C entry).</summary>
     public Color Color
     {
@@ -502,7 +745,21 @@ public partial class Annotation : BaseParagraph
             arr.Add(new PdfReal(value.G / 255.0));
             arr.Add(new PdfReal(value.B / 255.0));
             _dict.Set("C", arr);
+            OnColorChanged();
         }
+    }
+
+    /// <summary>Hook invoked after the annotation's /C colour is set. The base is a
+    /// no-op; FreeText overrides it to regenerate its appearance so the cached /AP
+    /// reflects the new background colour.</summary>
+    private protected virtual void OnColorChanged() { }
+
+    /// <summary>Drop the cached appearance/state views so a subsequent access
+    /// rebuilds from the current /AP.</summary>
+    private protected void InvalidateAppearanceCache()
+    {
+        _appearance = null;
+        _states = null;
     }
 
     /// <summary>The annotation interior color (/IC entry, for circle/square/line annotations).</summary>
@@ -563,6 +820,10 @@ public partial class Annotation : BaseParagraph
         var ap = _reader.ResolveDict(_dict.Get("AP")) ?? new PdfDictionary();
         ap.Set("N", stream);
         _dict.Set("AP", ap);
+        // Drop the cached appearance views so a subsequent Appearance / NormalAppearance
+        // access rebuilds from the freshly written /AP (otherwise a stale empty /N is returned).
+        _appearance = null;
+        _states = null;
     }
 
     /// <summary>Like <see cref="SetNormalAppearance"/> but adds a Helvetica
@@ -627,11 +888,33 @@ public partial class Annotation : BaseParagraph
         }
     }
 
-    /// <summary>Fully-qualified annotation name. For most annotation
-    /// types this is the unique /NM entry; for widget annotations (form
-    /// fields) the field hierarchy is reflected via <see cref="Field.FullName"/>
-    /// instead.</summary>
-    public string? FullName => Name;
+    /// <summary>Fully-qualified annotation name. For most annotation types this is the
+    /// unique /NM entry; for a widget annotation that is (part of) a form field it is the
+    /// fully-qualified field name — the /T values from this dict up through /Parent joined
+    /// by '.', matching <see cref="Field.FullName"/>.</summary>
+    public string? FullName
+    {
+        get
+        {
+            var nm = Name;
+            if (!string.IsNullOrEmpty(nm)) return nm;
+            // No /NM: if this dict participates in a field hierarchy (/T or /Parent),
+            // build the fully-qualified field name from the /T chain.
+            var parts = new System.Collections.Generic.List<string>();
+            var d = _dict;
+            int guard = 0;
+            while (d is not null && guard++ < 64)
+            {
+                if (_reader.Resolve(d.Get("T")) is PdfString t)
+                {
+                    var s = t.ToText();
+                    if (!string.IsNullOrEmpty(s)) parts.Insert(0, s);
+                }
+                d = _reader.ResolveDict(d.Get("Parent"));
+            }
+            return parts.Count > 0 ? string.Join(".", parts) : nm;
+        }
+    }
 
     /// <summary>The annotation subject (/Subj entry).</summary>
     public string? Subject
@@ -693,7 +976,7 @@ public partial class Annotation : BaseParagraph
         set => _dict.Set("F", new Aspose.Pdf.Core.PdfInteger((int)value));
     }
 
-    /// <summary>Typed alias of <see cref="Flags"/> matching the Aspose.PDF for .NET
+    /// <summary>Typed alias of <see cref="Flags"/> matching the Aspose.Pdf
     /// public surface that exposes <c>AnnotationFlags</c> as a property.</summary>
     public AnnotationFlags AnnotationFlags
     {
@@ -727,6 +1010,9 @@ public partial class Annotation : BaseParagraph
             var coll = new PdfActionCollection();
             foreach (var action in new ActionCollection(_dict, _reader))
                 coll.Add(action);
+            // Bind after populating so subsequent Add/Delete write through to the annotation dict's
+            // /A entry (and thus persist on save) — a fresh unbound collection dropped them.
+            coll.Bind(_dict);
             return coll;
         }
     }
@@ -822,7 +1108,7 @@ public partial class Annotation : BaseParagraph
         // Stamp the annotation appearance onto the page content (if it has one).
         // Shape/markup annotations are often stored without an /AP; synthesise one
         // from the geometry so the figure is baked in instead of vanishing.
-        if (ResolveAppearanceStream() is null && this is SquareAnnotation or CircleAnnotation or TextAnnotation)
+        if (ResolveAppearanceStream() is null && this is SquareAnnotation or CircleAnnotation or TextAnnotation or HighlightAnnotation)
             UpdateAppearances();
         var appearanceStream = ResolveAppearanceStream();
         if (appearanceStream is not null)
@@ -832,16 +1118,36 @@ public partial class Annotation : BaseParagraph
             {
                 var rect = Rectangle.FromPdfArray(rectArr);
 
+                // Per PDF 32000 §12.5.5 the appearance is placed by mapping the
+                // *transformed* appearance box (BBox corners run through the form's
+                // /Matrix, then their upright bounding box) onto the annotation /Rect —
+                // NOT the raw BBox. Ignoring /Matrix mis-places any appearance whose
+                // Matrix is not the identity (e.g. a Line/callout leader whose Matrix
+                // translates its BBox to the origin), drawing it at the wrong spot.
                 var bboxArr = _reader.Resolve(appearanceStream.Dict.Get("BBox")) as PdfArray;
-                double bboxW = rect.Width, bboxH = rect.Height;
-                double bboxX = 0, bboxY = 0;
+                double bboxX = 0, bboxY = 0, bboxW = rect.Width, bboxH = rect.Height;
                 if (bboxArr is { Count: >= 4 })
                 {
                     var bbox = Rectangle.FromPdfArray(bboxArr);
-                    bboxW = bbox.Width;
-                    bboxH = bbox.Height;
-                    bboxX = bbox.LLX;
-                    bboxY = bbox.LLY;
+                    var mtx = _reader.Resolve(appearanceStream.Dict.Get("Matrix")) as PdfArray;
+                    double ma = 1, mb = 0, mc = 0, md = 1, me = 0, mf = 0;
+                    if (mtx is { Count: >= 6 })
+                    {
+                        ma = PdfArrayHelper.GetDouble(mtx, 0); mb = PdfArrayHelper.GetDouble(mtx, 1);
+                        mc = PdfArrayHelper.GetDouble(mtx, 2); md = PdfArrayHelper.GetDouble(mtx, 3);
+                        me = PdfArrayHelper.GetDouble(mtx, 4); mf = PdfArrayHelper.GetDouble(mtx, 5);
+                    }
+                    // Transform the four BBox corners and take their bounding box.
+                    double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
+                    foreach (var (cx, cy) in new[] { (bbox.LLX, bbox.LLY), (bbox.URX, bbox.LLY), (bbox.URX, bbox.URY), (bbox.LLX, bbox.URY) })
+                    {
+                        double px = ma * cx + mc * cy + me;
+                        double py = mb * cx + md * cy + mf;
+                        if (px < minX) minX = px; if (px > maxX) maxX = px;
+                        if (py < minY) minY = py; if (py > maxY) maxY = py;
+                    }
+                    bboxX = minX; bboxY = minY;
+                    bboxW = maxX - minX; bboxH = maxY - minY;
                 }
 
                 var sx = bboxW > 0 ? rect.Width / bboxW : 1.0;
@@ -957,7 +1263,36 @@ public partial class Annotation : BaseParagraph
 
     private Characteristics? _characteristics;
     /// <summary>Appearance characteristics (border color, background color, rotation).</summary>
-    public Characteristics Characteristics => _characteristics ??= new Characteristics();
+    public Characteristics Characteristics => _characteristics ??= BuildCharacteristics();
+
+    /// <summary>Build the characteristics, populating Background/Border from the
+    /// annotation's /MK appearance-characteristics dictionary (/BG and /BC) when present.
+    /// Absent entries keep the defaults (transparent background, black border).</summary>
+    private Characteristics BuildCharacteristics()
+    {
+        var c = new Characteristics();
+        if (_reader.ResolveDict(_dict.Get("MK")) is { } mk)
+        {
+            if (ReadMkColor(mk, "BG") is { } bg) c.Background = bg;
+            if (ReadMkColor(mk, "BC") is { } bc) c.Border = bc;
+        }
+        return c;
+    }
+
+    private System.Drawing.Color? ReadMkColor(PdfDictionary mk, string key)
+    {
+        if (_reader.Resolve(mk.Get(key)) is not PdfArray arr || arr.Count == 0) return null;
+        int To255(double v) => (int)System.Math.Round(System.Math.Clamp(v, 0, 1) * 255);
+        double[] v = new double[arr.Count];
+        for (int i = 0; i < arr.Count; i++) v[i] = PdfArrayHelper.GetDouble(arr, i);
+        return arr.Count switch
+        {
+            1 => System.Drawing.Color.FromArgb(To255(v[0]), To255(v[0]), To255(v[0])),
+            3 => System.Drawing.Color.FromArgb(To255(v[0]), To255(v[1]), To255(v[2])),
+            4 => System.Drawing.Color.FromArgb(To255((1 - v[0]) * (1 - v[3])), To255((1 - v[1]) * (1 - v[3])), To255((1 - v[2]) * (1 - v[3]))),
+            _ => (System.Drawing.Color?)null,
+        };
+    }
 
     protected string? GetString(string key)
     {
@@ -998,8 +1333,11 @@ public partial class Annotation : BaseParagraph
             "Movie" => new MovieAnnotation(dict, reader),
             "Screen" => new ScreenAnnotation(dict, reader),
             "RichMedia" => new RichMediaAnnotation(dict, reader),
+            "3D" => new PDF3DAnnotation(dict, reader),
             // "Watermark" has a separate non-Annotation class — keep as generic
-            _ => new Annotation(dict, reader),
+            // Every other (un-modelled / vendor-specific) subtype, e.g. /BatesN,
+            // falls back to GenericAnnotation so it stays castable and round-trips.
+            _ => new GenericAnnotation(dict, reader),
         };
         annot._dictObjNum = objectNumber;
         return annot;
@@ -1229,6 +1567,24 @@ public partial class LinkAnnotation : Annotation
     public LinkAnnotation(Page page, Rectangle rect) : base(page, rect)
     {
         Dict.Set("Subtype", new PdfName("Link"));
+    }
+
+    /// <summary>Wrap an existing link-annotation object (e.g. the object an
+    /// <see cref="Aspose.Pdf.LogicalStructure.OBJRElement"/> references) in the given document.</summary>
+    public LinkAnnotation(object obj, Document document)
+        : base(ResolveAnnotDict(obj, document), document.Reader)
+    {
+    }
+
+    private static PdfDictionary ResolveAnnotDict(object obj, Document document)
+    {
+        var resolved = obj switch
+        {
+            PdfDictionary d => d,
+            PdfObject p => document.Reader.ResolveDict(p),
+            _ => null,
+        };
+        return resolved ?? throw new ArgumentException("Object does not resolve to an annotation dictionary.", nameof(obj));
     }
 
     /// <summary>Highlighting mode when the link is activated.</summary>
@@ -1503,9 +1859,8 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         : base(page, rect)
     {
         Dict.Set("Subtype", new PdfName("FreeText"));
-        _defaultAppearance = appearance ?? new DefaultAppearance();
-        if (appearance is not null)
-            Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(appearance.ToAppearanceString())));
+        _defaultAppearance = appearance ?? DefaultFreeTextAppearance();
+        Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(_defaultAppearance.ToAppearanceString())));
     }
 
     /// <summary>Document-bound ctor for creating a FreeTextAnnotation that
@@ -1515,10 +1870,14 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         : base(document, rect: null!)
     {
         Dict.Set("Subtype", new PdfName("FreeText"));
-        _defaultAppearance = appearance ?? new DefaultAppearance();
-        if (appearance is not null)
-            Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(appearance.ToAppearanceString())));
+        _defaultAppearance = appearance ?? DefaultFreeTextAppearance();
+        Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(_defaultAppearance.ToAppearanceString())));
     }
+
+    /// <summary>Fallback /DA for a FreeText annotation created with no explicit
+    /// appearance: Helvetica ("Helv") at 10pt black. A null appearance must still
+    /// produce a valid, non-zero font size rather than an empty or zero-size /DA.</summary>
+    private static DefaultAppearance DefaultFreeTextAppearance() => new("Helv", 10);
 
     private DefaultAppearance? _defaultAppearance;
 
@@ -1534,10 +1893,57 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     }
 
     /// <summary>The strongly-typed default-appearance object backing
-    /// <see cref="DefaultAppearance"/>. Construction-time appearance is
-    /// stored; reading after a string-set returns the last-constructed
-    /// object (the string→object round-trip is not parsed back).</summary>
-    public DefaultAppearance DefaultAppearanceObject => _defaultAppearance ??= new DefaultAppearance();
+    /// <see cref="DefaultAppearance"/>. The construction-time appearance is stored;
+    /// for an annotation read from a document (no stored object) the /DA string is
+    /// parsed so the font, size and colour drive the generated appearance.</summary>
+    public DefaultAppearance DefaultAppearanceObject =>
+        _defaultAppearance ??= ParseDefaultAppearance(DefaultAppearance) ?? new DefaultAppearance();
+
+    /// <summary>Parse a /DA appearance string (e.g. "/Helv 16 Tf 0 0 1 rg") into a typed
+    /// <see cref="DefaultAppearance"/>. Handles the rg/g/k colour operators and the common
+    /// Standard-14 resource abbreviations. Returns null when nothing recognisable is found.</summary>
+    private static DefaultAppearance? ParseDefaultAppearance(string? da)
+    {
+        if (string.IsNullOrWhiteSpace(da)) return null;
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        var t = da.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        bool TryD(string s, out double v) => double.TryParse(s, System.Globalization.NumberStyles.Float, ci, out v);
+        string fontName = "Helvetica"; double size = 12; var color = System.Drawing.Color.Black;
+        bool got = false;
+        for (int i = 0; i < t.Length; i++)
+        {
+            if (t[i] == "Tf" && i >= 2)
+            {
+                if (t[i - 2].StartsWith("/")) fontName = NormalizeDaFontName(t[i - 2].Substring(1));
+                if (TryD(t[i - 1], out var s) && s > 0) size = s;
+                got = true;
+            }
+            else if (t[i] == "rg" && i >= 3 && TryD(t[i - 3], out var r) && TryD(t[i - 2], out var g) && TryD(t[i - 1], out var b))
+            { color = System.Drawing.Color.FromArgb(C(r), C(g), C(b)); got = true; }
+            else if (t[i] == "g" && i >= 1 && TryD(t[i - 1], out var gray))
+            { color = System.Drawing.Color.FromArgb(C(gray), C(gray), C(gray)); got = true; }
+            else if (t[i] == "k" && i >= 4 && TryD(t[i - 4], out var c) && TryD(t[i - 3], out var m) && TryD(t[i - 2], out var y) && TryD(t[i - 1], out var k))
+            { color = System.Drawing.Color.FromArgb(C((1 - c) * (1 - k)), C((1 - m) * (1 - k)), C((1 - y) * (1 - k))); got = true; }
+        }
+        return got ? new DefaultAppearance(fontName, size, color) : null;
+
+        static int C(double v) => Math.Max(0, Math.Min(255, (int)Math.Round(v * 255)));
+    }
+
+    private static string NormalizeDaFontName(string n) => n switch
+    {
+        "Helv" => "Helvetica",
+        "HeBo" => "Helvetica-Bold",
+        "HeOb" => "Helvetica-Oblique",
+        "TiRo" => "Times-Roman",
+        "TiBo" => "Times-Bold",
+        "TiIt" => "Times-Italic",
+        "Cour" => "Courier",
+        "CoBo" => "Courier-Bold",
+        "Symb" => "Symbol",
+        "ZaDb" => "ZapfDingbats",
+        _ => n,
+    };
 
     /// <summary>Inline default rich-text style carried in /DS.</summary>
     public string? DefaultStyle
@@ -1550,7 +1956,9 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         }
     }
 
-    /// <summary>Rich text string (XHTML) for the annotation (/RC entry).</summary>
+    /// <summary>Rich text string (XHTML) for the annotation (/RC entry). Setting it parses the
+    /// XHTML span styles (font-weight/font-style/text-decoration and base font/size/colour) into
+    /// the plain text plus per-range style runs, and regenerates the styled appearance.</summary>
     public new string? RichText
     {
         get => GetString("RC");
@@ -1558,11 +1966,16 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         {
             if (value is null) Dict.Remove("RC");
             else Dict.Set("RC", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            // Capture the rich-text styling (plain text, per-range runs, base size/colour) so a
+            // following SetTextStyle renders it, but do NOT take over appearance generation here:
+            // rich text alone falls back to the normal save-time appearance (matching the
+            // established output), and the styled path is driven by explicit SetTextStyle calls.
+            ApplyRichTextStyles(value);
         }
     }
 
     /// <summary>Always <see cref="AnnotationType.FreeText"/>. Redeclared on
-    /// the derived class to match Aspose.PDF for .NET reflection (DeclaredOnly).</summary>
+    /// the derived class to match Aspose.Pdf reflection (DeclaredOnly).</summary>
     public new AnnotationType AnnotationType => AnnotationType.FreeText;
 
     /// <summary>
@@ -1572,6 +1985,22 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     /// is no text. Invoked by the save pipeline so a freshly-created FreeText annotation
     /// renders (and exposes <see cref="Annotation.NormalAppearance"/>).
     /// </summary>
+    /// <summary>Changing a FreeText annotation's /C background colour invalidates its
+    /// stored /AP, which still paints the old background. Drop the existing appearance
+    /// and rebuild it from /Contents + /DA so it reflects the new colour — matching
+    /// Aspose.Pdf, which regenerates the FreeText appearance on a colour change
+    /// (dropping any previously-embedded font for the /DA's standard font). Only rebuilt
+    /// when there is text to render; otherwise the existing appearance is left intact.</summary>
+    private protected override void OnColorChanged()
+    {
+        var text = Contents;
+        if (string.IsNullOrEmpty(text)) text = PlainTextFromRichText(RichText);
+        if (string.IsNullOrEmpty(text)) return;
+        Dict.Remove("AP");
+        InvalidateAppearanceCache();
+        GenerateAppearance();
+    }
+
     internal void GenerateAppearance()
     {
         if (InternalReader.ResolveDict(Dict.Get("AP")) is not null) return;
@@ -1642,7 +2071,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
 
         // A FreeText annotation's /C entry is its background colour: fill the
         // rectangle with it (behind border and text) when present, matching the
-        // Aspose.PDF for .NET appearance. Only the unrotated rect is filled —
+        // Aspose.Pdf appearance. Only the unrotated rect is filled —
         // BBox == rect there; rotated FreeText backgrounds are rare and skipped.
         if (!rotated && InternalReader.Resolve(Dict.Get("C")) is PdfArray bgArr && bgArr.Count >= 3)
         {
@@ -1655,7 +2084,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
 
         // Stroke the border rectangle so a styled/dashed border is visible. The
         // stroke uses the text colour and is inset by half the line width so it
-        // sits centred on the rectangle edge (matching the Aspose.PDF for .NET appearance).
+        // sits centred on the rectangle edge (matching the Aspose.Pdf appearance).
         // Only an explicitly-set border is drawn — a FreeText without a /BS or
         // /Border entry keeps its borderless appearance.
         var bsDict = InternalReader.ResolveDict(Dict.Get("BS"));
@@ -1688,7 +2117,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         {
             // Rotate the text about the expanded box centre. The frame origin is the
             // box left edge (inset) at the vertical centre, so the rotated text stays
-            // anchored to the rectangle's leading edge (matches the Aspose.PDF for .NET layout).
+            // anchored to the rectangle's leading edge (matches the Aspose.Pdf layout).
             string Fmt6(double v) => v.ToString("0.######", ci);
             double e = ehw - (ehw - inset) * rcos;
             double f = ehh - (ehw - inset) * rsin;
@@ -1701,14 +2130,42 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         sb.Append(Fmt(color.R / 255.0)).Append(' ').Append(Fmt(color.G / 255.0)).Append(' ')
           .Append(Fmt(color.B / 255.0)).Append(" rg\n");
         sb.Append(Fmt(leading)).Append(" TL\n");
-        if (rotated)
-            sb.Append("2 ").Append(Fmt(-fontSize)).Append(" Td\n");
-        else
-            sb.Append(Fmt(inset)).Append(' ').Append(Fmt(h - inset - fontSize)).Append(" Td\n");
-        for (int i = 0; i < lines.Count; i++)
+        // Alignment is taken from the persisted /Q justification (which survives a
+        // re-wrap of the annotation on save), falling back to the in-memory TextStyle.
+        var align = Justification switch
         {
-            if (i > 0) sb.Append("T*\n");
-            sb.Append('(').Append(EscapePdfString(lines[i])).Append(") Tj\n");
+            Justification.Right => Aspose.Pdf.HorizontalAlignment.Right,
+            Justification.Center => Aspose.Pdf.HorizontalAlignment.Center,
+            _ => ts?.HorizontalAlignment ?? Aspose.Pdf.HorizontalAlignment.Left,
+        };
+        if (rotated || align == Aspose.Pdf.HorizontalAlignment.Left)
+        {
+            if (rotated)
+                sb.Append("2 ").Append(Fmt(-fontSize)).Append(" Td\n");
+            else
+                sb.Append(Fmt(inset)).Append(' ').Append(Fmt(h - inset - fontSize)).Append(" Td\n");
+            for (int i = 0; i < lines.Count; i++)
+            {
+                if (i > 0) sb.Append("T*\n");
+                sb.Append('(').Append(EscapePdfString(lines[i])).Append(") Tj\n");
+            }
+        }
+        else
+        {
+            // Center/Right alignment: each line is offset by its own measured width,
+            // so emit a per-line Td (relative to the previous line's position).
+            double prevX = 0;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                var lineW = metrics.MeasureString(lines[i], fontSize);
+                double lineX = align == Aspose.Pdf.HorizontalAlignment.Right
+                    ? w - lineW
+                    : (w - lineW) / 2;
+                double dy = i == 0 ? h - inset - fontSize : -leading;
+                sb.Append(Fmt(lineX - prevX)).Append(' ').Append(Fmt(dy)).Append(" Td\n");
+                sb.Append('(').Append(EscapePdfString(lines[i])).Append(") Tj\n");
+                prevX = lineX;
+            }
         }
         sb.Append("ET\nQ\nEMC\n");
 
@@ -1752,7 +2209,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
 
     /// <summary>Greedy word-wrap: a word starts a new line when appending it would
     /// exceed <paramref name="avail"/>; a single word wider than the line still occupies
-    /// its own line (no mid-word breaking), matching the Aspose.PDF for .NET layout.</summary>
+    /// its own line (no mid-word breaking), matching the Aspose.Pdf layout.</summary>
     private static System.Collections.Generic.List<string> WrapText(
         string text, Aspose.Pdf.Text.FontMetrics metrics, double fontSize, double avail)
     {
@@ -1893,10 +2350,56 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     }
 
     /// <summary>Starting line-ending style (/LE first entry; callout intent only).</summary>
-    public LineEnding StartingStyle { get; set; } = LineEnding.None;
+    public LineEnding StartingStyle
+    {
+        get => GetCalloutLineEnding(0);
+        set => SetCalloutLineEnding(0, value);
+    }
 
     /// <summary>Ending line-ending style (/LE second entry; callout intent only).</summary>
-    public LineEnding EndingStyle { get; set; } = LineEnding.None;
+    public LineEnding EndingStyle
+    {
+        get => GetCalloutLineEnding(1);
+        set => SetCalloutLineEnding(1, value);
+    }
+
+    // A FreeText callout has a single line ending — the arrowhead at the callout's
+    // pointed end. It may be stored as a single /LE name (the PDF-spec form) or as a
+    // two-element [head tail] array (the form Acrobat/XFDF round-trips produce, with the
+    // ending carried in one slot). Report that single ending for both StartingStyle and
+    // EndingStyle, which matches the callout model.
+    private LineEnding GetCalloutLineEnding(int index)
+    {
+        var le = InternalReader.Resolve(Dict.Get("LE"));
+        if (le is PdfName name)
+            return LineAnnotation.ParseLineEnding(name.Value);
+        if (le is PdfArray arr)
+        {
+            for (int i = 0; i < arr.Count; i++)
+            {
+                var v = (InternalReader.Resolve(arr[i]) as PdfName)?.Value;
+                if (v is not null && v != "None")
+                    return LineAnnotation.ParseLineEnding(v);
+            }
+        }
+        return LineEnding.None;
+    }
+
+    private void SetCalloutLineEnding(int index, LineEnding value)
+    {
+        var arr = InternalReader.Resolve(Dict.Get("LE")) as PdfArray;
+        var start = "None";
+        var end = "None";
+        if (arr is { Count: >= 1 } && InternalReader.Resolve(arr[0]) is PdfName s) start = s.Value;
+        if (arr is { Count: >= 2 } && InternalReader.Resolve(arr[1]) is PdfName e) end = e.Value;
+        else if (InternalReader.Resolve(Dict.Get("LE")) is PdfName single) { start = single.Value; end = single.Value; }
+        if (index == 0) start = LineAnnotation.LineEndingToName(value);
+        else end = LineAnnotation.LineEndingToName(value);
+        var newArr = new PdfArray();
+        newArr.Add(new PdfName(start));
+        newArr.Add(new PdfName(end));
+        Dict.Set("LE", newArr);
+    }
 
     /// <summary>Page-rotation of the rendered text (/Rotate). Multiples of 90°.</summary>
     public Aspose.Pdf.Rotation Rotate
@@ -1940,31 +2443,302 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         }
     }
 
-    /// <summary>Bundled text style (font / size / colour / alignment) applied
-    /// when rendering the rich-text contents. Stored only — the FOSS write
-    /// path doesn't currently re-render free-text bodies.</summary>
+    /// <summary>Bundled text style (font / size / colour / alignment) applied when rendering the
+    /// rich-text contents. A mutable stored object: <c>annot.TextStyle.FontSize = 18</c> persists
+    /// and drives the generated appearance.</summary>
     public TextStyle TextStyle { get; set; } = new TextStyle();
 
-    /// <summary>Apply a font/size/colour bundle to the whole rich-text run.</summary>
+    /// <summary>Apply style flags to the whole text run. The <paramref name="fontName"/>/
+    /// <paramref name="fontSize"/>/<paramref name="fontColor"/> arguments mirror the caller's
+    /// current <see cref="TextStyle"/>; they are recorded on <see cref="TextStyle"/> but the
+    /// rendered base font is kept as the annotation's established /DA (so a bold base such as
+    /// "Arial Bold" survives), with the size/colour applied.</summary>
     public void SetTextStyle(RichTextFontStyles textStyles, string fontName, double fontSize, System.Drawing.Color fontColor)
     {
-        TextStyle = new TextStyle
-        {
-            FontName = fontName,
-            FontSize = fontSize,
-            Color = fontColor,
-        };
-        // textStyles flags are honoured at FOSS render time only when
-        // RichText is re-emitted; stored here for round-trip access.
-        _ = textStyles;
+        TextStyle = new TextStyle { FontName = fontName, FontSize = fontSize, Color = fontColor };
+        var baseFont = DefaultAppearanceObject.FontName;
+        DefaultAppearance = new DefaultAppearance(baseFont, fontSize, fontColor).ToAppearanceString();
+        _defaultAppearance = new DefaultAppearance(baseFont, fontSize, fontColor);
+        // The whole-run overload replaces any existing per-range styles with these flags
+        // (a later whole-text SetTextStyle overrides earlier rich-text spans).
+        var len = StyledSourceTextLength();
+        _styleRuns.Clear();
+        _styleRuns.Add((0, len, textStyles));
+        RegenerateStyledAppearance();
     }
 
-    /// <summary>Apply rich-text style flags to a substring (fromInd..toInd
-    /// inclusive). The current FOSS rich-text emitter doesn't honour the
-    /// indices; the call is captured for parity with Aspose.PDF for .NET.</summary>
+    /// <summary>Apply rich-text style flags to the substring [fromInd, toInd).
+    /// <see cref="RichTextFontStyles.ClearExisting"/> (value 0) on its own clears the range;
+    /// any other flags are OR-ed into the range. The annotation appearance is regenerated.</summary>
     public void SetTextStyle(int fromInd, int toInd, RichTextFontStyles textStyles)
     {
-        _ = fromInd; _ = toInd; _ = textStyles;
+        _styleRuns.Add((fromInd, toInd, textStyles));
+        RegenerateStyledAppearance();
+    }
+
+    // Ordered list of per-range style applications (from, to, styles). Replayed in order to
+    // build a per-character style array. styles == 0 (ClearExisting alone) clears the range.
+    private readonly System.Collections.Generic.List<(int from, int to, RichTextFontStyles styles)> _styleRuns = new();
+
+    private int StyledSourceTextLength()
+    {
+        var t = Contents;
+        if (string.IsNullOrEmpty(t)) t = PlainTextFromRichText(RichText);
+        return t?.Length ?? 0;
+    }
+
+    private RichTextFontStyles[] ResolveCharStyles(int len)
+    {
+        var arr = new RichTextFontStyles[len];
+        foreach (var (from, to, styles) in _styleRuns)
+        {
+            int a = System.Math.Max(0, System.Math.Min(from, to));
+            int b = System.Math.Min(len, System.Math.Max(from, to));
+            for (int i = a; i < b; i++)
+                if (styles == 0) arr[i] = 0; else arr[i] |= styles; // 0 == ClearExisting (clear range)
+        }
+        return arr;
+    }
+
+    private static string VariantFontName(string baseFont, bool bold, bool italic)
+    {
+        var f = (baseFont ?? "").Replace(" ", "");
+        // A bold/italic base font name (e.g. "Arial Bold") contributes the style itself.
+        if (f.IndexOf("Bold", System.StringComparison.OrdinalIgnoreCase) >= 0) bold = true;
+        if (f.IndexOf("Italic", System.StringComparison.OrdinalIgnoreCase) >= 0
+            || f.IndexOf("Oblique", System.StringComparison.OrdinalIgnoreCase) >= 0) italic = true;
+        if (f.IndexOf("Times", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            return bold && italic ? "Times-BoldItalic" : bold ? "Times-Bold" : italic ? "Times-Italic" : "Times-Roman";
+        if (f.IndexOf("Courier", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            return bold && italic ? "Courier-BoldOblique" : bold ? "Courier-Bold" : italic ? "Courier-Oblique" : "Courier";
+        return bold && italic ? "Helvetica-BoldOblique" : bold ? "Helvetica-Bold" : italic ? "Helvetica-Oblique" : "Helvetica";
+    }
+
+    private bool BorderExplicitlyZero()
+    {
+        var bs = InternalReader.ResolveDict(Dict.Get("BS"));
+        if (bs is not null)
+        {
+            if (bs.Get("W") is PdfInteger bi) return bi.Value == 0;
+            if (bs.Get("W") is PdfReal br) return br.Value == 0;
+        }
+        if (InternalReader.Resolve(Dict.Get("Border")) is PdfArray arr && arr.Count >= 3)
+        {
+            if (arr[2] is PdfInteger ai) return ai.Value == 0;
+            if (arr[2] is PdfReal ar) return ar.Value == 0;
+        }
+        return false;
+    }
+
+    /// <summary>Parse XHTML rich-text styling into the plain text, per-range style runs and a
+    /// base font size/colour. Returns true when styled markup was found (so the caller should
+    /// regenerate the styled appearance); false for plain text or no markup.</summary>
+    private bool ApplyRichTextStyles(string? xhtml)
+    {
+        if (string.IsNullOrEmpty(xhtml) || xhtml!.IndexOf('<') < 0) return false;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var sbText = new System.Text.StringBuilder();
+        var runs = new System.Collections.Generic.List<(int from, int to, RichTextFontStyles st)>();
+        var stack = new System.Collections.Generic.Stack<(bool b, bool i, bool u)>();
+        stack.Push((false, false, false));
+        string? baseFont = null; double baseSize = 0; System.Drawing.Color? baseColor = null;
+        int p = 0;
+        while (p < xhtml.Length)
+        {
+            if (xhtml[p] == '<')
+            {
+                int gt = xhtml.IndexOf('>', p); if (gt < 0) break;
+                string tag = xhtml.Substring(p + 1, gt - p - 1);
+                if (tag.StartsWith("/")) { if (stack.Count > 1) stack.Pop(); }
+                else if (!tag.StartsWith("?") && !tag.StartsWith("!"))
+                {
+                    var cur = stack.Peek();
+                    bool b = cur.b, it = cur.i, u = cur.u;
+                    var sm = System.Text.RegularExpressions.Regex.Match(tag, "style\\s*=\\s*\"([^\"]*)\"");
+                    if (sm.Success)
+                    {
+                        var css = sm.Groups[1].Value;
+                        if (css.Replace(" ", "").Contains("font-weight:bold")) b = true;
+                        if (css.Replace(" ", "").Contains("font-style:italic")) it = true;
+                        if (css.Contains("underline")) u = true;
+                        var fs = System.Text.RegularExpressions.Regex.Match(css, "font-size:\\s*([0-9.]+)pt");
+                        if (fs.Success && baseSize == 0) double.TryParse(fs.Groups[1].Value, System.Globalization.NumberStyles.Float, inv, out baseSize);
+                        var ff = System.Text.RegularExpressions.Regex.Match(css, "font-family:\\s*([^;\"]+)");
+                        if (ff.Success && baseFont == null) baseFont = ff.Groups[1].Value.Trim();
+                        var cm = System.Text.RegularExpressions.Regex.Match(css, "color:\\s*#([0-9A-Fa-f]{6})");
+                        if (cm.Success && baseColor == null)
+                        {
+                            var h = cm.Groups[1].Value;
+                            baseColor = System.Drawing.Color.FromArgb(
+                                System.Convert.ToInt32(h.Substring(0, 2), 16),
+                                System.Convert.ToInt32(h.Substring(2, 2), 16),
+                                System.Convert.ToInt32(h.Substring(4, 2), 16));
+                        }
+                    }
+                    if (!tag.EndsWith("/")) stack.Push((b, it, u));
+                }
+                p = gt + 1;
+            }
+            else
+            {
+                int lt = xhtml.IndexOf('<', p); if (lt < 0) lt = xhtml.Length;
+                var raw = xhtml.Substring(p, lt - p)
+                    .Replace("&lt;", "<").Replace("&gt;", ">").Replace("&amp;", "&").Replace("&#xD;", "").Replace("&#xA;", "");
+                if (raw.Length > 0)
+                {
+                    var cur = stack.Peek();
+                    RichTextFontStyles st = 0;
+                    if (cur.b) st |= RichTextFontStyles.Bold;
+                    if (cur.i) st |= RichTextFontStyles.Italic;
+                    if (cur.u) st |= RichTextFontStyles.Underline;
+                    int start = sbText.Length;
+                    sbText.Append(raw);
+                    if (st != 0) runs.Add((start, sbText.Length, st));
+                }
+                p = lt;
+            }
+        }
+        var plain = sbText.ToString();
+        if (string.IsNullOrEmpty(Contents)) Contents = plain;
+        // Keep the construction-time base font (it may already encode weight, e.g. "Arial Bold");
+        // only the size/colour are taken from the rich text.
+        if (baseSize > 0 || baseColor != null)
+        {
+            var f = DefaultAppearanceObject.FontName;
+            var s = baseSize > 0 ? baseSize : DefaultAppearanceObject.FontSize;
+            var c = baseColor ?? DefaultAppearanceObject.TextColor;
+            DefaultAppearance = new DefaultAppearance(f, s, c).ToAppearanceString();
+            _defaultAppearance = new DefaultAppearance(f, s, c);
+        }
+        _styleRuns.AddRange(runs);
+        return runs.Count > 0 || baseSize > 0 || baseColor != null;
+    }
+
+    /// <summary>Regenerate the /AP /N appearance honouring per-range rich-text styles
+    /// (bold/italic/underline) set via <see cref="SetTextStyle(int,int,RichTextFontStyles)"/>,
+    /// the /DA font/size/colour, and a default 1pt border (unless the border was set to 0).
+    /// Word-wraps within the rectangle, measuring each run with its styled font variant.</summary>
+    internal void RegenerateStyledAppearance()
+    {
+        var rect = Rect;
+        if (rect is null || rect.Width <= 0 || rect.Height <= 0) return;
+        var text = Contents;
+        if (string.IsNullOrEmpty(text)) text = PlainTextFromRichText(RichText);
+        if (string.IsNullOrEmpty(text)) return;
+        text = text!.Replace("\r\n", "\n").Replace("\r", "\n");
+
+        var da = DefaultAppearanceObject;
+        string baseFont = string.IsNullOrWhiteSpace(da.FontName) ? "Helvetica" : da.FontName!;
+        double size = da.FontSize > 0 ? da.FontSize : 12.0;
+        var color = da.TextColor;
+
+        double border = BorderExplicitlyZero() ? 0 : System.Math.Max(1.0, ReadBorderWidth());
+        double inset = border + 2.0;
+        double w = rect.Width, h = rect.Height;
+        double avail = System.Math.Max(1.0, w - 2 * inset);
+        double leading = size * 1.15;
+
+        var styles = ResolveCharStyles(text.Length);
+
+        // Per-variant font dict + metrics cache.
+        var fontDicts = new System.Collections.Generic.Dictionary<string, PdfDictionary>();
+        var metricsCache = new System.Collections.Generic.Dictionary<string, Aspose.Pdf.Text.FontMetrics>();
+        PdfDictionary FontDict(string v) { if (!fontDicts.TryGetValue(v, out var d)) { d = MakeFreeTextFontDict(v); fontDicts[v] = d; } return d; }
+        Aspose.Pdf.Text.FontMetrics Metrics(string v) { if (!metricsCache.TryGetValue(v, out var m)) { m = Aspose.Pdf.Text.FontMetrics.FromFontDict(FontDict(v), InternalReader); metricsCache[v] = m; } return m; }
+        string VarOf(RichTextFontStyles s) => VariantFontName(baseFont,
+            (s & RichTextFontStyles.Bold) != 0, (s & RichTextFontStyles.Italic) != 0);
+        double CharW(char c, RichTextFontStyles s) => Metrics(VarOf(s)).MeasureString(c.ToString(), size);
+
+        // Tokenise into words / spaces / newlines (carrying each char's style), then greedily
+        // wrap into output lines no wider than `avail`.
+        var outLines = new System.Collections.Generic.List<System.Collections.Generic.List<(char ch, RichTextFontStyles st)>>();
+        var line = new System.Collections.Generic.List<(char, RichTextFontStyles)>();
+        double lineW = 0;
+        var word = new System.Collections.Generic.List<(char ch, RichTextFontStyles st)>();
+        double wordW = 0;
+        void FlushWord()
+        {
+            if (word.Count == 0) return;
+            if (lineW > 0 && lineW + wordW > avail) { outLines.Add(line); line = new(); lineW = 0; }
+            foreach (var t in word) { line.Add(t); }
+            lineW += wordW; word.Clear(); wordW = 0;
+        }
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i]; var s = styles[i];
+            if (c == '\n') { FlushWord(); outLines.Add(line); line = new(); lineW = 0; continue; }
+            if (c == ' ')
+            {
+                FlushWord();
+                double sw = CharW(' ', s);
+                if (lineW > 0) { line.Add((c, s)); lineW += sw; } // skip leading spaces after a wrap
+                continue;
+            }
+            word.Add((c, s)); wordW += CharW(c, s);
+        }
+        FlushWord();
+        if (line.Count > 0 || outLines.Count == 0) outLines.Add(line);
+
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        string F(double v) => v.ToString("0.###", ci);
+        var sb = new System.Text.StringBuilder();
+
+        // Border box (default 1pt unless set to 0), stroked in the text colour.
+        if (border > 0)
+        {
+            sb.Append("q\n").Append(F(color.R / 255.0)).Append(' ').Append(F(color.G / 255.0)).Append(' ')
+              .Append(F(color.B / 255.0)).Append(" RG\n").Append(F(border)).Append(" w\n")
+              .Append(F(border / 2)).Append(' ').Append(F(border / 2)).Append(' ')
+              .Append(F(w - border)).Append(' ').Append(F(h - border)).Append(" re\nS\nQ\n");
+        }
+
+        var underlines = new System.Collections.Generic.List<(double x, double y, double len)>();
+        sb.Append("/Tx BMC\nq\nBT\n");
+        sb.Append(F(color.R / 255.0)).Append(' ').Append(F(color.G / 255.0)).Append(' ').Append(F(color.B / 255.0)).Append(" rg\n");
+        double y0 = h - inset - size;
+        for (int li = 0; li < outLines.Count; li++)
+        {
+            double baseY = y0 - li * leading;
+            if (baseY < -size) break; // ran past the bottom of the box
+            double x = inset;
+            var cells = outLines[li];
+            int j = 0;
+            while (j < cells.Count)
+            {
+                var st = cells[j].st;
+                var run = new System.Text.StringBuilder();
+                double runW = 0;
+                while (j < cells.Count && cells[j].st == st) { run.Append(cells[j].ch); runW += CharW(cells[j].ch, st); j++; }
+                string v = VarOf(st);
+                sb.Append("/").Append(ResName(v)).Append(' ').Append(F(size)).Append(" Tf\n");
+                sb.Append("1 0 0 1 ").Append(F(x)).Append(' ').Append(F(baseY)).Append(" Tm\n");
+                sb.Append('(').Append(EscapePdfString(run.ToString())).Append(") Tj\n");
+                if ((st & RichTextFontStyles.Underline) != 0)
+                    underlines.Add((x, baseY - size * 0.12, runW));
+                x += runW;
+            }
+        }
+        sb.Append("ET\n");
+        foreach (var (ux, uy, ulen) in underlines)
+            sb.Append(F(color.R / 255.0)).Append(' ').Append(F(color.G / 255.0)).Append(' ').Append(F(color.B / 255.0)).Append(" RG\n")
+              .Append(F(System.Math.Max(0.5, size * 0.06))).Append(" w\n")
+              .Append(F(ux)).Append(' ').Append(F(uy)).Append(" m\n").Append(F(ux + ulen)).Append(' ').Append(F(uy)).Append(" l\nS\n");
+        sb.Append("Q\nEMC\n");
+
+        var apStream = new PdfStream(new PdfDictionary(), System.Text.Encoding.Latin1.GetBytes(sb.ToString()));
+        apStream.Dict.Set("Type", new PdfName("XObject"));
+        apStream.Dict.Set("Subtype", new PdfName("Form"));
+        var bbox = new PdfArray();
+        bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(w)); bbox.Add(new PdfReal(h));
+        apStream.Dict.Set("BBox", bbox);
+        var fonts = new PdfDictionary();
+        foreach (var kv in fontDicts) fonts.Set(ResName(kv.Key), kv.Value);
+        var res = new PdfDictionary();
+        res.Set("Font", fonts);
+        apStream.Dict.Set("Resources", res);
+        var ap = new PdfDictionary();
+        ap.Set("N", apStream);
+        Dict.Set("AP", ap);
     }
 }
 
@@ -2210,15 +2984,101 @@ public partial class TextMarkupAnnotation : MarkupAnnotation
         if (Page is not { } page || QuadPoints is not { Length: >= 4 } quads)
             return result;
         var fragments = AbsorbFragments(page);
-        for (var i = 0; i + 3 < quads.Length; i += 4)
+
+        // Quad boxes.
+        var boxes = new System.Collections.Generic.List<(double minX, double minY, double maxX, double maxY)>();
+        for (var i = 0; i + 3 < quads.Length; i += 4) boxes.Add(QuadBounds(quads, i));
+        if (boxes.Count == 0) return result;
+
+        // Assign each marked character to a SINGLE best quad (largest X-overlap within
+        // the quad's Y band). Adjacent quads can overlap by a fraction of a point, so
+        // collecting per-quad independently would double-count boundary glyphs. Group the
+        // chars by (best quad, source text run) — one output fragment per group, matching
+        // the reference which yields a fragment per marked run, not per quad.
+        const double grazeTolerance = 0.1;
+        var groups = new System.Collections.Generic.Dictionary<(int q, int fi),
+            System.Collections.Generic.List<(char ch, double cx)>>();
+        var order = new System.Collections.Generic.List<(int q, int fi)>();
+        var fi = 0;
+        foreach (var f in fragments)
         {
-            var (minX, minY, maxX, maxY) = QuadBounds(quads, i);
-            foreach (var f in fragments)
+            var runIndex = fi++;
+            foreach (Aspose.Pdf.Text.TextSegment seg in f.Segments)
             {
-                var sb = new System.Text.StringBuilder();
-                CollectChars(f, minX, minY, maxX, maxY, sb, null);
-                if (sb.Length > 0)
-                    result.Add(new Aspose.Pdf.Text.TextFragment(sb.ToString()));
+                var chars = seg.Characters;
+                var text = seg.Text ?? string.Empty;
+                for (var c = 1; c <= chars.Count && c <= text.Length; c++)
+                {
+                    var r = chars[c].Rectangle;
+                    var cy = (r.LLY + r.URY) / 2.0;
+                    var bestQ = -1; var bestOv = grazeTolerance;
+                    for (var q = 0; q < boxes.Count; q++)
+                    {
+                        var (minX, minY, maxX, maxY) = boxes[q];
+                        if (cy < minY - 2 || cy > maxY + 2) continue;
+                        var overlapX = System.Math.Min(r.URX, maxX) - System.Math.Max(r.LLX, minX);
+                        if (overlapX > bestOv) { bestOv = overlapX; bestQ = q; }
+                    }
+                    if (bestQ < 0) continue;
+                    var key = (bestQ, runIndex);
+                    if (!groups.TryGetValue(key, out var list))
+                    {
+                        list = new System.Collections.Generic.List<(char, double)>();
+                        groups[key] = list;
+                        order.Add(key);
+                    }
+                    list.Add((text[c - 1], (r.LLX + r.URX) / 2.0));
+                }
+            }
+        }
+
+        // One piece per (quad, run) group, tagged with the quad's position for re-ordering.
+        var pieces = new System.Collections.Generic.List<(double midY, double minX, double maxX, string text)>();
+        double rightMargin = double.MinValue;
+        foreach (var key in order)
+        {
+            var list = groups[key];
+            if (list.Count == 0) continue;
+            list.Sort((a, b) => a.cx.CompareTo(b.cx));
+            var sb = new System.Text.StringBuilder();
+            var pieceMinX = double.MaxValue;
+            foreach (var (ch, cx) in list) { sb.Append(ch); if (cx < pieceMinX) pieceMinX = cx; }
+            var (_, minY, maxX, maxY) = boxes[key.q];
+            pieces.Add(((minY + maxY) / 2.0, pieceMinX, maxX, sb.ToString()));
+            if (maxX > rightMargin) rightMargin = maxX;
+        }
+        if (pieces.Count == 0) return result;
+
+        // Reading order: group pieces into lines by vertical centre (top first), then
+        // order each line left-to-right — /QuadPoints order need not be the visual order.
+        pieces.Sort((a, b) => b.midY.CompareTo(a.midY));
+        var lines = new System.Collections.Generic.List<System.Collections.Generic.List<(double midY, double minX, double maxX, string text)>>();
+        const double lineTol = 6.0;
+        foreach (var p in pieces)
+        {
+            if (lines.Count > 0 && System.Math.Abs(lines[^1][0].midY - p.midY) <= lineTol)
+                lines[^1].Add(p);
+            else
+                lines.Add(new System.Collections.Generic.List<(double, double, double, string)> { p });
+        }
+
+        for (var li = 0; li < lines.Count; li++)
+        {
+            var line = lines[li];
+            line.Sort((a, b) => a.minX.CompareTo(b.minX));
+            double lineRight = double.MinValue;
+            foreach (var p in line) if (p.maxX > lineRight) lineRight = p.maxX;
+
+            // A line ending well short of the block's right edge is a hard break (a label
+            // or paragraph end), not a soft wrap: emit a trailing space on its last quad
+            // to separate it from the next line. Wrapped lines that reach the margin join
+            // with no gap. Each quad remains its own fragment (the fragment count matters).
+            bool spaceAfterLine = li < lines.Count - 1 && lineRight < rightMargin - 20.0;
+            for (var pi = 0; pi < line.Count; pi++)
+            {
+                var text = line[pi].text;
+                if (spaceAfterLine && pi == line.Count - 1) text += " ";
+                result.Add(new Aspose.Pdf.Text.TextFragment(text));
             }
         }
         return result;
@@ -2277,6 +3137,67 @@ public partial class HighlightAnnotation : TextMarkupAnnotation
         SetDefaultQuadPoints(rect);
     }
     public new AnnotationType AnnotationType => AnnotationType.Highlight;
+
+    /// <summary>Regenerate the normal appearance (/AP /N): each /QuadPoints quad is
+    /// painted as a filled-and-stroked rectangle in the annotation colour, under a
+    /// Multiply blend graphics state so the highlighted text stays legible underneath.</summary>
+    public override void UpdateAppearances()
+    {
+        var r = Rect;
+        var quads = QuadPoints;
+        if (r is null || quads.Length < 4) { base.UpdateAppearances(); return; }
+        var color = Color;
+        var b = new Content.ContentStreamBuilder();
+        b.SaveState();
+        b.SetExtGState("TransGs");
+        b.SetFillColor(color);
+        b.SetStrokeColor(color);
+        for (int i = 0; i + 3 < quads.Length; i += 4)
+        {
+            double minX = Math.Min(Math.Min(quads[i].X, quads[i + 1].X), Math.Min(quads[i + 2].X, quads[i + 3].X));
+            double maxX = Math.Max(Math.Max(quads[i].X, quads[i + 1].X), Math.Max(quads[i + 2].X, quads[i + 3].X));
+            double minY = Math.Min(Math.Min(quads[i].Y, quads[i + 1].Y), Math.Min(quads[i + 2].Y, quads[i + 3].Y));
+            double maxY = Math.Max(Math.Max(quads[i].Y, quads[i + 1].Y), Math.Max(quads[i + 2].Y, quads[i + 3].Y));
+            b.MoveTo(minX, minY);
+            b.LineTo(minX, maxY);
+            b.LineTo(maxX, maxY);
+            b.LineTo(maxX, minY);
+            b.ClosePath();
+            b.FillAndStroke();
+        }
+        b.RestoreState();
+        SetHighlightAppearance(b.Build(), r);
+    }
+
+    // Build the /AP /N form XObject carrying the /TransGs ExtGState (Multiply blend)
+    // referenced by the appearance content.
+    private void SetHighlightAppearance(byte[] content, Rectangle bbox)
+    {
+        var form = new PdfDictionary();
+        form.Set("Type", new PdfName("XObject"));
+        form.Set("Subtype", new PdfName("Form"));
+        form.Set("FormType", new PdfInteger(1));
+        var bb = new PdfArray();
+        bb.Add(new PdfReal(bbox.LLX)); bb.Add(new PdfReal(bbox.LLY));
+        bb.Add(new PdfReal(bbox.URX)); bb.Add(new PdfReal(bbox.URY));
+        form.Set("BBox", bb);
+
+        var gs = new PdfDictionary();
+        gs.Set("Type", new PdfName("ExtGState"));
+        gs.Set("BM", new PdfName("Multiply"));
+        gs.Set("ca", new PdfReal(1));
+        gs.Set("CA", new PdfReal(1));
+        var extg = new PdfDictionary();
+        extg.Set("TransGs", gs);
+        var res = new PdfDictionary();
+        res.Set("ExtGState", extg);
+        form.Set("Resources", res);
+        form.Set("Length", new PdfInteger(content.Length));
+
+        var ap = InternalReader.ResolveDict(Dict.Get("AP")) ?? new PdfDictionary();
+        ap.Set("N", new PdfStream(form, content));
+        Dict.Set("AP", ap);
+    }
 }
 
 /// <summary>StrikeOut text markup annotation.</summary>
@@ -2319,6 +3240,14 @@ public partial class WidgetAnnotation : Annotation
 {
     internal WidgetAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
+    /// <summary>Detached ctor — a document-less widget used as a configuration holder
+    /// (see <see cref="Annotation()"/>). Tags the dict as a Widget annotation.</summary>
+    protected WidgetAnnotation() : base()
+    {
+        Dict.Set("Type", new PdfName("Annot"));
+        Dict.Set("Subtype", new PdfName("Widget"));
+    }
+
     /// <summary>Programmatic ctor — creates a bare widget annotation
     /// associated with <paramref name="doc"/>'s reader. The widget
     /// has no /AP/N appearance state until the caller assigns one.</summary>
@@ -2329,7 +3258,7 @@ public partial class WidgetAnnotation : Annotation
     }
 
     /// <summary>Always <see cref="AnnotationType.Widget"/>. Redeclared
-    /// with `new` so Aspose.PDF for .NET reflection (DeclaredOnly) sees it on
+    /// with `new` so Aspose.Pdf reflection (DeclaredOnly) sees it on
     /// WidgetAnnotation directly.</summary>
     public new AnnotationType AnnotationType => AnnotationType.Widget;
 
@@ -2371,7 +3300,7 @@ public partial class WidgetAnnotation : Annotation
     /// dictionary and /A (activation) entry on first access; further
     /// mutations are kept on the same instance. Redeclared with `new` so
     /// the strongly-typed collection surfaces on WidgetAnnotation
-    /// (Aspose.PDF for .NET DeclaredOnly reflection).</summary>
+    /// (Aspose.Pdf DeclaredOnly reflection).</summary>
     public new AnnotationActionCollection Actions => _actions ??= BuildActions();
     private AnnotationActionCollection? _actions;
 
@@ -2387,32 +3316,94 @@ public partial class WidgetAnnotation : Annotation
             return d is null ? null : PdfAction.Create(d, reader);
         }
 
-        col.OnActivated = Read(Dict, "A");
+        col.Load("A", Read(Dict, "A"));
 
         var aa = reader.ResolveDict(Dict.Get("AA"));
         if (aa is not null)
         {
-            col.OnEnter = Read(aa, "E");
-            col.OnExit = Read(aa, "X");
-            col.OnPressMouseBtn = Read(aa, "D");
-            col.OnReleaseMouseBtn = Read(aa, "U");
-            col.OnReceiveFocus = Read(aa, "Fo");
-            col.OnLostFocus = Read(aa, "Bl");
-            col.OnModifyCharacter = Read(aa, "K");
-            col.OnFormat = Read(aa, "F");
-            col.OnValidate = Read(aa, "V");
-            col.OnCalculate = Read(aa, "C");
-            col.OnOpenPage = Read(aa, "PO");
-            col.OnClosePage = Read(aa, "PC");
-            col.OnShowPage = Read(aa, "PV");
-            col.OnHidePage = Read(aa, "PI");
+            col.Load("E", Read(aa, "E"));
+            col.Load("X", Read(aa, "X"));
+            col.Load("D", Read(aa, "D"));
+            col.Load("U", Read(aa, "U"));
+            col.Load("Fo", Read(aa, "Fo"));
+            col.Load("Bl", Read(aa, "Bl"));
+            col.Load("K", Read(aa, "K"));
+            col.Load("F", Read(aa, "F"));
+            col.Load("V", Read(aa, "V"));
+            col.Load("C", Read(aa, "C"));
+            col.Load("PO", Read(aa, "PO"));
+            col.Load("PC", Read(aa, "PC"));
+            col.Load("PV", Read(aa, "PV"));
+            col.Load("PI", Read(aa, "PI"));
         }
+        col.Bind(Dict, reader);
         return col;
     }
 
-    /// <summary>Default-appearance string parsed into the typed
-    /// <see cref="DefaultAppearance"/> wrapper.</summary>
-    public DefaultAppearance DefaultAppearance { get; set; } = new DefaultAppearance();
+    private DefaultAppearance? _defaultAppearance;
+
+    /// <summary>Default-appearance (font, size, colour) for this widget. Write-through:
+    /// the setter serialises a /DA string onto the widget dict (so a per-widget appearance
+    /// survives save and drives the regenerated /AP), and the getter reads /DA back.</summary>
+    public DefaultAppearance DefaultAppearance
+    {
+        get
+        {
+            if (_defaultAppearance is not null) return _defaultAppearance;
+            var da = (Dict.Get("DA") as PdfString)?.ToText();
+            return _defaultAppearance = (ParseDefaultAppearanceString(da) ?? new DefaultAppearance());
+        }
+        set
+        {
+            _defaultAppearance = value;
+            if (value is not null)
+                Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(SerializeDefaultAppearance(value))));
+        }
+    }
+
+    /// <summary>Serialise a <see cref="DefaultAppearance"/> to a PDF /DA string
+    /// (<c>/Font size Tf  r g b rg</c>).</summary>
+    private static string SerializeDefaultAppearance(DefaultAppearance da)
+    {
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        string F(double v) => v.ToString("0.####", ci);
+        var c = da.TextColor;
+        return $"/{da.FontName} {F(da.FontSize)} Tf {F(c.R / 255.0)} {F(c.G / 255.0)} {F(c.B / 255.0)} rg";
+    }
+
+    /// <summary>Parse a /DA string back into a typed <see cref="DefaultAppearance"/>
+    /// (font name, size and colour), or null when the string is empty/unparseable.</summary>
+    private static DefaultAppearance? ParseDefaultAppearanceString(string? da)
+    {
+        if (string.IsNullOrEmpty(da)) return null;
+        var p = da!.Split(new[] { ' ', '\n', '\t', '\r' }, System.StringSplitOptions.RemoveEmptyEntries);
+        string font = "Helvetica";
+        double size = 12;
+        var color = System.Drawing.Color.Black;
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        for (int i = 0; i < p.Length; i++)
+        {
+            if (p[i] == "Tf" && i >= 2)
+            {
+                font = p[i - 2].TrimStart('/');
+                double.TryParse(p[i - 1], System.Globalization.NumberStyles.Float, ci, out size);
+            }
+            else if (p[i] == "rg" && i >= 3
+                && double.TryParse(p[i - 3], System.Globalization.NumberStyles.Float, ci, out var r)
+                && double.TryParse(p[i - 2], System.Globalization.NumberStyles.Float, ci, out var g)
+                && double.TryParse(p[i - 1], System.Globalization.NumberStyles.Float, ci, out var b))
+            {
+                color = System.Drawing.Color.FromArgb((int)(r * 255), (int)(g * 255), (int)(b * 255));
+            }
+            else if (p[i] == "g" && i >= 1
+                && double.TryParse(p[i - 1], System.Globalization.NumberStyles.Float, ci, out var gray))
+            {
+                int v = (int)(gray * 255);
+                color = System.Drawing.Color.FromArgb(v, v, v);
+            }
+        }
+        return new DefaultAppearance(font, size, color);
+    }
 
     /// <summary>Whether the widget's value should be exported on form
     /// submit. Maps to /Ff bit 3 cleared / set.</summary>
@@ -2453,9 +3444,26 @@ public partial class WidgetAnnotation : Annotation
     /// Stored only — the FOSS renderer doesn't dispatch widget actions.</summary>
     public PdfAction? OnActivated { get; set; }
 
+    private Forms.Field? _parentField;
+    private bool _parentResolved;
+
     /// <summary>Parent <see cref="Forms.Field"/> when this widget is the
-    /// visual child of an AcroForm field. Returns null when standalone.</summary>
-    public Forms.Field? Parent { get; internal set; }
+    /// visual child of an AcroForm field. Returns null when standalone. When not
+    /// set explicitly, resolved from the widget's /Parent dictionary so a widget
+    /// enumerated straight off a page still reports its owning field.</summary>
+    public Forms.Field? Parent
+    {
+        get
+        {
+            if (_parentField is not null || _parentResolved) return _parentField;
+            _parentResolved = true;
+            var pd = InternalReader?.ResolveDict(Dict?.Get("Parent"));
+            if (pd is not null)
+                _parentField = Forms.Field.Create(pd, InternalReader!);
+            return _parentField;
+        }
+        internal set { _parentField = value; _parentResolved = true; }
+    }
 
     /// <summary>Whether the widget rejects input (/Ff bit 1).</summary>
     public bool ReadOnly
@@ -2759,7 +3767,9 @@ public partial class RedactionAnnotation : Annotation
         get
         {
             var arr = InternalReader.Resolve(Dict.Get("QuadPoints")) as PdfArray;
-            if (arr is null || arr.Count < 8 || arr.Count % 2 != 0) return null;
+            // Return an empty array (not null) for an absent/short /QuadPoints so
+            // callers can iterate the result without a null guard.
+            if (arr is null || arr.Count < 8 || arr.Count % 2 != 0) return [];
             var pts = new Point[arr.Count / 2];
             for (int i = 0; i < pts.Length; i++)
             {
@@ -2851,7 +3861,7 @@ public partial class RedactionAnnotation : Annotation
                 if (!string.IsNullOrEmpty(sub))
                 {
                     var tr = new Text.TextReplacer { PreserveAdvanceOnDelete = true };
-                    if (tf.Position is not null) tr.TargetY = tf.Position.YIndent;
+                    if (tf.HasExplicitPosition) tr.TargetY = tf.Position!.YIndent;
                     tr.Replace(page, sub, string.Empty, false);
                 }
             }
@@ -2874,6 +3884,101 @@ public partial class RedactionAnnotation : Annotation
         b.Fill();
         b.RestoreState();
         page.AddContentStream(b.Build());
+
+        EmitOverlayText(page, r);
+    }
+
+    /// <summary>Draw the redaction's /OverlayText as real, searchable page text so it survives the
+    /// redaction (the content underneath was removed). It is laid into the first /QuadPoints quad
+    /// (or the annotation rect when there are no quads), in Helvetica at the annotation font size
+    /// (default 10), horizontally aligned per /Q, with the baseline one font-size below the quad top —
+    /// matching the reference redaction overlay layout.</summary>
+    private void EmitOverlayText(Page page, Rectangle r)
+    {
+        var overlay = OverlayText;
+        if (string.IsNullOrEmpty(overlay)) return;
+
+        var quads = QuadPoint;
+        double minX, maxX, top;
+        if (quads is { Length: >= 4 })
+        {
+            minX = Math.Min(Math.Min(quads[0].X, quads[1].X), Math.Min(quads[2].X, quads[3].X));
+            maxX = Math.Max(Math.Max(quads[0].X, quads[1].X), Math.Max(quads[2].X, quads[3].X));
+            top = Math.Max(Math.Max(quads[0].Y, quads[1].Y), Math.Max(quads[2].Y, quads[3].Y));
+        }
+        else { minX = r.LLX; maxX = r.URX; top = r.URY; }
+
+        double fs = FontSize > 0 ? FontSize : 10;
+        double w = 0;
+        foreach (char ch in overlay)
+        {
+            var cw = ch <= 255 ? Aspose.Pdf.Text.Standard14Fonts.GetWidth("Helvetica", ch) : 0;
+            if (cw <= 0) cw = Aspose.Pdf.Text.Standard14Fonts.GetDefaultWidth("Helvetica");
+            w += cw;
+        }
+        w = w * fs / 1000.0;
+
+        double tx = TextAlignment switch
+        {
+            HorizontalAlignment.Center => (minX + maxX) / 2 - w / 2,
+            HorizontalAlignment.Right => maxX - w,
+            _ => minX,
+        };
+        double baseline = top - fs;
+        var tc = Color;
+
+        var fontRes = RegisterOverlayFont(page);
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        string F(double v) => v.ToString("0.####", ci);
+        var esc = overlay.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+        var sb = new System.Text.StringBuilder();
+        sb.Append("BT\n");
+        sb.Append($"{F(tc.R / 255.0)} {F(tc.G / 255.0)} {F(tc.B / 255.0)} rg\n");
+        sb.Append($"/{fontRes} {F(fs)} Tf\n");
+        sb.Append($"1 0 0 1 {F(tx)} {F(baseline)} Tm\n");
+        sb.Append($"({esc}) Tj\n");
+        sb.Append("ET\n");
+        page.AddContentStream(System.Text.Encoding.Latin1.GetBytes(sb.ToString()));
+    }
+
+    /// <summary>Register a WinAnsi Helvetica font on the page carrying a /FontDescriptor with the
+    /// Standard-14 ascent/descent, and return its resource name (reusing an existing matching entry).
+    /// The descriptor is what lets the text absorber report the overlay fragment at its descent line
+    /// (baseline − descent), matching the reference — a plain descriptor-less Helvetica would surface
+    /// at the raw baseline.</summary>
+    internal static string RegisterOverlayFont(Page page)
+    {
+        var resources = page.Reader.ResolveDict(page.Dict.Get("Resources"));
+        if (resources is null) { resources = new PdfDictionary(); page.Dict.Set("Resources", resources); }
+        var fontDict = page.Reader.ResolveDict(resources.Get("Font"));
+        if (fontDict is null) { fontDict = new PdfDictionary(); resources.Set("Font", fontDict); }
+
+        foreach (var key in fontDict.Keys)
+            if (page.Reader.Resolve(fontDict.Get(key)) is PdfDictionary ex
+                && ex.GetName("BaseFont") == "Helvetica" && ex.Get("FontDescriptor") is not null)
+                return key;
+
+        var name = "FRov";
+        int n = 0;
+        while (fontDict.ContainsKey(name)) name = "FRov" + (++n);
+
+        var desc = new PdfDictionary();
+        desc.Set("Type", new PdfName("FontDescriptor"));
+        desc.Set("FontName", new PdfName("Helvetica"));
+        desc.Set("Flags", new PdfInteger(32));
+        desc.Set("Ascent", new PdfInteger(718));
+        desc.Set("Descent", new PdfInteger(-207));
+        desc.Set("CapHeight", new PdfInteger(718));
+        desc.Set("StemV", new PdfInteger(88));
+
+        var font = new PdfDictionary();
+        font.Set("Type", new PdfName("Font"));
+        font.Set("Subtype", new PdfName("Type1"));
+        font.Set("BaseFont", new PdfName("Helvetica"));
+        font.Set("Encoding", new PdfName("WinAnsiEncoding"));
+        font.Set("FontDescriptor", desc);
+        fontDict.Set(name, font);
+        return name;
     }
 
     /// <summary>Delete every AcroForm field that has a widget overlapping the
@@ -2892,7 +3997,7 @@ public partial class RedactionAnnotation : Annotation
         // A field is redacted when its widget's CENTRE lies inside the rectangle,
         // not merely when the rectangles touch: a widget that only clips the edge
         // of the redaction box (e.g. a neighbouring line caught by a couple of
-        // points) must survive, matching Aspose.PDF for .NET behaviour.
+        // points) must survive, matching Aspose.Pdf behaviour.
         bool CentreInside(PdfDictionary? d)
         {
             if (d is null || reader.Resolve(d.Get("Rect")) is not PdfArray arr || arr.Count < 4) return false;
@@ -3188,11 +4293,65 @@ public partial class StampAnnotation : MarkupAnnotation
     /// <summary>The stamp's image. When set programmatically the stored stream is
     /// returned; otherwise, for a stamp loaded from a document, the image is extracted
     /// from the normal appearance (/AP /N) — the first image XObject in its resources —
-    /// and returned as a PNG stream (matching the Aspose.PDF for .NET API).</summary>
+    /// and returned as a PNG stream (matching the Aspose.Pdf API).</summary>
     public System.IO.Stream? Image
     {
         get => _image ?? ExtractAppearanceImage();
-        set => _image = value;
+        set
+        {
+            _image = value;
+            // Embed the image into the normal appearance at its native resolution so the
+            // stamp renders and round-trips through save (a reopened stamp's Image then
+            // extracts the full-size source rather than nothing).
+            if (value is not null) BuildImageAppearance(value);
+        }
+    }
+
+    /// <summary>Generate the normal appearance (/AP /N) as a Form XObject that draws
+    /// <paramref name="image"/> at native resolution, scaled to fill the stamp rectangle.
+    /// The image XObject keeps the source pixel dimensions (DCTDecode pass-through for JPEG),
+    /// so the resolution survives the save/reload round-trip.</summary>
+    private void BuildImageAppearance(System.IO.Stream image)
+    {
+        var r = Rect;
+        if (r is null) return;
+        var w = r.URX - r.LLX;
+        var h = r.URY - r.LLY;
+        if (w <= 0 || h <= 0) return;
+
+        byte[] bytes;
+        if (image.CanSeek) image.Seek(0, System.IO.SeekOrigin.Begin);
+        using (var ms = new System.IO.MemoryStream()) { image.CopyTo(ms); bytes = ms.ToArray(); }
+        if (image.CanSeek) image.Seek(0, System.IO.SeekOrigin.Begin);
+        if (bytes.Length == 0) return;
+
+        Core.PdfStream imgXObject;
+        try { imgXObject = new Aspose.Pdf.ImageStamp(new System.IO.MemoryStream(bytes)).BuildImageXObject(); }
+        catch { return; } // not a decodable image — leave the stored stream untouched
+
+        static string F(double v) => v.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
+        // Map the unit image space into the BBox: q w 0 0 h 0 0 cm /Im0 Do Q.
+        var content = System.Text.Encoding.ASCII.GetBytes($"q {F(w)} 0 0 {F(h)} 0 0 cm /Im0 Do Q");
+
+        var form = new Core.PdfDictionary();
+        form.Set("Type", new Core.PdfName("XObject"));
+        form.Set("Subtype", new Core.PdfName("Form"));
+        form.Set("FormType", new Core.PdfInteger(1));
+        var bb = new Core.PdfArray();
+        bb.Add(new Core.PdfReal(0)); bb.Add(new Core.PdfReal(0));
+        bb.Add(new Core.PdfReal(w)); bb.Add(new Core.PdfReal(h));
+        form.Set("BBox", bb);
+
+        var xobjs = new Core.PdfDictionary();
+        xobjs.Set("Im0", imgXObject);
+        var res = new Core.PdfDictionary();
+        res.Set("XObject", xobjs);
+        form.Set("Resources", res);
+        form.Set("Length", new Core.PdfInteger(content.Length));
+
+        var ap = InternalReader.ResolveDict(Dict.Get("AP")) ?? new Core.PdfDictionary();
+        ap.Set("N", new Core.PdfStream(form, content));
+        Dict.Set("AP", ap);
     }
 
     private System.IO.Stream? ExtractAppearanceImage()
@@ -3482,7 +4641,7 @@ public partial class LineAnnotation : MarkupAnnotation
     }
 
     /// <summary>Always <see cref="AnnotationType.Line"/>. Redeclared with
-    /// `new` so Aspose.PDF for .NET reflection sees it on LineAnnotation directly.</summary>
+    /// `new` so Aspose.Pdf reflection sees it on LineAnnotation directly.</summary>
     public new AnnotationType AnnotationType => AnnotationType.Line;
 
     /// <summary>Border with width, style and dash pattern resolved from /BS.</summary>
@@ -3519,19 +4678,89 @@ public partial class LineAnnotation : MarkupAnnotation
 
     /// <summary>Regenerate the normal appearance (/AP /N) by stroking the
     /// line from <see cref="Starting"/> to <see cref="Ending"/>.</summary>
+    // Open-arrow head proportions relative to the line width, measured from
+    // Aspose.Pdf: for width w the V vertex sits 1.328·w behind the line
+    // endpoint, the wings 5.894·w behind and ±1.573·w off-axis, and the shaft is
+    // pulled back 1·w so it meets the head. Verified for w = 1, 3, 5.
+    private const double ArrowApex = 1.328, ArrowBack = 5.894, ArrowHalf = 1.573;
+
     public override void UpdateAppearances()
     {
-        var r = Rect;
-        if (r is null) return;
+        if (Rect is null) return;
         var s = Starting; var e = Ending;
+        double w = GetBorderWidthValue();
+        double lw = w <= 0 ? 1 : w;
+
+        double[]? dash = null;
+        if (GetBorderStyleValue() == Aspose.Pdf.Annotations.BorderStyle.Dashed
+            && GetBorderDashValue() is { Length: > 0 } dp)
+            dash = System.Array.ConvertAll(dp, v => (double)v);
+
+        bool startArrow = IsArrowEnding(GetLineEnding(0));
+        bool endArrow = IsArrowEnding(GetLineEnding(1));
+
         var b = new Content.ContentStreamBuilder();
         b.SaveState();
         b.SetStrokeColor(Color);
-        b.MoveTo(s.X, s.Y);
-        b.LineTo(e.X, e.Y);
-        b.Stroke();
+        b.SetLineWidth(lw);
+        if (dash is not null) b.SetDashPattern(dash);
+
+        // Shaft, pulled back by lw at any arrowed end so it meets the head vertex.
+        var (ax, ay) = MovePointToward(s.X, s.Y, e.X, e.Y, startArrow ? lw : 0);
+        var (bx, by) = MovePointToward(e.X, e.Y, s.X, s.Y, endArrow ? lw : 0);
+        b.MoveTo(ax, ay); b.LineTo(bx, by); b.Stroke();
+
+        if (endArrow) DrawOpenArrowHead(b, s.X, s.Y, e.X, e.Y, lw);
+        if (startArrow) DrawOpenArrowHead(b, e.X, e.Y, s.X, s.Y, lw);
         b.RestoreState();
-        SetNormalAppearance(b.Build(), r);
+
+        // Grow the annotation rectangle (and the appearance BBox, which maps 1:1 to
+        // it) 10·w around the segment so the arrow head and a thick stroke are never
+        // cropped when the appearance is placed — matching the expected /Rect.
+        double minX = System.Math.Min(s.X, e.X), maxX = System.Math.Max(s.X, e.X);
+        double minY = System.Math.Min(s.Y, e.Y), maxY = System.Math.Max(s.Y, e.Y);
+        double m = 10 * lw;
+        var bbox = new Rectangle(minX - m, minY - m, maxX + m, maxY + m);
+
+        var rArr = new PdfArray();
+        rArr.Add(new PdfReal(bbox.LLX)); rArr.Add(new PdfReal(bbox.LLY));
+        rArr.Add(new PdfReal(bbox.URX)); rArr.Add(new PdfReal(bbox.URY));
+        Dict.Set("Rect", rArr);
+
+        SetNormalAppearance(b.Build(), bbox);
+    }
+
+    private static bool IsArrowEnding(LineEnding le) =>
+        le is LineEnding.OpenArrow or LineEnding.ClosedArrow
+           or LineEnding.ROpenArrow or LineEnding.RClosedArrow;
+
+    // Move (px,py) toward (qx,qy) by dist points (no-op for dist ≤ 0 or coincident points).
+    private static (double, double) MovePointToward(double px, double py, double qx, double qy, double dist)
+    {
+        if (dist <= 0) return (px, py);
+        double dx = qx - px, dy = qy - py;
+        double len = System.Math.Sqrt(dx * dx + dy * dy);
+        if (len < 1e-9) return (px, py);
+        return (px + dx / len * dist, py + dy / len * dist);
+    }
+
+    // Stroke an open-V arrow head at (tipX,tipY) pointing away from (fromX,fromY).
+    private static void DrawOpenArrowHead(Content.ContentStreamBuilder b,
+        double fromX, double fromY, double tipX, double tipY, double w)
+    {
+        double dx = tipX - fromX, dy = tipY - fromY;
+        double len = System.Math.Sqrt(dx * dx + dy * dy);
+        if (len < 1e-9) return;
+        double ux = dx / len, uy = dy / len;   // unit from->tip
+        double vx = -uy, vy = ux;               // perpendicular
+        double apexX = tipX - ArrowApex * w * ux, apexY = tipY - ArrowApex * w * uy;
+        // Emit the wings in the reference's order (−v wing first) so the dash pattern,
+        // which runs along the stroked path, lands on identical positions.
+        double w1x = tipX - ArrowBack * w * ux - ArrowHalf * w * vx;
+        double w1y = tipY - ArrowBack * w * uy - ArrowHalf * w * vy;
+        double w2x = tipX - ArrowBack * w * ux + ArrowHalf * w * vx;
+        double w2y = tipY - ArrowBack * w * uy + ArrowHalf * w * vy;
+        b.MoveTo(w1x, w1y); b.LineTo(apexX, apexY); b.LineTo(w2x, w2y); b.Stroke();
     }
 
     /// <summary>Regenerate the appearance of <paramref name="annotation"/>.</summary>
@@ -3761,7 +4990,7 @@ public partial class LineAnnotation : MarkupAnnotation
         Dict.Set("LE", newArr);
     }
 
-    private static string LineEndingToName(LineEnding le) => le switch
+    internal static string LineEndingToName(LineEnding le) => le switch
     {
         LineEnding.Square => "Square",
         LineEnding.Circle => "Circle",
@@ -3775,7 +5004,7 @@ public partial class LineAnnotation : MarkupAnnotation
         _ => "None",
     };
 
-    private static LineEnding ParseLineEnding(string? name) => name switch
+    internal static LineEnding ParseLineEnding(string? name) => name switch
     {
         "Square" => LineEnding.Square,
         "Circle" => LineEnding.Circle,
@@ -3938,6 +5167,25 @@ public abstract partial class CommonFigureAnnotation : MarkupAnnotation
         else b.Stroke();
         b.RestoreState();
         SetNormalAppearance(b.Build(), rect);
+    }
+
+    /// <summary>Resize-with-normalization helper (PdfFileEditor.ResizeContents): regenerate
+    /// the figure's /N appearance, and when <see cref="UpdateAppearances"/> draws nothing —
+    /// a colourless figure or a collapsed rectangle (e.g. a zero-area Square used as a text
+    /// anchor) — still emit a minimal valid but empty appearance form so the annotation
+    /// carries a normalized /N instead of a degenerate/absent one. Flatten and normal
+    /// rendering keep the visibility-gated <see cref="UpdateAppearances"/> behaviour.</summary>
+    internal void EnsureNormalizedAppearance()
+    {
+        UpdateAppearances();
+        var na = NormalAppearance;
+        if (na is not null && na.Contents.Count > 0) return;
+
+        var r = Rect ?? new Rectangle(0, 0, 0, 0);
+        var b = new Content.ContentStreamBuilder();
+        b.SaveState();
+        b.RestoreState();
+        SetNormalAppearance(b.Build(), r);
     }
 }
 
@@ -4356,7 +5604,7 @@ public partial class SoundAnnotation : MarkupAnnotation
     }
 
     /// <summary>Sound annotations have no typed Visit overload in the
-    /// Aspose.PDF for .NET visitor, so Accept here is a no-op kept for reflection
+    /// Aspose.Pdf visitor, so Accept here is a no-op kept for reflection
     /// parity.</summary>
     public override void Accept(AnnotationSelector visitor) { _ = visitor; }
 }
@@ -4407,7 +5655,13 @@ public partial class ScreenAnnotation : Annotation
         Dict.Set("Type", new PdfName("Annot"));
         Dict.Set("Subtype", new PdfName("Screen"));
         if (!string.IsNullOrEmpty(mediaFile))
-            Dict.Set("FS", new FileSpecification(mediaFile).Dict);
+        {
+            // The activation action: a rendition action playing a media rendition whose
+            // clip embeds the media file (PDF §12.6.4.14 / §13.2). The embedded stream
+            // rides in the clip's file specification.
+            var action = new RenditionAction(new MediaRendition(new MediaClipData(mediaFile)));
+            Dict.Set("A", action.Dict);
+        }
     }
 
     /// <summary>Always <see cref="AnnotationType.Screen"/>.</summary>
@@ -4520,5 +5774,18 @@ public partial class RichMediaAnnotation : Annotation
         Audio = 1,
         Video = 2,
     }
+}
+
+/// <summary>
+/// Fallback annotation class for annotation subtypes that have no dedicated model
+/// (e.g. vendor-specific subtypes such as <c>/BatesN</c>). It exposes the common
+/// annotation surface (rectangle, colour, appearance, flags) inherited from
+/// <see cref="Annotation"/> and round-trips its dictionary unchanged, so an
+/// un-modelled annotation survives load → edit → save and stays castable via
+/// <c>annot as GenericAnnotation</c>.
+/// </summary>
+public sealed class GenericAnnotation : Annotation
+{
+    internal GenericAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 }
 

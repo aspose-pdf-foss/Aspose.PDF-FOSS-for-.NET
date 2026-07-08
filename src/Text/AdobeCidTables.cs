@@ -52,6 +52,14 @@ internal static class AdobeCidTables
         return map.TryGetValue(unicode, out var cid) ? cid : null;
     }
 
+    /// <summary>Largest CID present in the ordering's table (0 when the
+    /// ordering is unknown). Used to size a synthesised /CIDToGIDMap.</summary>
+    public static int MaxCid(string ordering)
+    {
+        var table = GetTable(ordering);
+        return table is { Length: >= 2 } ? table[^2] : 0;
+    }
+
     private static ushort[]? GetTable(string ordering) => ordering switch
     {
         "Japan1"  => _japan1  ??= B64ToU16(JAPAN1_B64),

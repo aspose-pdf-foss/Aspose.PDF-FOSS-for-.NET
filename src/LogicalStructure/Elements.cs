@@ -14,6 +14,18 @@ public abstract class Element
     public abstract ElementList ChildElements { get; }
 }
 
+/// <summary>A structure-type role (the /S entry value), exposed via
+/// <see cref="StructureElement.S"/>. <see cref="Name"/> is the role tag, e.g. "P", "H1".</summary>
+public sealed class StructureType
+{
+    internal StructureType(string name) => Name = name;
+
+    /// <summary>The structure-type role tag (e.g. "P", "Sect", "H1").</summary>
+    public string Name { get; }
+
+    public override string ToString() => Name;
+}
+
 /// <summary>An ordered list of structure elements, as returned by
 /// <see cref="Element.ChildElements"/>.</summary>
 public sealed class ElementList : List<StructureElement>
@@ -94,6 +106,10 @@ public class StructureElement : Element, ITextElement
     /// <summary>The PDF structure-type role (/S entry, e.g. "P", "Span").</summary>
     public string StructureType => _dict.GetName("S") ?? string.Empty;
 
+    /// <summary>The element's structure type (/S) as a <see cref="LogicalStructure.StructureType"/>
+    /// whose <see cref="LogicalStructure.StructureType.Name"/> is the role tag (e.g. "H1").</summary>
+    public StructureType S => new(_dict.GetName("S") ?? string.Empty);
+
     /// <summary>The replacement text for the marked content (/ActualText).</summary>
     public string ActualText
     {
@@ -141,8 +157,47 @@ public class StructureElement : Element, ITextElement
     /// into the parent's /K so the change persists to the saved
     /// PDF.</summary>
     public virtual StructureElement AppendChild(StructureElement child)
+        => AppendChildCore(child, validate: true);
+
+    /// <summary>True when this element is the document-level root of the
+    /// structure tree (the /StructTreeRoot itself, or the single element
+    /// directly under it).</summary>
+    private bool IsDocumentRoot
+        => this is StructTreeRootElement || _parent is StructTreeRootElement;
+
+    /// <summary>Containment rules the authoring API enforces when
+    /// validate=true: a Table may hold only row groups / rows / captions,
+    /// a TR only cells, a TOC sits under the document root only, and a
+    /// TOCI only under a TOC. Throws <see cref="Aspose.Pdf.Tagged.TaggedException"/>
+    /// when appending <paramref name="child"/> here would break a rule.</summary>
+    private void ValidateAppend(StructureElement child)
+    {
+        string? rule = null;
+        if (child is TOCElement && !IsDocumentRoot)
+            rule = "a TOC element may be a child of the root element only";
+        else if (child is TOCIElement && this is not TOCElement)
+            rule = "a TOCI element may be a child of a TOC element only";
+        else if (this is TableElement
+                 && child is not (TableTRElement or TableTHeadElement or TableTBodyElement
+                     or TableTFootElement or CaptionElement))
+            rule = "a Table element may hold only THead/TBody/TFoot/TR/Caption children";
+        else if (this is TableTRElement && child is not (TableTHElement or TableTDElement))
+            rule = "a TR element may hold only TH/TD children";
+        if (rule is not null)
+            throw new Aspose.Pdf.Tagged.TaggedException(
+                $"Appending structure element '{child}' to the element '{this}' is not allowed: {rule}.");
+    }
+
+    private StructureElement AppendChildCore(StructureElement child, bool validate)
     {
         if (child is null) throw new ArgumentNullException(nameof(child));
+        // Re-appending an element that is already a child of this element is
+        // invalid — it would duplicate the /K reference. Move it explicitly
+        // with ChangeParentElement to re-parent.
+        if (ReferenceEquals(child._parent, this))
+            throw new Aspose.Pdf.Tagged.TaggedException(
+                "Structure element is already a child of this element.");
+        if (validate) ValidateAppend(child);
         EnsureChildrenLoaded();
         Adopt(child);
         _children!.Add(child);
@@ -214,6 +269,14 @@ public class StructureElement : Element, ITextElement
         child._idRegistry ??= _idRegistry;
     }
 
+    /// <summary>Remove all children (and the underlying /K entries). Used by the
+    /// auto-tagger to clear an existing structure tree before regenerating it.</summary>
+    internal void ClearChildren()
+    {
+        _dict.Remove("K");
+        _children = new ElementList();
+    }
+
     private void EnsureChildrenLoaded()
     {
         if (_children is not null) return;
@@ -269,13 +332,9 @@ public class StructureElement : Element, ITextElement
     /// <summary>Append <paramref name="child"/> with an optional
     /// validation pass. FOSS-extra matching the
     /// <see cref="Aspose.Pdf.Tagged.StructureElement.AppendChild(Aspose.Pdf.Tagged.StructureElement, bool)"/>
-    /// overload — the validate flag is currently a no-op (the FOSS
-    /// builder doesn't enforce per-role child rules).</summary>
+    /// overload — validate=false skips the containment rules.</summary>
     public void AppendChild(StructureElement child, bool validate)
-    {
-        _ = validate;
-        AppendChild(child);
-    }
+        => AppendChildCore(child, validate);
 
     /// <summary>Set the element's text content (stored as
     /// /ActualText). FOSS-extra alias.</summary>
@@ -304,21 +363,36 @@ public class StructureElement : Element, ITextElement
         _dict.Remove("ID");
     }
 
-    /// <summary>Stub no-op kept for compat with the
-    /// <see cref="Aspose.Pdf.Tagged.StructureElement.AdjustPosition"/>
-    /// authoring API — FOSS doesn't render through PositionSettings yet.</summary>
+    /// <summary>Layout margin captured from <see cref="AdjustPosition"/> or
+    /// <see cref="StructureTextState"/>.MarginInfo, consumed by the tagged-content
+    /// renderer to place an authored block. Null when no position was requested.</summary>
+    internal MarginInfo? _positionMargin;
+
+    /// <summary>Capture the requested layout position for an authored structure
+    /// element. The settings object is an <c>Aspose.Pdf.Tagged.PositionSettings</c>
+    /// exposing a <c>Margin</c> property.
+    /// The margin is stored so the tagged-content renderer can offset the block
+    /// (Left/Right indent the column, Top adds space above it).</summary>
     public void AdjustPosition(object settings)
     {
-        _ = settings;
+        if (settings is null) return;
+        // Both the Tagged-side and LogicalStructure PositionSettings expose a
+        // MarginInfo? Margin; read it structurally so we don't hard-depend on
+        // either concrete type here.
+        var marginProp = settings.GetType().GetProperty("Margin");
+        if (marginProp?.GetValue(settings) is MarginInfo margin)
+            _positionMargin = margin;
     }
 
     /// <summary>Move this element under <paramref name="newParent"/>.
-    /// FOSS-extra mirroring the Tagged-side authoring helper.</summary>
+    /// FOSS-extra mirroring the Tagged-side authoring helper. The
+    /// containment rules run BEFORE detaching so a rejected move leaves
+    /// the tree unchanged.</summary>
     public void ChangeParentElement(StructureElement newParent, bool validate = true)
     {
-        _ = validate;
+        if (newParent is not null && validate) newParent.ValidateAppend(this);
         Detach();
-        newParent?.AppendChild(this);
+        newParent?.AppendChildCore(this, validate: false);
     }
 
     /// <summary>Detach this element, then re-parent its children
@@ -326,13 +400,45 @@ public class StructureElement : Element, ITextElement
     /// slot). FOSS-extra mirroring the Tagged-side helper.</summary>
     public void RemoveAndMoveItsChildObjectsToItsParent(bool validate = true)
     {
-        _ = validate;
         var parent = _parent;
         if (parent is null) return;
         EnsureChildrenLoaded();
+        parent.EnsureChildrenLoaded();
+        // Rules run before any mutation so a rejected move leaves the tree intact.
+        if (validate)
+            foreach (var c in _children!)
+                parent.ValidateAppend(c);
         var copy = new List<StructureElement>(_children!);
-        Detach();
-        foreach (var c in copy) parent.AppendChild(c);
+
+        // Record this element's slot in the parent (in-memory list + /K array) so
+        // the moved children take its place rather than landing at the parent's end.
+        var listIdx = parent._children!.IndexOf(this);
+        if (listIdx < 0) listIdx = parent._children.Count;
+        var parentK = parent._reader?.Resolve(parent._dict.Get("K")) as PdfArray
+                      ?? parent._dict.Get("K") as PdfArray;
+        var kIdx = -1;
+        if (parentK is not null)
+            for (var i = 0; i < parentK.Count; i++)
+                if (ReferenceEquals(parent._reader?.Resolve(parentK[i]) ?? parentK[i], _dict)) { kIdx = i; break; }
+
+        Detach(); // removes this from parent._children (at listIdx) and /K (at kIdx)
+
+        for (var j = 0; j < copy.Count; j++)
+        {
+            var c = copy[j];
+            parent.Adopt(c);
+            parent._children.Insert(Math.Min(listIdx + j, parent._children.Count), c);
+            if (parentK is null)
+            {
+                parentK = new PdfArray();
+                parent._dict.Set("K", parentK);
+                parentK.Add(c._dict);
+            }
+            else if (kIdx >= 0)
+                parentK.Insert(Math.Min(kIdx + j, parentK.Count), c._dict);
+            else
+                parentK.Add(c._dict);
+        }
     }
 
     /// <summary>Detach this element from its parent. FOSS-extra.</summary>
@@ -365,7 +471,7 @@ public class StructureElement : Element, ITextElement
         var role = dict.GetName("S") ?? string.Empty;
         StructureElement el = role switch
         {
-            "Document" => new PartElement(dict, _reader),
+            "Document" => new DocumentElement(dict, _reader),
             "Annot" => new AnnotElement(dict, _reader),
             "Art" => new ArtElement(dict, _reader),
             "BibEntry" => new BibEntryElement(dict, _reader),
@@ -383,6 +489,8 @@ public class StructureElement : Element, ITextElement
             "LI" => new ListLIElement(dict, _reader),
             "Lbl" => new ListLblElement(dict, _reader),
             "Link" => new LinkElement(dict, _reader),
+            "MCR" => new MCRElement(dict, _reader),
+            "OBJR" => new OBJRElement(dict, _reader),
             "NonStruct" => new NonStructElement(dict, _reader),
             "Note" => new NoteElement(dict, _reader),
             "P" => new ParagraphElement(dict, _reader),
@@ -470,35 +578,13 @@ public sealed class StructureTextState
     public float CharacterSpacing { get; set; }
     /// <summary>Extra spacing between words, in points.</summary>
     public float WordSpacing { get; set; }
+
+    /// <summary>Layout margin for the element the state is applied to. An
+    /// alternative to <see cref="Aspose.Pdf.Tagged.StructureElement.AdjustPosition"/>
+    /// for positioning an authored block; consumed by the tagged-content renderer.</summary>
+    public Aspose.Pdf.MarginInfo? MarginInfo { get; set; }
 }
 
-/// <summary>
-/// Layout/position settings for a structure element. Stored only — the
-/// FOSS structure builder doesn't re-flow content through these values.
-/// </summary>
-public sealed class PositionSettings
-{
-    /// <summary>Horizontal alignment.</summary>
-    public HorizontalAlignment HorizontalAlignment { get; set; } = HorizontalAlignment.None;
-
-    /// <summary>Vertical alignment.</summary>
-    public VerticalAlignment VerticalAlignment { get; set; } = VerticalAlignment.None;
-
-    /// <summary>Margin information.</summary>
-    public MarginInfo? Margin { get; set; }
-
-    /// <summary>Whether the element starts a new column. Stored only.</summary>
-    public bool IsFirstParagraphInColumn { get; set; }
-
-    /// <summary>Whether the element is kept with the next one. Stored only.</summary>
-    public bool IsKeptWithNext { get; set; }
-
-    /// <summary>Whether the element starts on a new page. Stored only.</summary>
-    public bool IsInNewPage { get; set; }
-
-    /// <summary>Whether the element flows inline within a paragraph. Stored only.</summary>
-    public bool IsInLineParagraph { get; set; }
-}
 
 /// <summary>
 /// Maps custom (non-standard) structure-type names to PDF standard
@@ -569,10 +655,10 @@ internal sealed class IdRegistry
 
 // ── Typed structure-element subclasses ────────────────────────────────
 //
-// Each subclass just fixes the /S role for its node; Aspose.PDF for .NET declares
+// Each subclass just fixes the /S role for its node; Aspose.Pdf declares
 // these as distinct nominal types so callers can pattern-match on the
 // element kind. No subclass adds members beyond what the base provides
-// (matches Aspose.PDF for .NET DeclaredOnly reflection, which reports zero
+// (matches Aspose.Pdf DeclaredOnly reflection, which reports zero
 // declared members on most of these subclasses).
 
 internal sealed class GenericStructureElement : StructureElement
@@ -741,6 +827,40 @@ public sealed class PartElement : StructureElement
 {
     internal PartElement() : base("Part") { }
     internal PartElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
+}
+
+/// <summary>The document root structure element (/S Document).</summary>
+public sealed class DocumentElement : StructureElement
+{
+    internal DocumentElement() : base("Document") { }
+    internal DocumentElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
+}
+
+/// <summary>A marked-content reference leaf (role "MCR") emitted by the auto-tagger to mark
+/// where a structure element's page content lives. Counted by
+/// <see cref="StructTreeRootElement.AllElements"/>. (A loaded document's bare MCID integers /
+/// /MCR dicts in /K are intentionally NOT surfaced as elements — only these explicit role-MCR
+/// structure elements are, so the auto-tagger's tree round-trips without inflating the element
+/// count of externally-authored tagged PDFs.)</summary>
+public sealed class MCRElement : StructureElement
+{
+    internal MCRElement() : base("MCR") { }
+    internal MCRElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
+}
+
+/// <summary>An object reference (role "OBJR") — links a structure element to a PDF object on a
+/// page (typically an annotation, e.g. a Link's widget). <see cref="Obj"/> resolves the
+/// referenced object so callers can wrap it (e.g. <c>new LinkAnnotation(objr.Obj, doc)</c>).</summary>
+public sealed class OBJRElement : StructureElement
+{
+    internal OBJRElement() : base("OBJR") { }
+    internal OBJRElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
+
+    /// <summary>Record the referenced object's indirect reference under /Obj.</summary>
+    internal void SetObj(PdfObject objRef) => _dict.Set("Obj", objRef);
+
+    /// <summary>The referenced PDF object (resolved from /Obj), or null.</summary>
+    public object? Obj => _reader is not null ? _reader.Resolve(_dict.Get("Obj")) : _dict.Get("Obj");
 }
 public sealed class PrivateElement : StructureElement
 {

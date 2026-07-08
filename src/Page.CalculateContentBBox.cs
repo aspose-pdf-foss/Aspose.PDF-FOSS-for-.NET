@@ -21,7 +21,10 @@ public sealed partial class Page
         var tfa = new TextFragmentAbsorber();
         tfa.Visit(this);
         foreach (var frag in tfa.TextFragments)
+        {
             acc.Include(frag.Rectangle);
+            ExtendFlippedTextLineBox(frag, acc);
+        }
 
         // Vector paths, images, inline images, Form-XObject recursion.
         var contents = ResolveContentStreams(_dict, _reader);
@@ -29,6 +32,48 @@ public sealed partial class Page
             WalkContentForBBox(stream, _dict, _reader, Cm.Identity, acc, depth: 0);
 
         return acc.HasAny ? acc.ToRectangle() : MediaBox;
+    }
+
+    /// <summary>
+    /// Extend the content bbox below a flipped-text-matrix fragment (Tm.d &lt; 0).
+    /// An absorbed fragment's Rectangle.LLY sits at its baseline; for flipped text
+    /// the reference content box drops a line-box below that baseline. The drop is
+    /// an internal line-box heuristic proportional to the effective (page-space)
+    /// font size, NOT any font descent metric — a black-box probe of the reference
+    /// implementation showed the value maps to no hhea/descriptor/FontBBox descent.
+    /// Gated to flipped text so upright text (the common case, and the other
+    /// CalculateContentBBox callers) is left exactly as the fragment rectangle.
+    /// </summary>
+    private static void ExtendFlippedTextLineBox(Text.TextFragment frag, BBoxAccumulator acc)
+    {
+        var rect = frag.Rectangle;
+        if (rect is null || frag.ExtractionCtm is null || frag.Segments.Count == 0)
+            return;
+
+        Text.TextSegment? seg0 = null;
+        foreach (var s in frag.Segments) { seg0 = s; break; }
+        if (seg0 is null)
+            return;
+
+        // Only flipped text: the net vertical direction (text-matrix d × CTM d) is
+        // negative, i.e. the glyph baseline is drawn under an inverted Y axis. The
+        // double flip in this file is folded so the text-matrix reports d=+1 and the
+        // inversion lives in the CTM, so test the product.
+        var ctm = frag.ExtractionCtm;
+        double tmD = seg0.TextState.TmD;
+        if (tmD * ctm.D >= 0)
+            return;
+
+        // Effective page-space font size = raw size × |Tm y-scale| × |CTM y-scale|.
+        double ctmScale = Math.Sqrt(ctm.C * ctm.C + ctm.D * ctm.D);
+        double effFs = frag.TextState.FontSize * Math.Abs(tmD) * ctmScale;
+        if (effFs <= 0)
+            return;
+
+        // Line-box factor matching the reference content-box drop below a flipped
+        // baseline (empirical constant × effective font size).
+        const double flippedLineBoxFactor = 0.60;
+        acc.IncludePoint(rect.LLX, rect.LLY - flippedLineBoxFactor * effFs);
     }
 
     private readonly record struct Cm(double A, double B, double C, double D, double E, double F)

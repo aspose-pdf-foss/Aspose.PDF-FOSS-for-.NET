@@ -6,12 +6,12 @@ namespace Aspose.Pdf.Facades;
 
 /// <summary>
 /// Internal helper that serializes/deserializes the AcroForm field tree to/from
-/// the JSON shape Aspose.PDF for .NET uses for ExportJson/ImportJson.
+/// the JSON shape Aspose.Pdf uses for ExportJson/ImportJson.
 /// Mirrors the public contract; button-field values are intentionally omitted.
 /// </summary>
 internal static class FormJsonSerializer
 {
-    /// <summary>JSON DTO for a form field. Property order mirrors the Aspose.PDF for .NET output.</summary>
+    /// <summary>JSON DTO for a form field. Property order mirrors the Aspose.Pdf output.</summary>
     internal sealed class FormFieldData
     {
         [JsonPropertyOrder(0)] public string? Name { get; set; }
@@ -99,7 +99,7 @@ internal static class FormJsonSerializer
 
     private static int ResolvePageIndex(Field field, Document document)
     {
-        // Field doesn't yet expose its owning page directly; the Aspose.PDF for .NET
+        // Field doesn't yet expose its owning page directly; the Aspose.Pdf
         // exporter reports the 0-based page index via the widget annotation.
         // For now report 0 — tests that match by Name still pass; tests that
         // assert exact PageIndex will surface that gap and we'll wire up the

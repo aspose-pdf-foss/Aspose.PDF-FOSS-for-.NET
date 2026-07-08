@@ -6,7 +6,7 @@ namespace Aspose.Pdf
     /// <c>Aspose.Pdf.TextStamp</c> (from before the type moved to
     /// <c>Aspose.Pdf.Stamps</c>) keep compiling. Most behaviour comes
     /// from the real implementation in <see cref="Stamps.TextStamp"/>;
-    /// Aspose.PDF for .NET-shape additions are declared here so they surface in
+    /// Aspose.Pdf-shape additions are declared here so they surface in
     /// the reflection dump.</summary>
     public class TextStamp : Stamps.TextStamp
     {
@@ -57,20 +57,26 @@ namespace Aspose.Pdf
         public new double Width { get => base.Width; set => base.Width = value; }
         public new bool WordWrap { get => base.WordWrap; set => base.WordWrap = value; }
         public new Aspose.Pdf.Text.TextFormattingOptions.WordWrapMode WordWrapMode { get => base.WordWrapMode; set => base.WordWrapMode = value; }
-        /// <summary>Text-state snapshot. Get-only on the derived type per the Aspose.PDF for .NET public API.</summary>
+        /// <summary>Text-state snapshot. Get-only on the derived type per the Aspose.Pdf public API.</summary>
         public new Aspose.Pdf.Text.TextState TextState => base.TextState;
 
-        /// <summary>Font size in points. Get-only on the derived type per the Aspose.PDF for .NET public API
+        /// <summary>Font size in points. Get-only on the derived type per the Aspose.Pdf public API
         /// (the inherited setter remains accessible internally for the renderer + facades).</summary>
         public new float FontSize { get => base.FontSize; internal set => base.FontSize = value; }
 
-        // ── Aspose.PDF for .NET-shape additions ───────────────────────────
+        // ── Aspose.Pdf-shape additions ───────────────────────────
 
         /// <summary>When auto-adjusting font size to fit the stamp rectangle, the precision (in points). Stored only.</summary>
         public float AutoAdjustFontSizePrecision { get; set; } = 0.1f;
 
-        /// <summary>When true, the renderer shrinks the font size until the text fits the stamp's Width/Height. Stored only.</summary>
+        /// <summary>When true, the renderer shrinks the font size until the text fits the stamp's Width/Height.</summary>
         public bool AutoAdjustFontSizeToFitStampRectangle { get; set; }
+
+        /// <summary>Drive the base auto-fit off the Aspose.Pdf-shape properties.</summary>
+        protected override bool AutoFitToBox => AutoAdjustFontSizeToFitStampRectangle;
+
+        /// <summary>Bisection stop interval for the auto-fit search.</summary>
+        protected override double AutoFitPrecision => AutoAdjustFontSizePrecision > 0 ? AutoAdjustFontSizePrecision : 0.1;
 
         /// <summary>When false, the stamp records intent but skips drawing. Stored only.</summary>
         public bool Draw { get; set; } = true;
@@ -89,6 +95,14 @@ namespace Aspose.Pdf
 
         /// <summary>Fallback font used when the main font lacks a required glyph; consulted only when <see cref="NoCharacterBehavior"/> is <see cref="NoCharacterAction.UseReplacementFont"/>.</summary>
         public Aspose.Pdf.Text.Font ReplacementFont { get; set; }
+
+        /// <summary>Expose the configured <see cref="ReplacementFont"/>'s embedded TrueType
+        /// program to the base stamp builder so it can fall back to a Type0 font for glyphs
+        /// the primary font lacks. Null when no usable replacement program is available.</summary>
+        protected override (byte[] ttf, string name)? ReplacementFontProgram =>
+            ReplacementFont?.SourceFontData?.TtfData is { } ttf
+                ? (ttf, ReplacementFont.FontName)
+                : null;
 
         /// <summary>When true, the stamp's Y-indent is treated as the text baseline rather than the bounding-box top. Stored only.</summary>
         public bool TreatYIndentAsBaseLine { get; set; }

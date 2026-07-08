@@ -7,7 +7,7 @@ namespace Aspose.Pdf;
 /// <summary>
 /// A growable in-memory stream that can exceed the 2 GB single-array limit of
 /// <see cref="System.IO.MemoryStream"/> by storing data in fixed-size chunks.
-/// Matches the Aspose.PDF for .NET OptimizedMemoryStream public surface.
+/// Matches the Aspose.Pdf OptimizedMemoryStream public surface.
 /// </summary>
 public sealed class OptimizedMemoryStream : Stream
 {

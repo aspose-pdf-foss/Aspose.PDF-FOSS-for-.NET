@@ -120,7 +120,7 @@ public class HtmlSaveOptions : UnifiedSaveOptions
     /// <summary>Honour z-order of overlapping content when emitting HTML. Stored only.</summary>
     public bool UseZOrder { get; set; }
 
-    // ── Public fields (matches Aspose.PDF for .NET reflection shape) ─────────
+    // ── Public fields (matches Aspose.Pdf reflection shape) ─────────
 
     public AntialiasingProcessingType AntialiasingProcessing;
     public string CssClassNamesPrefix;
@@ -155,7 +155,7 @@ public class HtmlSaveOptions : UnifiedSaveOptions
         TryCorrectResultHtml,
     }
 
-    /// <summary>Backing-byte enum: the Aspose.PDF for .NET reflection signature is byte-typed.</summary>
+    /// <summary>Backing-byte enum: the Aspose.Pdf reflection signature is byte-typed.</summary>
     public enum FontEncodingRules : byte
     {
         Default,

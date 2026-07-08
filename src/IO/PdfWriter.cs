@@ -53,6 +53,10 @@ internal sealed class PdfWriter
     /// </summary>
     public bool UseXRefStream { get; set; }
 
+    /// <summary>Re-deflate plain FlateDecode pass-through streams at the strongest
+    /// level, keeping the smaller of old/new bytes. Enabled for PDF/A saves.</summary>
+    public bool RecompressFlateStreams { get; set; }
+
     /// <summary>
     /// When true, packs eligible small non-stream objects into compressed object streams (PDF 1.6+).
     /// Implies UseXRefStream = true (object streams require type-2 xref entries).
@@ -176,6 +180,14 @@ internal sealed class PdfWriter
     /// Allocate next available object number.
     /// </summary>
     public int AllocateObjectNumber() => _nextObjNum++;
+
+    /// <summary>Ensure the next allocated object number is above <paramref name="objNum"/>,
+    /// reserving a number that will be written later (e.g. an imported page's destination
+    /// slot) so <see cref="AllocateObjectNumber"/> never hands it out to something else.</summary>
+    public void ReserveObjectNumber(int objNum)
+    {
+        if (objNum >= _nextObjNum) _nextObjNum = objNum + 1;
+    }
 
     private int _writeDepth;
     private const int MaxWriteDepth = 100;
@@ -352,7 +364,6 @@ internal sealed class PdfWriter
         foreach (var key in dict.Keys)
         {
             WriteName(new PdfName(key));
-            WriteRaw(" ");
             var val = dict.Get(key)!;
             // PDF spec requires streams to be indirect objects; promote inline streams.
             // Deduplicate: if the same PdfStream instance was already promoted, reuse its obj number.
@@ -364,14 +375,21 @@ internal sealed class PdfWriter
                     _streamObjNums[embeddedStream] = streamObjNum;
                     _deferredStreams.Enqueue((streamObjNum, embeddedStream));
                 }
+                WriteRaw(" "); // indirect ref begins with a digit, so a separator is required
                 WriteObject(new PdfIndirectRef(streamObjNum, 0));
             }
             else if (val is PdfDictionary sharedDict && TryPromoteSharedDict(sharedDict, out var valDictNum))
             {
+                WriteRaw(" "); // indirect ref begins with a digit, so a separator is required
                 WriteObject(new PdfIndirectRef(valDictNum, 0));
             }
             else
             {
+                // Only insert a separating space when the value's token does not begin with a
+                // self-delimiting character. Name (/), array ([) and string ((, <) values need no
+                // space after the key, matching the compact form (e.g. "/Type/Metadata"). Numbers,
+                // booleans, null, indirect refs and (cycle-promotable) dictionaries still need one.
+                if (!StartsWithDelimiter(val)) WriteRaw(" ");
                 WriteObject(val);
             }
         }
@@ -382,6 +400,15 @@ internal sealed class PdfWriter
             _dictStack.Remove(dict);
         }
     }
+
+    /// <summary>
+    /// Whether the serialized form of <paramref name="val"/> begins with a self-delimiting
+    /// character, in which case no separating space is needed after a preceding dictionary key.
+    /// Dictionaries are excluded because cycle detection may promote them to an indirect ref
+    /// (which begins with a digit) at write time.
+    /// </summary>
+    private static bool StartsWithDelimiter(PdfObject val) =>
+        val is PdfName or PdfArray or PdfString;
 
     /// <summary>
     /// Pre-scan the inline object graph rooted at <paramref name="root"/> and record every
@@ -461,6 +488,23 @@ internal sealed class PdfWriter
             // Pass through: keep the raw data and original filter as-is
             data = stream.RawData;
             // dict already has the correct Filter from CloneDictionary
+
+            // PDF/A saves re-compress plain Flate streams at the strongest level
+            // (the conversion save does this; without
+            // it, outputs carried over from weakly-deflated producers exceed the
+            // reference size envelope). Streams with DecodeParms (predictors) are
+            // left untouched — recompressing would need the parms re-applied.
+            if (RecompressFlateStreams && existingFilter == "FlateDecode"
+                && dict.Get("DecodeParms") is null && dict.Get("DP") is null)
+            {
+                try
+                {
+                    var raw = Filters.FlateDecodeFilter.Decode(stream.RawData, null);
+                    var recompressed = Compress(raw);
+                    if (recompressed.Length < data.Length) data = recompressed;
+                }
+                catch { /* keep the original bytes on any decode failure */ }
+            }
         }
         else
         {

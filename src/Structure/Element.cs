@@ -122,6 +122,105 @@ public class Element
         };
     }
 
+    /// <summary>
+    /// After this element has been detached from its parent's /K, physically remove its
+    /// backing structure-element object — and every structure element in its descendant
+    /// subtree — from the document, then scrub the /StructTreeRoot's /ParentTree and
+    /// /IDTree of the now-dangling references to them. Without this the orphaned StructElem
+    /// objects stay in the file (still reachable via /ParentTree), so removing tags never
+    /// shrinks the saved document.
+    /// </summary>
+    internal void PurgeStructureSubtree(int ownObjectNumber)
+    {
+        if (_reader is null) return;
+
+        var freed = new HashSet<int>();
+        if (ownObjectNumber > 0) freed.Add(ownObjectNumber);
+        CollectChildStructElems(_dict, freed);
+        if (freed.Count == 0) return;
+
+        // Mark each freed object's xref entry as free so the writer skips it on save.
+        var xref = _reader.XRefTable;
+        foreach (var num in freed)
+        {
+            var entry = xref.GetEntry(num);
+            if (entry is { InUse: true } e)
+                xref.SetEntry(num, new XRefEntry { ObjectNumber = num, Generation = e.Generation, InUse = false });
+        }
+
+        // Replace references to freed objects in the number/name trees with null so the
+        // saved file has no dangling references.
+        var root = _reader.ResolveDict(_reader.Catalog.Get("StructTreeRoot"));
+        if (root is not null)
+        {
+            var seen = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+            ScrubTreeReferences(root.Get("ParentTree"), freed, seen);
+            ScrubTreeReferences(root.Get("IDTree"), freed, seen);
+        }
+    }
+
+    /// <summary>Collect the object numbers of every indirect structure element reachable
+    /// through <paramref name="structElem"/>'s /K subtree (recursively). MCID integers and
+    /// /MCR / /OBJR content references are skipped — they are not part of the tree.</summary>
+    private void CollectChildStructElems(PdfDictionary structElem, HashSet<int> freed)
+    {
+        var kResolved = _reader!.Resolve(structElem.Get("K"));
+        if (kResolved is PdfArray arr)
+        {
+            foreach (var item in arr) HandleKItem(item, freed);
+        }
+        else
+        {
+            // /K may be a single child (a direct reference or an inline dictionary).
+            HandleKItem(structElem.Get("K"), freed);
+        }
+    }
+
+    private void HandleKItem(PdfObject? item, HashSet<int> freed)
+    {
+        if (item is null) return;
+        var objNum = item is PdfIndirectRef iref ? iref.ObjectNumber : -1;
+        if (_reader!.Resolve(item) is not PdfDictionary d) return; // MCID integer
+        var type = d.GetName("Type");
+        if (type is "MCR" or "OBJR") return;                       // marked-content / object reference
+        if (type is not null && type != "StructElem") return;      // not a structure element
+        if (objNum > 0 && !freed.Add(objNum)) return;              // already visited (cycle guard)
+        CollectChildStructElems(d, freed);
+    }
+
+    /// <summary>Walk a PDF number tree (/Nums) or name tree (/Names) and replace any value
+    /// that references a freed object with null, descending through /Kids.</summary>
+    private void ScrubTreeReferences(PdfObject? node, HashSet<int> freed, HashSet<PdfDictionary> seen)
+    {
+        if (_reader!.Resolve(node) is not PdfDictionary d || !seen.Add(d)) return;
+
+        foreach (var valuesKey in new[] { "Nums", "Names" })
+        {
+            if (_reader.Resolve(d.Get(valuesKey)) is PdfArray entries)
+                // Entries are laid out as [key value key value ...]; values sit at odd indices.
+                for (var i = 1; i < entries.Count; i += 2)
+                    ScrubTreeValue(entries, i, freed);
+        }
+
+        if (_reader.Resolve(d.Get("Kids")) is PdfArray kids)
+            foreach (var kid in kids) ScrubTreeReferences(kid, freed, seen);
+    }
+
+    private void ScrubTreeValue(PdfArray entries, int index, HashSet<int> freed)
+    {
+        var value = entries[index];
+        if (value is PdfIndirectRef r && freed.Contains(r.ObjectNumber))
+        {
+            entries.ReplaceAt(index, PdfNull.Instance);
+            return;
+        }
+        // A page's value is an array of per-MCID structure-element references.
+        if (_reader!.Resolve(value) is PdfArray arr)
+            for (var i = 0; i < arr.Count; i++)
+                if (arr[i] is PdfIndirectRef ir && freed.Contains(ir.ObjectNumber))
+                    arr.ReplaceAt(i, PdfNull.Instance);
+    }
+
     /// <summary>Re-bind this element to a different parent (used when
     /// the element is moved within the tree).</summary>
     internal void SetParent(Element? parent) => _parent = parent;
@@ -135,7 +234,7 @@ public class Element
 }
 
 /// <summary>A live, mutable collection of structure elements held
-/// under a parent's /K array. Mirrors the Aspose.PDF for .NET
+/// under a parent's /K array. Mirrors the Aspose.Pdf
 /// <c>Aspose.Pdf.Structure.ElementCollection</c> surface.</summary>
 public class ElementCollection : IEnumerable<Element>
 {
@@ -167,32 +266,42 @@ public class ElementCollection : IEnumerable<Element>
         var idx = _items.IndexOf(item);
         if (idx < 0) return false;
         _items.RemoveAt(idx);
-        RemoveFromParentK(item);
+        var removedObjNum = RemoveFromParentK(item);
         item.SetParent(null);
+        // Physically drop the detached subtree's structure-element objects so a
+        // subsequent Save shrinks the file instead of carrying them as orphans.
+        item.PurgeStructureSubtree(removedObjNum);
         return true;
     }
 
-    private void RemoveFromParentK(Element item)
+    /// <summary>Drop <paramref name="item"/> from the parent's /K array (or single /K
+    /// entry). Returns the object number of the removed entry when it was an indirect
+    /// reference, or -1 when it was inline (or not found).</summary>
+    private int RemoveFromParentK(Element item)
     {
-        if (_parent._reader is null) return;
+        if (_parent._reader is null) return -1;
         var k = _parent._reader.Resolve(_parent.Dict.Get("K"));
         if (k is PdfArray arr)
         {
             // Walk the array and drop the entry that resolves to item.Dict.
             for (var i = 0; i < arr.Count; i++)
             {
-                var resolved = _parent._reader.Resolve(arr[i]);
+                var raw = arr[i];
+                var resolved = _parent._reader.Resolve(raw);
                 if (ReferenceEquals(resolved, item.Dict))
                 {
                     arr.RemoveAt(i);
-                    return;
+                    return raw is PdfIndirectRef r ? r.ObjectNumber : -1;
                 }
             }
         }
         else if (k is PdfDictionary single && ReferenceEquals(single, item.Dict))
         {
+            var raw = _parent.Dict.Get("K");
             _parent.Dict.Remove("K");
+            return raw is PdfIndirectRef r ? r.ObjectNumber : -1;
         }
+        return -1;
     }
 }
 
@@ -243,7 +352,7 @@ public class FigureElement : Element
     /// <summary>The figure's image extracted from the page's /Resources
     /// /XObject dictionary, or null when the figure has no embedded
     /// image stream. Returned as a <see cref="System.Drawing.Image"/>
-    /// matching the Aspose.PDF for .NET public type. Throws
+    /// matching the Aspose.Pdf public type. Throws
     /// <see cref="System.PlatformNotSupportedException"/> on non-Windows
     /// runtimes (per System.Drawing.Common's runtime contract).</summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -256,9 +365,17 @@ public class FigureElement : Element
             if (stream is null) return null;
             try
             {
-                var data = _reader.DecodeStream(stream);
-                using var ms = new MemoryStream(data);
-                return System.Drawing.Image.FromStream(ms);
+                // Reconstruct a raster via ImageXObject, which decodes the full range
+                // of image filters and colour spaces (FlateDecode/ICCBased/DCT/…) into
+                // an encoded PNG or JPEG. Feeding raw DecodeStream bytes to
+                // Image.FromStream only works for an embedded JPEG codestream and fails
+                // for inflated raw samples.
+                var xobj = new ImageXObject("Img", stream, _reader);
+                using var ms = new MemoryStream();
+                xobj.Save(ms);
+                ms.Position = 0;
+                using var loaded = System.Drawing.Image.FromStream(ms);
+                return new System.Drawing.Bitmap(loaded);
             }
             catch
             {
@@ -269,12 +386,11 @@ public class FigureElement : Element
 
     private PdfStream? ResolveFirstImageStream()
     {
-        // Walk /K. An entry that resolves to a PdfStream with /Subtype
-        // /Image is the figure's image. The PDF spec also allows the
-        // image to be referenced via /MCID into a content stream, but
-        // that path requires page rendering — out of scope here.
+        // Walk /K. An entry that resolves to a PdfStream with /Subtype /Image is the
+        // figure's image. The PDF spec also allows the image to be referenced via an
+        // /MCID marked-content sequence in a page content stream; resolve that too.
         var k = _reader!.Resolve(_dict.Get("K"));
-        return FirstStream(k);
+        return FirstStream(k) ?? ResolveImageViaMarkedContent(k);
     }
 
     private PdfStream? FirstStream(PdfObject? obj)
@@ -291,6 +407,142 @@ public class FigureElement : Element
                     if (found is not null) return found;
                 }
                 break;
+        }
+        return null;
+    }
+
+    // ── Marked-content (MCID) image resolution ────────────────────────────────
+
+    // Operators of interest, scanned left-to-right: a marked-content point with a
+    // property list (BDC), a tag-only marked-content point (BMC), its end (EMC), and an
+    // XObject paint (Do). Group captures pick which one matched.
+    private static readonly System.Text.RegularExpressions.Regex MarkedContentScanner =
+        new(@"(?<bdc>/[\w.\-]+\s*(?<props><<[^>]*?>>|/[\w.\-]+)\s*BDC)" +
+            @"|(?<bmc>/[\w.\-]+\s*BMC)" +
+            @"|(?<emc>\bEMC\b)" +
+            @"|/(?<doname>[\w.\-]+)\s+(?<do>Do)\b",
+            System.Text.RegularExpressions.RegexOptions.Compiled |
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+    /// <summary>Resolve the figure's image when its /K is (or contains) an MCID that
+    /// points into a page content stream, by finding the image XObject painted inside
+    /// that marked-content region.</summary>
+    private PdfStream? ResolveImageViaMarkedContent(PdfObject? k)
+    {
+        foreach (var (mcid, pgOverride) in CollectMcids(k))
+        {
+            var page = _reader!.ResolveDict(pgOverride) ?? _reader!.ResolveDict(_dict.Get("Pg"));
+            if (page is null) continue;
+            var img = FindImageInMarkedContent(page, mcid);
+            if (img is not null) return img;
+        }
+        return null;
+    }
+
+    /// <summary>Collect (MCID, optional page) pairs reachable from a structure element's
+    /// /K: a bare integer, an /MCR marked-content reference, or an array of either.</summary>
+    private IEnumerable<(int mcid, PdfObject? pg)> CollectMcids(PdfObject? k)
+    {
+        switch (_reader!.Resolve(k))
+        {
+            case PdfInteger pi:
+                yield return ((int)pi.Value, null);
+                break;
+            case PdfDictionary d when d.GetName("Type") == "MCR":
+                yield return ((int)d.GetInt("MCID", -1), d.Get("Pg"));
+                break;
+            case PdfArray arr:
+                foreach (var item in arr)
+                    foreach (var pair in CollectMcids(item))
+                        yield return pair;
+                break;
+        }
+    }
+
+    private PdfStream? FindImageInMarkedContent(PdfDictionary page, int mcid)
+    {
+        if (mcid < 0) return null;
+        var content = GetPageContentText(page);
+        if (content is null) return null;
+        var properties = _reader!.ResolveDict(GetInheritedResources(page)?.Get("Properties"));
+
+        // Track the open marked-content stack; an image painted while the target MCID is
+        // open (anywhere on the stack, to allow nested marked content) is the figure's.
+        var stack = new List<int>();
+        foreach (System.Text.RegularExpressions.Match m in MarkedContentScanner.Matches(content))
+        {
+            if (m.Groups["bdc"].Success)
+                stack.Add(ResolveBdcMcid(m.Groups["props"].Value, properties));
+            else if (m.Groups["bmc"].Success)
+                stack.Add(-1);
+            else if (m.Groups["emc"].Success)
+            {
+                if (stack.Count > 0) stack.RemoveAt(stack.Count - 1);
+            }
+            else if (m.Groups["do"].Success)
+            {
+                if (!stack.Contains(mcid)) continue;
+                var xobj = ResolveXObject(page, m.Groups["doname"].Value);
+                if (xobj is not null && xobj.Dict.GetName("Subtype") == "Image")
+                    return xobj;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Read the MCID of a BDC operand: an inline <c>&lt;&lt;/MCID n&gt;&gt;</c>
+    /// dictionary, or a named property list resolved through /Resources/Properties.</summary>
+    private int ResolveBdcMcid(string props, PdfDictionary? properties)
+    {
+        props = props.Trim();
+        if (props.StartsWith("<<", StringComparison.Ordinal))
+        {
+            var mm = System.Text.RegularExpressions.Regex.Match(props, @"/MCID\s+(\d+)");
+            return mm.Success ? int.Parse(mm.Groups[1].Value) : -1;
+        }
+        if (props.StartsWith("/", StringComparison.Ordinal) && properties is not null)
+        {
+            var pd = _reader!.ResolveDict(properties.Get(props[1..]));
+            return pd is not null ? (int)pd.GetInt("MCID", -1) : -1;
+        }
+        return -1;
+    }
+
+    private PdfStream? ResolveXObject(PdfDictionary page, string name)
+    {
+        var xobjects = _reader!.ResolveDict(GetInheritedResources(page)?.Get("XObject"));
+        return _reader!.ResolveStream(xobjects?.Get(name));
+    }
+
+    /// <summary>The page's /Resources, walking up the /Pages tree when a page inherits
+    /// them rather than carrying its own.</summary>
+    private PdfDictionary? GetInheritedResources(PdfDictionary page)
+    {
+        var node = page;
+        for (var depth = 0; node is not null && depth < 32; depth++)
+        {
+            var res = _reader!.ResolveDict(node.Get("Resources"));
+            if (res is not null) return res;
+            node = _reader!.ResolveDict(node.Get("Parent"));
+        }
+        return null;
+    }
+
+    private string? GetPageContentText(PdfDictionary page)
+    {
+        var contents = _reader!.Resolve(page.Get("Contents"));
+        if (contents is PdfStream s)
+            return Encoding.Latin1.GetString(_reader.DecodeStream(s));
+        if (contents is PdfArray arr)
+        {
+            var sb = new StringBuilder();
+            foreach (var item in arr)
+                if (_reader.ResolveStream(item) is PdfStream cs)
+                {
+                    sb.Append(Encoding.Latin1.GetString(_reader.DecodeStream(cs)));
+                    sb.Append('\n');
+                }
+            return sb.ToString();
         }
         return null;
     }

@@ -90,10 +90,10 @@ public class ImageStamp : BaseParagraph
     /// <summary>Display height in points. Defaults to image pixel height.</summary>
     public double DisplayHeight { get; set; }
 
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="DisplayWidth"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="DisplayWidth"/>.</summary>
     public double Width { get => DisplayWidth; set => DisplayWidth = value; }
 
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="DisplayHeight"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="DisplayHeight"/>.</summary>
     public double Height { get => DisplayHeight; set => DisplayHeight = value; }
 
     /// <summary>Horizontal offset from the stamp's anchor point. Stored only.</summary>
@@ -128,7 +128,7 @@ public class ImageStamp : BaseParagraph
     /// <summary>Vertical zoom percentage. Stored only.</summary>
     public double ZoomY { get; set; } = 100;
 
-    /// <summary>Rotation enum (Aspose.PDF for .NET Rotation; 0/90/180/270 in degrees).
+    /// <summary>Rotation enum (Aspose.Pdf Rotation; 0/90/180/270 in degrees).
     /// Stored only.</summary>
     public Rotation Rotate { get; set; } = Rotation.None;
 
@@ -157,8 +157,14 @@ public class ImageStamp : BaseParagraph
     public System.IO.Stream Image =>
         new System.IO.MemoryStream(_originalImageBytes ?? _imageData, writable: false);
 
-    /// <summary>Aspose.PDF for .NET-shape alias for <see cref="ApplyTo"/>.</summary>
+    /// <summary>Aspose.Pdf-shape alias for <see cref="ApplyTo"/>.</summary>
     public void Put(Page page) => ApplyTo(page);
+
+    /// <summary>When set (the Page.AddImage path), the anchor rectangle is interpreted
+    /// in the ROTATED (as-displayed) coordinate system of a /Rotate page and the image
+    /// is drawn upright for the viewer — Aspose.Pdf's AddImage prepends the
+    /// same rotation-compensating cm. Stamps keep the raw page coordinate system.</summary>
+    internal bool CompensatePageRotation;
 
     /// <summary>
     /// Create an image stamp from raw RGB pixel data.
@@ -214,6 +220,24 @@ public class ImageStamp : BaseParagraph
     /// scanned/bilevel documents. Returns null when the platform decoder is
     /// unavailable so the caller can fall back to a normal embed.
     /// </summary>
+    /// <summary>True when the source image is genuinely bilevel (1 bit per pixel),
+    /// so it can be embedded losslessly as a compact 1-bit image rather than an
+    /// 8-bit re-encode. Returns false when the platform decoder is unavailable.</summary>
+    internal static bool IsBilevelSource(byte[] imageData)
+    {
+        if (imageData is null || imageData.Length < 4) return false;
+        if (!OperatingSystem.IsWindows()) return false;
+        try
+        {
+#pragma warning disable CA1416
+            using var ms = new MemoryStream(imageData);
+            using var src = System.Drawing.Image.FromStream(ms, useEmbeddedColorManagement: false, validateImageData: false);
+            return src.PixelFormat == System.Drawing.Imaging.PixelFormat.Format1bppIndexed;
+#pragma warning restore CA1416
+        }
+        catch { return false; }
+    }
+
     internal static ImageStamp? FromBlackWhite(byte[] imageData)
     {
         if (imageData is null || imageData.Length < 4) return null;
@@ -469,6 +493,13 @@ public class ImageStamp : BaseParagraph
             : width * channels;
         var rgb = new byte[width * height * 3];
 
+        // Alpha channel for the truecolour/grayscale+alpha types is split out into a
+        // DeviceGray soft mask so transparent pixels show the page behind instead of
+        // rendering as black. Built only when the source actually carries alpha (4/6).
+        var hasAlphaChannel = colorType == 4 || colorType == 6;
+        var alpha = hasAlphaChannel ? new byte[width * height] : null;
+        var anyTransparent = false;
+
         // Reverse PNG filtering and extract RGB
         var prevRow = new byte[stride];
         var curRow = new byte[stride];
@@ -515,13 +546,19 @@ public class ImageStamp : BaseParagraph
                         rgb[rgbIdx + 1] = curRow[x * 3 + 1];
                         rgb[rgbIdx + 2] = curRow[x * 3 + 2];
                         break;
-                    case 4: // Grayscale + Alpha (ignore alpha)
+                    case 4: // Grayscale + Alpha
                         rgb[rgbIdx] = rgb[rgbIdx + 1] = rgb[rgbIdx + 2] = curRow[x * 2];
+                        var ga = curRow[x * 2 + 1];
+                        alpha![y * width + x] = ga;
+                        if (ga != 255) anyTransparent = true;
                         break;
-                    case 6: // RGBA (ignore alpha)
+                    case 6: // RGBA
                         rgb[rgbIdx] = curRow[x * 4];
                         rgb[rgbIdx + 1] = curRow[x * 4 + 1];
                         rgb[rgbIdx + 2] = curRow[x * 4 + 2];
+                        var ra = curRow[x * 4 + 3];
+                        alpha![y * width + x] = ra;
+                        if (ra != 255) anyTransparent = true;
                         break;
                     case 3: // Indexed: unpack the index at the image bit depth, look up /PLTE
                         int idx;
@@ -548,7 +585,10 @@ public class ImageStamp : BaseParagraph
             (prevRow, curRow) = (curRow, prevRow);
         }
 
-        return FromRgb(rgb, width, height);
+        var stamp = FromRgb(rgb, width, height);
+        if (alpha is not null && anyTransparent)
+            stamp.SetAlphaMask(alpha);
+        return stamp;
     }
 
     private static byte PaethPredictor(byte a, byte b, byte c)
@@ -571,10 +611,27 @@ public class ImageStamp : BaseParagraph
         var w = DisplayWidth;
         var h = DisplayHeight;
 
-        // Anchor at XIndent/YIndent (the bottom-left placement) when
-        // set, else fall back to X/Y.
-        double ax = XIndent != 0 ? XIndent : X;
-        double ay = YIndent != 0 ? YIndent : Y;
+        // Anchor at XIndent/YIndent (the bottom-left placement) when set, else X/Y,
+        // else derive it from Horizontal/VerticalAlignment against the page box
+        // (matches Aspose.Pdf: a Right/Bottom-aligned image with no explicit
+        // indent lands at pageWidth-imageWidth / 0).
+        var pageBox = page.MediaBox;
+        double ax = XIndent != 0 ? XIndent
+            : X != 0 ? X
+            : HorizontalAlignment switch
+            {
+                HorizontalAlignment.Right => pageBox.Width - w,
+                HorizontalAlignment.Center => (pageBox.Width - w) / 2.0,
+                _ => 0,
+            };
+        double ay = YIndent != 0 ? YIndent
+            : Y != 0 ? Y
+            : VerticalAlignment switch
+            {
+                VerticalAlignment.Top => pageBox.Height - h,
+                VerticalAlignment.Center => (pageBox.Height - h) / 2.0,
+                _ => 0,
+            };
 
         // Compose scale + rotation into the cm matrix, then translate so the
         // rotated image's bounding box bottom-left lands at the anchor.
@@ -615,7 +672,32 @@ public class ImageStamp : BaseParagraph
         {
             resetCm = $"{Format(ia)} {Format(ib)} {Format(ic)} {Format(id)} {Format(ie)} {Format(iff)} cm ";
         }
-        var contentOps = $"{idComment}{rectComment}q {resetCm}{gsOp}{Format(ma)} {Format(mb)} {Format(mc)} {Format(md)} {Format(me)} {Format(mf)} cm /{imgName} Do Q\n";
+        // Rotated-page compensation (AddImage semantics): map the as-displayed
+        // coordinate system back onto page space so the anchor rect is where the
+        // viewer sees it and the image is upright. Reference emission for /Rotate 90
+        // on a 612-wide box is "0 1 -1 0 612 0 cm" ahead of the placement cm.
+        var rotCm = string.Empty;
+        if (CompensatePageRotation)
+        {
+            var box = page.MediaBox;
+            var rot = ((page.RotateDegrees % 360) + 360) % 360;
+            rotCm = rot switch
+            {
+                90 => $"0 1 -1 0 {Format(box.URX)} 0 cm ",
+                180 => $"-1 0 0 -1 {Format(box.URX)} {Format(box.URY)} cm ",
+                270 => $"0 -1 1 0 0 {Format(box.URY)} cm ",
+                _ => string.Empty,
+            };
+        }
+        var stampBody = $"q {resetCm}{gsOp}{rotCm}{Format(ma)} {Format(mb)} {Format(mc)} {Format(md)} {Format(me)} {Format(mf)} cm /{imgName} Do Q\n";
+
+        // A foreground image stamp is a pagination artifact: wrap it in an
+        // /Artifact BDC … EMC marked-content block, matching Aspose.Pdf.
+        // The BDC/EMC sit outside the q…Q draw block, so GetStamps still recognises
+        // the clean q gs cm /Im Do Q shape inside. Background stamps stay bare.
+        var contentOps = Background
+            ? $"{idComment}{rectComment}{stampBody}"
+            : $"{idComment}{rectComment}/Artifact BDC\n{stampBody}EMC\n";
         var contentBytes = System.Text.Encoding.ASCII.GetBytes(contentOps);
 
         // Add the stamp as a separate content stream so the page's existing
@@ -709,6 +791,13 @@ public class ImageStamp : BaseParagraph
     internal string RegisterXObject(Page page)
     {
         var imgStream = BuildImageXObject();
+
+        // Managed stamps record their id on the XObject dictionary so the stamp
+        // facade can rediscover them after a save. The %StampId content-stream
+        // comment alone does not survive re-serialisation (comments are dropped),
+        // but a /StampId dict entry does — and PdfContentEditor.GetStamps reads it.
+        if (StampId != 0 || ForceStampIdComment)
+            imgStream.Dict.Set("StampId", new PdfInteger(StampId));
 
         var resources = GetOrCreateResources(page);
         var xobjectDict = GetOrCreateDict(page, resources, "XObject");

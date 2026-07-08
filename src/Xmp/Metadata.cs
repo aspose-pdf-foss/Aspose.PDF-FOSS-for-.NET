@@ -16,13 +16,19 @@ public sealed class Metadata : IDictionary<string, XmpValue>
 {
     private static readonly Dictionary<string, string> _defaultNamespaces = new(StringComparer.Ordinal)
     {
+        ["rdf"] = "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
         ["xmp"] = "http://ns.adobe.com/xap/1.0/",
         ["dc"] = "http://purl.org/dc/elements/1.1/",
         ["pdf"] = "http://ns.adobe.com/pdf/1.3/",
         ["xmpMM"] = "http://ns.adobe.com/xap/1.0/mm/",
         ["xmpRights"] = "http://ns.adobe.com/xap/1.0/rights/",
         ["pdfaid"] = "http://www.aiim.org/pdfa/ns/id/",
+        ["pdfuaid"] = "http://www.aiim.org/pdfua/ns/id/",
     };
+
+    /// <summary>Accessor mirroring the Aspose.Pdf <c>Metadata.getData()</c> surface:
+    /// returns the XMP packet so callers can read the raw RDF/XML.</summary>
+    public XmpPacketContainer getData() => new(_xmp);
 
     private readonly XmpMetadata _xmp;
 
@@ -74,7 +80,7 @@ public sealed class Metadata : IDictionary<string, XmpValue>
 
     /// <summary>PDF/A extension fields, keyed by extension namespace prefix.
     /// Stored only in this build; full PDF/A-3 extension emission is left to
-    /// Aspose.PDF for .NET.</summary>
+    /// Aspose.Pdf.</summary>
     public IDictionary<string, XmpPdfAExtensionSchema> ExtensionFields { get; }
         = new Dictionary<string, XmpPdfAExtensionSchema>(StringComparer.Ordinal);
 
@@ -87,9 +93,19 @@ public sealed class Metadata : IDictionary<string, XmpValue>
             if (structured is not null) return structured;
             var raw = _xmp[key];
             if (raw is null) throw new KeyNotFoundException(key);
-            return new XmpValue(raw);
+            // Typed view: numeric / date strings surface as IsInteger/IsDouble/
+            // IsDateTime, so a typed add round-trips as its type.
+            return XmpMetadata.ParseXmpValue(raw);
         }
-        set => _xmp[key] = value?.ToStringValue();
+        set
+        {
+            // A composite value (array/struct/named-values) is stored structured so
+            // it serialises as nested RDF and round-trips; a scalar collapses to text.
+            if (value is not null && (value.IsArray || value.IsStructure || value.IsNamedValues))
+                _xmp.SetStructured(key, value);
+            else
+                _xmp[key] = value?.ToStringValue();
+        }
     }
 
     /// <summary>Add a property by raw key.</summary>
@@ -245,4 +261,39 @@ public sealed class Metadata : IDictionary<string, XmpValue>
 
     /// <summary>Underlying XmpMetadata accessor for FOSS-internal use.</summary>
     internal XmpMetadata Inner => _xmp;
+}
+
+/// <summary>The XMP packet exposed by <see cref="Metadata.getData"/>; its
+/// <see cref="WorkingPacket"/> yields the live RDF/XML.</summary>
+public sealed class XmpPacketContainer
+{
+    private readonly XmpMetadata _xmp;
+    internal XmpPacketContainer(XmpMetadata xmp) => _xmp = xmp;
+
+    /// <summary>The working (in-memory) XMP packet.</summary>
+    public XmpWorkingPacket WorkingPacket => new(_xmp);
+}
+
+/// <summary>A working XMP packet; <see cref="GetXml"/> returns the packet's RDF/XML with
+/// <c>rdf:RDF</c> as the document element so callers can XPath into it.</summary>
+public sealed class XmpWorkingPacket
+{
+    private readonly XmpMetadata _xmp;
+    internal XmpWorkingPacket(XmpMetadata xmp) => _xmp = xmp;
+
+    /// <summary>The packet content as an <see cref="System.Xml.XmlDocument"/> rooted at
+    /// <c>rdf:RDF</c> (the <c>&lt;?xpacket?&gt;</c> wrapper is stripped).</summary>
+    public System.Xml.XmlDocument GetXml()
+    {
+        var xml = _xmp.ToXml();
+        var doc = new System.Xml.XmlDocument();
+        var start = xml.IndexOf("<rdf:RDF", System.StringComparison.Ordinal);
+        var endTag = "</rdf:RDF>";
+        var end = xml.IndexOf(endTag, System.StringComparison.Ordinal);
+        if (start >= 0 && end > start)
+            doc.LoadXml(xml.Substring(start, end - start + endTag.Length));
+        else
+            doc.LoadXml(xml);
+        return doc;
+    }
 }

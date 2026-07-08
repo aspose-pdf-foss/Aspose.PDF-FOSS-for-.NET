@@ -11,10 +11,13 @@ public class ActualTextTests
     [Fact]
     public void TextAbsorber_ActualText_OverridesGlyphDecoding()
     {
-        // Build a PDF with BDC /ActualText (fi) containing two glyph operators
+        // Build a PDF with BDC /ActualText (hi) overriding the glyph operator.
+        // (A whole-span ActualText of exactly "fi"/"fl"/"ff" is deliberately
+        // collapsed to its ligature codepoint — see CollapseTwoCharLigature —
+        // so a non-ligature payload is used here.)
         var content = Encoding.ASCII.GetBytes(
             "BT /F1 12 Tf " +
-            "/Span << /ActualText (fi) >> BDC " +
+            "/Span << /ActualText (hi) >> BDC " +
             "(X) Tj " +
             "EMC " +
             "( rest) Tj ET");
@@ -23,7 +26,7 @@ public class ActualTextTests
 
         var absorber = new TextAbsorber();
         absorber.Visit(doc.Pages[1]);
-        Assert.Contains("fi", absorber.Text);
+        Assert.Contains("hi", absorber.Text);
         Assert.Contains("rest", absorber.Text);
         // The "X" glyph should NOT appear — ActualText overrides it
         Assert.DoesNotContain("X", absorber.Text);

@@ -30,6 +30,15 @@ public sealed class PDF3DContent
 
     public string? Extension { get; private set; }
 
+    /// <summary>Populate directly from a parsed 3D stream (reading path):
+    /// keep the decoded content bytes and the format tag (e.g. "PRC"/"U3D")
+    /// exactly as read, without the LoadAsPRC/U3D dotted-extension rewrite.</summary>
+    internal void SetReadContent(byte[] bytes, string? extension)
+    {
+        _bytes = bytes ?? System.Array.Empty<byte>();
+        Extension = extension;
+    }
+
     public byte[] GetAsByteArray() => (byte[])_bytes.Clone();
     public Stream GetAsStream() => new MemoryStream(_bytes, writable: false);
 
@@ -91,7 +100,7 @@ public enum LightingSchemeType
     Headlamp,
 }
 
-/// <summary>Lighting scheme applied to a PDF 3D artwork (Aspose.PDF for .NET shape).
+/// <summary>Lighting scheme applied to a PDF 3D artwork (Aspose.Pdf shape).
 /// Stored only.</summary>
 public sealed class PDF3DLightingScheme
 {
@@ -140,7 +149,7 @@ public enum RenderModeType
     ShadedIllustration,
 }
 
-/// <summary>Render mode applied to a 3D artwork view (Aspose.PDF for .NET shape).
+/// <summary>Render mode applied to a 3D artwork view (Aspose.Pdf shape).
 /// Stored only.</summary>
 public sealed class PDF3DRenderMode
 {
@@ -186,7 +195,7 @@ public sealed class PDF3DRenderMode
 }
 
 /// <summary>Orientation angles for the cutting plane of a 3D cross-section
-/// (Aspose.PDF for .NET shape). Stored only.</summary>
+/// (Aspose.Pdf shape). Stored only.</summary>
 public sealed class PDF3DCuttingPlaneOrientation
 {
     public PDF3DCuttingPlaneOrientation() { }
@@ -206,7 +215,7 @@ public sealed class PDF3DCuttingPlaneOrientation
         => $"({AngleX?.ToString() ?? "_"}, {AngleY?.ToString() ?? "_"}, {AngleZ?.ToString() ?? "_"})";
 }
 
-/// <summary>Single cross-section through a PDF 3D model (Aspose.PDF for .NET shape).
+/// <summary>Single cross-section through a PDF 3D model (Aspose.Pdf shape).
 /// Stored only.</summary>
 public sealed class PDF3DCrossSection
 {
@@ -221,7 +230,7 @@ public sealed class PDF3DCrossSection
 }
 
 /// <summary>Ordered collection of <see cref="PDF3DCrossSection"/> entries
-/// applied to a PDF 3D view (Aspose.PDF for .NET shape). Stored only.</summary>
+/// applied to a PDF 3D view (Aspose.Pdf shape). Stored only.</summary>
 public sealed class PDF3DCrossSectionArray
 {
     private readonly List<PDF3DCrossSection> _items = new();
@@ -230,10 +239,12 @@ public sealed class PDF3DCrossSectionArray
 
     public int Count => _items.Count;
 
+    // Aspose.Pdf exposes this collection as 1-based (the first entry
+    // is [1]); mirror that so read-back positions match the reference API.
     public PDF3DCrossSection this[int index]
     {
-        get => _items[index];
-        set => _items[index] = value;
+        get => _items[index - 1];
+        set => _items[index - 1] = value;
     }
 
     public void Add(PDF3DCrossSection crossSection) => _items.Add(crossSection);
@@ -241,7 +252,7 @@ public sealed class PDF3DCrossSectionArray
     public void RemoveAt(int index) => _items.RemoveAt(index);
 }
 
-/// <summary>Camera + render-state snapshot of a 3D artwork (Aspose.PDF for .NET
+/// <summary>Camera + render-state snapshot of a 3D artwork (Aspose.Pdf
 /// shape). Stored only.</summary>
 public sealed class PDF3DView
 {
@@ -277,7 +288,7 @@ public sealed class PDF3DView
 }
 
 /// <summary>Indexed collection of <see cref="PDF3DView"/> snapshots
-/// (Aspose.PDF for .NET shape). Stored only.</summary>
+/// (Aspose.Pdf shape). Stored only.</summary>
 public sealed class PDF3DViewArray
 {
     private readonly List<PDF3DView> _items = new();
@@ -286,10 +297,12 @@ public sealed class PDF3DViewArray
 
     public int Count => _items.Count;
 
+    // Aspose.Pdf exposes this collection as 1-based (the first view
+    // is [1]); mirror that so read-back positions match the reference API.
     public PDF3DView this[int index]
     {
-        get => _items[index];
-        set => _items[index] = value;
+        get => _items[index - 1];
+        set => _items[index - 1] = value;
     }
 
     public void Add(PDF3DView view) => _items.Add(view);
@@ -300,7 +313,7 @@ public sealed class PDF3DViewArray
 }
 
 /// <summary>A 3D artwork dictionary referenced by a PDF 3D annotation
-/// (Aspose.PDF for .NET shape). Stored only.</summary>
+/// (Aspose.Pdf shape). Stored only.</summary>
 public sealed class PDF3DArtwork
 {
     public PDF3DArtwork(Document doc, PDF3DContent content)

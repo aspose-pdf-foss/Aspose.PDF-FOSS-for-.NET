@@ -141,7 +141,8 @@ public sealed class FontEmbedder
     /// this dictionary.</summary>
     internal static void EmbedIntoFontDict(Document document, byte[] ttfData,
         PdfDictionary fontDict, string baseFontName,
-        Dictionary<string, (int objNum, string embedName)>? fontFileCache = null)
+        Dictionary<string, (int objNum, string embedName)>? fontFileCache = null,
+        bool subset = true)
     {
         var parser = new TrueTypeParser(ttfData);
         parser.Parse();
@@ -156,6 +157,9 @@ public sealed class FontEmbedder
         // (e.g. CFF-based or loca-less fonts).
         var fontProgram = parser.FontData;
         var embedName = baseFontName;
+        // A caller that explicitly cleared IsSubset wants the full program embedded under
+        // the bare name (no subset tag). Skip the WinAnsi reduction then.
+        if (subset)
         try
         {
             var winAnsiCodes = new HashSet<int>();
@@ -207,10 +211,6 @@ public sealed class FontEmbedder
         descriptor.Set("StemV", new PdfInteger(85));
         descriptor.Set("FontFile2", new PdfIndirectRef(fontFileObjNum, 0));
 
-        var widths = new PdfArray();
-        for (var c = 32; c <= 255; c++)
-            widths.Add(new PdfInteger((int)(parser.GetCharWidth(c) * scale)));
-
         // Drop any prior simple-font entries that no longer apply, then write the
         // embedded-TrueType shape over the existing dictionary. The descriptor is held
         // inline (direct) so an in-memory re-read of the font sees the FontFile2 entry
@@ -221,11 +221,128 @@ public sealed class FontEmbedder
         fontDict.Set("Type", new PdfName("Font"));
         fontDict.Set("Subtype", new PdfName("TrueType"));
         fontDict.Set("BaseFont", new PdfName(embedName));
-        fontDict.Set("Encoding", new PdfName("WinAnsiEncoding"));
-        fontDict.Set("FirstChar", new PdfInteger(32));
-        fontDict.Set("LastChar", new PdfInteger(255));
-        fontDict.Set("Widths", widths);
+        // Preserve the source's /Widths (and the /FirstChar-/LastChar range and /Encoding)
+        // when the dictionary already carries them: the page content was laid out against
+        // those advances, so replacing them with the substitute face's own metrics shifts
+        // every glyph on a text-showing run by a small, accumulating amount — the same text
+        // then renders a fraction of a point off where the un-embedded source drew it. Only
+        // synthesise a WinAnsi 32..255 width array (and encoding) when the source had none.
+        if (fontDict.Get("Widths") is null)
+        {
+            var widths = new PdfArray();
+            for (var c = 32; c <= 255; c++)
+                widths.Add(new PdfInteger((int)(parser.GetCharWidth(c) * scale)));
+            fontDict.Set("FirstChar", new PdfInteger(32));
+            fontDict.Set("LastChar", new PdfInteger(255));
+            fontDict.Set("Widths", widths);
+        }
+        if (fontDict.Get("Encoding") is null)
+            fontDict.Set("Encoding", new PdfName("WinAnsiEncoding"));
         fontDict.Set("FontDescriptor", descriptor);
+    }
+
+    /// <summary>Embed <paramref name="ttfData"/> as the /FontFile2 of an EXISTING
+    /// composite (Type0/CID) font whose descendant lacks a program. The dictionary's
+    /// /W widths, /Encoding CMap and /CIDSystemInfo are left untouched — the content
+    /// stream was authored against them. For an Identity encoding the CIDs are the
+    /// original face's glyph ids, so only the same-named real face may be embedded
+    /// (the caller guarantees that); for a predefined national CMap a /CIDToGIDMap
+    /// is synthesised via CID→Unicode (Adobe tables) → Unicode→GID (the face's cmap).</summary>
+    internal static void EmbedIntoCidFontDict(Document document, byte[] ttfData,
+        PdfDictionary type0Dict, PdfDictionary cidFontDict,
+        Dictionary<string, (int objNum, string embedName)>? fontFileCache = null)
+    {
+        ttfData = CjkFallbackFont.NormalizeToSfnt(ttfData);
+        var parser = new TrueTypeParser(ttfData);
+        parser.Parse();
+        var scale = 1000.0 / parser.UnitsPerEm;
+        var reader = document.Reader;
+
+        // Share one FontFile2 object per distinct program (CJK faces run to many MB).
+        int fontFileObjNum;
+        var cacheKey = fontFileCache is null
+            ? null
+            : Convert.ToHexString(Security.ShaDigest.Sha256(ttfData));
+        if (cacheKey is not null && fontFileCache!.TryGetValue(cacheKey, out var cached))
+            fontFileObjNum = cached.objNum;
+        else
+        {
+            fontFileObjNum = document.AllocateObjectNumber();
+            var fontFileDict = new PdfDictionary();
+            fontFileDict.Set("Length1", new PdfInteger(ttfData.Length));
+            document.AddNewObject(fontFileObjNum, new PdfStream(fontFileDict, ttfData));
+            if (cacheKey is not null)
+                fontFileCache![cacheKey] = (fontFileObjNum, parser.PostScriptName);
+        }
+
+        // Reuse the existing descriptor when present — its metrics match the /W
+        // layout the page was set with; only synthesise one when absent.
+        var descriptor = reader.ResolveDict(cidFontDict.Get("FontDescriptor"));
+        if (descriptor is null)
+        {
+            descriptor = new PdfDictionary();
+            descriptor.Set("Type", new PdfName("FontDescriptor"));
+            descriptor.Set("FontName",
+                new PdfName(cidFontDict.GetName("BaseFont") ?? parser.PostScriptName));
+            descriptor.Set("Flags", new PdfInteger(parser.GetPdfFlags()));
+            descriptor.Set("ItalicAngle", new PdfReal(parser.ItalicAngle));
+            var bbox = parser.BBox;
+            var bboxArray = new PdfArray();
+            for (var i = 0; i < 4; i++) bboxArray.Add(new PdfInteger((int)(bbox[i] * scale)));
+            descriptor.Set("FontBBox", bboxArray);
+            descriptor.Set("Ascent", new PdfInteger((int)(parser.Ascent * scale)));
+            descriptor.Set("Descent", new PdfInteger((int)(parser.Descent * scale)));
+            descriptor.Set("CapHeight", new PdfInteger((int)(parser.CapHeight * scale)));
+            descriptor.Set("StemV", new PdfInteger(85));
+            cidFontDict.Set("FontDescriptor", descriptor);
+        }
+        descriptor.Remove("FontFile");
+        descriptor.Remove("FontFile3");
+        descriptor.Set("FontFile2", new PdfIndirectRef(fontFileObjNum, 0));
+
+        // A TrueType program makes the descendant a CIDFontType2.
+        if (cidFontDict.GetName("Subtype") == "CIDFontType0")
+            cidFontDict.Set("Subtype", new PdfName("CIDFontType2"));
+
+        var encoding = type0Dict.GetName("Encoding");
+        if (encoding is null or "Identity-H" or "Identity-V")
+        {
+            if (cidFontDict.Get("CIDToGIDMap") is null)
+                cidFontDict.Set("CIDToGIDMap", new PdfName("Identity"));
+            return;
+        }
+
+        // Predefined national CMap: content-stream CIDs are registry CIDs.
+        var csi = reader.ResolveDict(cidFontDict.Get("CIDSystemInfo"));
+        var orderingObj = csi?.Get("Ordering");
+        var ordering = orderingObj is PdfString os ? os.ToText()
+            : (orderingObj is PdfName on ? on.Value : null);
+        var map = BuildCidToGidMap(ordering, parser);
+        if (map is not null)
+        {
+            var mapObjNum = document.AllocateObjectNumber();
+            document.AddNewObject(mapObjNum, new PdfStream(new PdfDictionary(), map));
+            cidFontDict.Set("CIDToGIDMap", new PdfIndirectRef(mapObjNum, 0));
+        }
+    }
+
+    /// <summary>Big-endian ushort[] CID→GID map for a predefined Adobe ordering
+    /// (Japan1, GB1, CNS1, Korea1), built through the face's Unicode cmap.
+    /// Null when the ordering is unknown.</summary>
+    private static byte[]? BuildCidToGidMap(string? ordering, TrueTypeParser parser)
+    {
+        if (string.IsNullOrEmpty(ordering)) return null;
+        var maxCid = AdobeCidTables.MaxCid(ordering);
+        if (maxCid <= 0) return null;
+        var map = new byte[(maxCid + 1) * 2];
+        for (var cid = 0; cid <= maxCid; cid++)
+        {
+            if (AdobeCidTables.LookupCid(ordering, cid) is not int uni) continue;
+            if (!parser.CMap.TryGetValue(uni, out var gid)) continue;
+            map[cid * 2] = (byte)(gid >> 8);
+            map[cid * 2 + 1] = (byte)gid;
+        }
+        return map;
     }
 
     private void CreateFontObjects()

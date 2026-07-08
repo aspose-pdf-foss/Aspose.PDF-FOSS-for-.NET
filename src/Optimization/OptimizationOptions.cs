@@ -21,7 +21,7 @@ public class OptimizationOptions
 
     /// <summary>Maximum image resolution; higher resolution images are scaled down.
     /// Note: the public reference spells this 'MaxResoultion' (typo in the original
-    /// Aspose.PDF for .NET API); retained for source compatibility. Forwards to
+    /// Aspose.Pdf API); retained for source compatibility. Forwards to
     /// <see cref="ImageCompressionOptions.MaxResolution"/>.</summary>
     public int MaxResoultion
     {

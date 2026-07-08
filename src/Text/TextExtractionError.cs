@@ -13,7 +13,7 @@ public sealed class TextExtractionError
     /// <summary>Human-readable error message.</summary>
     public string Message { get; internal set; } = string.Empty;
 
-    /// <summary>Longer-form description of the error (Aspose.PDF for .NET sibling of <see cref="Message"/>).</summary>
+    /// <summary>Longer-form description of the error (Aspose.Pdf sibling of <see cref="Message"/>).</summary>
     public string Description { get; internal set; } = string.Empty;
 
     /// <summary>Raw text that was extracted before the failure (best-effort).</summary>

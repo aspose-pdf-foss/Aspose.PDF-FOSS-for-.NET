@@ -65,7 +65,7 @@ public sealed class EncryptionParameters
 
 /// <summary>Pluggable custom security handler — implement this to handle
 /// non-Standard /Filter entries (e.g. Public-Key handlers /Adobe.PPKLite).
-/// Aspose.PDF for .NET contract; the FOSS lib accepts custom handlers but the
+/// Aspose.Pdf contract; the FOSS lib accepts custom handlers but the
 /// built-in Standard security handler covers RC4/AES password encryption
 /// without needing a custom implementation.</summary>
 public interface ICustomSecurityHandler
