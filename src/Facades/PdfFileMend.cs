@@ -48,7 +48,7 @@ public sealed class PdfFileMend : ISaveableFacade
 
     /// <summary>
     /// Whether to enable word wrapping for AddText operations. Set-only on
-    /// the public surface to match Aspose.Pdf; internal code reads
+    /// the public surface only; internal code reads
     /// <see cref="WrapMode"/> for the resolved behaviour.
     /// </summary>
     public bool IsWordWrap { set => _isWordWrap = value; }
@@ -420,20 +420,34 @@ public sealed class PdfFileMend : ISaveableFacade
             embedder.AddToPage(page);
             fontName = resourceName;
         }
+        else if (ft.RequestedFontName is { } requested
+            && requested.Replace(" ", "") is { Length: > 0 } strippedReq
+            && !string.Equals(strippedReq, ft.FontName, StringComparison.Ordinal))
+        {
+            // The caller asked for a named system font (e.g. "Times New Roman") via the
+            // string-font FormattedText constructor, and its name differs from the
+            // Standard-14 base font it folds to for glyph metrics ("Times-Roman"). Emit it
+            // as a TrueType font whose /BaseFont is the requested name with spaces removed
+            // ("TimesNewRoman"), so text extraction reports that name rather than the fold.
+            fontName = EnsureFont(page, strippedReq, trueType: true);
+        }
         else
         {
             fontName = EnsureFont(page, ft.FontName);
         }
 
-        // Baseline position: the point overload places the first baseline at
-        // lly + 0.3*fontSize + |descent|, the rectangle overload at ~lly + 0.5*fontSize.
-        // descentPt is negative for typical fonts.
+        // Baseline-to-baseline line pitch is fontSize + 2 points (measured constant across
+        // 8–50 pt), so consecutive AddNewLineText lines sit an integral distance apart
+        // (e.g. 15pt → 17).
+        double defaultLeading = ft.FontSize + 2;
+
+        // First baseline sits at lly − fontSize + 13 (a linear rule, slope −1 in size,
+        // independent of the lly value); both the point and rectangle overloads use it
+        // (e.g. lly=600, 15pt → 598; 20pt → 593).
         var metricsFont = string.IsNullOrEmpty(ft.FontName) ? "Helvetica" : ft.FontName!;
         double descentPt = (Standard14Fonts.IsStandard14(metricsFont)
             ? Standard14Fonts.GetDescent(metricsFont) : -207) * ft.FontSize / 1000.0;
-        double startY = (ury > 0 && ury > lly)
-            ? lly + ft.FontSize * 0.5
-            : lly + ft.FontSize * 0.3 - descentPt;
+        double startY = lly - ft.FontSize + 13;
 
         // Clamp to page bounds so off-page coordinates don't silently render nothing.
         var pageMediaBox = page.MediaBox;
@@ -458,7 +472,7 @@ public sealed class PdfFileMend : ISaveableFacade
                 if (i > 0)
                 {
                     var extra = ft.Lines[i - 1].LineSpacing;
-                    baseline -= ft.DefaultLineSpacing + (extra > 0 ? extra : 0);
+                    baseline -= defaultLeading + (extra > 0 ? extra : 0);
                 }
                 sb.AppendFormat(CultureInfo.InvariantCulture,
                     "{0:F3} {1:F3} {2:F3} rg\n{3:F2} {4:F2} {5:F2} {6:F2} re\nf\n",
@@ -492,7 +506,7 @@ public sealed class PdfFileMend : ISaveableFacade
         {
             var line = ft.Lines[i];
             var extra = ft.Lines[i - 1].LineSpacing;
-            var leading = ft.DefaultLineSpacing + (extra > 0 ? extra : 0);
+            var leading = defaultLeading + (extra > 0 ? extra : 0);
             sb.AppendFormat(CultureInfo.InvariantCulture,
                 "{0:F2} TL\n", leading);
             sb.Append("T*\n");
@@ -582,7 +596,7 @@ public sealed class PdfFileMend : ISaveableFacade
         return $"F{existingCount}";
     }
 
-    private static string EnsureFont(Page page, string fontName)
+    private static string EnsureFont(Page page, string fontName, bool trueType = false)
     {
         var pageDict = page.Dict;
 
@@ -647,7 +661,7 @@ public sealed class PdfFileMend : ISaveableFacade
         var pdfFontName = $"F{count}";
         var newFont = new PdfDictionary();
         newFont.Set("Type", new PdfName("Font"));
-        newFont.Set("Subtype", new PdfName("Type1"));
+        newFont.Set("Subtype", new PdfName(trueType ? "TrueType" : "Type1"));
         newFont.Set("BaseFont", new PdfName(fontName));
         // For Latin text, use WinAnsiEncoding
         newFont.Set("Encoding", new PdfName("WinAnsiEncoding"));

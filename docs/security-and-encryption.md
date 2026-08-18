@@ -14,6 +14,22 @@
 All crypto primitives ship in pure managed C# — no native dependency on the
 host OS crypto provider.
 
+### PDF 2.0 deprecation gates
+
+ISO 32000-2 retires the SHA-1-era mechanisms, and this library refuses them up
+front rather than writing a file that violates its own declared version. These
+throw `DeprecatedFeatureException`:
+
+- **RC4 under the 2.0 encryption flag**, and any legacy security handler applied to
+  a document that is already PDF 2.0
+- **Converting to PDF 2.0 while an RC4 encryptor is pending** — rejected instead of
+  producing a self-violating document
+- **Signing a 2.0 document with a retired subfilter** — raw-RSA
+  (`adbe.x509.rsa_sha1`) and enveloping PKCS#7 (`adbe.pkcs7.sha1`). Detached
+  PKCS#7 (`adbe.pkcs7.detached`) stays legal and is what you should use.
+
+`AESx256` is the encryption to pair with PDF 2.0.
+
 ## Encrypting a PDF
 
 ### Via `Document.Encrypt`

@@ -4,16 +4,20 @@ namespace Aspose.Pdf;
 
 /// <summary>
 /// A footnote or endnote attached to a <see cref="TextFragment"/>.
-/// Stored only; the layout engine does not currently render the note
-/// glyph or the page-bottom note text.
+/// Rendered as a superscript reference marker after the parent fragment
+/// and a marker-prefixed note body at the bottom of the parent's page.
 /// </summary>
 public sealed class Note
 {
     public Note() { }
 
-    public Note(string content) { Text = content; }
+    /// <summary>Content passed here becomes the note's body paragraph;
+    /// the reference marker stays auto-numbered unless <see cref="Text"/>
+    /// is set (setting Text never replaces this body).</summary>
+    public Note(string content) { Paragraphs.Add(new TextFragment(content)); }
 
-    /// <summary>Plain-text content of the note.</summary>
+    /// <summary>Custom reference-marker label. When unset, the marker is the
+    /// footnote's sequential number.</summary>
     public string? Text { get; set; }
 
     /// <summary>Rich-paragraph content of the note (when set, takes

@@ -97,11 +97,15 @@ public sealed class PdfJavaScriptStripper
                 var annotDict = reader.ResolveDict(annotRef);
                 if (annotDict is null) continue;
 
-                // Remove /A if JavaScript
+                // Neutralise a JavaScript /A action rather than dropping it: the
+                // widget/field keeps its action structure (so Field.OnActivated still
+                // resolves to a JavascriptAction) but the script body is emptied,
+                // leaving a zero-length script
+                // in place instead of removing the trigger outright.
                 var action = reader.ResolveDict(annotDict.Get("A"));
                 if (action is not null && action.GetName("S") == "JavaScript")
                 {
-                    annotDict.Remove("A");
+                    action.Set("JS", new PdfString(System.Array.Empty<byte>()));
                     removed = true;
                 }
 

@@ -37,8 +37,8 @@ public sealed class TextFormattingOptions
 
     /// <summary>
     /// Gets or sets the word wrap mode for the paragraph.
-    /// Default is <see cref="WordWrapMode.Undefined"/>, matching Aspose.PDF
-    /// for .NET (its ctor sets the backing field to Undefined). The
+    /// Default is <see cref="WordWrapMode.Undefined"/> (the ctor sets the
+    /// backing field to Undefined). The
     /// flow layout treats Undefined as "wrap by width" -- callers that want
     /// the no-wrap behaviour have to opt in explicitly.
     /// </summary>
@@ -47,7 +47,7 @@ public sealed class TextFormattingOptions
     /// <summary>Line-spacing interpretation mode. Default is <see cref="LineSpacingMode.FontSize"/>.</summary>
     public LineSpacingMode LineSpacing { get; set; } = LineSpacingMode.FontSize;
 
-    /// <summary>Line-spacing value in points (FOSS-internal — the Aspose.Pdf API exposes the mode only).</summary>
+    /// <summary>Line-spacing value in points (internal extension — the public API exposes the mode only).</summary>
     public double LineSpacingPoints { get; set; }
 
     /// <summary>Indent applied to the first line of the paragraph (points).</summary>

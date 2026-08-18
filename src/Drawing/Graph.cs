@@ -60,7 +60,6 @@ public sealed class Color
 
 /// <summary>
 /// Defines a linear (axial) gradient between two colors for use as a fill pattern.
-/// Mirrors <c>Aspose.Pdf.Drawing.GradientAxialShading</c>.
 /// </summary>
 public sealed class GradientAxialShading : PatternColorSpace
 {
@@ -147,6 +146,42 @@ public abstract class Shape
             builder.SetFillColor(fc.R, fc.G, fc.B);
     }
 
+    /// <summary>Two-pass paint for a shape whose fill and stroke carry their own
+    /// transparency (colours built with an alpha channel): the stroke alpha and the
+    /// fill alpha each get a DEDICATED ExtGState — registered on the page under the
+    /// sequential lowercase names <c>gs1, gs2, …</c> with disjoint /CA and /ca keys,
+    /// so the pair composes — then the region is filled (<c>f</c>) and the outline
+    /// stroked (<c>S</c>) as separate paints. Returns false (leaving the caller on
+    /// the combined single-gs path) when the shape lacks either colour, has no
+    /// transparency, or fills with a gradient pattern.</summary>
+    protected bool TryPaintTransparentFillStroke(ContentStreamBuilder builder, Page? page,
+        Action<ContentStreamBuilder> addPath)
+    {
+        if (page is null) return false;
+        if (GraphInfo.FillColor is null || GraphInfo.Color is null) return false;
+        if (GraphInfo.FillColor.PatternColorSpace is not null) return false;
+        if (GraphInfo.FillOpacity >= 1.0 && GraphInfo.StrokeOpacity >= 1.0) return false;
+
+        if (GraphInfo.LineWidth != 1f) builder.SetLineWidth(GraphInfo.LineWidth);
+        if (GraphInfo.DashPattern is { Length: > 0 })
+            builder.SetDashPattern(GraphInfo.DashPattern, GraphInfo.DashPhase);
+        builder.SetExtGState(page.AddExtGStateSequential(
+            new Content.ExtGState { StrokeAlpha = GraphInfo.StrokeOpacity }));
+        builder.SetExtGState(page.AddExtGStateSequential(
+            new Content.ExtGState { FillAlpha = GraphInfo.FillOpacity }));
+
+        if (GraphInfo.FillColorInternal is { } fc)
+            builder.SetFillColor(fc.R, fc.G, fc.B);
+        addPath(builder);
+        builder.Fill();
+
+        if (GraphInfo.StrokeColor is { } sc)
+            builder.SetStrokeColor(sc.R, sc.G, sc.B);
+        addPath(builder);
+        builder.Stroke();
+        return true;
+    }
+
     /// <summary>Apply appropriate paint operator based on fill/stroke settings.</summary>
     protected void Paint(ContentStreamBuilder builder)
     {
@@ -156,6 +191,70 @@ public abstract class Shape
             builder.FillAndStroke();
         else
             builder.Stroke();
+    }
+
+    /// <summary>Paint the shape with an axial-gradient fill when the FillColor
+    /// carries a <see cref="GradientAxialShading"/>: the path is used as a clip
+    /// for an <c>sh</c> paint (registered under the page's /Resources/Shading),
+    /// then re-emitted and stroked for the outline. Returns false — leaving the
+    /// caller on the solid-fill path — when there is no gradient or no page to
+    /// host the shading resource.</summary>
+    protected bool TryPaintGradient(ContentStreamBuilder builder, Page? page, Action<ContentStreamBuilder> addPath)
+    {
+        if (page is null || GraphInfo.FillColor?.PatternColorSpace is not GradientAxialShading grad)
+            return false;
+
+        var name = page.AddShading(BuildAxialShadingDict(grad));
+        builder.SaveState();
+        addPath(builder);
+        builder.Clip();
+        builder.Raw($"/{name} sh\n");
+        builder.RestoreState();
+        addPath(builder);
+        builder.Stroke();
+        return true;
+    }
+
+    /// <summary>Axial (type 2) shading dictionary for the gradient: DeviceRGB, an
+    /// exponential (type 2, N=1) colour ramp between the start/end colours over the
+    /// gradient axis, extended past both ends. Coordinates stay in graph-local
+    /// space — the graph's content stream translates them into page position.</summary>
+    internal static Aspose.Pdf.Core.PdfDictionary BuildAxialShadingDict(GradientAxialShading grad)
+    {
+        static Aspose.Pdf.Core.PdfArray Rgb(Aspose.Pdf.Color? c)
+        {
+            var arr = new Aspose.Pdf.Core.PdfArray();
+            arr.Add(new Aspose.Pdf.Core.PdfReal((c?.R ?? 0) / 255.0));
+            arr.Add(new Aspose.Pdf.Core.PdfReal((c?.G ?? 0) / 255.0));
+            arr.Add(new Aspose.Pdf.Core.PdfReal((c?.B ?? 0) / 255.0));
+            return arr;
+        }
+
+        var fn = new Aspose.Pdf.Core.PdfDictionary();
+        fn.Set("FunctionType", new Aspose.Pdf.Core.PdfInteger(2));
+        var domain = new Aspose.Pdf.Core.PdfArray();
+        domain.Add(new Aspose.Pdf.Core.PdfInteger(0));
+        domain.Add(new Aspose.Pdf.Core.PdfInteger(1));
+        fn.Set("Domain", domain);
+        fn.Set("C0", Rgb(grad.StartColor));
+        fn.Set("C1", Rgb(grad.EndColor));
+        fn.Set("N", new Aspose.Pdf.Core.PdfInteger(1));
+
+        var sh = new Aspose.Pdf.Core.PdfDictionary();
+        sh.Set("ShadingType", new Aspose.Pdf.Core.PdfInteger(2));
+        sh.Set("ColorSpace", new Aspose.Pdf.Core.PdfName("DeviceRGB"));
+        var coords = new Aspose.Pdf.Core.PdfArray();
+        coords.Add(new Aspose.Pdf.Core.PdfReal(grad.Start.X));
+        coords.Add(new Aspose.Pdf.Core.PdfReal(grad.Start.Y));
+        coords.Add(new Aspose.Pdf.Core.PdfReal(grad.End.X));
+        coords.Add(new Aspose.Pdf.Core.PdfReal(grad.End.Y));
+        sh.Set("Coords", coords);
+        sh.Set("Function", fn);
+        var extend = new Aspose.Pdf.Core.PdfArray();
+        extend.Add(Aspose.Pdf.Core.PdfBoolean.True);
+        extend.Add(Aspose.Pdf.Core.PdfBoolean.True);
+        sh.Set("Extend", extend);
+        return sh;
     }
 }
 
@@ -364,7 +463,7 @@ public sealed class Circle : Shape
         CenterX = centerX; CenterY = centerY; Radius = radius;
     }
 
-    /// <summary>Single-precision overload matching the Aspose.Pdf public API.</summary>
+    /// <summary>Single-precision overload matching the public API.</summary>
     public Circle(float posX, float posY, float radius)
         : this((double)posX, (double)posY, (double)radius)
     {
@@ -454,7 +553,7 @@ public sealed class Ellipse : Shape
         }
     }
 
-    /// <summary>Bounding-box ctor. Parameters match the Aspose.Pdf public API.</summary>
+    /// <summary>Bounding-box ctor. Parameters match the public API.</summary>
     public Ellipse(double left, double bottom, double width, double height)
     {
         RadiusX = width / 2.0;
@@ -580,20 +679,38 @@ public sealed class Arc : Shape
     {
     }
 
-    /// <summary>Single-precision overload matching the Aspose.Pdf public API.</summary>
+    /// <summary>Single-precision overload matching the public API.</summary>
     public Arc(float posX, float posY, float radius, float alpha, float beta)
         : this((double)posX, (double)posY, (double)radius, (double)alpha, (double)beta)
     {
     }
 
-    /// <summary>Whether this arc lies entirely within a <paramref name="containerWidth"/>×<paramref name="containerHeight"/> box anchored at the origin.</summary>
+    /// <summary>Whether this arc lies entirely within a <paramref name="containerWidth"/>×<paramref name="containerHeight"/>
+    /// box anchored at the origin. Only the SWEPT extent counts — an arc whose unswept
+    /// side would overhang the container is accepted. Extremes occur at the two endpoints
+    /// and at every axis angle (multiple of 90°) inside the sweep; the sweep magnitude is
+    /// taken modulo a full turn (a whole number of extra turns adds no extent).</summary>
     public override bool CheckBounds(double containerWidth, double containerHeight)
     {
-        var minX = CenterX - RadiusX;
-        var maxX = CenterX + RadiusX;
-        var minY = CenterY - RadiusY;
-        var maxY = CenterY + RadiusY;
-        return minX >= 0 && maxX <= containerWidth && minY >= 0 && maxY <= containerHeight;
+        var sweep = SweepAngle % 360;
+        if (sweep == 0 && SweepAngle != 0) sweep = SweepAngle > 0 ? 360 : -360;
+        var a0 = StartAngle;
+        var a1 = StartAngle + sweep;
+        var lo = System.Math.Min(a0, a1);
+        var hi = System.Math.Max(a0, a1);
+        const double eps = 1e-9;
+        bool Fits(double deg)
+        {
+            var rad = deg * System.Math.PI / 180.0;
+            var x = CenterX + RadiusX * System.Math.Cos(rad);
+            var y = CenterY + RadiusY * System.Math.Sin(rad);
+            return x >= -eps && y >= -eps
+                && x <= containerWidth + eps && y <= containerHeight + eps;
+        }
+        if (!Fits(a0) || !Fits(a1)) return false;
+        for (var k = System.Math.Ceiling(lo / 90.0) * 90.0; k <= hi; k += 90.0)
+            if (!Fits(k)) return false;
+        return true;
     }
 
     internal override void Render(ContentStreamBuilder builder, Page? page = null)
@@ -809,7 +926,7 @@ public sealed class Rectangle : Shape
         Left = left; Bottom = bottom; Width = width; Height = height;
     }
 
-    /// <summary>Single-precision overload matching the Aspose.Pdf public API.</summary>
+    /// <summary>Single-precision overload matching the public API.</summary>
     public Rectangle(float left, float bottom, float width, float height)
         : this((double)left, (double)bottom, (double)width, (double)height) { }
 
@@ -821,7 +938,11 @@ public sealed class Rectangle : Shape
 
     internal override void Render(ContentStreamBuilder builder, Page? page = null)
     {
+        if (TryPaintTransparentFillStroke(builder, page, b => b.Rectangle(Left, Bottom, Width, Height)))
+            return;
         ApplyStyle(builder, page);
+        if (TryPaintGradient(builder, page, b => b.Rectangle(Left, Bottom, Width, Height)))
+            return;
         builder.Rectangle(Left, Bottom, Width, Height);
         Paint(builder);
     }
@@ -841,11 +962,22 @@ public sealed class Graph : BaseParagraph
     /// </summary>
     public bool IsChangePosition { get; set; } = true;
 
-    /// <summary>Absolute horizontal position from the left page edge (used when <see cref="IsChangePosition"/> is false).</summary>
-    public double Left { get; set; }
+    private double _left;
+    private double _top;
 
-    /// <summary>Absolute vertical position from the top page edge (used when <see cref="IsChangePosition"/> is false).</summary>
-    public double Top { get; set; }
+    /// <summary>True once <see cref="Left"/> or <see cref="Top"/> has been assigned.
+    /// Assigning either switches the graph to absolute placement (anchored to the
+    /// content-area top-left, overlaying rather than flowing) irrespective of
+    /// <see cref="IsChangePosition"/> — matching the reference behaviour.</summary>
+    internal bool PositionAssigned { get; private set; }
+
+    /// <summary>Horizontal offset of the graph box. Assigning it (to any value,
+    /// including 0) marks the graph as explicitly positioned.</summary>
+    public double Left { get => _left; set { _left = value; PositionAssigned = true; } }
+
+    /// <summary>Vertical offset of the graph box. Assigning it (to any value,
+    /// including 0) marks the graph as explicitly positioned.</summary>
+    public double Top { get => _top; set { _top = value; PositionAssigned = true; } }
 
     /// <summary>Optional border around the graph area.</summary>
     public BorderInfo? Border { get; set; }
@@ -866,9 +998,12 @@ public sealed class Graph : BaseParagraph
     {
         Width = width;
         Height = height;
+        // The shape list must know the canvas so ThrowExceptionIfDoesNotFit can
+        // validate at add time even when callers switch mode with the 1-arg overload.
+        Shapes = new BoundsCheckableList<Shape>(BoundsCheckMode.Default, width, height);
     }
 
-    /// <summary>Single-precision overload matching the Aspose.Pdf public API.</summary>
+    /// <summary>Single-precision overload matching the public API.</summary>
     public Graph(float width, float height) : this((double)width, (double)height) { }
 
     public void Add(Shape shape) => Shapes.Add(shape);
@@ -879,13 +1014,16 @@ public sealed class Graph : BaseParagraph
         var copy = new Graph(Width, Height)
         {
             IsChangePosition = IsChangePosition,
-            Left = Left,
-            Top = Top,
             Border = Border,
             GraphInfo = GraphInfo,
             ZIndex = ZIndex,
             Title = Title,
         };
+        // Preserve the explicit-position flag: copy the backing fields directly so a
+        // graph with untouched Left/Top clones as still-untouched (flowing).
+        copy._left = _left;
+        copy._top = _top;
+        copy.PositionAssigned = PositionAssigned;
         foreach (var s in Shapes) copy.Shapes.Add(s);
         return copy;
     }

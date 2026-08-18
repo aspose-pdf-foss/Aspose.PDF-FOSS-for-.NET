@@ -440,6 +440,29 @@ Enumerations: `LineCap`, `LineJoin`.
 | `ElementCollection`         | Element collection                                           |
 | `RootElement` / `StructElement` / `TextElement` / `FigureElement` | Element variants    |
 
+## `Aspose.Pdf.Comparison`
+
+| Type | Purpose |
+|------|---------|
+| `SideBySidePdfComparer` | Static `Compare` overloads for two pages or two documents, writing a side-by-side result PDF to a path or stream |
+| `SideBySideComparisonOptions` | Whitespace `ComparisonMode`, comparison / exclusion areas, `ExcludeTables`, `DeleteColor` / `InsertColor`, `AdditionalChangeMarks` |
+| `ComparisonMode` | `Normal`, `IgnoreSpaces`, `ParseSpaces` |
+| `SideBySideDocsComparisonResult` | `HasChanges`, per-page `FirstDocChanges` / `SecondDocChanges`, per-page `FullChanges` |
+| `SideBySidePagesComparisonResult` | `HasChanges`, `FirstPageChanges` / `SecondPageChanges`, `FullChanges` |
+| `EditContainer` | One highlighted change: `Id`, its `DiffOperation`, and the `Rects` it covers |
+| `GraphicalPdfComparer` | Pixel comparison of two pages (`Resolution`, `Color`, `Threshold`) — **Windows only** |
+| `ImagesDifference` | `Difference` / `Stride` / `Height`, `SourceImage`, `GetDestinationImage()`, `DifferenceToImage()` — **Windows only** |
+
+## `Aspose.Pdf.Comparison.Diff`
+
+| Type | Purpose |
+|------|---------|
+| `DiffOperation` | One edit: an `Operation` plus its `Text` |
+| `Operation` | `Equal`, `Delete`, `Insert` |
+| `DiffUtils` | `FindCommonStartParts`, `FindCommonEndParts`, `AssemblySourceText` |
+
+See [Comparison](comparison.md) for worked examples.
+
 ## Not included
 
 The following surface areas are intentionally not part of this library:

@@ -51,7 +51,7 @@ public class ExplicitDestination : IAppointment
         // PDF 32000 §12.3.2.2 Explicit Destinations: return the concrete
         // subclass for fit types that have them so tests can cast to e.g.
         // FitExplicitDestination.
-        return typeName switch
+        var dest = typeName switch
         {
             "Fit" => new FitExplicitDestination(pageNum),
             "FitB" => new FitBExplicitDestination(pageNum),
@@ -66,6 +66,24 @@ public class ExplicitDestination : IAppointment
                 ReadReal(arr, 4) ?? 0, ReadReal(arr, 5) ?? 0),
             _ => new ExplicitDestination(pageNum, typeName),
         };
+        // Materialise the target Page from the owner document's page list so
+        // the destination tracks the page OBJECT: callers that re-anchor the
+        // page (e.g. inserting a TOC page ahead of it) see its current number,
+        // and identity look-ups against Pages succeed. Matched by page-dict
+        // identity — the raw-tree index and the live collection index diverge
+        // once pages have been inserted.
+        if (reader?.OwnerDocument is { } ownerDoc && pageObj is PdfDictionary destPageDict)
+        {
+            foreach (var p in ownerDoc.Pages)
+                if (ReferenceEquals(p.Dict, destPageDict))
+                {
+                    dest.Page = p;
+                    break;
+                }
+            if (dest.Page is null && pageNum >= 1 && pageNum <= ownerDoc.Pages.Count)
+                dest.Page = ownerDoc.Pages[pageNum];
+        }
+        return dest;
     }
 
     private static double? ReadReal(PdfArray arr, int index)

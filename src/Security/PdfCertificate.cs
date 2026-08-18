@@ -89,6 +89,24 @@ public sealed class PdfCertificate
             kind, cert);
     }
 
+    /// <summary>Wrap an already-loaded platform certificate. The private key
+    /// (when present) stays inside the <see cref="DotNetCert"/> handle, which
+    /// the signer uses for the actual crypto — this is the path for
+    /// certificates from the OS store, a smartcard or an HSM.</summary>
+    internal static PdfCertificate FromX509(
+        System.Security.Cryptography.X509Certificates.X509Certificate2 cert)
+    {
+        var kind = cert.GetKeyAlgorithm() switch
+        {
+            "1.2.840.10040.4.1" => SignatureKeyKind.Dsa,   // id-dsa
+            "1.2.840.10045.2.1" => SignatureKeyKind.Ecdsa, // id-ecPublicKey
+            _ => SignatureKeyKind.Rsa,
+        };
+        var (subject, issuer, serial, issuerDer) = ParseCertMetadata(cert.RawData);
+        return new PdfCertificate(cert.RawData, privateKey: null, subject, issuer, serial, issuerDer,
+            kind, cert);
+    }
+
     /// <summary>Load from a PFX file path.</summary>
     public static PdfCertificate FromPfx(string path, string password)
         => FromPfx(File.ReadAllBytes(path), password);

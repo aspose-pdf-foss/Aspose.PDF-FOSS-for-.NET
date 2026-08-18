@@ -24,6 +24,9 @@ internal static class CmsBuilder
         OidSha256 => ShaDigest.Sha256(data),
         OidSha384 => ShaDigest.Sha384(data),
         OidSha512 => ShaDigest.Sha512(data),
+        "2.16.840.1.101.3.4.2.8" => new Sha3_256().ComputeHash(data),
+        "2.16.840.1.101.3.4.2.9" => new Sha3_384().ComputeHash(data),
+        "2.16.840.1.101.3.4.2.10" => new Sha3_512().ComputeHash(data),
         // Some signers put the signatureAlgorithm OID (sha*WithRSAEncryption) in
         // the signerInfo digestAlgorithm field; map those to their digest too.
         "1.2.840.113549.1.1.11" => ShaDigest.Sha256(data), // sha256WithRSA
@@ -35,12 +38,64 @@ internal static class CmsBuilder
     private const string OidEcPublicKey = "1.2.840.10045.2.1";
     private const string OidEcdsaWithSha1 = "1.2.840.10045.4.1";
     private const string OidEcdsaWithSha256 = "1.2.840.10045.4.3.2";
+    private const string OidEcdsaWithSha384 = "1.2.840.10045.4.3.3";
+    private const string OidEcdsaWithSha512 = "1.2.840.10045.4.3.4";
     private const string OidDsa = "1.2.840.10040.4.1";
     private const string OidDsaWithSha1 = "1.2.840.10040.4.3";
     private const string OidDsaWithSha256 = "2.16.840.1.101.3.4.3.2";
 
-    private static string DigestOid(DigestHashAlgorithm digest)
-        => digest == DigestHashAlgorithm.Sha1 ? OidSha1 : OidSha256;
+    private const string OidEcdsaWithSha3_256 = "2.16.840.1.101.3.4.3.10";
+    private const string OidEcdsaWithSha3_384 = "2.16.840.1.101.3.4.3.11";
+    private const string OidEcdsaWithSha3_512 = "2.16.840.1.101.3.4.3.12";
+
+    private static string DigestOid(DigestHashAlgorithm digest) => digest switch
+    {
+        DigestHashAlgorithm.Sha1 => OidSha1,
+        DigestHashAlgorithm.Sha384 => OidSha384,
+        DigestHashAlgorithm.Sha512 => OidSha512,
+        DigestHashAlgorithm.Sha3_256 => "2.16.840.1.101.3.4.2.8",
+        DigestHashAlgorithm.Sha3_384 => "2.16.840.1.101.3.4.2.9",
+        DigestHashAlgorithm.Sha3_512 => "2.16.840.1.101.3.4.2.10",
+        _ => OidSha256,
+    };
+
+    /// <summary>Settle on the digest a signature is actually made with, and refuse
+    /// the combinations that have no signature-algorithm to carry them. Which
+    /// digests are usable depends on the key: PKCS#1 v1.5 has no SHA-3 assignment,
+    /// ECDSA has no reason to fall back to SHA-1, and the DSA path here reaches
+    /// only DSA-with-SHA-1. <see cref="DigestHashAlgorithm.Auto"/> resolves to the
+    /// key's natural default — the /SubFilter's digest for everything but DSA.</summary>
+    public static DigestHashAlgorithm ResolveDigest(
+        SignatureKeyKind keyKind, DigestHashAlgorithm requested, DigestHashAlgorithm subFilterDefault)
+    {
+        var digest = requested;
+        if (digest == DigestHashAlgorithm.Auto)
+            digest = keyKind == SignatureKeyKind.Dsa ? DigestHashAlgorithm.Sha1 : subFilterDefault;
+
+        var supported = keyKind switch
+        {
+            SignatureKeyKind.Ecdsa => digest is DigestHashAlgorithm.Sha256 or DigestHashAlgorithm.Sha384
+                or DigestHashAlgorithm.Sha512 or DigestHashAlgorithm.Sha3_256
+                or DigestHashAlgorithm.Sha3_384 or DigestHashAlgorithm.Sha3_512,
+            SignatureKeyKind.Dsa => digest == DigestHashAlgorithm.Sha1,
+            _ => digest is DigestHashAlgorithm.Sha1 or DigestHashAlgorithm.Sha256
+                or DigestHashAlgorithm.Sha384 or DigestHashAlgorithm.Sha512,
+        };
+        if (!supported)
+            throw new System.NotSupportedException(
+                $"Digest algorithm {digest} is not supported for {keyKind} PKCS#7 signing.");
+        return digest;
+    }
+
+    /// <summary>The platform hash name for the digest, used when the signature is
+    /// produced by a platform key (RSA/ECDSA).</summary>
+    private static System.Security.Cryptography.HashAlgorithmName HashName(DigestHashAlgorithm digest) => digest switch
+    {
+        DigestHashAlgorithm.Sha1 => System.Security.Cryptography.HashAlgorithmName.SHA1,
+        DigestHashAlgorithm.Sha384 => System.Security.Cryptography.HashAlgorithmName.SHA384,
+        DigestHashAlgorithm.Sha512 => System.Security.Cryptography.HashAlgorithmName.SHA512,
+        _ => System.Security.Cryptography.HashAlgorithmName.SHA256,
+    };
 
     /// <summary>
     /// Create a PKCS#7 detached signature over a SHA-256 hash.
@@ -149,7 +204,16 @@ internal static class CmsBuilder
                     ?? throw new InvalidOperationException("Certificate has no ECDSA private key.");
                 var sig = ec.SignHash(hash,
                     System.Security.Cryptography.DSASignatureFormat.Rfc3279DerSequence);
-                return (sig, sha1 ? OidEcdsaWithSha1 : OidEcdsaWithSha256, false);
+                return (sig, digest switch
+                {
+                    DigestHashAlgorithm.Sha1 => OidEcdsaWithSha1,
+                    DigestHashAlgorithm.Sha384 => OidEcdsaWithSha384,
+                    DigestHashAlgorithm.Sha512 => OidEcdsaWithSha512,
+                    DigestHashAlgorithm.Sha3_256 => OidEcdsaWithSha3_256,
+                    DigestHashAlgorithm.Sha3_384 => OidEcdsaWithSha3_384,
+                    DigestHashAlgorithm.Sha3_512 => OidEcdsaWithSha3_512,
+                    _ => OidEcdsaWithSha256,
+                }, false);
             }
             case SignatureKeyKind.Dsa:
             {
@@ -164,14 +228,18 @@ internal static class CmsBuilder
                 // otherwise the platform key (a PFX whose encoding the hand-rolled
                 // parser rejected and which fell back to X509Certificate2).
                 if (certificate.PrivateKey is not null)
-                    return (sha1 ? certificate.PrivateKey.SignSha1(hash) : certificate.PrivateKey.SignSha256(hash),
+                    return (digest switch
+                            {
+                                DigestHashAlgorithm.Sha1 => certificate.PrivateKey.SignSha1(hash),
+                                DigestHashAlgorithm.Sha384 => certificate.PrivateKey.SignSha384(hash),
+                                DigestHashAlgorithm.Sha512 => certificate.PrivateKey.SignSha512(hash),
+                                _ => certificate.PrivateKey.SignSha256(hash),
+                            },
                             OidRsaEncryption, true);
                 using (var rsa = System.Security.Cryptography.X509Certificates
                            .RSACertificateExtensions.GetRSAPrivateKey(certificate.DotNetCert!)
                        ?? throw new InvalidOperationException("Certificate has no RSA private key."))
-                    return (rsa.SignHash(hash,
-                                sha1 ? System.Security.Cryptography.HashAlgorithmName.SHA1
-                                     : System.Security.Cryptography.HashAlgorithmName.SHA256,
+                    return (rsa.SignHash(hash, HashName(digest),
                                 System.Security.Cryptography.RSASignaturePadding.Pkcs1),
                             OidRsaEncryption, true);
         }

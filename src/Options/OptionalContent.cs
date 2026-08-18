@@ -74,7 +74,7 @@ public sealed class OptionalContentGroup
     /// <summary>Whether this layer is locked (cannot be toggled by users).</summary>
     public bool IsLocked { get; set; }
 
-    /// <summary>Alias for <see cref="IsLocked"/> matching the Aspose.Pdf public surface.</summary>
+    /// <summary>Alias for <see cref="IsLocked"/> matching the public surface.</summary>
     public bool Locked
     {
         get => IsLocked;

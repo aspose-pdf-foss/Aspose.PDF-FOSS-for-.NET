@@ -68,6 +68,8 @@ internal static class JpxDecoder
         public int Expn;          // quantization exponent
         public int Mant;          // quantization mantissa
         public int Gain;          // log2 gain (0,1,1,2 for LL,HL/LH,HH)
+        public int Guard;         // guard bits (from the governing QCD/QCC)
+        public int Prec = 8;      // owning component's sample precision
     }
 
     private sealed class Resolution
@@ -93,10 +95,18 @@ internal static class JpxDecoder
 
         // COD
         private int _progOrder, _numLayers, _mct, _numLevels, _xcb, _ycb, _cbStyle, _transform;
+        private bool _useSop, _useEph;
         // QCD
         private int _quantStyle, _guardBits;
         private int[] _qExpn = Array.Empty<int>();
         private int[] _qMant = Array.Empty<int>();
+        // QCC — per-component quantization overriding the main QCD (ISO 15444-1
+        // A.6.5). Keyed by component index; parsed in both the main and
+        // tile-part headers.
+        private readonly Dictionary<int, (int style, int guard, int[] expn, int[] mant)> _qcc = new();
+        // Component whose subband structure is currently being built — lets
+        // AssignQuant pick that component's QCC table over the QCD default.
+        private int _curComp;
 
         public Decoder(byte[] data) { _d = data; }
 
@@ -145,6 +155,7 @@ internal static class JpxDecoder
                         {
                             case 0x52: ParseCod(); break;
                             case 0x5C: ParseQcd(e2); break;
+                            case 0x5D: ParseQcc(e2); break;
                         }
                         _p = e2;
                     }
@@ -161,7 +172,8 @@ internal static class JpxDecoder
                     case 0x51: ParseSiz(); break;
                     case 0x52: ParseCod(); break;
                     case 0x5C: ParseQcd(segEnd); break;
-                    default: break; // COC/QCC/RGN/POC/TLM/PLT/COM/etc. — ignored in subset
+                    case 0x5D: ParseQcc(segEnd); break;
+                    default: break; // COC/RGN/POC/TLM/PLT/COM/etc. — ignored in subset
                 }
                 _p = segEnd;
             }
@@ -309,6 +321,8 @@ internal static class JpxDecoder
         private void ParseCod()
         {
             int scod = U8();
+            _useSop = (scod & 2) != 0; // SOP marker segments precede each packet
+            _useEph = (scod & 4) != 0; // EPH marker terminates each packet header
             _progOrder = U8();
             _numLayers = U16();
             _mct = U8();
@@ -330,31 +344,51 @@ internal static class JpxDecoder
             int sqcd = U8();
             _quantStyle = sqcd & 0x1F;
             _guardBits = sqcd >> 5;
+            var (expn, mant) = ParseQuantValues(_quantStyle, segEnd);
+            _qExpn = expn;
+            _qMant = mant;
+        }
+
+        /// <summary>QCC (ISO 15444-1 A.6.5): per-component quantization that
+        /// overrides the main QCD for that component. Ignoring it mis-scales
+        /// every coefficient by the mantissa ratio (a real-world encoder pairs
+        /// a mantissa-free QCD with mantissa-bearing per-component QCCs).</summary>
+        private void ParseQcc(int segEnd)
+        {
+            int comp = _comps.Length < 257 ? U8() : U16();
+            int sqcc = U8();
+            int style = sqcc & 0x1F;
+            int guard = sqcc >> 5;
+            var (expn, mant) = ParseQuantValues(style, segEnd);
+            _qcc[comp] = (style, guard, expn, mant);
+        }
+
+        private (int[] expn, int[] mant) ParseQuantValues(int style, int segEnd)
+        {
             var expn = new List<int>();
             var mant = new List<int>();
-            if (_quantStyle == 0) // no quantization (reversible)
+            if (style == 0) // no quantization (reversible)
             {
                 while (_p < segEnd) { int v = U8(); expn.Add(v >> 3); mant.Add(0); }
             }
             else // scalar derived (1) or expounded (2)
             {
-                while (_p + 1 < segEnd || _p + 1 == segEnd)
+                while (_p + 2 <= segEnd)
                 {
-                    if (_p + 2 > segEnd) break;
                     int v = U16();
                     expn.Add(v >> 11);
                     mant.Add(v & 0x7FF);
-                    if (_quantStyle == 1) break; // derived: single value
+                    if (style == 1) break; // derived: single value
                 }
             }
-            _qExpn = expn.ToArray();
-            _qMant = mant.ToArray();
+            return (expn.ToArray(), mant.ToArray());
         }
 
         // ── Per-component decode ────────────────────────────────────
 
         private void BuildComponent(int ci)
         {
+            _curComp = ci;
             var comp = _comps[ci];
             int tcx0 = Math.Max(_tpx0, _xosiz);
             int tcy0 = Math.Max(_tpy0, _yosiz);
@@ -521,18 +555,24 @@ internal static class JpxDecoder
                 int level = _numLevels - r; // 0..numLevels-1
                 idx = 1 + (_numLevels - 1 - level) * 3 + (b.Orient - 1);
             }
-            if (_quantStyle == 1) // derived — scale from single value
+            // A component with its own QCC uses that table; others fall back to QCD.
+            var (style, guard, expn, mant) = _qcc.TryGetValue(_curComp, out var qc)
+                ? qc
+                : (_quantStyle, _guardBits, _qExpn, _qMant);
+            b.Guard = guard;
+            b.Prec = _curComp < _comps.Length ? _comps[_curComp].Prec : 8;
+            if (style == 1) // derived — scale from single value
             {
-                int baseExpn = _qExpn.Length > 0 ? _qExpn[0] : 0;
-                int baseMant = _qMant.Length > 0 ? _qMant[0] : 0;
+                int baseExpn = expn.Length > 0 ? expn[0] : 0;
+                int baseMant = mant.Length > 0 ? mant[0] : 0;
                 int nb = _numLevels - r;
                 b.Expn = Math.Max(0, baseExpn - (_numLevels - nb));
                 b.Mant = baseMant;
             }
             else
             {
-                b.Expn = idx < _qExpn.Length ? _qExpn[idx] : (_qExpn.Length > 0 ? _qExpn[^1] : 0);
-                b.Mant = idx < _qMant.Length ? _qMant[idx] : (_qMant.Length > 0 ? _qMant[^1] : 0);
+                b.Expn = idx < expn.Length ? expn[idx] : (expn.Length > 0 ? expn[^1] : 0);
+                b.Mant = idx < mant.Length ? mant[idx] : (mant.Length > 0 ? mant[^1] : 0);
             }
         }
 
@@ -544,8 +584,24 @@ internal static class JpxDecoder
             // non-empty packet's body left the stream byte-aligned). An empty packet is a
             // lone 0 flag bit with no body and no re-alignment.
             if (pr.AtEnd) return;
+            // A resilience-marker stream (Scod bits 1/2) wraps every packet: an SOP
+            // segment (FF91 + Lsop + Nsop, 6 bytes) before the header and an EPH
+            // marker (FF92) terminating the header — both sit outside the header
+            // bit-stream, so they must be skipped at the byte level or every
+            // subsequent header bit misparses into noise.
+            if (_useSop) pr.SkipMarker(0x91, 6);
             bool nonEmpty = pr.ReadBit() == 1;
-            if (!nonEmpty) return;
+            if (!nonEmpty)
+            {
+                // With resilience markers the empty header is still padded to a
+                // byte and terminated by EPH before the next packet begins.
+                if (_useSop || _useEph)
+                {
+                    pr.Align();
+                    if (_useEph) pr.SkipMarker(0x92, 2);
+                }
+                return;
+            }
 
             foreach (var band in res.Bands)
             {
@@ -588,6 +644,7 @@ internal static class JpxDecoder
             }
 
             pr.Align();
+            if (_useEph) pr.SkipMarker(0x92, 2);
 
             // Packet body: code-block compressed bytes in the same scan order. A block
             // may receive bytes in several layers, so each layer's contribution is
@@ -656,8 +713,8 @@ internal static class JpxDecoder
 
         private int GuardMaxBitplanes(Subband band)
         {
-            // Mb = guard + expn - 1
-            return _guardBits + band.Expn - 1;
+            // Mb = guard + expn - 1 (guard from the band's governing QCD/QCC)
+            return band.Guard + band.Expn - 1;
         }
 
         private void Dequantize(Subband band, int[] coeffs, int bw, int bh)
@@ -673,19 +730,18 @@ internal static class JpxDecoder
             else
             {
                 // Irreversible 9/7: dequantize to fixed reconstruction.
-                int Mb = _guardBits + band.Expn - 1;
-                double step = (1.0 + band.Mant / 2048.0) * Math.Pow(2.0, band.Expn + band.Gain - band.Expn); // = (1+mant/2048)*2^gain * 2^(Rb-expn)?
                 // Reconstruction: value = q * delta, delta = (1+mant/2048) * 2^(Rb - expn),
                 // Rb = prec + gain. Tier-1 magnitude is in units of 2^(Mb - numbps); but we
                 // decoded full precision, so q already integer at LSB. Use delta directly.
-                int prec = _comps.Length > 0 ? _comps[0].Prec : 8;
-                int Rb = prec + band.Gain;
-                // The 9/7 synthesis filter bank has a non-unit DC gain; the inverse lifting
-                // here reproduces the standard's normalised transform whose reconstructed
-                // coefficients must be scaled by K² (the squared low-pass gain) to land in
-                // the sample range. Without it every irreversible image decodes ~1/K² too
-                // dark (verified against the OpenJPEG reference: white 255 → 211).
-                double delta = (1.0 + band.Mant / 2048.0) * Math.Pow(2.0, Rb - band.Expn) * (K * K);
+                int Rb = band.Prec + band.Gain;
+                // Δ_b = 2^(R_b − ε_b) · (1 + μ_b/2^11) exactly as ISO 15444-1 E.1.1 —
+                // the inverse lifting below already carries the K normalisation per
+                // level (low ×K, high ÷K), so no extra filter-bank gain belongs here.
+                // (A previous K² factor double-compensated that scaling: every
+                // irreversible image decoded with ~1.5× contrast about mid-gray, which
+                // pushed light scan washes to pure white — measured against both the
+                // OpenJPEG and Pillow references on gradient calibration images.)
+                double delta = (1.0 + band.Mant / 2048.0) * Math.Pow(2.0, Rb - band.Expn);
                 for (int i = 0; i < coeffs.Length; i++)
                 {
                     int q = coeffs[i];
@@ -1251,6 +1307,17 @@ internal static class JpxDecoder
         {
             _bufferSize = 0;
             if (_skipNextBit) { _pos++; _skipNextBit = false; }
+        }
+
+        /// <summary>Skip a fixed-size marker segment (SOP/EPH) at the current
+        /// byte-aligned position. A missing marker is tolerated — the encoder may
+        /// omit SOP on some packets even when Scod signals it.</summary>
+        public void SkipMarker(byte second, int totalLength)
+        {
+            if (_bufferSize != 0) return; // not byte-aligned: markers only sit between packets
+            if (_skipNextBit) { _pos++; _skipNextBit = false; }
+            if (_pos + 1 < _d.Length && _d[_pos] == 0xFF && _d[_pos + 1] == second)
+                _pos += totalLength;
         }
 
         public byte[] ReadBytes(int n)

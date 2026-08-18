@@ -153,7 +153,10 @@ public sealed class TaggedContent : ITaggedContent
                 _lsRootElement = root.ChildElements[0];
             else
             {
-                var doc = new LS.PartElement();
+                // The single element under /StructTreeRoot is the document root (/S Document),
+                // the parent every top-level structure element hangs off — matching how a
+                // tagged PDF nests its content and how another document's tree merges in.
+                var doc = new LS.DocumentElement();
                 root.AppendChild(doc);
                 _lsRootElement = doc;
             }

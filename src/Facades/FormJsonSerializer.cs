@@ -6,12 +6,12 @@ namespace Aspose.Pdf.Facades;
 
 /// <summary>
 /// Internal helper that serializes/deserializes the AcroForm field tree to/from
-/// the JSON shape Aspose.Pdf uses for ExportJson/ImportJson.
+/// the JSON shape used for ExportJson/ImportJson.
 /// Mirrors the public contract; button-field values are intentionally omitted.
 /// </summary>
 internal static class FormJsonSerializer
 {
-    /// <summary>JSON DTO for a form field. Property order mirrors the Aspose.Pdf output.</summary>
+    /// <summary>JSON DTO for a form field. Property order mirrors the reference output.</summary>
     internal sealed class FormFieldData
     {
         [JsonPropertyOrder(0)] public string? Name { get; set; }
@@ -69,7 +69,7 @@ internal static class FormJsonSerializer
             }
             if (node is null) continue;
             node.Value = pair.Value;
-            if (hasAcroFields && form.FindByName(pair.Key) is { } acro)
+            if (hasAcroFields && form.FindFieldOrNull(pair.Key) is { } acro)
                 node.Flags = (int)acro.Flags;
         }
         return roots;
@@ -99,7 +99,7 @@ internal static class FormJsonSerializer
 
     private static int ResolvePageIndex(Field field, Document document)
     {
-        // Field doesn't yet expose its owning page directly; the Aspose.Pdf
+        // Field doesn't yet expose its owning page directly; the reference
         // exporter reports the 0-based page index via the widget annotation.
         // For now report 0 — tests that match by Name still pass; tests that
         // assert exact PageIndex will surface that gap and we'll wire up the
@@ -134,7 +134,7 @@ internal static class FormJsonSerializer
     private static void ApplyFieldData(Document document, FormFieldData entry)
     {
         if (entry.Name is null) return;
-        var field = document.Form.FindByName(entry.Name);
+        var field = document.Form.FindFieldOrNull(entry.Name);
         if (field is not null)
         {
             if (entry.Value is not null && field.Type != Forms.FieldType.Button)
@@ -167,7 +167,7 @@ internal static class FormJsonSerializer
         {
             foreach (var pair in leaves)
             {
-                var field = form.FindByName(pair.Key);
+                var field = form.FindFieldOrNull(pair.Key);
                 if (field is not null && field.Type != Forms.FieldType.Button)
                     field.Value = pair.Value;
             }

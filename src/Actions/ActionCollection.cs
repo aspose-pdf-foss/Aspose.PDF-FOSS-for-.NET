@@ -76,7 +76,7 @@ public sealed class ActionCollection : IEnumerable<PdfAction>
     public PdfAction this[int index] => _actions[index];
 
     /// <summary>
-    /// Delete an action at the specified 1-based index (matching .NET Aspose.PDF API).
+    /// Delete an action at the specified 1-based index (matching the public API).
     /// </summary>
     public void Delete(int index)
     {

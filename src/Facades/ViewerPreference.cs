@@ -9,7 +9,7 @@ namespace Aspose.Pdf.Facades;
 /// </summary>
 public class ViewerPreference
 {
-    /// <summary>Default constructor matches the Aspose.Pdf reflection
+    /// <summary>Default constructor matches the public reflection
     /// signature; the class carries no instance state.</summary>
     public ViewerPreference() { }
 
@@ -37,10 +37,10 @@ public class ViewerPreference
     /// <summary>Display the pages in two columns, odd pages on the right.</summary>
     public const int PageLayoutTwoColumnRight = 0x0800;
     /// <summary>Display the pages two at a time, odd pages on the left
-    /// (FOSS extension; Aspose.Pdf does not expose this flag).</summary>
+    /// (FOSS extension; not exposed on the public surface).</summary>
     public const int PageLayoutTwoPageLeft = 0x1000;
     /// <summary>Display the pages two at a time, odd pages on the right
-    /// (FOSS extension; Aspose.Pdf does not expose this flag).</summary>
+    /// (FOSS extension; not exposed on the public surface).</summary>
     public const int PageLayoutTwoPageRight = 0x2000;
 
     // ── ViewerPreferences dictionary flags (bits 16+) ───────────────────────

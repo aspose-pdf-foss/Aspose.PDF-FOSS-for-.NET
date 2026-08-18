@@ -1,12 +1,68 @@
 using Aspose.Pdf.Core;
+using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Annotations;
 
-/// <summary>Standard note-icon appearance streams for /Text annotations,
-/// sized to a 35x35 BBox (PDF 32000 §12.5.6.4). Stroke colour is black by
-/// default; UpdateAppearances substitutes the annotation /C colour when set.</summary>
+/// <summary>Standard note-icon appearance streams for /Text annotations
+/// (PDF 32000 §12.5.6.4). The icon paths span a 20x20 unit box; the first
+/// fill-colour op after the header (`1 g`) is the slot where the annotation's
+/// /C colour goes — the icon body. Later `1 g` ops are genuine white (donut
+/// holes, the question mark). Strokes stay black.</summary>
 internal static class TextAnnotationIcons
 {
+    /// <summary>Side of the square BBox the icon streams are drawn in.</summary>
+    internal const double BoxSize = 20;
+
+    /// <summary>Stream text for the named icon with the annotation's /C colour
+    /// substituted into the body-fill slot. Unknown/missing names fall back to
+    /// the Note icon; a missing colour keeps the white body.</summary>
+    internal static string ContentFor(string? name, (double R, double G, double B)? color)
+    {
+        if (name is null || !Streams.TryGetValue(name, out var content))
+            content = Streams["Note"];
+        if (color is { } c)
+        {
+            string F(double v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+            var slot = content.IndexOf("1 g", System.StringComparison.Ordinal);
+            if (slot >= 0)
+                content = content.Substring(0, slot)
+                    + $"{F(c.R)} {F(c.G)} {F(c.B)} rg"
+                    + content.Substring(slot + "1 g".Length);
+        }
+        return content;
+    }
+
+    /// <summary>Build the icon appearance as a Form XObject for a /Text
+    /// annotation dictionary that carries no /AP — renderers map it onto the
+    /// annotation /Rect like any other appearance form.</summary>
+    internal static PdfStream BuildIconForm(PdfDictionary annot, PdfReader reader)
+    {
+        var content = ContentFor(annot.GetName("Name") ?? "Note", ReadColor(reader, annot.Get("C")));
+        var form = new PdfStream(new PdfDictionary(), System.Text.Encoding.ASCII.GetBytes(content));
+        form.Dict.Set("Type", new PdfName("XObject"));
+        form.Dict.Set("Subtype", new PdfName("Form"));
+        var bbox = new PdfArray();
+        bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(0));
+        bbox.Add(new PdfReal(BoxSize)); bbox.Add(new PdfReal(BoxSize));
+        form.Dict.Set("BBox", bbox);
+        return form;
+    }
+
+    private static (double R, double G, double B)? ReadColor(PdfReader reader, PdfObject? o)
+    {
+        if (reader.Resolve(o) is not PdfArray a) return null;
+        double Num(PdfObject? v) => v switch { PdfInteger i => i.Value, PdfReal r => r.Value, _ => 0 };
+        switch (a.Count)
+        {
+            case 1: { double v = Num(a[0]); return (v, v, v); }
+            case 3: return (Num(a[0]), Num(a[1]), Num(a[2]));
+            case 4:
+                double c = Num(a[0]), m = Num(a[1]), y = Num(a[2]), k = Num(a[3]);
+                return ((1 - c) * (1 - k), (1 - m) * (1 - k), (1 - y) * (1 - k));
+            default: return null;
+        }
+    }
+
     public static readonly System.Collections.Generic.Dictionary<string, string> Streams = new()
     {
         ["Check"] = @"q

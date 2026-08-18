@@ -111,8 +111,12 @@ public abstract class ImageDevice
     private static IPageRenderer DefaultRenderer() =>
         OperatingSystem.IsWindows() ? new GdiPlusPageRenderer() : new SoftwarePageRenderer();
 
-    /// <summary>Convert a points dimension to pixels at the given DPI.
-    /// PDF points are 1/72 inch; pixels = points × DPI / 72.</summary>
+    /// <summary>Convert a points dimension to pixels at the given DPI for the
+    /// EXPLICIT page-size device ctors (e.g. <c>JpegDevice(PageSize.A4)</c>),
+    /// which round to the nearest pixel — A4 594.96 pt at 150 dpi = 1239.5 → 1240.
+    /// The DPI-follows-page RENDER path uses a float32-narrow +
+    /// truncate rule instead (see <see cref="SoftwarePageRenderer.PagePixels"/>);
+    /// the two ctor families genuinely differ.</summary>
     private static int PointsToPixels(double points, double dpi) =>
         (int)Math.Round(points * dpi / 72.0);
 
@@ -130,7 +134,7 @@ public abstract class ImageDevice
     /// Render a page to a <see cref="System.Drawing.Bitmap"/>. The bitmap is built from the
     /// internal RGBA buffer; on non-Windows hosts <c>System.Drawing.Common</c> raises
     /// <see cref="System.PlatformNotSupportedException"/> at bitmap construction time
-    /// — that's the cross-platform shape Aspose.Pdf also ships.
+    /// — the expected cross-platform shape for this API.
     /// </summary>
     public System.Drawing.Bitmap GetBitmap(Page page)
     {
@@ -188,7 +192,7 @@ public abstract class ImageDevice
     /// <summary>
     /// Render a page to an RGBA pixel buffer using the configured renderer and resolution.
     /// When <see cref="TargetWidth"/>/<see cref="TargetHeight"/> are set, the rendered buffer is
-    /// bilinearly resampled to those pixel dimensions (matches Aspose.Pdf's
+    /// bilinearly resampled to those pixel dimensions (the
     /// <c>PngDevice(int, int, Resolution)</c> contract: resolution controls render quality,
     /// the size pair pins the final pixel dimensions).
     /// </summary>
@@ -196,17 +200,20 @@ public abstract class ImageDevice
     {
         // When the caller pinned both pixel dimensions AND the target aspect matches
         // the page aspect, render straight at that size instead of
-        // render-at-DPI-then-resample. The template PNG is rasterized at the final
-        // 850×1100 grid too, so any stroke-hinting rules (pixel-grid snap for ~1px
+        // render-at-DPI-then-resample. Drawing straight on the final grid (e.g.
+        // 850×1100) means any stroke-hinting rules (pixel-grid snap for ~1px
         // strokes) only take effect when we're actually drawing at 1.39-px line
         // widths — at 300-DPI intermediate resolution all lines are 4+ pixels wide
         // and the hinting path is skipped. For mismatched aspects (e.g. 500×700 on
         // a 612×792 Letter page) we fall through to render-uniformly-then-resample
-        // so the content fills the target canvas the way Aspose's GDI+ renderer does.
+        // so the content stretches to fill the target canvas.
         // Propagate the caller's default-font substitution name so runs whose own font
         // program can't be resolved render with it instead of vanishing.
         if (OperatingSystem.IsWindows() && _renderer is GdiPlusPageRenderer gdiOpt)
+        {
             gdiOpt.DefaultFontName = RenderingOptions?.DefaultFontName;
+            gdiOpt.AliasedVectorFills = RenderingOptions?.BarcodeOptimization ?? false;
+        }
 
         if (TargetWidth > 0 && TargetHeight > 0)
         {
@@ -221,14 +228,14 @@ public abstract class ImageDevice
             }
         }
 
-        // Out-of-memory guard (Aspose.Pdf parity): when the page's natural
+        // Out-of-memory guard: when the page's natural
         // pixel count at the requested DPI exceeds 40M pixels (~160 MB RGBA), halve
         // the effective resolution until it fits. Oversized-page renders (wall-plot
         // pages at 300 DPI: 13200px → 6600, 16500px → 8250) come back at half/quarter
         // scale instead of exhausting memory; explicitly pinned TargetWidth/Height
-        // outputs are never affected. The bound is bracketed by the reference
-        // contract: 16500×8850 must halve to 8250×4425 (36.5M px allowed) while
-        // 13200×3300 (43.6M px) must halve to 6600×1650.
+        // outputs are never affected. The bound is bracketed so that
+        // 16500×8850 halves to 8250×4425 (36.5M px allowed) while
+        // 13200×3300 (43.6M px) halves to 6600×1650.
         int dpiX = Resolution.X, dpiY = Resolution.Y;
         if (TargetWidth <= 0 && TargetHeight <= 0)
         {
@@ -258,7 +265,7 @@ public abstract class ImageDevice
     /// <summary>
     /// Bilinear-resample an RGBA buffer to a new pixel size. Samples at pixel centres
     /// (GDI+-compatible offset) so straight scales of clean integer-aspect pages land on
-    /// the same grid the template was rasterised against.
+    /// a GDI+-identical pixel grid.
     /// </summary>
     private static RgbaBuffer ResampleBilinear(RgbaBuffer src, int dstW, int dstH)
     {

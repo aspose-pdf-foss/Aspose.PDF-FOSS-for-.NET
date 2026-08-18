@@ -14,8 +14,8 @@ namespace Aspose.Pdf.Text;
 ///
 /// Widths and per-glyph metrics are the fallback font's, not the original
 /// PDF font's — character advances can drift slightly. Acceptable for
-/// visual-comparison tests whose tolerance is pixel-neighbourhood-based;
-/// precise-typography workflows would need the actual Adobe reference fonts.
+/// close visual rendering; precise-typography workflows would need the
+/// actual Adobe reference fonts.
 /// </summary>
 internal static class CjkFallbackFont
 {
@@ -51,8 +51,8 @@ internal static class CjkFallbackFont
     /// Resolve a system/registered CJK font matching a non-embedded font's /BaseFont
     /// (serif vs sans, weight): e.g. MS-PMincho → MS Mincho, SimHei/黑体 → a heavy
     /// sans, SimSun/宋体 → SimSun. Registered <see cref="FontRepository"/> sources are
-    /// tried first — that's how the test harness (and Aspose.Pdf) supply
-    /// fonts like MSMINCHO.TTF that aren't installed on the host — then the installed
+    /// tried first — that's how callers supply fonts like MSMINCHO.TTF
+    /// that aren't installed on the host — then the installed
     /// system fonts, then the generic broad-coverage fallback (<see cref="TryGet"/>).
     /// </summary>
     public static GlyphOutlineParser? ResolveNamed(string? baseFont, string? ordering = null)
@@ -169,8 +169,8 @@ internal static class CjkFallbackFont
                    "Dotum", "돋움", "Gulim", "굴림", "Gungsuh", "궁서", "명조", "고딕", "Malgun", "맑은"))
             return (new[] { "Malgun Gothic", "Batang", "Gulim" },
                     new[] { F + "malgun.ttf", F + "batang.ttc", F + "gulim.ttc" });
-        // Japanese Mincho (serif). MS Mincho isn't installed on modern Windows; the
-        // test harness registers MSMINCHO.TTF, so try the repository first.
+        // Japanese Mincho (serif). MS Mincho isn't installed on modern Windows; callers
+        // typically register MSMINCHO.TTF, so try the repository first.
         if (Has("Mincho", "明朝", "Ryumin"))      // 明朝
             return (new[] { "MSMINCHO", "MS Mincho", "MS-Mincho" },
                     new[] { F + "msmincho.ttc", F + "yumin.ttf", F + "msgothic.ttc" });

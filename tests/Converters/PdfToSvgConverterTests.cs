@@ -68,8 +68,9 @@ public class PdfToSvgConverterTests
 
         var converter = new PdfToSvgConverter();
         var svg = converter.SavePageAsSvg(doc, 1);
-        Assert.Contains("width=\"612\"", svg);
-        Assert.Contains("height=\"792\"", svg);
+        // Page geometry is carried by the pt-space viewBox; width/height are CSS px.
+        Assert.Contains("viewBox=\"0 0 612 792\"", svg);
+        Assert.Contains("width=\"816\"", svg);
     }
 
     [Fact]
@@ -100,7 +101,8 @@ public class PdfToSvgConverterTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.StartsWith("<svg", svg);
+        Assert.StartsWith("<?xml", svg);
+        Assert.Contains("<svg", svg);
         Assert.Contains("</svg>", svg);
     }
 

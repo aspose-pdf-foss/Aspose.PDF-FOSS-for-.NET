@@ -4,7 +4,7 @@ namespace Aspose.Pdf.Forms;
 /// Represents a single field of an XFA form addressed by its template SOM path
 /// (e.g. <c>form1[0].#subform[0].TextField1[0]</c>). Obtain an instance via
 /// <see cref="GetInstance(XFA, string)"/>; <see cref="Value"/> returns the field's
-/// bound datasets value. This surface matches the Aspose.Pdf public API.
+/// bound datasets value. This surface matches the public API.
 /// </summary>
 public sealed class XfaField
 {

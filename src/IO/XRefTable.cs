@@ -6,7 +6,7 @@ namespace Aspose.Pdf.IO;
 internal sealed class XRefTable
 {
     private readonly Dictionary<int, XRefEntry> _entries = new();
-    private readonly HashSet<int> _xrefStreamObjNums = new();
+    private readonly HashSet<(int objNum, long offset)> _xrefStreamObjNums = new();
     private PdfDictionary? _trailer;
 
     public PdfDictionary Trailer => _trailer ?? throw new InvalidOperationException("No trailer found");
@@ -26,7 +26,19 @@ internal sealed class XRefTable
     /// </summary>
     public HashSet<int> InfrastructureObjectNumbers()
     {
-        var infra = new HashSet<int>(_xrefStreamObjNums);
+        var infra = new HashSet<int>();
+        foreach (var (objNum, offset) in _xrefStreamObjNums)
+        {
+            // An incremental update can REUSE a superseded xref stream's object
+            // number for a live object (a page content stream can sit at the object
+            // number an older increment used for its xref stream). The number is
+            // infrastructure only while the merged table still points AT that xref
+            // stream; if the newest chain redirected it to other data, the object is
+            // live and must be carried over on save.
+            if (!_entries.TryGetValue(objNum, out var e) || !e.InUse
+                || (!e.IsCompressed && e.Offset == offset))
+                infra.Add(objNum);
+        }
         foreach (var entry in _entries.Values)
             if (entry.IsCompressed)
                 infra.Add(entry.StreamObjectNumber);
@@ -337,8 +349,10 @@ internal sealed class XRefTable
         UsedXrefStream = true;
 
         // Remember this xref stream's own object number so the writer can skip it on save
-        // (the cross-reference stream is always regenerated, never carried over).
-        _xrefStreamObjNums.Add(indirectObj.ObjectNumber);
+        // (the cross-reference stream is always regenerated, never carried over). The
+        // offset is kept so InfrastructureObjectNumbers can tell a still-current xref
+        // stream from a number a later increment redefined as a live object.
+        _xrefStreamObjNums.Add((indirectObj.ObjectNumber, offset));
 
         var dict = stream.Dict;
         _trailer ??= dict;

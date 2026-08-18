@@ -100,7 +100,7 @@ public enum LightingSchemeType
     Headlamp,
 }
 
-/// <summary>Lighting scheme applied to a PDF 3D artwork (Aspose.Pdf shape).
+/// <summary>Lighting scheme applied to a PDF 3D artwork (public-API shape).
 /// Stored only.</summary>
 public sealed class PDF3DLightingScheme
 {
@@ -149,7 +149,7 @@ public enum RenderModeType
     ShadedIllustration,
 }
 
-/// <summary>Render mode applied to a 3D artwork view (Aspose.Pdf shape).
+/// <summary>Render mode applied to a 3D artwork view (public-API shape).
 /// Stored only.</summary>
 public sealed class PDF3DRenderMode
 {
@@ -195,7 +195,7 @@ public sealed class PDF3DRenderMode
 }
 
 /// <summary>Orientation angles for the cutting plane of a 3D cross-section
-/// (Aspose.Pdf shape). Stored only.</summary>
+/// (public-API shape). Stored only.</summary>
 public sealed class PDF3DCuttingPlaneOrientation
 {
     public PDF3DCuttingPlaneOrientation() { }
@@ -215,7 +215,7 @@ public sealed class PDF3DCuttingPlaneOrientation
         => $"({AngleX?.ToString() ?? "_"}, {AngleY?.ToString() ?? "_"}, {AngleZ?.ToString() ?? "_"})";
 }
 
-/// <summary>Single cross-section through a PDF 3D model (Aspose.Pdf shape).
+/// <summary>Single cross-section through a PDF 3D model (public-API shape).
 /// Stored only.</summary>
 public sealed class PDF3DCrossSection
 {
@@ -230,7 +230,7 @@ public sealed class PDF3DCrossSection
 }
 
 /// <summary>Ordered collection of <see cref="PDF3DCrossSection"/> entries
-/// applied to a PDF 3D view (Aspose.Pdf shape). Stored only.</summary>
+/// applied to a PDF 3D view (public-API shape). Stored only.</summary>
 public sealed class PDF3DCrossSectionArray
 {
     private readonly List<PDF3DCrossSection> _items = new();
@@ -239,8 +239,8 @@ public sealed class PDF3DCrossSectionArray
 
     public int Count => _items.Count;
 
-    // Aspose.Pdf exposes this collection as 1-based (the first entry
-    // is [1]); mirror that so read-back positions match the reference API.
+    // This collection is exposed as 1-based (the first entry
+    // is [1]), so indexed read-backs line up with insertion positions.
     public PDF3DCrossSection this[int index]
     {
         get => _items[index - 1];
@@ -249,10 +249,13 @@ public sealed class PDF3DCrossSectionArray
 
     public void Add(PDF3DCrossSection crossSection) => _items.Add(crossSection);
     public void RemoveAll() => _items.Clear();
-    public void RemoveAt(int index) => _items.RemoveAt(index);
+
+    // 1-based like the indexer: RemoveAt(2) on a two-entry collection removes
+    // the second entry.
+    public void RemoveAt(int index) => _items.RemoveAt(index - 1);
 }
 
-/// <summary>Camera + render-state snapshot of a 3D artwork (Aspose.Pdf
+/// <summary>Camera + render-state snapshot of a 3D artwork (public-API
 /// shape). Stored only.</summary>
 public sealed class PDF3DView
 {
@@ -288,7 +291,7 @@ public sealed class PDF3DView
 }
 
 /// <summary>Indexed collection of <see cref="PDF3DView"/> snapshots
-/// (Aspose.Pdf shape). Stored only.</summary>
+/// (public-API shape). Stored only.</summary>
 public sealed class PDF3DViewArray
 {
     private readonly List<PDF3DView> _items = new();
@@ -297,8 +300,8 @@ public sealed class PDF3DViewArray
 
     public int Count => _items.Count;
 
-    // Aspose.Pdf exposes this collection as 1-based (the first view
-    // is [1]); mirror that so read-back positions match the reference API.
+    // This collection is exposed as 1-based (the first view
+    // is [1]), so indexed read-backs line up with insertion positions.
     public PDF3DView this[int index]
     {
         get => _items[index - 1];
@@ -307,13 +310,15 @@ public sealed class PDF3DViewArray
 
     public void Add(PDF3DView view) => _items.Add(view);
     public void RemoveAll() => _items.Clear();
-    public void RemoveAt(int index) => _items.RemoveAt(index);
+
+    // 1-based like the indexer: RemoveAt(1) drops the first view.
+    public void RemoveAt(int index) => _items.RemoveAt(index - 1);
 
     internal IEnumerable<PDF3DView> Items => _items;
 }
 
 /// <summary>A 3D artwork dictionary referenced by a PDF 3D annotation
-/// (Aspose.Pdf shape). Stored only.</summary>
+/// (public-API shape). Stored only.</summary>
 public sealed class PDF3DArtwork
 {
     public PDF3DArtwork(Document doc, PDF3DContent content)

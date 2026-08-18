@@ -7,13 +7,11 @@ namespace Aspose.Pdf.Devices;
 ///
 /// Background: PDF 32000 §6.2.4.2's algebraic CMYK→RGB formula
 /// <c>R = (1−C)(1−K)</c> is *spec-correct* but produces results that
-/// differ markedly from what GDI+ / Acrobat / Aspose.Pdf
-/// emit when rasterising CMYK fills. Those products run CMYK through
-/// an ICC profile (typically a SWOP-style transform) — non-linear,
-/// per-channel, with explicit dot-gain compensation. The result is
-/// usually 20-30% brighter per channel than the naïve subtractive
-/// formula, which is what the GDI+-rendered visual-test templates
-/// have baked in.
+/// differ markedly from what GDI+ or Acrobat emit when rasterising
+/// CMYK fills. Those products run CMYK through an ICC profile
+/// (typically a SWOP-style transform) — non-linear, per-channel,
+/// with explicit dot-gain compensation. The result is usually
+/// 20-30% brighter per channel than the naïve subtractive formula.
 ///
 /// Implementation: at build time we sample 9 levels per CMYK channel
 /// (6561 samples) through macOS's <c>Generic CMYK Profile.icc</c>
@@ -22,11 +20,9 @@ namespace Aspose.Pdf.Devices;
 /// runtime we quadrilinear-interpolate between the 16 nearest grid
 /// corners.
 ///
-/// On the canonical regression target — <c>/IC [0.2 0.3 0.7 0.6]</c>
-/// — this gives sRGB (91, 81, 50) versus the
-/// GDI+ template's (102, 102, 51). All three channels land within
-/// the visual-comparison tolerance (colorDelta=30), where the naïve
-/// formula's (82, 71, 31) was off by 31 on G.
+/// For <c>/IC [0.2 0.3 0.7 0.6]</c> this gives sRGB (91, 81, 50)
+/// versus GDI+'s (102, 102, 51) — every channel within 30 levels,
+/// where the naïve formula's (82, 71, 31) was off by 31 on G.
 /// </summary>
 internal static class CmykToRgbLut
 {

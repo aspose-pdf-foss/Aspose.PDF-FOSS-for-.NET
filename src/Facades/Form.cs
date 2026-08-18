@@ -14,6 +14,7 @@ public sealed class Form : IDisposable
     private Document? _doc;
     private readonly bool _ownsDoc;
     private string? _destPath;
+    private bool _ownsDestStream;
     private FormImportResult[] _importResult = Array.Empty<FormImportResult>();
 
     /// <summary>Per-field outcomes from the most recent ImportFdf/
@@ -68,7 +69,13 @@ public sealed class Form : IDisposable
         _doc = Document.Open(srcFileName);
         _ownsDoc = true;
         _destPath = destFileName;
-        DestStream = new FileStream(destFileName, FileMode.Create, FileAccess.Write);
+        // Callers reach for DestStream directly, so it exists from construction. The handle
+        // is shared and released on Dispose: several facades are routinely pointed at one
+        // destination, and an exclusive handle held for the facade's lifetime would fail the
+        // second binding — and any reader of the destination — with a sharing violation.
+        DestStream = new FileStream(destFileName, FileMode.Create, FileAccess.Write,
+            FileShare.ReadWrite | FileShare.Delete);
+        _ownsDestStream = true;
     }
 
     /// <summary>Create a Form facade from an input file, writing to a stream on Save.</summary>
@@ -92,7 +99,7 @@ public sealed class Form : IDisposable
         // Buffer the source into an independent array so the facade never owns or
         // mutates the caller's stream (Form must not dispose the
         // source stream on Save). A seekable source is read from offset 0 —
-        // Aspose.Pdf semantics, so `doc.Save(ms); new Form(ms)` works without
+        // so `doc.Save(ms); new Form(ms)` works without
         // the caller rewinding — and the caller's position is restored afterwards so
         // the same source stream can be reused across several Form instances in a loop.
         long origPos = srcStream.CanSeek ? srcStream.Position : -1;
@@ -138,6 +145,7 @@ public sealed class Form : IDisposable
     public void BindPdf(Stream stream)
     {
         using var ms = new MemoryStream();
+        if (stream.CanSeek && stream.Position != 0) stream.Position = 0;
         stream.CopyTo(ms);
         _doc = Document.Open(ms.ToArray());
     }
@@ -149,7 +157,7 @@ public sealed class Form : IDisposable
     public int GetFieldLimit(string fieldName)
     {
         if (_doc?.Form is null) return 0;
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
         return field is TextBoxField tb ? tb.MaxLen : 0;
     }
 
@@ -163,7 +171,7 @@ public sealed class Form : IDisposable
             var val = _doc.Form.GetXfaFieldValue(fieldName);
             if (val is not null) return val;
         }
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
         if (field is null) return null;
         // An existing field with no value (e.g. an unsigned signature field) reads as an
         // empty string, not null — callers expect GetField on a known field to be non-null.
@@ -178,20 +186,24 @@ public sealed class Form : IDisposable
         if (_doc.Form.IsXfa)
         {
             // Only fill a path that resolves to a genuine XFA template field — a non-matching
-            // (e.g. wrong-container) or partial (leaf-only) path returns false, matching
-            // Aspose.Pdf, rather than silently creating a stray datasets node.
+            // (e.g. wrong-container) or partial (leaf-only) path returns false
+            // rather than silently creating a stray datasets node.
             if (!_doc.Form.XfaTemplateFieldExists(fieldName)) return false;
             _doc.Form.SetXfaFieldValue(fieldName, fieldValue);
             // Also try AcroForm field if it exists
-            var field = _doc.Form.FindByName(fieldName);
+            var field = _doc.Form.FindFieldOrNull(fieldName);
             if (field is not null) field.Value = fieldValue;
             return true;
         }
         else
         {
-            var field = _doc.Form.FindByName(fieldName);
+            var field = _doc.Form.FindFieldOrNull(fieldName);
             if (field is null) return false;
-            field.Value = fieldValue;
+            // The facade fills raw: a value the field's /AA/F formatter cannot
+            // parse is still stored and rendered verbatim (the DOM Value setter
+            // keeps reject-invalid semantics).
+            if (field is TextBoxField tb) tb.SetValue(fieldValue, validateFormat: false);
+            else field.Value = fieldValue;
             return true;
         }
     }
@@ -206,13 +218,17 @@ public sealed class Form : IDisposable
     public FieldType GetFieldType(string fieldName)
     {
         if (_doc is null) return FieldType.InvalidNameOrType;
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
         if (field is not null)
         {
             // An image field is a push button laid out for an icon (/MK /TP 1) or
             // one whose appearance draws an image XObject (e.g. after FillImageField).
             // Detect that before the generic FT mapping, which reports PushButton.
             if (field is ButtonField && IsImageButton(field)) return FieldType.Image;
+            // A barcode field is a text field carrying a paper-metadata dictionary
+            // (/PMD, PDF 32000 §12.7.4.3) — the FT mapping alone reports Text.
+            if (field.Type == Forms.FieldType.Text && field.Dict.ContainsKey("PMD"))
+                return FieldType.Barcode;
             return MapToFacadeFieldType(field.Type);
         }
         // Dynamic XFA forms carry no AcroForm twin for their fields, so resolve the
@@ -318,7 +334,7 @@ public sealed class Form : IDisposable
     public FormFieldFacade? GetFieldFacade(string fieldName)
     {
         if (_doc is null) return null;
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
 
         // For XFA forms, field may not exist in AcroForm — build facade from XFA template
         if (field is null && _doc.Form.IsXfa)
@@ -414,7 +430,7 @@ public sealed class Form : IDisposable
     public string? GetButtonOptionCurrentValue(string fieldName)
     {
         if (_doc is null) return null;
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
         if (field is not null)
         {
             var v = field.Value;
@@ -438,7 +454,7 @@ public sealed class Form : IDisposable
     public Dictionary<string, string>? GetButtonOptionValues(string fieldName)
     {
         if (_doc is null) return null;
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
 
         var result = new Dictionary<string, string>();
         if (field is not null)
@@ -568,7 +584,7 @@ public sealed class Form : IDisposable
             // Each field name is reported once. A radio/checkbox group whose widgets
             // are split across several /Kids (or that resolves through more than one
             // enumerated entry) must not inflate the count — the facade lists the
-            // logical field name a single time, matching the reference.
+            // logical field name a single time.
             var names = new List<string>();
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var f in _doc.Form.Fields)
@@ -587,7 +603,7 @@ public sealed class Form : IDisposable
     public string GetFullFieldName(string fieldName)
     {
         if (_doc is null) return fieldName;
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
         return field?.FullName ?? field?.PartialName ?? fieldName;
     }
 
@@ -598,7 +614,7 @@ public sealed class Form : IDisposable
     public void FlattenField(string fieldName)
     {
         if (_doc is null) return;
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
         if (field is null) return;
         _doc.Form.Flatten(_doc);
     }
@@ -616,13 +632,31 @@ public sealed class Form : IDisposable
         // template into a flattened static page is a separate, unimplemented feature.
         if (_doc.Form.IsXfa)
         {
-            _doc.Form.SetXfaFieldsReadOnly();
+            if (_doc.Form.Type == FormType.Dynamic)
+            {
+                _doc.Form.SetXfaFieldsReadOnly();
+                return;
+            }
+            // Static XFA: the widgets carry real /AP + /Rect, so fold them into the page
+            // content as-authored (no appearance regen — the /AP already reflects the
+            // filled value, and regenerating would repaint with this library's default
+            // text layout instead of the authored one). Standard-14 fonts referenced by
+            // the folded appearances are subset-embedded at save so the flattened text
+            // keeps an embedded font.
+            _doc.EmbedStandardFonts = true;
+            _doc.Form.Flatten(_doc,
+                settings: new Forms.Form.FlattenSettings { HideButtons = true, UpdateAppearances = false },
+                frmStartIndex: 1, flattenNonWidgets: true);
             return;
         }
         // The facade flatten numbers its flattened FRM{n} XObjects from 1 (document/form flatten
         // numbers from 0) and folds every annotation — including markup such as FreeText — into
-        // the page content so the FRM index lines up with /Annots. Matches Aspose.Pdf.
-        _doc.Form.Flatten(_doc, settings: null, frmStartIndex: 1, flattenNonWidgets: true);
+        // the page content so the FRM index lines up with /Annots. Push buttons carry no
+        // persistent value and are UI affordances, so flattening drops them entirely rather than
+        // stamping their (often coloured) appearance as static ink.
+        _doc.Form.Flatten(_doc,
+            settings: new Forms.Form.FlattenSettings { HideButtons = true, UpdateAppearances = true },
+            frmStartIndex: 1, flattenNonWidgets: true);
     }
 
     /// <summary>
@@ -637,7 +671,7 @@ public sealed class Form : IDisposable
         if (_doc is null) throw new InvalidOperationException("No document bound.");
 
         var xml = new XmlDocument();
-        // Aspose.Pdf reads the XML through the Windows default codepage unless
+        // The XML is read through the Windows default codepage unless
         // the stream carries a BOM or an explicit <?xml encoding=...?> declaration, so
         // UTF-8 bytes in a bare XML arrive as Windows-1252 characters. Field values
         // written that way round-trip through the XFA datasets verbatim; decode the
@@ -658,6 +692,10 @@ public sealed class Form : IDisposable
             }
             if (hasBom || hasDeclaredEncoding)
                 xml.Load(new MemoryStream(bytes));
+            else if (IsValidUtf8(bytes))
+                // Bare XML that decodes cleanly as UTF-8 is UTF-8 (the XML default);
+                // only byte sequences that can't be UTF-8 take the legacy codepage read.
+                xml.LoadXml(new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes));
             else
                 xml.LoadXml(Aspose.Pdf.Text.Cp1252.GetString(bytes));
         }
@@ -685,6 +723,19 @@ public sealed class Form : IDisposable
         }
         ImportXmlAcroForm(xml.DocumentElement!);
         _importResult = TrackResults(names);
+    }
+
+    private static bool IsValidUtf8(byte[] bytes)
+    {
+        try
+        {
+            new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true).GetCharCount(bytes);
+            return true;
+        }
+        catch (System.Text.DecoderFallbackException)
+        {
+            return false;
+        }
     }
 
     private static void CollectXmlFieldNames(XmlNode node, string? parentPath, List<string> result)
@@ -753,7 +804,15 @@ public sealed class Form : IDisposable
         {
             // Persist into the XFA datasets, but still report per-field import
             // status (TrackResults resolves names against the XFA field paths).
-            var xfaNames = ParseXfdfFieldNames(xfdfXml);
+            // A self-closing <field/> (no <fields>, no <value>) is ambiguous: it is
+            // either an unfilled leaf field or a childless container — both self-close
+            // since the export omits the empty <fields> wrapper. Only a genuine field
+            // should surface as an import result; a childless container carries no data
+            // and must not be reported as FieldNotFound. Gate self-closing entries on
+            // the XFA template so containers are dropped while unfilled leaves are kept.
+            var xfaPaths = XfaFieldPathsNorm();
+            var xfaNames = ParseXfdfFieldNames(xfdfXml,
+                selfClosingIsField: path => xfaPaths is not null && IsKnownXfaField(path, xfaPaths));
             ImportXfdfXfa(xfdfXml);
             _importResult = TrackResults(xfaNames);
             return;
@@ -795,7 +854,7 @@ public sealed class Form : IDisposable
         // (from a flat-FDF /T(Employee[0])) matches the full path form1[0]…Employee[0],
         // and a full dotted path matches exactly. Only genuine template fields are in
         // the set, so a field named in the import but absent from the form (e.g.
-        // 33618's TextFieldX) reports FieldNotFound.
+        // an FDF entry naming a field the template never declares) reports FieldNotFound.
         List<string>? xfaPathsNorm = XfaFieldPathsNorm();
 
         var list = new List<FormImportResult>();
@@ -803,7 +862,7 @@ public sealed class Form : IDisposable
         {
             bool found = xfaPathsNorm is not null
                 ? IsKnownXfaField(name, xfaPathsNorm)
-                : form.FindByName(name) is not null;
+                : form.FindFieldOrNull(name) is not null;
             var status = found ? ImportStatus.Success : ImportStatus.FieldNotFound;
             list.Add(new FormImportResult { FieldName = name, Status = status });
         }
@@ -828,7 +887,8 @@ public sealed class Form : IDisposable
         return normPaths.Any(p => p == n || p.EndsWith("." + n, StringComparison.Ordinal));
     }
 
-    private static List<string> ParseXfdfFieldNames(string xfdfXml)
+    private static List<string> ParseXfdfFieldNames(string xfdfXml,
+        Func<string, bool>? selfClosingIsField = null)
     {
         var result = new List<string>();
         try
@@ -837,14 +897,20 @@ public sealed class Form : IDisposable
             var ns = doc.Root?.GetDefaultNamespace() ?? System.Xml.Linq.XNamespace.None;
             var fields = doc.Root?.Element(ns + "fields");
             if (fields is null) return result;
-            CollectXfdfFieldNames(fields, ns, parentPath: null, result);
+            CollectXfdfFieldNames(fields, ns, parentPath: null, result, selfClosingIsField);
         }
         catch { /* malformed XFDF — leave list empty */ }
         return result;
     }
 
+    // <paramref name="selfClosingIsField"/> decides whether a self-closing <field/> (one
+    // with neither a nested <fields> nor a <value>) names a real importable field. When
+    // null every self-closing entry is treated as a field (AcroForm behaviour); the XFA
+    // path passes a predicate so childless-container fields — which self-close since the
+    // export dropped their empty <fields> wrapper — are not mistaken for missing leaves.
     private static void CollectXfdfFieldNames(System.Xml.Linq.XElement fieldsContainer,
-        System.Xml.Linq.XNamespace ns, string? parentPath, List<string> result)
+        System.Xml.Linq.XNamespace ns, string? parentPath, List<string> result,
+        Func<string, bool>? selfClosingIsField)
     {
         foreach (var fieldEl in fieldsContainer.Elements(ns + "field"))
         {
@@ -854,9 +920,11 @@ public sealed class Form : IDisposable
             // <field><fields><field name="..."> nesting → recurse
             var nestedFields = fieldEl.Element(ns + "fields");
             if (nestedFields is not null)
-                CollectXfdfFieldNames(nestedFields, ns, path, result);
-            else
-                result.Add(path);
+                CollectXfdfFieldNames(nestedFields, ns, path, result, selfClosingIsField);
+            else if (fieldEl.Element(ns + "value") is not null)
+                result.Add(path); // leaf carrying a value
+            else if (selfClosingIsField is null || selfClosingIsField(path))
+                result.Add(path); // self-closing: only genuine (unfilled) leaf fields
         }
     }
 
@@ -1151,7 +1219,7 @@ public sealed class Form : IDisposable
     public bool HasField(string fullName)
     {
         if (_doc is null) return false;
-        return _doc.Form.FindByName(fullName) is not null;
+        return _doc.Form.FindFieldOrNull(fullName) is not null;
     }
 
     /// <summary>Destination file name for saving.</summary>
@@ -1193,16 +1261,15 @@ public sealed class Form : IDisposable
                 DestStream.SetLength(0);
             }
             DestStream.Write(bytes, 0, bytes.Length);
-            // Form(srcPath, destPath) opens DestStream itself in the ctor; the
-            // contract is that Save() returns with the destination
-            // file fully written and unlocked, so callers can immediately do
-            // `new Document(destPath)`. Without this dispose, the FileStream
-            // opened in the (string,string) ctor stayed open for the lifetime
-            // of the Form facade and locked the output for any reader.
-            if (_destPath is not null)
+            // A stream this facade opened itself is closed here: the contract is that Save()
+            // returns with the destination fully written and unlocked, so callers can
+            // immediately do `new Document(destPath)`. A caller-supplied stream is left
+            // open — closing it would be the caller's call, not ours.
+            if (_ownsDestStream)
             {
                 DestStream.Dispose();
                 DestStream = null;
+                _ownsDestStream = false;
             }
             else
             {
@@ -1247,6 +1314,12 @@ public sealed class Form : IDisposable
     {
         if (_ownsDoc) _doc?.Dispose();
         _doc = null;
+        if (_ownsDestStream)
+        {
+            DestStream?.Dispose();
+            DestStream = null;
+            _ownsDestStream = false;
+        }
     }
 
     // ── AcroForm XML Import ─────────────────────────────────────────
@@ -1261,19 +1334,19 @@ public sealed class Form : IDisposable
             if (node.NodeType != XmlNodeType.Element) continue;
 
             // Support both formats:
-            // 1. <field name="FieldName"><value>val</value></field> (Aspose .NET format)
+            // 1. <field name="FieldName"><value>val</value></field> (field-element format)
             // 2. <FieldName>val</FieldName> (simple format)
             var nameAttr = node.Attributes?["name"]?.Value;
             var fieldName = nameAttr ?? node.LocalName;
 
             // Extract value: check for <value> child element first. Strip the
             // newline characters introduced by pretty-printed (indented) XML —
-            // Acrobat/Aspose keep the value's spaces but drop the layout newlines,
+            // the value's spaces are kept but the layout newlines dropped,
             // so "\n            Product\n        " imports as "            Product        ".
             var valueNode = node.SelectSingleNode("value");
             var fieldValue = (valueNode?.InnerText ?? node.InnerText).Replace("\r", "").Replace("\n", "");
 
-            var field = form.FindByName(fieldName);
+            var field = form.FindFieldOrNull(fieldName);
             if (field is not null)
             {
                 editor.SetField(fieldName, fieldValue);
@@ -1292,7 +1365,7 @@ public sealed class Form : IDisposable
 
         if (node.HasChildNodes && node.FirstChild!.NodeType == XmlNodeType.Text)
         {
-            var field = form.FindByName(name);
+            var field = form.FindFieldOrNull(name);
             if (field is not null)
                 editor.SetField(name, node.InnerText);
             return;
@@ -1692,22 +1765,144 @@ public sealed class Form : IDisposable
 
     private void ExportXfdfXfa(Stream output)
     {
-        var dataDoc = BuildXfaDataDocument();
+        // Template-driven structure (unbound template fields stay present as empty
+        // self-closing entries), expanded
+        // per DATASETS instance: a subform the datasets hold N times is emitted N
+        // times (name="S[0]" … "S[N-1]"), each instance carrying its own values —
+        // a flat template walk would collapse repeated subforms into one node with
+        // whichever instance's values were visited last.
         const string ns = "http://ns.adobe.com/xfdf/";
+        var doc = new XmlDocument();
+        var xfdf = doc.CreateElement("xfdf", ns);
+        doc.AppendChild(xfdf);
+        var fieldsEl = doc.CreateElement("fields", ns);
+        xfdf.AppendChild(fieldsEl);
+
+        var templateXml = _doc!.Form.GetXfaTemplateXml();
+        if (templateXml is not null)
+        {
+            try
+            {
+                var tmpl = new XmlDocument();
+                tmpl.LoadXml(templateXml);
+                if (tmpl.DocumentElement is not null)
+                    EmitXfdfLevel(tmpl.DocumentElement, LoadDatasetsDataRoot(), fieldsEl, ns);
+            }
+            catch { }
+        }
+
         var settings = new XmlWriterSettings
         {
             Indent = true,
             Encoding = new UTF8Encoding(false),
         };
         using var w = XmlWriter.Create(output, settings);
-        w.WriteStartDocument();
-        w.WriteStartElement("xfdf", ns);
-        w.WriteStartElement("fields", ns);
-        if (dataDoc?.DocumentElement is not null)
-            EmitXfdfField(dataDoc.DocumentElement, w, ns, XfaFieldPathsNorm());
-        w.WriteEndElement(); // fields
-        w.WriteEndElement(); // xfdf
-        w.WriteEndDocument();
+        doc.Save(w);
+    }
+
+    /// <summary>The datasets packet's <c>xfa:data</c> element (or the packet root when
+    /// no data wrapper exists), null when the document has no datasets.</summary>
+    private XmlElement? LoadDatasetsDataRoot()
+    {
+        var datasetsXml = _doc!.Form.GetXfaDatasetsXml();
+        if (datasetsXml is null) return null;
+        try
+        {
+            var ds = new XmlDocument();
+            ds.LoadXml(datasetsXml);
+            var root = ds.DocumentElement;
+            if (root is null) return null;
+            foreach (XmlNode c in root.ChildNodes)
+                if (c is XmlElement el && el.LocalName == "data") return el;
+            return root;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Same-name element children of <paramref name="ctx"/> — the dataset
+    /// instances backing one template node.</summary>
+    private static List<XmlElement> DataChildren(XmlElement? ctx, string name)
+    {
+        var list = new List<XmlElement>();
+        if (ctx is null) return list;
+        foreach (XmlNode c in ctx.ChildNodes)
+            if (c is XmlElement el && el.LocalName == name) list.Add(el);
+        return list;
+    }
+
+    /// <summary>Walk one template level, appending <c>&lt;field&gt;</c> entries to
+    /// <paramref name="parent"/>. Subforms recurse per dataset instance; fields take
+    /// their instance's value; draws mirror the ExportXml inclusion rule and stay
+    /// value-less.</summary>
+    private static void EmitXfdfLevel(XmlNode templateNode, XmlElement? dataCtx, XmlElement parent, string ns)
+    {
+        var counters = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        int NextIndex(string name)
+        {
+            counters.TryGetValue(name, out var i);
+            counters[name] = i + 1;
+            return i;
+        }
+
+        void AppendContainer(XmlNode templateChild, XmlElement? inst, string name)
+        {
+            var fieldEl = parent.OwnerDocument!.CreateElement("field", ns);
+            fieldEl.SetAttribute("name", $"{name}[{NextIndex(name)}]");
+            parent.AppendChild(fieldEl);
+            var inner = parent.OwnerDocument.CreateElement("fields", ns);
+            EmitXfdfLevel(templateChild, inst, inner, ns);
+            // A childless container gets no <fields> wrapper.
+            if (inner.HasChildNodes) fieldEl.AppendChild(inner);
+        }
+
+        void AppendLeaf(string name, string? value)
+        {
+            var fieldEl = parent.OwnerDocument!.CreateElement("field", ns);
+            fieldEl.SetAttribute("name", $"{name}[{NextIndex(name)}]");
+            parent.AppendChild(fieldEl);
+            if (!string.IsNullOrEmpty(value))
+            {
+                var valueEl = parent.OwnerDocument.CreateElement("value", ns);
+                valueEl.InnerText = value;
+                fieldEl.AppendChild(valueEl);
+            }
+        }
+
+        foreach (XmlNode child in templateNode.ChildNodes)
+        {
+            if (child.NodeType != XmlNodeType.Element) continue;
+            var localName = child.LocalName;
+            var nameAttr = child.Attributes?["name"]?.Value;
+
+            if (localName is "subform" or "subformSet" or "area")
+            {
+                if (nameAttr is null)
+                {
+                    EmitXfdfLevel(child, dataCtx, parent, ns);
+                    continue;
+                }
+                var instances = DataChildren(dataCtx, nameAttr);
+                if (instances.Count == 0) AppendContainer(child, null, nameAttr);
+                else foreach (var inst in instances) AppendContainer(child, inst, nameAttr);
+            }
+            else if (localName is "field" or "exclGroup")
+            {
+                if (nameAttr is null) continue;
+                var instances = DataChildren(dataCtx, nameAttr);
+                if (instances.Count == 0) AppendLeaf(nameAttr, null);
+                else foreach (var inst in instances) AppendLeaf(nameAttr, inst.InnerText);
+            }
+            else if (localName == "draw" && nameAttr is not null
+                && templateNode.Attributes?["layout"]?.Value is not "row" and not "table")
+            {
+                AppendLeaf(nameAttr, null);
+            }
+            else
+            {
+                EmitXfdfLevel(child, dataCtx, parent, ns);
+            }
+        }
     }
 
     /// <summary>Emit a nested <c>&lt;field name="elem[0]"&gt;</c> element. A container
@@ -1737,9 +1932,12 @@ public sealed class Form : IDisposable
                 w.WriteEndElement(); // value
             }
         }
-        else
+        else if (children.Count > 0)
         {
-            // Container subform: always wrap children in <fields> (empty → <fields />).
+            // Container subform: wrap children in <fields>. A childless container
+            // (e.g. an empty XFA subform such as a table header row) is emitted as a
+            // self-closing <field name="X[0]" /> — the export omits the
+            // empty <fields> wrapper rather than writing <fields />.
             w.WriteStartElement("fields", ns);
             foreach (var child in children)
                 EmitXfdfField(child, w, ns, fields);
@@ -1944,7 +2142,7 @@ public sealed class Form : IDisposable
     public bool FillField(string fieldName, int index)
     {
         if (_doc?.Form is null) return false;
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
         // A radio button is selected by widget index. Its appearance on-state can
         // differ from its export value (the /Opt entry) — "index and value do not
         // match" — so drive the selection by index (RadioButtonField.Selected is
@@ -1974,7 +2172,7 @@ public sealed class Form : IDisposable
     public void FillField(string fieldName, string[] fieldValues)
     {
         if (_doc?.Form is null || fieldValues is null) return;
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
         if (field is null) return;
         field.Value = string.Join(",", fieldValues);
     }
@@ -2023,7 +2221,7 @@ public sealed class Form : IDisposable
             _doc.Form.SetXfaFieldImage(fieldName, Convert.ToBase64String(imageBytes),
                 DetectImageContentType(imageBytes));
 
-        var field = _doc.Form.FindByName(fieldName);
+        var field = _doc.Form.FindFieldOrNull(fieldName);
         if (field is null) return;
 
         // A field is either a terminal widget (its own dict carries /Rect + /AP) or
@@ -2170,7 +2368,7 @@ public sealed class Form : IDisposable
     public PropertyFlag GetFieldFlag(string fieldName)
     {
         if (_doc?.Form is null) return PropertyFlag.InvalidFlag;
-        var f = _doc.Form.FindByName(fieldName);
+        var f = _doc.Form.FindFieldOrNull(fieldName);
         if (f is null) return PropertyFlag.InvalidFlag;
         int ff = (int)f.Dict.GetInt("Ff");
         if ((ff & 1) != 0) return PropertyFlag.ReadOnly;
@@ -2183,7 +2381,7 @@ public sealed class Form : IDisposable
     public string? GetRichText(string fieldName)
     {
         if (_doc?.Form is null) return null;
-        var f = _doc.Form.FindByName(fieldName);
+        var f = _doc.Form.FindFieldOrNull(fieldName);
         if (f is null) return null;
         var rv = f.Dict.Get("RV");
         return rv is Core.PdfString s ? s.ToText() : null;
@@ -2194,7 +2392,7 @@ public sealed class Form : IDisposable
     public SubmitFormFlag GetSubmitFlags(string fieldName)
     {
         if (_doc?.Form is null) return SubmitFormFlag.Fdf;
-        var f = _doc.Form.FindByName(fieldName);
+        var f = _doc.Form.FindFieldOrNull(fieldName);
         if (f is null) return SubmitFormFlag.Fdf;
         var action = _doc.Reader.ResolveDict(f.Dict.Get("A"));
         var flags = action?.Get("Flags") is Core.PdfInteger n ? (int)n.Value : 0;
@@ -2215,7 +2413,7 @@ public sealed class Form : IDisposable
     public bool IsRequiredField(string fieldName)
     {
         if (_doc?.Form is null) return false;
-        var f = _doc.Form.FindByName(fieldName);
+        var f = _doc.Form.FindFieldOrNull(fieldName);
         if (f is null) return false;
         return ((int)f.Dict.GetInt("Ff") & 2) != 0;
     }
@@ -2224,7 +2422,7 @@ public sealed class Form : IDisposable
     public void RenameField(string fieldName, string newFieldName)
     {
         if (_doc?.Form is null) return;
-        _doc.Form.FindByName(fieldName)?.SetPartialName(newFieldName);
+        _doc.Form.FindFieldOrNull(fieldName)?.SetPartialName(newFieldName);
     }
 
     /// <summary>

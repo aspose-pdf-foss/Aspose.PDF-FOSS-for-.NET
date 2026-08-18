@@ -3,7 +3,6 @@ namespace Aspose.Pdf.Security;
 /// <summary>
 /// A variable-length bit string supporting bitwise operations, concatenation,
 /// substring extraction, and conversion to/from bytes and hex.
-/// Mirrors Aspose.Pdf.Security.Impl.Digests.BitString from .NET.
 /// Bit indexing: bit 0 is the least-significant (rightmost) bit in the string
 /// representation returned by ToString(). This matches .NET BitString semantics.
 /// </summary>

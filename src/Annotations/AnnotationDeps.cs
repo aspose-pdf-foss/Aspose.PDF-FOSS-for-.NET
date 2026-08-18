@@ -16,7 +16,7 @@ public enum CaptionPosition
 /// renderer does not interpret measure entries at write time.</summary>
 public class Measure
 {
-    /// <summary>Nested number-format list (Aspose.Pdf shape:
+    /// <summary>Nested number-format list (public-API shape:
     /// <c>Measure+NumberFormatList</c>). Backed by an in-memory list.</summary>
     public class NumberFormatList
     {
@@ -28,7 +28,7 @@ public class Measure
 
         public int Count => _items.Count;
 
-        // 1-based indexer to match the Aspose.Pdf collection convention.
+        // 1-based indexer to match the public collection convention.
         public NumberFormat this[int index]
         {
             get => _items[index - 1];
@@ -152,7 +152,7 @@ public class Measure
 }
 
 /// <summary>Per-event PDF action slots for a widget annotation
-/// (matches the Aspose.Pdf /AA-tree entry shape: 14 named events plus
+/// (matches the public /AA-tree entry shape: 14 named events plus
 /// the direct /A activation action). When bound to an annotation dictionary
 /// (the normal case) each setter writes through to the live /AA tree (or /A for
 /// <see cref="OnActivated"/>), so assignments survive save/reload. The FOSS
@@ -167,8 +167,8 @@ public class AnnotationActionCollection
     private const string ActivatedKey = "A";
 
     /// <summary>Bind this collection to the owning annotation dict so setters
-    /// write through to /A and /AA.</summary>
-    internal void Bind(Aspose.Pdf.Core.PdfDictionary owner, Aspose.Pdf.IO.PdfReader reader)
+    /// write through to /A and /AA (reader may be null for freshly created annotations).</summary>
+    internal void Bind(Aspose.Pdf.Core.PdfDictionary owner, Aspose.Pdf.IO.PdfReader? reader)
     {
         _owner = owner;
         _reader = reader;
@@ -192,7 +192,9 @@ public class AnnotationActionCollection
             return;
         }
 
-        var aa = _reader?.ResolveDict(_owner.Get("AA"));
+        var aa = _reader is not null
+            ? _reader.ResolveDict(_owner.Get("AA"))
+            : _owner.Get("AA") as Aspose.Pdf.Core.PdfDictionary;
         if (value is null)
         {
             aa?.Remove(key);
@@ -226,7 +228,7 @@ public class AnnotationActionCollection
 
 /// <summary>Collection of <see cref="PdfAction"/> entries attached to an
 /// annotation (or any other action-bearing PDF object). Indexed by
-/// 1-based position to match Aspose.Pdf.</summary>
+/// 1-based position to match the public API.</summary>
 public class PdfActionCollection : IEnumerable<PdfAction>
 {
     private readonly List<PdfAction> _actions = new();
@@ -290,7 +292,7 @@ public class PdfActionCollection : IEnumerable<PdfAction>
 
 /// <summary>Appearance-stream dictionary on an annotation (/AP entry):
 /// maps appearance-state name -> <see cref="XForm"/>. Implements the full
-/// <see cref="IDictionary{TKey,TValue}"/> shape for Aspose.Pdf parity.
+/// <see cref="IDictionary{TKey,TValue}"/> shape for public-API parity.
 /// The FOSS implementation backs the dictionary in memory; round-trip
 /// to the /AP entry is not currently emitted at save time.</summary>
 public class AppearanceDictionary : IDictionary<string, XForm>

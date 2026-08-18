@@ -7,7 +7,7 @@ namespace Aspose.Pdf.IO;
 
 internal sealed class PdfReader
 {
-    private readonly byte[] _data;
+    private byte[] _data;
     private readonly XRefTable _xref;
     private readonly PdfParser _parser;
     private readonly PdfReaderOptions _options;
@@ -29,6 +29,19 @@ internal sealed class PdfReader
 
     /// <summary>A no-op reader for newly created annotations that are not yet backed by a document.</summary>
     internal static PdfReader Empty { get; } = new(Array.Empty<byte>(), new XRefTable(), new PdfReaderOptions());
+
+    /// <summary>
+    /// Releases the raw file buffer and parsed-object caches so a disposed document
+    /// stops pinning its source bytes. Lazy resolution is unusable afterwards.
+    /// </summary>
+    internal void ReleaseBuffers()
+    {
+        _data = Array.Empty<byte>();
+        _parser.ReleaseBuffers();
+        _cache.Clear();
+        _objStmCache.Clear();
+        _overlayObjects.Clear();
+    }
 
     public static PdfReader FromBytes(byte[] data)
     {
@@ -115,6 +128,15 @@ internal sealed class PdfReader
     /// <summary>The active standard-security decryptor (also used to encrypt
     /// newly appended objects), or null when the document is not encrypted.</summary>
     internal Security.PdfDecryptor? Decryptor => _decryptor;
+
+    /// <summary>Attach an externally-built decryptor (e.g. the public-key handler,
+    /// whose file key comes from CMS recipients + a private key rather than a
+    /// password). Marks decryptor init done so lazy password init is skipped.</summary>
+    internal void AttachDecryptor(Security.PdfDecryptor decryptor)
+    {
+        _decryptor = decryptor;
+        _decryptorInitialized = true;
+    }
     /// <summary>True when the supplied password matched the owner /O entry
     /// (full permissions). False when it matched the user /U entry or no
     /// password was needed.</summary>
@@ -126,8 +148,17 @@ internal sealed class PdfReader
     public bool OwnerPasswordEqualsUserPassword => _decryptor?.OwnerPasswordEqualsUserPassword ?? false;
     internal PdfReaderOptions Options => _options;
 
+    /// <summary>Suppresses <see cref="ClearCache"/> while set. In-memory edits to
+    /// resolved objects (conversion steps, pending metadata) live in the cache until
+    /// save; a mid-operation render (e.g. the PDF/A transparency simulation) must not
+    /// flush them away.</summary>
+    internal bool SuppressCacheClear;
+
     /// <summary>Clear the resolved-object cache to free memory after batch operations.</summary>
-    internal void ClearCache() => _cache.Clear();
+    internal void ClearCache()
+    {
+        if (!SuppressCacheClear) _cache.Clear();
+    }
 
     /// <summary>Set when an in-place edit (e.g. replacing an image's data) may have left the
     /// original object orphaned. Signals the full-rewrite save to run a reachability pass so
@@ -224,6 +255,17 @@ internal sealed class PdfReader
         var resolved = Resolve(obj);
         return resolved as PdfStream;
     }
+
+    /// <summary>A dictionary entry as a name, following an indirect reference.
+    /// Some producers write even scalar entries like /Subtype indirect
+    /// (<c>/Subtype 71 0 R</c>), where <see cref="PdfDictionary.GetName"/> —
+    /// which has no reader — returns null and "is it a Form?" gates misfire.</summary>
+    public string? ResolveName(PdfDictionary dict, string key)
+        => (Resolve(dict.Get(key)) as PdfName)?.Value;
+
+    /// <summary>A dictionary entry as an array, following an indirect reference.</summary>
+    public PdfArray? ResolveArray(PdfObject? obj)
+        => Resolve(obj) as PdfArray;
 
     /// <summary>
     /// Get the decoded stream data (decryption + filters applied).
@@ -492,6 +534,24 @@ internal sealed class PdfReader
         }
 
         if (encryptDict is null) return;
+
+        // Public-key (certificate) security handler has no password: the Document
+        // certificate constructor recovers the file key from a recipient envelope and
+        // attaches the decryptor via AttachDecryptor. Leave decryption uninitialised
+        // here (no password gating) so the open does not fail before that runs.
+        if (encryptDict.GetName("Filter") is "Adobe.PPKLite" or "Adobe.PPKMS" or "Adobe.PubSec")
+            return;
+
+        // A caller-supplied handler takes over whenever it claims this document's
+        // /Filter — the Standard handler cannot read an alternative one's /O and /U.
+        if (_options.CustomSecurityHandler is { } custom
+            && encryptDict.GetName("Filter") == custom.Filter)
+        {
+            _decryptor = PdfDecryptor.CreateWithCustomHandler(custom, encryptDict, password);
+            if (_decryptor is null)
+                throw new InvalidPasswordException("Incorrect password for encrypted PDF document.");
+            return;
+        }
 
         var fileId = Trailer.Get("ID") as PdfArray;
 

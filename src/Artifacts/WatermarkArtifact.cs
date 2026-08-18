@@ -262,12 +262,16 @@ public class WatermarkArtifact : Artifact
             AddImageWatermark(page);
             return;
         }
-        // Register Helvetica and use the returned resource name. RegisterFont may
-        // return a name other than "F1" when the page's existing resources already
-        // use that slot — a page may reserve /F1 for an
-        // embedded subset that lacks our watermark glyphs (g/p/q/y), so emitting
-        // SetFont("F1", ...) into our content stream renders the text invisibly.
-        var fontName = Table.RegisterFont(page);
+        // Register the artifact's own font when it is a Standard-14 face (e.g. a
+        // Courier watermark must not come out as Helvetica), falling back to
+        // Helvetica otherwise. RegisterFont may return a name other than "F1"
+        // when the page's existing resources already use that slot — a page may
+        // reserve /F1 for an embedded subset that lacks our watermark glyphs
+        // (g/p/q/y), so emitting SetFont("F1", ...) into our content stream
+        // renders the text invisibly.
+        var baseFont = TextState?.FontName is { Length: > 0 } fn && Standard14Fonts.IsStandard14(fn)
+            ? fn : "Helvetica";
+        var fontName = Table.RegisterFont(page, baseFont);
 
         var content = BuildTextWatermark(page, fontName);
         if (IsBackground)
@@ -280,7 +284,7 @@ public class WatermarkArtifact : Artifact
     /// the page-level block is a clean <c>q … /Artifact «props» BDC /FrmN Do EMC Q</c>
     /// and the text (colour + BT…ET) lives in the form. Keeping the drawing in a
     /// form lets callers walk the page's Do operators and pull the watermark text
-    /// out of <c>Resources.Forms[name]</c>, mirroring the reference behaviour.</summary>
+    /// out of <c>Resources.Forms[name]</c>.</summary>
     private byte[] BuildTextWatermark(Page page, string fontResourceName)
     {
         var renderText = Text;
@@ -291,13 +295,21 @@ public class WatermarkArtifact : Artifact
         var pageWidth = page.Width;
         var pageHeight = page.Height;
         var fontSize = TextState?.FontSize ?? 12;
+        var baseFont = TextState?.FontName ?? TextState?.Font?.FontName ?? "Helvetica";
 
-        var charWidth = fontSize * 0.5; // approximate
-        var textWidth = renderText!.Length * charWidth;
-        var textHeight = (double)fontSize;
+        var textWidth = MeasureTextWidth(renderText!, baseFont, fontSize);
+
+        // Vertical extent of the text line: the written face's ascent+descent box.
+        var ascent = Math.Abs(Standard14Fonts.GetWrittenFaceAscent(baseFont)) * fontSize / 1000.0;
+        var descent = Math.Abs(Standard14Fonts.GetWrittenFaceDescent(baseFont)) * fontSize / 1000.0;
+        if (ascent <= 0) ascent = fontSize * 0.75;
+        if (descent <= 0) descent = fontSize * 0.2;
+        var textHeight = ascent + descent;
 
         double x, y;
-        if (Position is { } pos) { x = pos.X; y = pos.Y; }
+        // An explicit Position gives the text BOX floor; the baseline sits one
+        // descent above it.
+        if (Position is { } pos) { x = pos.X; y = pos.Y + descent; }
         else
         {
             x = ArtifactHorizontalAlignment switch
@@ -306,15 +318,17 @@ public class WatermarkArtifact : Artifact
                 HorizontalAlignment.Right => pageWidth - textWidth - (RightMargin > 0 ? RightMargin : 36),
                 _ => (pageWidth - textWidth) / 2,
             };
+            // Baseline position: the centred case centres the ascent+descent box
+            // and sets the baseline one descent above its floor.
             y = ArtifactVerticalAlignment switch
             {
                 VerticalAlignment.Top => pageHeight - fontSize - (TopMargin > 0 ? TopMargin : 36),
                 VerticalAlignment.Bottom => BottomMargin > 0 ? BottomMargin : 36,
-                _ => (pageHeight - textHeight) / 2,
+                _ => (pageHeight - textHeight) / 2 + descent,
             };
         }
 
-        var bbox = ComputeBBox(x, y, textWidth, textHeight);
+        var bbox = ComputeBBox(x, y - descent, textWidth, textHeight);
         Rectangle = bbox;
 
         var ci = System.Globalization.CultureInfo.InvariantCulture;

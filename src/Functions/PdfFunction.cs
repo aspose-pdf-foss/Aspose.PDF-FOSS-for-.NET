@@ -224,46 +224,78 @@ public sealed class SampledFunction : PdfFunction
     public int BitsPerSample { get; }
     private readonly double[] _samples;
     private readonly int _nOutputs;
+    private readonly double[][]? _encode; // per input: sample-grid range (default [0, Size_i-1])
+    private readonly double[][]? _decode; // per output: value range (default = Range)
 
     private SampledFunction(double[][] domain, double[][]? range,
-        int[] size, int bitsPerSample, double[] samples, int nOutputs)
+        int[] size, int bitsPerSample, double[] samples, int nOutputs,
+        double[][]? encode, double[][]? decode)
         : base(domain, range)
     {
         Size = size; BitsPerSample = bitsPerSample; _samples = samples; _nOutputs = nOutputs;
+        _encode = encode; _decode = decode;
     }
 
     protected override double[] EvaluateCore(double[] inputs)
     {
-        // 1-D linear interpolation (most common case)
-        if (inputs.Length == 1 && Size.Length == 1)
+        // General m-input multilinear interpolation (§7.10.2). Sample order: the
+        // FIRST input varies fastest. A DeviceN tint transform (e.g. Cyan+Yellow
+        // spot mixes) is a 2-input sampled function — the old 1-D-only path
+        // returned all-zero components for it, painting everything black.
+        var m = Size.Length;
+        var result = new double[_nOutputs];
+        if (m == 0 || inputs.Length < m) return result;
+
+        // Domain → Encode → clamp to the sample grid.
+        var e = new double[m];
+        for (int i = 0; i < m; i++)
         {
-            var x = inputs[0];
-            var lo = Domain[0][0];
-            var hi = Domain[0][1];
+            double lo = i < Domain.Length ? Domain[i][0] : 0;
+            double hi = i < Domain.Length ? Domain[i][1] : 1;
+            var x = Math.Max(Math.Min(inputs[i], Math.Max(lo, hi)), Math.Min(lo, hi));
+            double e0 = _encode is not null && i < _encode.Length ? _encode[i][0] : 0;
+            double e1 = _encode is not null && i < _encode.Length ? _encode[i][1] : Size[i] - 1;
             var t = hi - lo != 0 ? (x - lo) / (hi - lo) : 0;
-            t = Math.Max(0, Math.Min(1, t));
-            var idx = t * (Size[0] - 1);
-            var i0 = (int)Math.Floor(idx);
-            var i1 = Math.Min(i0 + 1, Size[0] - 1);
-            var frac = idx - i0;
-            var result = new double[_nOutputs];
+            e[i] = Math.Max(0, Math.Min(Size[i] - 1, e0 + t * (e1 - e0)));
+        }
+
+        // Accumulate the 2^m interpolation corners.
+        var corners = 1 << m;
+        for (int corner = 0; corner < corners; corner++)
+        {
+            double w = 1;
+            long index = 0, stride = 1;
+            for (int i = 0; i < m; i++)
+            {
+                var i0 = (int)Math.Floor(e[i]);
+                var frac = e[i] - i0;
+                var i1 = Math.Min(i0 + 1, Size[i] - 1);
+                var hiBit = ((corner >> i) & 1) == 1;
+                w *= hiBit ? frac : 1 - frac;
+                index += (hiBit ? i1 : i0) * stride;
+                stride *= Size[i];
+            }
+            if (w == 0) continue;
+            var baseIdx = index * _nOutputs;
             for (int c = 0; c < _nOutputs; c++)
             {
-                var s0 = _samples[i0 * _nOutputs + c];
-                var s1 = _samples[i1 * _nOutputs + c];
-                result[c] = s0 + frac * (s1 - s0);
+                var si = baseIdx + c;
+                if (si < _samples.Length) result[c] += w * _samples[si];
             }
-            // Decode: map from [0, 2^bps-1] to Decode range
-            // For simplicity, if Range is set, map 0.maxSample to Range
-            if (Range is not null)
-            {
-                var maxSample = (1 << BitsPerSample) - 1;
-                for (int c = 0; c < _nOutputs && c < Range.Length; c++)
-                    result[c] = Range[c][0] + result[c] / maxSample * (Range[c][1] - Range[c][0]);
-            }
-            return result;
         }
-        return new double[_nOutputs]; // fallback
+
+        // Decode: map raw samples [0, 2^bps-1] onto /Decode (default /Range,
+        // default [0,1] when neither is present).
+        var maxSample = (double)((1L << BitsPerSample) - 1);
+        for (int c = 0; c < _nOutputs; c++)
+        {
+            double d0, d1;
+            if (_decode is not null && c < _decode.Length) { d0 = _decode[c][0]; d1 = _decode[c][1]; }
+            else if (Range is not null && c < Range.Length) { d0 = Range[c][0]; d1 = Range[c][1]; }
+            else { d0 = 0; d1 = 1; }
+            result[c] = d0 + result[c] / maxSample * (d1 - d0);
+        }
+        return result;
     }
 
     internal static SampledFunction? Create(PdfDictionary dict, PdfReader reader, byte[]? streamData)
@@ -278,12 +310,14 @@ public sealed class SampledFunction : PdfFunction
             size[i] = PdfArrayHelper.GetInt(sizeArr, i);
         var bps = (int)dict.GetInt("BitsPerSample");
         if (bps <= 0) bps = 8;
+        var encode = dict.Get("Encode") is PdfArray enc ? ParsePairs(enc) : null;
+        var decode = dict.Get("Decode") is PdfArray dec ? ParsePairs(dec) : null;
         var nOutputs = range?.Length ?? 1;
         var totalSamples = 1;
         foreach (var s in size) totalSamples *= s;
         totalSamples *= nOutputs;
         var samples = DecodeSamples(streamData, bps, totalSamples);
-        return new SampledFunction(domain, range, size, bps, samples, nOutputs);
+        return new SampledFunction(domain, range, size, bps, samples, nOutputs, encode, decode);
     }
 
     private static double[] DecodeSamples(byte[] data, int bps, int count)
@@ -303,6 +337,19 @@ public sealed class SampledFunction : PdfFunction
         {
             for (int i = 0; i < count && i * 4 + 3 < data.Length; i++)
                 result[i] = (data[i * 4] << 24) | (data[i * 4 + 1] << 16) | (data[i * 4 + 2] << 8) | data[i * 4 + 3];
+        }
+        else if (bps is 1 or 2 or 4)
+        {
+            // Sub-byte samples, big-endian bit packing within each byte.
+            var perByte = 8 / bps;
+            var mask = (1 << bps) - 1;
+            for (int i = 0; i < count; i++)
+            {
+                var byteIdx = i / perByte;
+                if (byteIdx >= data.Length) break;
+                var shift = 8 - bps * (i % perByte + 1);
+                result[i] = (data[byteIdx] >> shift) & mask;
+            }
         }
         return result;
     }

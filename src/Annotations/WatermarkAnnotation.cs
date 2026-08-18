@@ -12,14 +12,31 @@ namespace Aspose.Pdf.Annotations;
 /// </summary>
 public sealed class Characteristics
 {
+    private System.Drawing.Color _border = System.Drawing.Color.Black;
+    private System.Drawing.Color _background = System.Drawing.Color.Transparent;
+
+    /// <summary>When the characteristics are attached to an annotation, setting a
+    /// colour writes through to the annotation's /MK dictionary ("BC"/"BG" key
+    /// passed as the first argument). Detached instances (WatermarkAnnotation)
+    /// keep plain property semantics.</summary>
+    internal System.Action<string, System.Drawing.Color>? WriteThrough;
+
     /// <summary>Rotation of the annotation appearance.</summary>
     public Rotation Rotate { get; set; }
 
     /// <summary>Border color used for the annotation's appearance.</summary>
-    public System.Drawing.Color Border { get; set; } = System.Drawing.Color.Black;
+    public System.Drawing.Color Border
+    {
+        get => _border;
+        set { _border = value; WriteThrough?.Invoke("BC", value); }
+    }
 
     /// <summary>Background color used for the annotation's appearance.</summary>
-    public System.Drawing.Color Background { get; set; } = System.Drawing.Color.Transparent;
+    public System.Drawing.Color Background
+    {
+        get => _background;
+        set { _background = value; WriteThrough?.Invoke("BG", value); }
+    }
 }
 
 /// <summary>
@@ -68,6 +85,7 @@ public sealed partial class WatermarkAnnotation
     {
         _texts = text;
         _textState = textState;
+        RefreshAppearance();
     }
 
     /// <summary>Set the watermark text from a <see cref="Aspose.Pdf.Facades.FormattedText"/>. Stored only.</summary>
@@ -80,8 +98,27 @@ public sealed partial class WatermarkAnnotation
     /// <summary>Always <see cref="AnnotationType.Watermark"/>.</summary>
     public AnnotationType AnnotationType => AnnotationType.Watermark;
 
-    /// <summary>Watermark opacity (0..1). Stored only — the appearance stream uses 1.0.</summary>
-    public double Opacity { get; set; } = 1.0;
+    /// <summary>Watermark opacity (0..1). Painted through an /ExtGState with
+    /// matching fill/stroke alpha in the appearance stream.</summary>
+    public double Opacity
+    {
+        get => _opacity;
+        set { _opacity = value; RefreshAppearance(); }
+    }
+    private double _opacity = 1.0;
+
+    // The dictionary handed to AnnotationCollection.Add — the public API allows
+    // configuring the annotation AFTER adding it to the page (Add, then
+    // SetTextAndState/Opacity), so mutators rebuild the appearance in place.
+    private PdfDictionary? _builtDict;
+
+    private void RefreshAppearance()
+    {
+        if (_builtDict is null || _texts is null || _texts.Length == 0) return;
+        var apDict = new PdfDictionary();
+        apDict.Set("N", BuildAppearanceStream());
+        _builtDict.Set("AP", apDict);
+    }
 
     /// <summary>Translate the watermark's rectangle through <paramref name="transform"/>.</summary>
     public void ChangeAfterResize(Matrix transform)
@@ -129,6 +166,7 @@ public sealed partial class WatermarkAnnotation
             dict.Set("AP", apDict);
         }
 
+        _builtDict = dict;
         return dict;
     }
 
@@ -140,6 +178,12 @@ public sealed partial class WatermarkAnnotation
         var fontName = _textState?.FontName ?? _textState?.Font?.BaseFont ?? "Helvetica";
 
         var builder = new ContentStreamBuilder();
+
+        // A translucent watermark paints through an /ExtGState carrying the
+        // fill/stroke alpha (PDF 32000-1 §11.6.4.2); the state is selected
+        // before any painting so every line of text takes the opacity.
+        if (_opacity < 1.0)
+            builder.SetGraphicsState("GS0");
 
         // Apply rotation if specified
         var rotation = (int)Characteristics.Rotate;
@@ -164,10 +208,15 @@ public sealed partial class WatermarkAnnotation
         builder.BeginText();
         builder.SetFont("F1", fontSize);
 
-        var y = height - fontSize;
-        builder.MoveTextPosition(2, y);
+        // The text block sits on the bottom edge of the annotation rectangle:
+        // the last line's baseline is one descent above the box floor so the
+        // descenders stay inside the rectangle; earlier lines stack above it.
+        var descent = Math.Abs(Standard14Fonts.GetWrittenFaceDescent(fontName)) * fontSize / 1000.0;
+        if (descent <= 0) descent = fontSize * 0.2;
+        var y = descent + (_texts!.Length - 1) * fontSize * 1.2;
+        builder.MoveTextPosition(0, y);
 
-        for (var i = 0; i < _texts!.Length; i++)
+        for (var i = 0; i < _texts.Length; i++)
         {
             if (i > 0)
                 builder.MoveTextPosition(0, -fontSize * 1.2);
@@ -197,6 +246,16 @@ public sealed partial class WatermarkAnnotation
         f1Dict.Set("Encoding", new PdfName("WinAnsiEncoding"));
         fontDict.Set("F1", f1Dict);
         resDict.Set("Font", fontDict);
+        if (_opacity < 1.0)
+        {
+            var gsDict = new PdfDictionary();
+            var gs0 = new PdfDictionary();
+            gs0.Set("Type", new PdfName("ExtGState"));
+            gs0.Set("ca", new PdfReal(_opacity));
+            gs0.Set("CA", new PdfReal(_opacity));
+            gsDict.Set("GS0", gs0);
+            resDict.Set("ExtGState", gsDict);
+        }
         formDict.Set("Resources", resDict);
 
         return new PdfStream(formDict, streamBytes);

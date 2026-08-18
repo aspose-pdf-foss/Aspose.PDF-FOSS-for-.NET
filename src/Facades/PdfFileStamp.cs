@@ -336,6 +336,7 @@ public sealed class PdfFileStamp : System.IDisposable
             pdfPageStamp = new PdfPageStamp(new MemoryStream(stamp.PdfBytes), stamp.PdfPageNumber)
             {
                 IsBackground = stamp.IsBackground,
+                StampId = stamp.StampId,
                 XIndent = stamp.XOrigin,
                 YIndent = stamp.YOrigin,
                 // Facade layout: the stamp form's fonts surface at page level
@@ -472,18 +473,25 @@ public sealed class PdfFileStamp : System.IDisposable
         }
         else if (!stamp.IsBackground)
         {
-            // Rotated FOREGROUND stamp: draw inline. The renderer rasterises a rotated
-            // Form XObject with a small offset, and the era-templates for foreground
-            // watermarks capture this exact inline placement — keep it pixel-exact.
-            var fontRes = EnsureFont(page, fontName);
+            // Rotated FOREGROUND stamp: the exact operator sequence of the historical
+            // inline placement — the rotation cm followed by the text ops — wrapped in
+            // a Form XObject invoked at IDENTITY, so the stamp lands in Resources.Forms
+            // (the public-API shape) while the renderer walks an identical operator
+            // stream and the era-calibrated placement stays pixel-exact. The BBox spans
+            // the page so nothing the inline form drew is clipped away.
             double radInline = rot * Math.PI / 180.0;
             double cosInline = Math.Cos(radInline), sinInline = Math.Sin(radInline);
-            sb.Append($"{Format(cosInline)} {Format(sinInline)} {Format(-sinInline)} {Format(cosInline)} {Format(ox)} {Format(oy)} cm\n");
-            sb.Append(DrawOps(fontRes));
+            var inner = new StringBuilder();
+            inner.Append($"{Format(cosInline)} {Format(sinInline)} {Format(-sinInline)} {Format(cosInline)} {Format(ox)} {Format(oy)} cm\n");
+            inner.Append(DrawOps("F0"));
+            var mboxFg = page.MediaBox;
+            var fmNameFg = AddTextStampFormCore(page, inner.ToString(), fontName,
+                mboxFg.LLX, mboxFg.LLY, mboxFg.URX, mboxFg.URY);
+            sb.Append($"/{fmNameFg} Do\n");
         }
         else
         {
-            // Rotated BACKGROUND stamp: Aspose.Pdf draws it through an UNROTATED
+            // Rotated BACKGROUND stamp: the reference draws it through an UNROTATED
             // Form XObject whose BBox spans [0 0 max(TextWidth, pageWidth) pageHeight],
             // TextWidth being the real system-face advance sum (unrounded hmtx units,
             // e.g. Windows Arial for "Arial" — not the rounded Standard-14 AFM). The
@@ -546,7 +554,7 @@ public sealed class PdfFileStamp : System.IDisposable
 
     /// <summary>Advance width of <paramref name="line"/> at <paramref name="fontSize"/>
     /// measured with the REAL system face the caller asked for (unrounded hmtx units,
-    /// e.g. Windows Arial for "Arial"), matching the Aspose.Pdf facade
+    /// e.g. Windows Arial for "Arial"), matching the public facade
     /// TextWidth model. Falls back to the FormattedText's AFM-based TextWidth when no
     /// TrueType face resolves.</summary>
     private static double MeasureSystemFaceWidth(string line, FormattedText text, double fontSize)
@@ -622,10 +630,41 @@ public sealed class PdfFileStamp : System.IDisposable
         var objNum = doc.AllocateObjectNumber();
         doc.AddNewObject(objNum, stream);
 
+        // A page frequently inherits /Resources from the /Pages tree. Setting a fresh
+        // empty dict on such a page would SHADOW the inherited fonts/shadings out of
+        // rendering — seed the page-local copy with the inherited entries instead
+        // (same contract as EnsureFont below).
         var resources = reader.ResolveDict(page.Dict.Get("Resources"));
-        if (resources is null) { resources = new PdfDictionary(); page.Dict.Set("Resources", resources); }
+        var resourcesWereInherited = false;
+        if (resources is null)
+        {
+            var inherited = ResolveInheritedResources(page);
+            resources = new PdfDictionary();
+            if (inherited is not null)
+                foreach (var key in inherited.Keys)
+                {
+                    var v = inherited.Get(key);
+                    if (v is not null) resources.Set(key, v);
+                }
+            page.Dict.Set("Resources", resources);
+            resourcesWereInherited = true;
+        }
         var xobjs = reader.ResolveDict(resources.Get("XObject")) ?? resources.Get("XObject") as PdfDictionary;
         if (xobjs is null) { xobjs = new PdfDictionary(); resources.Set("XObject", xobjs); }
+        else if (resourcesWereInherited)
+        {
+            // The /XObject dict came from the inherited resources and is shared with
+            // sibling pages — copy it page-local so the stamp form does not leak into
+            // (or collide on) their inherited resources.
+            var localXobjs = new PdfDictionary();
+            foreach (var key in xobjs.Keys)
+            {
+                var v = xobjs.Get(key);
+                if (v is not null) localXobjs.Set(key, v);
+            }
+            xobjs = localXobjs;
+            resources.Set("XObject", xobjs);
+        }
         int n = 0;
         while (xobjs.ContainsKey($"Fm{n}")) n++;
         var name = $"Fm{n}";
@@ -1015,9 +1054,16 @@ public sealed class PdfFileStamp : System.IDisposable
         var stamp = new TextStamp(text) { StampId = StampId };
         if (source is not null)
         {
+            // TextState is the effective source of font/size at render time (its
+            // defaults win over the bare stamp properties), so the FormattedText's
+            // size and font must land there too, not only on FontSize/FontName.
             stamp.FontSize = (float)source.FontSize;
+            stamp.TextState.FontSize = (float)source.FontSize;
             if (!string.IsNullOrEmpty(source.FontName))
+            {
                 stamp.FontName = source.FontName;
+                stamp.TextState.FontName = source.FontName;
+            }
             if (source.ForegroundColor is not null)
                 stamp.Color = source.ForegroundColor;
         }

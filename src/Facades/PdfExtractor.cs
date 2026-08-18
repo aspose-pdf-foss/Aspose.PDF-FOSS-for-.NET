@@ -12,7 +12,7 @@ namespace Aspose.Pdf
         Raw = 1,
     }
 
-    /// <summary>Image extraction mode — matches docs.aspose.com Aspose.Pdf.ExtractImageMode.</summary>
+    /// <summary>Image extraction mode — matches the public ExtractImageMode surface.</summary>
     public enum ExtractImageMode
     {
         /// <summary>All image XObjects defined in page resources.</summary>
@@ -26,7 +26,7 @@ namespace Aspose.Pdf.Facades
 {
     /// <summary>
     /// Facade for extracting text and images from a PDF document.
-    /// Public surface mirrors docs.aspose.com/pdf/net/ Aspose.Pdf.Facades.PdfExtractor.
+    /// Public surface of the Facades PdfExtractor.
     /// Typical flow: <c>BindPdf</c> → <c>ExtractText</c> → <c>GetText(...)</c>.
     /// </summary>
     public sealed class PdfExtractor : IDisposable
@@ -43,7 +43,7 @@ namespace Aspose.Pdf.Facades
         /// <summary>1-based end page for extraction. 0 = to the last page.</summary>
         public int EndPage { get; set; }
 
-        /// <summary>Text extraction mode. Matches the Aspose.Pdf API shape —
+        /// <summary>Text extraction mode. Matches the published API shape —
         /// int-typed because tests do both `= (int)` and `= ExtractTextMode.Pure`
         /// (via implicit enum-to-int conversion). 0 = Pure (strip formatting),
         /// 1 = Raw (keep it).</summary>
@@ -132,6 +132,8 @@ namespace Aspose.Pdf.Facades
                 throw new InvalidOperationException("No document bound. Call BindPdf first.");
 
             var absorber = new TextAbsorber();
+            if (_textSearchOptions is not null)
+                absorber.TextSearchOptions = _textSearchOptions;
             // Honour the facade's mode: Raw keeps the source stream's own
             // whitespace and skips the Pure-mode column grid entirely.
             if (ExtractTextMode == (int)Aspose.Pdf.ExtractTextMode.Raw)
@@ -142,9 +144,52 @@ namespace Aspose.Pdf.Facades
             for (var i = from; i <= to; i++)
                 absorber.Visit(_document.Pages.At(i));
 
-            _extractedText = ReorderRtlLines(absorber.Text);
+            _extractedText = FoldSymbolPua(DecomposeLigatures(ReorderRtlLines(absorber.Text)));
             _extracted = true;
             _nextPageCursor = from;
+        }
+
+        /// <summary>The facade renders symbol-font glyphs that decode into the
+        /// U+F000–U+F0FF private-use mirror range (a symbolic TrueType cmap's
+        /// 0xF0xx block — Wingdings/Symbol bullets and dingbats) as a plain
+        /// '.' placeholder; the
+        /// absorber keeps the PUA codepoint itself.</summary>
+        private static string FoldSymbolPua(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            bool has = false;
+            foreach (var c in text)
+                if (c >= '' && c <= '') { has = true; break; }
+            if (!has) return text;
+            var sb = new System.Text.StringBuilder(text.Length);
+            foreach (var c in text)
+                sb.Append(c >= '' && c <= '' ? '.' : c);
+            return sb.ToString();
+        }
+
+        /// <summary>The facade decomposes Latin ligature codepoints to their letters
+        /// (PdfExtractor returns "effective", not "eﬀective") — unlike
+        /// TextAbsorber, which surfaces a ligature-mapped glyph as its codepoint.</summary>
+        private static string DecomposeLigatures(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            bool has = false;
+            foreach (var c in text)
+                if (c >= 'ﬀ' && c <= 'ﬆ') { has = true; break; }
+            if (!has) return text;
+            var sb = new System.Text.StringBuilder(text.Length + 16);
+            foreach (var c in text)
+                sb.Append(c switch
+                {
+                    'ﬀ' => "ff",
+                    'ﬁ' => "fi",
+                    'ﬂ' => "fl",
+                    'ﬃ' => "ffi",
+                    'ﬄ' => "ffl",
+                    'ﬅ' or 'ﬆ' => "st",
+                    _ => c.ToString(),
+                });
+            return sb.ToString();
         }
 
         /// <summary>
@@ -159,18 +204,25 @@ namespace Aspose.Pdf.Facades
         /// </summary>
         private static string ReorderRtlLines(string text)
         {
+            // The absorber's line assembly now emits RTL lines in LOGICAL word order
+            // already; reversing here would double-reverse them. What remains is a
+            // neutral-binding correction: a colon that trails an RTL word visually
+            // (drawn to its left) surfaces glued to the FOLLOWING word ("שם :אורי");
+            // logically it binds to the preceding word ("שם: אורי").
             if (string.IsNullOrEmpty(text)) return text;
             var lines = text.Split('\n');
             var changed = false;
             for (var li = 0; li < lines.Length; li++)
             {
                 var line = lines[li];
-                // Preserve a trailing '\r' so "\r\n" separators survive intact.
                 var cr = line.EndsWith("\r", StringComparison.Ordinal) ? "\r" : "";
                 var core = cr.Length > 0 ? line[..^1] : line;
-                if (BaseDirectionIsRtl(core))
+                if (!BaseDirectionIsRtl(core)) continue;
+                var fixedCore = System.Text.RegularExpressions.Regex.Replace(
+                    core, @"(?<=\S) :(?=\S)", ": ");
+                if (!ReferenceEquals(fixedCore, core) && fixedCore != core)
                 {
-                    lines[li] = ReverseWordOrder(core) + cr;
+                    lines[li] = fixedCore + cr;
                     changed = true;
                 }
             }
@@ -337,6 +389,9 @@ namespace Aspose.Pdf.Facades
             // "one entry per image object", not "one entry per page reference".
             var list = new System.Collections.Generic.List<ImageXObject>();
             var seen = new System.Collections.Generic.HashSet<Core.PdfStream>();
+            // Inline images have no shared stream object; identical payloads repeated
+            // across pages (a per-page letterhead logo) dedupe by content instead.
+            var inlineSeen = new System.Collections.Generic.HashSet<string>();
             var from = StartPage > 0 ? StartPage : 1;
             var to = EndPage > 0 ? EndPage : _document.PageCount;
             for (var i = from; i <= to; i++)
@@ -350,7 +405,7 @@ namespace Aspose.Pdf.Facades
                     // declared in /Resources regardless of whether it is drawn.
                     var resources = Devices.SoftwarePageRenderer.ResolveInheritedPageResources(page.Dict, page.Reader);
                     var content = Devices.SoftwarePageRenderer.GetPageContent(page.Dict, page.Reader);
-                    CollectDrawnImages(resources, content, page.Reader, list, seen, 0);
+                    CollectDrawnImages(resources, content, page.Reader, list, seen, inlineSeen, 0);
                 }
                 else
                 {
@@ -463,15 +518,36 @@ namespace Aspose.Pdf.Facades
         /// </summary>
         private static void CollectDrawnImages(Core.PdfDictionary? resources, byte[] content,
             IO.PdfReader reader, System.Collections.Generic.List<ImageXObject> list,
-            System.Collections.Generic.HashSet<Core.PdfStream> seen, int depth)
+            System.Collections.Generic.HashSet<Core.PdfStream> seen,
+            System.Collections.Generic.HashSet<string> inlineSeen, int depth)
         {
             if (depth > 32 || content.Length == 0) return;
             var xobjects = Devices.SoftwarePageRenderer.ResolveAllXObjects(resources, reader);
-            if (xobjects.Count == 0) return;
 
-            var order = new System.Collections.Generic.List<string>();
+            // Paint-order entries: a Do'd XObject is recorded by name; an inline
+            // (BI/ID/EI) image is materialised on the spot as a standalone stream.
+            var order = new System.Collections.Generic.List<(string? name, ImageXObject? inline)>();
             var parser = new Content.ContentStreamParser(reader);
-            parser.OnImageDrawn += (name, _) => order.Add(name);
+            parser.OnImageDrawn += (name, _) => order.Add((name, null));
+            parser.OnInlineImage += (dict, data) =>
+            {
+                if (dict.GetInt("Width") <= 0 || dict.GetInt("Height") <= 0 || data.Length == 0)
+                    return;
+                // An inline image's named colour space refers to the surrounding
+                // resource dictionary — swap in the actual object so the standalone
+                // stream decodes without that context.
+                if (dict.Get("ColorSpace") is Core.PdfName csName
+                    && csName.Value is not ("DeviceRGB" or "DeviceGray" or "DeviceCMYK"))
+                {
+                    var csRes = reader.ResolveDict(resources?.Get("ColorSpace"));
+                    if (csRes?.Get(csName.Value) is { } actual)
+                        dict.Set("ColorSpace", actual);
+                }
+                var key = string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                    $"{dict.GetInt("Width")}x{dict.GetInt("Height")}:{System.Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(data))}");
+                if (inlineSeen.Add(key))
+                    order.Add((null, new ImageXObject("InlineImage", new Core.PdfStream(dict, data), reader)));
+            };
             try
             {
                 var fonts = Devices.SoftwarePageRenderer.ResolveFontDicts(resources, reader);
@@ -480,11 +556,16 @@ namespace Aspose.Pdf.Facades
                 var props = reader.ResolveDict(resources?.Get("Properties"));
                 parser.Parse(content, fonts, null, extg, cs, props);
             }
-            catch { /* a malformed stream still yields whatever Do names parsed so far */ }
+            catch { /* a malformed stream still yields whatever parsed so far */ }
 
-            foreach (var name in order)
+            foreach (var (name, inline) in order)
             {
-                if (!xobjects.TryGetValue(name, out var xobj)) continue;
+                if (inline is not null)
+                {
+                    list.Add(inline);
+                    continue;
+                }
+                if (name is null || !xobjects.TryGetValue(name, out var xobj)) continue;
                 var subtype = xobj.Dict.GetName("Subtype");
                 if (subtype == "Image")
                 {
@@ -496,7 +577,7 @@ namespace Aspose.Pdf.Facades
                     byte[] formContent;
                     try { formContent = reader.DecodeStream(xobj); }
                     catch { continue; }
-                    CollectDrawnImages(formRes, formContent, reader, list, seen, depth + 1);
+                    CollectDrawnImages(formRes, formContent, reader, list, seen, inlineSeen, depth + 1);
                 }
             }
         }

@@ -14,15 +14,15 @@ public enum NumberingStyle
     LowerRoman,
     UpperAlpha,
     LowerAlpha,
-    /// <summary>Aspose.Pdf alias for <see cref="Decimal"/>.</summary>
+    /// <summary>Public-API alias for <see cref="Decimal"/>.</summary>
     NumeralsArabic = Decimal,
-    /// <summary>Aspose.Pdf alias for <see cref="UpperRoman"/>.</summary>
+    /// <summary>Public-API alias for <see cref="UpperRoman"/>.</summary>
     NumeralsRomanUppercase = UpperRoman,
-    /// <summary>Aspose.Pdf alias for <see cref="LowerRoman"/>.</summary>
+    /// <summary>Public-API alias for <see cref="LowerRoman"/>.</summary>
     NumeralsRomanLowercase = LowerRoman,
-    /// <summary>Aspose.Pdf alias for <see cref="UpperAlpha"/>.</summary>
+    /// <summary>Public-API alias for <see cref="UpperAlpha"/>.</summary>
     LettersUppercase = UpperAlpha,
-    /// <summary>Aspose.Pdf alias for <see cref="LowerAlpha"/>.</summary>
+    /// <summary>Public-API alias for <see cref="LowerAlpha"/>.</summary>
     LettersLowercase = LowerAlpha,
 }
 
@@ -40,14 +40,14 @@ public sealed class PageLabel
     /// <summary>The numbering style.</summary>
     public NumberingStyle Style { get; set; }
 
-    /// <summary>Aspose.Pdf alias for <see cref="Style"/>.</summary>
+    /// <summary>Public-API alias for <see cref="Style"/>.</summary>
     public NumberingStyle NumberingStyle
     {
         get => Style;
         set => Style = value;
     }
 
-    /// <summary>Aspose.Pdf alias for <see cref="Start"/>.</summary>
+    /// <summary>Public-API alias for <see cref="Start"/>.</summary>
     public int StartingValue
     {
         get => Start;

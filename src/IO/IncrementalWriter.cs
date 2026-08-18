@@ -121,6 +121,10 @@ internal sealed class IncrementalWriter
         WriteLn("endobj");
     }
 
+    /// <summary>Containers currently being written — detects direct-object cycles
+    /// that would otherwise recurse to a StackOverflow and kill the process.</summary>
+    private readonly HashSet<PdfObject> _inFlight = new(ReferenceEqualityComparer.Instance);
+
     private void WriteObject(PdfObject obj)
     {
         switch (obj)
@@ -160,26 +164,38 @@ internal sealed class IncrementalWriter
                 Write($"/{n.Value}");
                 break;
             case PdfArray arr:
-                Write("[");
-                for (var i = 0; i < arr.Count; i++)
+                // A DIRECT container cycle (self-referential graph without indirect refs)
+                // must not recurse forever: emit null for the back-edge.
+                if (!_inFlight.Add(arr)) { Write("null"); break; }
+                try
                 {
-                    if (i > 0) Write(" ");
-                    if (arr[i] is PdfStream s) WriteObject(PromoteStream(s));
-                    else WriteObject(arr[i]);
+                    Write("[");
+                    for (var i = 0; i < arr.Count; i++)
+                    {
+                        if (i > 0) Write(" ");
+                        if (arr[i] is PdfStream s) WriteObject(PromoteStream(s));
+                        else WriteObject(arr[i]);
+                    }
+                    Write("]");
                 }
-                Write("]");
+                finally { _inFlight.Remove(arr); }
                 break;
             case PdfDictionary dict:
-                Write("<< ");
-                foreach (var key in dict.Keys)
+                if (!_inFlight.Add(dict)) { Write("null"); break; }
+                try
                 {
-                    Write($"/{key} ");
-                    var v = dict.Get(key)!;
-                    if (v is PdfStream embedded) WriteObject(PromoteStream(embedded));
-                    else WriteObject(v);
-                    Write(" ");
+                    Write("<< ");
+                    foreach (var key in dict.Keys)
+                    {
+                        Write($"/{key} ");
+                        var v = dict.Get(key)!;
+                        if (v is PdfStream embedded) WriteObject(PromoteStream(embedded));
+                        else WriteObject(v);
+                        Write(" ");
+                    }
+                    Write(">>");
                 }
-                Write(">>");
+                finally { _inFlight.Remove(dict); }
                 break;
             case PdfStream stream:
                 stream.Dict.Set("Length", new PdfInteger(stream.RawData.Length));

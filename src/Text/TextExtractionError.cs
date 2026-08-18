@@ -13,7 +13,7 @@ public sealed class TextExtractionError
     /// <summary>Human-readable error message.</summary>
     public string Message { get; internal set; } = string.Empty;
 
-    /// <summary>Longer-form description of the error (Aspose.Pdf sibling of <see cref="Message"/>).</summary>
+    /// <summary>Longer-form description of the error (public-API sibling of <see cref="Message"/>).</summary>
     public string Description { get; internal set; } = string.Empty;
 
     /// <summary>Raw text that was extracted before the failure (best-effort).</summary>
@@ -32,7 +32,7 @@ public sealed class TextExtractionError
     public TextExtractionErrorLocation Location { get; internal set; } = new TextExtractionErrorLocation();
 
     public override string ToString() =>
-        string.IsNullOrEmpty(Summary) ? Message : Summary;
+        $"Summary: {(string.IsNullOrEmpty(Summary) ? Message : Summary)}\r\nDescription: {(string.IsNullOrEmpty(Description) ? Message : Description)}";
 }
 
 /// <summary>

@@ -9,9 +9,10 @@ public enum BoundsCheckMode
     ThrowExceptionIfDoesNotFit = 1,
 }
 
-/// <summary>A list of <typeparamref name="T"/> that optionally enforces container bounds on insertion.
-/// The FOSS implementation records the mode + container dimensions but never raises — bounds are
-/// checked at render time, not at add time. Mirrors the Aspose.Pdf public surface.</summary>
+/// <summary>A list of <typeparamref name="T"/> that optionally enforces container bounds on insertion:
+/// under <see cref="BoundsCheckMode.ThrowExceptionIfDoesNotFit"/> an item whose
+/// <see cref="Drawing.Shape.CheckBounds"/> fails raises <see cref="BoundsOutOfRangeException"/>
+/// at add time. Mirrors the public surface.</summary>
 public class BoundsCheckableList<T> : System.Collections.Generic.IEnumerable<T>
 {
     private readonly System.Collections.Generic.List<T> _items = new();
@@ -37,12 +38,30 @@ public class BoundsCheckableList<T> : System.Collections.Generic.IEnumerable<T>
         set => _items[index] = value;
     }
 
-    public void Add(T item) => _items.Add(item);
+    public void Add(T item)
+    {
+        EnsureFits(item);
+        _items.Add(item);
+    }
+
     public void Clear() => _items.Clear();
     public bool Contains(T item) => _items.Contains(item);
     public void CopyTo(T[] array, int arrayIndex) => _items.CopyTo(array, arrayIndex);
     public int IndexOf(T item) => _items.IndexOf(item);
-    public void Insert(int index, T item) => _items.Insert(index, item);
+
+    public void Insert(int index, T item)
+    {
+        EnsureFits(item);
+        _items.Insert(index, item);
+    }
+
+    private void EnsureFits(T item)
+    {
+        if (_mode != BoundsCheckMode.ThrowExceptionIfDoesNotFit) return;
+        if (item is Drawing.Shape shape && !shape.CheckBounds(_w, _h))
+            throw new BoundsOutOfRangeException(
+                "The element does not fit within the bounds of its parent container.");
+    }
     public bool Remove(T item) => _items.Remove(item);
     public void RemoveAt(int index) => _items.RemoveAt(index);
 

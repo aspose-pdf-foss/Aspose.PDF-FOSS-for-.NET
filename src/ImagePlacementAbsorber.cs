@@ -62,7 +62,13 @@ public sealed class ImagePlacement
         {
             if (Matrix is null) return 0f;
             var rad = Math.Atan2(Matrix.B, Matrix.A);
-            return (float)(rad * 180.0 / Math.PI);
+            var deg = rad * 180.0 / Math.PI;
+            // The placement Matrix stays in the page's default (media) space, but the
+            // reported angle is measured in the DISPLAYED frame: a page /Rotate turns
+            // the drawn image with it. Subtract the page rotation and normalize to
+            // [0, 360); Matrix/Rectangle stay unrotated.
+            var pageRot = Page?.RotateDegrees ?? 0;
+            return (float)(((deg - pageRot) % 360 + 360) % 360);
         }
     }
 
@@ -88,11 +94,39 @@ public sealed class ImagePlacement
     /// XObjects, which page-level operator edits cannot address.</summary>
     internal int PageLevelOrdinal = -1;
 
+    /// <summary>The tiling-pattern stream this placement was discovered in, when the
+    /// image is painted by a pattern fill rather than a page-level <c>Do</c>.</summary>
+    internal Core.PdfStream? SourcePattern;
+    internal IO.PdfReader? SourceReader;
+
     /// <summary>Hide this image placement by removing its <c>Do</c> invocation from
     /// the page content. Placements nested inside Form XObjects are left untouched
     /// (removing them would affect every use of the form).</summary>
     public void Hide()
     {
+        // A pattern-painted image hides by dropping its Do from the PATTERN's
+        // content — the pattern object is what the page's fill references, so the
+        // image disappears from every tile.
+        if (SourcePattern is not null && SourceReader is not null && XObjectName is not null)
+        {
+            try
+            {
+                var content = SourceReader.DecodeStream(SourcePattern);
+                var text = System.Text.Encoding.Latin1.GetString(content);
+                var pat = new System.Text.RegularExpressions.Regex(
+                    "/" + System.Text.RegularExpressions.Regex.Escape(XObjectName) + "\\s+Do");
+                var replaced = pat.Replace(text, " ", 1);
+                if (!ReferenceEquals(replaced, text))
+                {
+                    SourcePattern.ReplaceData(System.Text.Encoding.Latin1.GetBytes(replaced));
+                    SourcePattern.Dict.Remove("Filter");
+                    SourcePattern.Dict.Remove("DecodeParms");
+                    SourcePattern.Dict.Set("Length", new Core.PdfInteger(replaced.Length));
+                }
+            }
+            catch { /* undecodable pattern: leave the placement visible */ }
+            return;
+        }
         if (Page is null || XObjectName is null || PageLevelOrdinal < 0) return;
         var ops = Page.Contents;
         var matches = new List<int>();
@@ -109,10 +143,17 @@ public sealed class ImagePlacement
         ops.Delete(idx);
     }
 
-    /// <summary>Replace this image placement's content with <paramref name="image"/>. Stored only.</summary>
+    /// <summary>Replace this image placement's underlying image XObject with
+    /// <paramref name="image"/>. The resource name is kept, so every invocation
+    /// of the XObject (and subsequent reads) sees the new pixels.</summary>
     public void Replace(Stream image)
     {
         if (image is null) throw new ArgumentNullException(nameof(image));
+        if (Image is null) return;
+        using var ms = new MemoryStream();
+        if (image.CanSeek) image.Seek(0, SeekOrigin.Begin);
+        image.CopyTo(ms);
+        Image.ReplaceImageData(ms.ToArray());
     }
 
     /// <summary>Write the decoded image bytes to <paramref name="stream"/>.</summary>
@@ -210,7 +251,14 @@ public sealed class ImagePlacementAbsorber
         var reader = page.Reader;
         var pageDict = page.Dict;
 
+        // /Resources is inheritable: a page without its own dict draws with the
+        // nearest ancestor's (a scanned-page producer commonly parks the XObject
+        // dict on the /Pages node).
         var resources = reader.ResolveDict(pageDict.Get("Resources"));
+        for (var anc = reader.ResolveDict(pageDict.Get("Parent"));
+             resources is null && anc is not null;
+             anc = reader.ResolveDict(anc.Get("Parent")))
+            resources = reader.ResolveDict(anc.Get("Resources"));
 
         // Get content streams
         var contentStreams = GetContentStreams(pageDict, reader);
@@ -224,6 +272,84 @@ public sealed class ImagePlacementAbsorber
         {
             ParseContentStream(streamBytes, resources, reader, page, initialCtm, depth: 0, pageLevelSeen);
         }
+
+        // Tiling patterns paint images too (an image-stamp watermark is often a
+        // pattern fill): walk each /Pattern content stream once, under the
+        // pattern's own /Matrix.
+        var patternDict = resources is null ? null : reader.ResolveDict(resources.Get("Pattern"));
+        if (patternDict is not null)
+        {
+            foreach (var key in patternDict.Keys)
+            {
+                if (reader.ResolveStream(patternDict.Get(key)) is not { } pat) continue;
+                if (pat.Dict.GetInt("PatternType", 1) != 1) continue; // shading patterns draw no images
+                var patRes = reader.ResolveDict(pat.Dict.Get("Resources"));
+                var patCtm = new double[] { 1, 0, 0, 1, 0, 0 };
+                if (reader.Resolve(pat.Dict.Get("Matrix")) is PdfArray pm && pm.Count == 6)
+                {
+                    for (var i = 0; i < 6; i++)
+                        patCtm[i] = reader.Resolve(pm[i]) switch
+                        {
+                            PdfInteger pi => pi.Value,
+                            PdfReal pr => pr.Value,
+                            _ => patCtm[i],
+                        };
+                }
+                byte[] patBytes;
+                try { patBytes = reader.DecodeStream(pat); } catch { continue; }
+                ParseContentStream(patBytes, patRes, reader, page, patCtm, depth: 1,
+                    sourcePattern: pat);
+            }
+        }
+
+        // Annotation appearance streams paint on the page too (stamps, watermark
+        // letterheads): walk each /AP /N form like a page-level Form XObject, with
+        // the appearance's own /Matrix mapped onto its /Rect.
+        var annots = reader.Resolve(pageDict.Get("Annots")) as PdfArray;
+        if (annots is not null)
+        {
+            foreach (var item in annots)
+            {
+                var annotDict = reader.ResolveDict(item);
+                if (annotDict is null) continue;
+                var ap = reader.ResolveDict(annotDict.Get("AP"));
+                var norm = ap is null ? null : reader.Resolve(ap.Get("N"));
+                // A stateful appearance (/N is a dict of states) uses /AS to select.
+                if (norm is PdfDictionary stateDict)
+                {
+                    var asName = annotDict.GetName("AS");
+                    norm = asName is not null ? reader.Resolve(stateDict.Get(asName)) : null;
+                }
+                if (norm is not PdfStream apStream) continue;
+                var apRes = reader.ResolveDict(apStream.Dict.Get("Resources"));
+                var apCtm = AppearanceCtm(apStream, annotDict, reader);
+                byte[] apBytes;
+                try { apBytes = reader.DecodeStream(apStream); } catch { continue; }
+                ParseContentStream(apBytes, apRes, reader, page, apCtm, depth: 1);
+            }
+        }
+    }
+
+    /// <summary>CTM mapping an appearance stream's form space onto the annotation's
+    /// /Rect: the /BBox (transformed by the form /Matrix) scales/translates to fit
+    /// the rectangle (PDF 32000 §12.5.5 appearance-stream algorithm, sans rotation).</summary>
+    private static double[] AppearanceCtm(PdfStream apStream, PdfDictionary annotDict, PdfReader reader)
+    {
+        var identity = new double[] { 1, 0, 0, 1, 0, 0 };
+        var rectArr = reader.Resolve(annotDict.Get("Rect")) as PdfArray;
+        var bboxArr = reader.Resolve(apStream.Dict.Get("BBox")) as PdfArray;
+        if (rectArr is not { Count: 4 } || bboxArr is not { Count: 4 }) return identity;
+        double N(PdfObject? o) => o switch { PdfInteger i => i.Value, PdfReal r => r.Value, _ => 0 };
+        double rx0 = N(reader.Resolve(rectArr[0])), ry0 = N(reader.Resolve(rectArr[1]));
+        double rx1 = N(reader.Resolve(rectArr[2])), ry1 = N(reader.Resolve(rectArr[3]));
+        double bx0 = N(reader.Resolve(bboxArr[0])), by0 = N(reader.Resolve(bboxArr[1]));
+        double bx1 = N(reader.Resolve(bboxArr[2])), by1 = N(reader.Resolve(bboxArr[3]));
+        if (rx1 < rx0) (rx0, rx1) = (rx1, rx0);
+        if (ry1 < ry0) (ry0, ry1) = (ry1, ry0);
+        var bw = bx1 - bx0; var bh = by1 - by0;
+        if (bw <= 0 || bh <= 0) return identity;
+        var sx = (rx1 - rx0) / bw; var sy = (ry1 - ry0) / bh;
+        return new[] { sx, 0, 0, sy, rx0 - bx0 * sx, ry0 - by0 * sy };
     }
 
     /// <summary>When true, the absorber walks pages without mutating any state. Stored only.</summary>
@@ -243,7 +369,8 @@ public sealed class ImagePlacementAbsorber
     /// When a Form XObject is encountered, recursively parse its content stream.
     /// </summary>
     private void ParseContentStream(byte[] streamBytes, PdfDictionary? resources, PdfReader reader,
-        Page page, double[] parentCtm, int depth, Dictionary<string, int>? pageLevelSeen = null)
+        Page page, double[] parentCtm, int depth, Dictionary<string, int>? pageLevelSeen = null,
+        PdfStream? sourcePattern = null)
     {
         if (depth > 10) return; // Guard against infinite recursion
 
@@ -281,7 +408,8 @@ public sealed class ImagePlacementAbsorber
                 var localCtm = state.Ctm;
                 var ctm = MultiplyMatrices(localCtm, parentCtm);
 
-                AddImagePlacement(ctm, xobjStream, page, xobjName, reader, depth == 0 ? pageLevelSeen : null);
+                AddImagePlacement(ctm, xobjStream, page, xobjName, reader, depth == 0 ? pageLevelSeen : null,
+                    sourcePattern);
             }
             else if (subtype == "Form")
             {
@@ -327,7 +455,8 @@ public sealed class ImagePlacementAbsorber
     }
 
     private void AddImagePlacement(double[] ctm, PdfStream xobjStream, Page page,
-        string? xobjName = null, PdfReader? reader = null, Dictionary<string, int>? pageLevelSeen = null)
+        string? xobjName = null, PdfReader? reader = null, Dictionary<string, int>? pageLevelSeen = null,
+        PdfStream? sourcePattern = null)
     {
         // The image occupies a 1x1 unit square transformed by the CTM.
         var displayWidth = Math.Sqrt(ctm[0] * ctm[0] + ctm[1] * ctm[1]);
@@ -353,8 +482,17 @@ public sealed class ImagePlacementAbsorber
 
         // Resolution: DPI = (pixelDim / displayDim) * 72
         // Use truncation (not rounding) to match the public API behavior.
-        var resX = displayWidth > 0 ? (int)((pixelWidth / displayWidth) * 72.0) : 72;
-        var resY = displayHeight > 0 ? (int)((pixelHeight / displayHeight) * 72.0) : 72;
+        // DPI truncates (a 308.6 DPI placement reports 308) but float noise in the
+        // CTM must not drag an exact-integer DPI down (191.9999 → 192, not 191).
+        static int Dpi(double pixels, double display)
+        {
+            if (display <= 0) return 72;
+            var v = pixels / display * 72.0;
+            var r = Math.Round(v);
+            return Math.Abs(v - r) < 0.01 ? (int)r : (int)v;
+        }
+        var resX = Dpi(pixelWidth, displayWidth);
+        var resY = Dpi(pixelHeight, displayHeight);
 
         var matrix = new Matrix(ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5]);
         XImage? image = (reader is not null)
@@ -363,6 +501,8 @@ public sealed class ImagePlacementAbsorber
         var placement = new ImagePlacement(rect, new Resolution(resX, resY), page, matrix, image)
         {
             XObjectName = xobjName,
+            SourcePattern = sourcePattern,
+            SourceReader = reader,
         };
         if (pageLevelSeen is not null && xobjName is not null)
         {

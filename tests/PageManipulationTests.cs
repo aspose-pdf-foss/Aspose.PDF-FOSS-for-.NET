@@ -14,7 +14,7 @@ public class PageManipulationTests
 
         var page = doc.Pages.Add();
         Assert.Equal(1, doc.PageCount);
-        // Aspose.Pdf defaults to A4 (595 x 842 — PageInfo ctor +
+        // The reference defaults to A4 (595 x 842 — PageInfo ctor +
         // PageSize.A4 literal), not US Letter; FOSS matches.
         Assert.Equal(595, page.MediaBox.URX);
         Assert.Equal(842, page.MediaBox.URY);

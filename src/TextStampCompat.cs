@@ -6,7 +6,7 @@ namespace Aspose.Pdf
     /// <c>Aspose.Pdf.TextStamp</c> (from before the type moved to
     /// <c>Aspose.Pdf.Stamps</c>) keep compiling. Most behaviour comes
     /// from the real implementation in <see cref="Stamps.TextStamp"/>;
-    /// Aspose.Pdf-shape additions are declared here so they surface in
+    /// public-API-shape additions are declared here so they surface in
     /// the reflection dump.</summary>
     public class TextStamp : Stamps.TextStamp
     {
@@ -57,14 +57,14 @@ namespace Aspose.Pdf
         public new double Width { get => base.Width; set => base.Width = value; }
         public new bool WordWrap { get => base.WordWrap; set => base.WordWrap = value; }
         public new Aspose.Pdf.Text.TextFormattingOptions.WordWrapMode WordWrapMode { get => base.WordWrapMode; set => base.WordWrapMode = value; }
-        /// <summary>Text-state snapshot. Get-only on the derived type per the Aspose.Pdf public API.</summary>
+        /// <summary>Text-state snapshot. Get-only on the derived type per the public API.</summary>
         public new Aspose.Pdf.Text.TextState TextState => base.TextState;
 
-        /// <summary>Font size in points. Get-only on the derived type per the Aspose.Pdf public API
+        /// <summary>Font size in points. Get-only on the derived type per the public API
         /// (the inherited setter remains accessible internally for the renderer + facades).</summary>
         public new float FontSize { get => base.FontSize; internal set => base.FontSize = value; }
 
-        // ── Aspose.Pdf-shape additions ───────────────────────────
+        // ── public-API-shape additions ───────────────────────────
 
         /// <summary>When auto-adjusting font size to fit the stamp rectangle, the precision (in points). Stored only.</summary>
         public float AutoAdjustFontSizePrecision { get; set; } = 0.1f;
@@ -72,7 +72,7 @@ namespace Aspose.Pdf
         /// <summary>When true, the renderer shrinks the font size until the text fits the stamp's Width/Height.</summary>
         public bool AutoAdjustFontSizeToFitStampRectangle { get; set; }
 
-        /// <summary>Drive the base auto-fit off the Aspose.Pdf-shape properties.</summary>
+        /// <summary>Drive the base auto-fit off the public-API-shape properties.</summary>
         protected override bool AutoFitToBox => AutoAdjustFontSizeToFitStampRectangle;
 
         /// <summary>Bisection stop interval for the auto-fit search.</summary>
@@ -104,7 +104,10 @@ namespace Aspose.Pdf
                 ? (ttf, ReplacementFont.FontName)
                 : null;
 
-        /// <summary>When true, the stamp's Y-indent is treated as the text baseline rather than the bounding-box top. Stored only.</summary>
+        /// <summary>When true, the stamp's Y-indent is treated as the text baseline rather than the bounding-box top.</summary>
         public bool TreatYIndentAsBaseLine { get; set; }
+
+        /// <summary>Feed the baseline declaration to the base stamp's bottom-seat placement.</summary>
+        protected override bool YIndentIsBaseline => TreatYIndentAsBaseLine;
     }
 }

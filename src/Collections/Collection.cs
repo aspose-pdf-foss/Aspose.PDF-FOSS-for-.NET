@@ -33,9 +33,8 @@ public class Collection : EmbeddedFileCollection
         }
     }
 
-    internal Collection(PdfDictionary collDict, PdfDictionary? namesDict, PdfReader reader,
-        PageCollection? pages = null, PdfReader? pageReader = null)
-        : base(namesDict, reader, pages, pageReader)
+    internal Collection(PdfDictionary collDict, PdfDictionary? namesDict, PdfReader reader)
+        : base(namesDict, reader)
     {
         _dict = collDict;
     }

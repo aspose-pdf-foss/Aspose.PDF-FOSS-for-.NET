@@ -10,17 +10,18 @@
 
     <!-- Package / release metadata -->
     <PackageId>Aspose.PDF.FOSS</PackageId>
-    <Version>26.7.0</Version>
+    <Version>26.8.0</Version>
     <Product>Aspose.PDF FOSS for .NET</Product>
     <PackageReleaseNotes>
-v26.7.0 - large update.
+v26.8.0 - conversion fidelity release.
 
-New: real PDF&lt;-&gt;SVG conversion, Markdown save/load, document Comparison (Diff), PDF 3D annotation reading, dynamic XFA flatten rendering.
-Text: CR/LF line structure, RTL/bidi and CJK extraction, ligatures, post-replace reflow.
-Rendering/images: image alt-text, inline-image enumeration, DPI-preserving XImage.Save, improved TIFF/JPEG/JBIG2/CCITT handling.
-Also: fonts, Forms/AcroForm/XFA, signatures (SHA-1/DSA/ECDSA, LTV, DocMDP), PDF/A and save/optimize improvements.
+New: side-by-side PDF comparison (SideBySidePdfComparer, SideBySideComparisonOptions) and graphical page diff (GraphicalPdfComparer); PDF 2.0 deprecation gates raising DeprecatedFeatureException.
+HTML-&gt;PDF: large fidelity push - print stylesheets and @page sheets, float and multi-column layout, percent / max-content table grids, chart and grid pagination, right-to-left and Word-filtered exports.
+Text: ligature handling and word-gap reconstruction, TrueType collection faces, Unicode CMap decoding, symbol fallback, Type3 / ActualText rebuild.
+XFA: dynamic layout - field heights from laid-out content, per-edge border chrome, captions, rich text, dataRef binding and occur rules.
+Also: PDF/A implementation limits with conformance clauses and part-4 embedded-file semantics, font substitution reporting and SubsetAllFonts embedding, Markdown pipe tables, plus forms, stamps, annotations and rendering fixes.
 
-Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/releases/tag/v26.7.0
+Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/releases/tag/v26.8.0
     </PackageReleaseNotes>
     <Authors>Aspose</Authors>
     <Company>Aspose Pty Ltd</Company>

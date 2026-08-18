@@ -209,7 +209,7 @@ public sealed class DocumentInfo
 
     /// <summary>
     /// Adds a custom metadata property. Alias for <see cref="SetCustom"/>;
-    /// matches the Aspose.Pdf DocumentInfo.Add(string, string) public surface.
+    /// matches the DocumentInfo.Add(string, string) public surface.
     /// </summary>
     public void Add(string key, string value) => SetString(key, value);
 
@@ -225,7 +225,7 @@ public sealed class DocumentInfo
 
     /// <summary>
     /// Indexer access for any property — well-known ones (Title, Author, etc.)
-    /// or custom keys. Matches the Aspose.Pdf DocumentInfo.this[string] surface.
+    /// or custom keys. Matches the DocumentInfo.this[string] surface.
     /// </summary>
     public string? this[string key]
     {
@@ -363,7 +363,7 @@ public sealed class DocumentInfo
             // A from-scratch document's /Info, the first time it is materialised, carries
             // the standard text entries as empty strings — so a field left unset (the test
             // sets only Title, say) reads back as "" rather than absent after the document
-            // is saved and reopened, matching Aspose.Pdf. The actual setter that
+            // is saved and reopened. The actual setter that
             // triggered this overwrites its own key right after. Loaded documents are left
             // untouched: an absent entry on an externally-authored file still reads as null.
             if (_document.IsNewDocument && dict.Count == 0)

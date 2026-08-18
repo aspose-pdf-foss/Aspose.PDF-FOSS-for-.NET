@@ -517,7 +517,7 @@ public sealed class NamedDestinationCollection : IEnumerable<NamedDestination>
 /// <summary>
 /// Named-destination collection exposed as
 /// <c>IEnumerable&lt;KeyValuePair&lt;string, object&gt;&gt;</c> for
-/// Aspose.Pdf parity. Each pair maps a destination name to its
+/// public-API parity. Each pair maps a destination name to its
 /// raw PDF object (typically an <see cref="Aspose.Pdf.Annotations.ExplicitDestination"/>).
 /// </summary>
 public sealed class DestinationCollection

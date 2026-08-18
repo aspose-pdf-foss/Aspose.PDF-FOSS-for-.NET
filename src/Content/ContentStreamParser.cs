@@ -19,6 +19,11 @@ internal sealed class ContentStreamParser
     // swallowed by a stray `NaN` token — is dropped rather than stroked from the
     // implicit origin.
     private bool _subpathOpen;
+    // True when a path-construction operator since the last paint was dropped for
+    // insufficient operands (damaged content streams fuse coordinate separators).
+    // A clip built from such a partial path would cut away legitimate content, so
+    // the pending W/W* is ignored instead — standard viewer tolerance.
+    private bool _pathBroken;
 
     // PDF 32000 §8.5.4: W / W* do not immediately modify the clipping path; they flag
     // the current path for intersection with the existing clip once the following
@@ -93,6 +98,37 @@ internal sealed class ContentStreamParser
     /// rather than chasing the array via _reader on every fill.
     /// </summary>
     private readonly Dictionary<string, (Functions.PdfFunction tint, string altSpace)> _tintColorSpaces = new();
+    // Named [/ICCBased] spaces whose profile is a scanner-class Lab-encoded
+    // profile — scn components clamp to [0,1] and decode as
+    // L = c0·100, a = c1·255−128, b = c2·255−128 (see IsLabEncodedIcc).
+    private readonly HashSet<string> _labEncColorSpaces = new();
+    // Named DIRECT [/Lab <dict>] spaces: scn/SCN operands are raw L,a,b values
+    // (L 0..100, a/b typically ±128) and must go through the Lab→sRGB transform —
+    // read as display RGB they clamp into wildly wrong colours.
+    private readonly HashSet<string> _labColorSpaces = new();
+
+    /// <summary>
+    /// True when the referenced ICC stream is a 3-component scanner-class
+    /// ('scnr') profile with an 'RGB ' data signature. Such profiles are input
+    /// (capture) profiles, never display RGB: their channel encoding is
+    /// Lab-like (channel 0 = L/100, channels 1/2 = (a|b + 128)/255 — verified
+    /// against a pdfDocs PANTONE tint transform whose 0-tint output is
+    /// (1, 0.496, 0.496) = paper white). Treating their components as display
+    /// RGB paints cyan bars red in such files.
+    /// </summary>
+    private bool IsLabEncodedIcc(PdfObject? streamRef)
+    {
+        if (_reader.ResolveStream(streamRef) is not { } icc) return false;
+        var n = (_reader.Resolve(icc.Dict.Get("N")) as PdfInteger)?.Value ?? 0;
+        if (n != 3) return false;
+        byte[] bytes;
+        try { bytes = _reader.DecodeStream(icc); }
+        catch { return false; }
+        if (bytes.Length < 20) return false;
+        // ICC header: bytes 12–15 = device class, 16–19 = data colour space.
+        return bytes[12] == (byte)'s' && bytes[13] == (byte)'c' && bytes[14] == (byte)'n' && bytes[15] == (byte)'r'
+            && bytes[16] == (byte)'R' && bytes[17] == (byte)'G' && bytes[18] == (byte)'B' && bytes[19] == (byte)' ';
+    }
 
     /// <summary>
     /// Names of page-resource colour spaces that resolve to a /Pattern space
@@ -141,6 +177,8 @@ internal sealed class ContentStreamParser
         _tintColorSpaces.Clear();
         _patternColorSpaces.Clear();
         _barePatternColorSpaces.Clear();
+        _labEncColorSpaces.Clear();
+        _labColorSpaces.Clear();
         if (colorSpaces is not null)
         {
             foreach (var name in colorSpaces.Keys)
@@ -160,13 +198,38 @@ internal sealed class ContentStreamParser
                 if ((resolved is PdfName pn && pn.Value == "Pattern")
                     || (resolved is PdfArray bp && bp.Count >= 1 && (bp[0] as PdfName)?.Value == "Pattern"))
                 { _barePatternColorSpaces.Add(name); continue; }
-                if (resolved is not PdfArray arr || arr.Count < 4) continue;
+                if (resolved is not PdfArray arr) continue;
+                // A named [/ICCBased <stream>] space whose profile is a scanner-class
+                // (Lab-encoded) profile: producers like pdfDocs write RAW Lab-ish scn
+                // operands against it (e.g. "100 -1 -1 scn"); record it so scn can
+                // clamp + decode instead of misreading the components as display RGB.
+                if (arr.Count >= 2 && (arr[0] as PdfName)?.Value == "ICCBased"
+                    && IsLabEncodedIcc(arr[1]))
+                { _labEncColorSpaces.Add(name); continue; }
+                if (arr.Count >= 1 && (arr[0] as PdfName)?.Value == "Lab")
+                { _labColorSpaces.Add(name); continue; }
+                if (arr.Count < 4) continue;
                 var familyName = (arr[0] as PdfName)?.Value;
                 if (familyName != "Separation" && familyName != "DeviceN") continue;
                 var altSpace = ResolveAltSpaceName(arr[2]);
-                if (altSpace is null) continue;
-                var tint = Functions.PdfFunction.Parse(arr[3], _reader);
-                if (tint is null) continue;
+                var tint = altSpace is null ? null : Functions.PdfFunction.Parse(arr[3], _reader);
+                // A scanner-class ICC alternate carries no marker for how the tint
+                // output is ENCODED — some producers emit Lab-encoded channels
+                // (L/100, (a|b+128)/255), others plain display RGB against the same
+                // profile class. The no-ink end disambiguates: tint(0) must be paper
+                // white, which is (1, ~0.5, ~0.5) in the Lab encoding but (1, 1, 1)
+                // in display RGB. Only keep the LabEnc decode when the function
+                // actually lands near the Lab-encoded white.
+                if (altSpace == "LabEnc" && tint is not null)
+                {
+                    var zero = tint.Evaluate(new double[] { 0 });
+                    bool labWhite = zero is { Length: >= 3 }
+                        && Math.Abs(zero[1] - 0.5) < 0.25 && Math.Abs(zero[2] - 0.5) < 0.25;
+                    if (!labWhite) altSpace = "DeviceRGB";
+                }
+                if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_CSDEBUG") == "1")
+                    Console.Error.WriteLine($"[cs] {name} family={familyName} alt={altSpace ?? "NULL"} tint={(tint is null ? "NULL" : tint.GetType().Name)}");
+                if (altSpace is null || tint is null) continue;
                 _tintColorSpaces[name] = (tint, altSpace);
             }
         }
@@ -176,12 +239,17 @@ internal sealed class ContentStreamParser
         string? currentFontKey = null;
         Dictionary<int, string>? currentToUnicode = toUnicode;
         int tokenCount = 0;
+        // Safety guard against malformed streams (a lexer that stops advancing).
+        // A well-formed token consumes at least one input byte, so the byte count
+        // is a true upper bound — huge legitimate vector streams (60MB+ CAD maps)
+        // must parse to the end rather than stop at an arbitrary op count.
+        var maxTokens = Math.Max(MaxTokens, streamBytes.Length);
 
         while (true)
         {
             var token = lexer.NextToken();
             if (token.Kind == TokenKind.Eof) break;
-            if (++tokenCount > MaxTokens) break; // safety guard against malformed streams
+            if (++tokenCount > maxTokens) break;
 
             switch (token.Kind)
             {
@@ -610,6 +678,7 @@ internal sealed class ContentStreamParser
                 _subpathOpen = true;
                 break;
             case "m" or "l" or "c" or "v" or "y" or "re":
+                _pathBroken = true;
                 break; // insufficient operands — ignore
 
             // Path painting — a W/W* seen since the last `m` gets applied here, after
@@ -619,11 +688,15 @@ internal sealed class ContentStreamParser
                 OnPathPainted?.Invoke(op, _state, _pathSegments);
                 if (_pendingClipEvenOdd is { } clipRule)
                 {
-                    OnPathClipped?.Invoke(clipRule, _state, _pathSegments);
+                    // A partial (op-dropped) path must not become a clip: the missing
+                    // segments would leave a sliver that erases the whole group.
+                    if (!_pathBroken)
+                        OnPathClipped?.Invoke(clipRule, _state, _pathSegments);
                     _pendingClipEvenOdd = null;
                 }
                 _pathSegments.Clear();
                 _subpathOpen = false;
+                _pathBroken = false;
                 break;
 
             // Shading-paint operator — fills the current clipping region with the
@@ -795,15 +868,56 @@ internal sealed class ContentStreamParser
         // components in the alternate space. Without this, `1 scn` on a
         // /Separation /PANTONE 1805 C space defaults to gray=1.0 (white) and any
         // orange text drawn that way renders invisible against a white background.
+        // Scanner-class ICC space fed OUT-OF-RANGE operands: some producers
+        // (pdfDocs) write RAW Lab values against such a space ("100 -1 -1 scn",
+        // "0 -1 -1 scn") — impossible for the profile's [0,1] input range, so
+        // the components can't be display RGB. Clamp to [0,1] and decode the
+        // profile's Lab-like channel encoding: (1,0,0) = Lab(100,−128,−128) →
+        // process cyan; (0,0,0) → a deep blue.
+        // IN-RANGE operands on the same profile class stay plain RGB (many
+        // scanned files use scnr profiles with ordinary colour components).
+        // Direct [/Lab] colorspace: operands ARE L,a,b — convert, don't clamp as RGB.
+        if (cs is not null && _labColorSpaces.Contains(cs) && operands.Count >= 3)
+        {
+            LabColor.ToRgb(Num(operands[0]), Num(operands[1]), Num(operands[2]),
+                out var dlr, out var dlg, out var dlb);
+            if (isFill) { _state.FillR = dlr; _state.FillG = dlg; _state.FillB = dlb; }
+            else { _state.StrokeR = dlr; _state.StrokeG = dlg; _state.StrokeB = dlb; }
+            return;
+        }
+        if (cs is not null && _labEncColorSpaces.Contains(cs) && operands.Count >= 3)
+        {
+            var outOfRange = false;
+            for (var i = 0; i < 3 && !outOfRange; i++)
+            {
+                var v = Num(operands[i]);
+                if (v < -0.01 || v > 1.5) outOfRange = true;
+            }
+            if (outOfRange)
+            {
+                double Ch(int i) { var v = Num(operands[i]); return v < 0 ? 0 : v > 1 ? 1 : v; }
+                LabColor.ToRgb(Ch(0) * 100.0, Ch(1) * 255.0 - 128.0, Ch(2) * 255.0 - 128.0,
+                    out var lr, out var lg, out var lb);
+                if (isFill) { _state.FillR = lr; _state.FillG = lg; _state.FillB = lb; }
+                else { _state.StrokeR = lr; _state.StrokeG = lg; _state.StrokeB = lb; }
+                return;
+            }
+            // fall through: ordinary components, ApplyColorOperands maps them as RGB
+        }
+
         if (cs is not null && _tintColorSpaces.TryGetValue(cs, out var tintInfo))
         {
             var inputs = new double[operands.Count];
             for (var i = 0; i < operands.Count; i++) inputs[i] = Num(operands[i]);
             var altComponents = tintInfo.tint.Evaluate(inputs);
+            if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_CSDEBUG") == "1")
+                Console.Error.WriteLine($"[scn] cs={cs} tint inputs=[{string.Join(",", inputs)}] alt={(altComponents is null ? "NULL" : string.Join(",", altComponents))} space={tintInfo.altSpace}");
             if (altComponents is null) return;
             ApplyAltSpaceComponents(altComponents, tintInfo.altSpace, isFill);
             return;
         }
+        if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_CSDEBUG") == "1")
+            Console.Error.WriteLine($"[scn] cs={cs ?? "null"} NO-TINT operands={operands.Count} fill={isFill}");
 
         ApplyColorOperands(operands, isFill);
     }
@@ -936,6 +1050,14 @@ internal sealed class ContentStreamParser
             case "Lab" when comp.Length >= 3:
                 LabColor.ToRgb(comp[0], comp[1], comp[2], out r, out g, out b);
                 break;
+            case "LabEnc" when comp.Length >= 3:
+            {
+                // Lab-encoded scanner ICC channels (see IsLabEncodedIcc).
+                double C(double v) => v < 0 ? 0 : v > 1 ? 1 : v;
+                LabColor.ToRgb(C(comp[0]) * 100.0, C(comp[1]) * 255.0 - 128.0, C(comp[2]) * 255.0 - 128.0,
+                    out r, out g, out b);
+                break;
+            }
             default:
                 // Unknown / unsupported alternate: pick whichever interpretation
                 // matches the component count so we at least pass something
@@ -974,6 +1096,11 @@ internal sealed class ContentStreamParser
             // CMYK if N=4, RGB if N=3, Gray if N=1.
             if (fam.Value == "ICCBased" && a.Count > 1 && _reader.ResolveStream(a[1]) is { } iccStream)
             {
+                // A scanner-class Lab-encoded ICC alternate: the tint function's output
+                // components are L/100, (a+128)/255, (b+128)/255 — route them through
+                // the LabEnc decode instead of reading them as display RGB (a spot
+                // colour resolving to teal otherwise comes out mauve).
+                if (IsLabEncodedIcc(a[1])) return "LabEnc";
                 var nObj = iccStream.Dict.Get("N");
                 var iccN = nObj switch
                 {
@@ -1086,26 +1213,25 @@ internal sealed class ContentStreamParser
         }
         else
         {
-            // When bytes are 1:1 with decoded text (typical for simple TT fonts), the
-            // PDF font dict's /Widths is keyed by the raw byte values — that's how the
-            // bytes were paired with widths at embed time. Subset TT fonts with /ToUnicode
-            // map byte X to char Y but /Widths still uses X as the key, so a Unicode-char
-            // lookup falls through to the MissingWidth/default and the cursor advances
-            // wrong (visible as huge letter-spacing on subset-font text). Use byte-keyed
-            // lookup when we have a 1:1 mapping; the existing Unicode path remains for
-            // multi-byte expansions (rare for simple TT but legal per /ToUnicode spec).
+            // A simple font advances one width per BYTE — the /Widths array is keyed
+            // by the raw byte values (that's how the bytes were paired with widths at
+            // embed time). Subset TT fonts with /ToUnicode map byte X to char Y but
+            // /Widths still uses X as the key, so a Unicode-char lookup falls through
+            // to the MissingWidth/default and the cursor advances wrong (visible as
+            // huge letter-spacing on subset-font text). When a /ToUnicode entry
+            // expands one code to SEVERAL chars (an Arabic lam-alef ligature, "fi"),
+            // the decoded text is longer than the byte string — walking it would add
+            // one advance per CHAR, opening a gap after every ligature. Walk the
+            // bytes; the decoded text only supplies the char for the fallback width
+            // lookup when the mapping is 1:1.
             bool oneToOne = bytes.Length == text.Length;
-            for (var i = 0; i < text.Length; i++)
+            for (var i = 0; i < bytes.Length; i++)
             {
-                var ch = text[i];
-                int w;
-                if (oneToOne)
-                    w = _currentMetrics?.GetWidth(bytes[i]) ?? 0;
-                else
-                    w = _currentMetrics?.GetWidth(ch) ?? 0;
+                var ch = oneToOne ? text[i] : (char)bytes[i];
+                int w = _currentMetrics?.GetWidth(bytes[i]) ?? 0;
                 if (w == 0) w = _currentMetrics?.GetWidth(ch) ?? 500;
                 totalWidth += (w / 1000.0 * fontSize + charSpacing) * hScaling;
-                if (ch == ' ')
+                if (ch == ' ' || bytes[i] == 0x20)
                     totalWidth += wordSpacing * hScaling;
             }
         }
@@ -1159,9 +1285,13 @@ internal sealed class ContentStreamParser
     private static void CmykToRgb(double c, double m, double y, double k,
         out double r, out double g, out double b)
     {
-        r = (1 - c) * (1 - k);
-        g = (1 - m) * (1 - k);
-        b = (1 - y) * (1 - k);
+        // ICC-style conversion (see CmykToRgbLut): the spec's algebraic formula lands
+        // far from the profile-based colours real-world rasterisers emit — pure K black,
+        // for instance, converts to a dark grey near (30, 30, 30), not (0, 0, 0).
+        var (rb, gb, bb) = Aspose.Pdf.Devices.CmykToRgbLut.Convert(c, m, y, k);
+        r = rb / 255.0;
+        g = gb / 255.0;
+        b = bb / 255.0;
     }
 
     private static double Num(PdfObject obj) => obj switch

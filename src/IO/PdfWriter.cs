@@ -491,8 +491,8 @@ internal sealed class PdfWriter
 
             // PDF/A saves re-compress plain Flate streams at the strongest level
             // (the conversion save does this; without
-            // it, outputs carried over from weakly-deflated producers exceed the
-            // reference size envelope). Streams with DecodeParms (predictors) are
+            // it, outputs carried over from weakly-deflated producers come out
+            // needlessly oversized). Streams with DecodeParms (predictors) are
             // left untouched — recompressing would need the parms re-applied.
             if (RecompressFlateStreams && existingFilter == "FlateDecode"
                 && dict.Get("DecodeParms") is null && dict.Get("DP") is null)

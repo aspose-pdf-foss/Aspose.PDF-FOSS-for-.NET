@@ -309,7 +309,7 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
     }
 
     /// <summary>Serialise just the property named <paramref name="name"/> as a UTF-8 byte array.</summary>
-    /// <remarks>Matches Aspose.Pdf: the single-property overload returns the bare
+    /// <remarks>Matches the reference: the single-property overload returns the bare
     /// property element as the document root, with its prefix's namespace declared inline —
     /// e.g. <c>&lt;pdf:Name xmlns:pdf="http://ns.adobe.com/pdf/1.3/"&gt;value&lt;/pdf:Name&gt;</c>
     /// — not the full xpacket/rdf wrapper (which is what the no-argument overload returns).</remarks>

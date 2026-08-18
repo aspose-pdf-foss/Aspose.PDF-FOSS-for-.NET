@@ -31,15 +31,23 @@ public sealed class BorderInfo
     // forcing creation, so the renderer can tell an explicitly-styled side from a plain one.
     private GraphInfo? _top, _bottom, _left, _right;
 
-    public GraphInfo Top { get => _top ??= NewSide(); set => _top = value; }
-    public GraphInfo Bottom { get => _bottom ??= NewSide(); set => _bottom = value; }
-    public GraphInfo Left { get => _left ??= NewSide(); set => _left = value; }
-    public GraphInfo Right { get => _right ??= NewSide(); set => _right = value; }
+    public GraphInfo Top { get => _top ??= NewSide(); set { _top = value; TopAssigned = true; } }
+    public GraphInfo Bottom { get => _bottom ??= NewSide(); set { _bottom = value; BottomAssigned = true; } }
+    public GraphInfo Left { get => _left ??= NewSide(); set { _left = value; LeftAssigned = true; } }
+    public GraphInfo Right { get => _right ??= NewSide(); set { _right = value; RightAssigned = true; } }
 
     internal GraphInfo? RawTop => _top;
     internal GraphInfo? RawBottom => _bottom;
     internal GraphInfo? RawLeft => _left;
     internal GraphInfo? RawRight => _right;
+
+    // A side whose GraphInfo was explicitly ASSIGNED draws even when the Side
+    // flags don't name it (the generator treats `border.Top = graphInfo` as
+    // enabling the top side). Reading the lazy getter does not count.
+    internal bool TopAssigned { get; private set; }
+    internal bool BottomAssigned { get; private set; }
+    internal bool LeftAssigned { get; private set; }
+    internal bool RightAssigned { get; private set; }
 
     private GraphInfo NewSide() => new GraphInfo { LineWidth = (float)Width };
 

@@ -11,10 +11,15 @@ internal static class JpegDecoder
     /// <summary>
     /// Decode a JPEG byte stream into raw pixel data.
     /// </summary>
+    /// <param name="data">JPEG bytes.</param>
+    /// <param name="invertCmyk">Invert 4-component (CMYK) samples before the ink→RGB
+    /// conversion. Set when the image's PDF dictionary carries an inverting /Decode
+    /// array ([1 0 1 0 1 0 1 0]) — the embedder's way of saying the file stores
+    /// Adobe-inverted CMYK rather than direct ink values.</param>
     /// <returns>Decoded pixels (RGB or grayscale), width, height, component count.</returns>
-    public static (byte[] pixels, int width, int height, int components) Decode(byte[] data)
+    public static (byte[] pixels, int width, int height, int components) Decode(byte[] data, bool invertCmyk = false)
     {
-        var reader = new JpegReader(data);
+        var reader = new JpegReader(data) { InvertCmyk = invertCmyk };
         reader.Parse();
         return (reader.Pixels, reader.Width, reader.Height, reader.Components);
     }
@@ -29,6 +34,9 @@ internal static class JpegDecoder
         public int Height { get; private set; }
         public int Components { get; private set; }
         public byte[] Pixels { get; private set; } = [];
+
+        /// <summary>Invert CMYK samples before the ink→RGB conversion (/Decode [1 0 …]).</summary>
+        public bool InvertCmyk { get; init; }
 
         private ComponentInfo[] _components = [];
         private int[][] _quantTables = new int[4][];
@@ -492,14 +500,17 @@ internal static class JpegDecoder
             if (_outputDone || _coefs.Length == 0) return;
             _outputDone = true;
 
-            var buffers = new int[_components.Length][];
+            // Component sample buffers hold clamped 0..255 values — byte[], not
+            // int[]: at scan size these arrays live on the LOH and a 4× width
+            // quadruples the per-image heap spike.
+            var buffers = new byte[_components.Length][];
             var bufWidths = new int[_components.Length];
             for (var i = 0; i < _components.Length; i++)
             {
                 var bw = _blocksPerLine[i];
                 var bh = _blocksPerCol[i];
                 bufWidths[i] = bw * 8;
-                buffers[i] = new int[bw * 8 * bh * 8];
+                buffers[i] = new byte[bw * 8 * bh * 8];
                 var qt = _quantTables[_components[i].QtId] ?? _quantTables[0];
                 var block = new int[64];
                 for (var by = 0; by < bh; by++)
@@ -516,7 +527,7 @@ internal static class JpegDecoder
                             var dst = (py + y) * bufWidths[i] + px;
                             var src = y * 8;
                             for (var x = 0; x < 8; x++)
-                                buffers[i][dst + x] = Clamp(block[src + x] + 128);
+                                buffers[i][dst + x] = (byte)Clamp(block[src + x] + 128);
                         }
                     }
                 }
@@ -532,15 +543,16 @@ internal static class JpegDecoder
             var mcuCols = (Width + mcuW - 1) / mcuW;
             var mcuRows = (Height + mcuH - 1) / mcuH;
 
-            // Allocate component buffers (full MCU-aligned dimensions)
-            var buffers = new int[Components][];
+            // Allocate component buffers (full MCU-aligned dimensions). Samples are
+            // clamped 0..255 — byte[] keeps the LOH spike a quarter of int[]'s.
+            var buffers = new byte[Components][];
             var bufWidths = new int[Components];
             var bufHeights = new int[Components];
             for (var i = 0; i < Components; i++)
             {
                 var cw = mcuCols * _components[i].H * 8;
                 var ch = mcuRows * _components[i].V * 8;
-                buffers[i] = new int[cw * ch];
+                buffers[i] = new byte[cw * ch];
                 bufWidths[i] = cw;
                 bufHeights[i] = ch;
             }
@@ -549,6 +561,63 @@ internal static class JpegDecoder
             var dcPred = new int[Components];
             var restartCounter = 0;
 
+            if (_scanComponentIndices.Length == 1)
+            {
+                // Non-interleaved scan (T.81 A.2.2): one 8x8 block per MCU, row-major over
+                // the component's own block grid — the sampling factors play no role. A
+                // single-component frame that still declares 2x2 sampling (common in
+                // scanner output) otherwise gets scrambled by the interleaved MCU layout.
+                var ciN = _scanComponentIndices[0];
+                var compN = _components[ciN];
+                var compWidth = (Width * compN.H + _maxH - 1) / _maxH;
+                var compHeight = (Height * compN.V + _maxV - 1) / _maxV;
+                var blockCols = (compWidth + 7) / 8;
+                var blockRows = (compHeight + 7) / 8;
+                var dcTableN = _dcTables[_scanDcTableIds[0]];
+                var acTableN = _acTables[_scanAcTableIds[0]];
+                var qtN = _quantTables[compN.QtId] ?? _quantTables[0];
+                var bwBuf = bufWidths[ciN];
+
+                // One reusable coefficient block: tens of thousands of per-block
+                // allocations otherwise dominate the decode's allocation profile.
+                var blockN = new int[64];
+                for (var by = 0; by < blockRows; by++)
+                {
+                    for (var bx = 0; bx < blockCols; bx++)
+                    {
+                        if (_restartInterval > 0 && restartCounter == _restartInterval)
+                        {
+                            bits.AlignByte();
+                            bits.SkipRestartMarker();
+                            Array.Clear(dcPred);
+                            restartCounter = 0;
+                        }
+
+                        Array.Clear(blockN);
+                        DecodeBlock(bits, blockN, ref dcPred[ciN], dcTableN!, acTableN!);
+                        Dequantize(blockN, qtN);
+                        IDCT(blockN);
+
+                        var pxN = bx * 8;
+                        var pyN = by * 8;
+                        for (var y = 0; y < 8; y++)
+                        {
+                            var dst = (pyN + y) * bwBuf + pxN;
+                            var src = y * 8;
+                            for (var x = 0; x < 8; x++)
+                                buffers[ciN][dst + x] = (byte)Clamp(blockN[src + x] + 128);
+                        }
+                        restartCounter++;
+                    }
+                }
+
+                _pos = bits.BytePosition;
+                ConvertBuffersToPixels(buffers, bufWidths);
+                return;
+            }
+
+            // One reusable coefficient block across the whole scan (see above).
+            var mcuBlock = new int[64];
             for (var mcuRow = 0; mcuRow < mcuRows; mcuRow++)
             {
                 for (var mcuCol = 0; mcuCol < mcuCols; mcuCol++)
@@ -576,7 +645,8 @@ internal static class JpegDecoder
                         {
                             for (var bh = 0; bh < comp.H; bh++)
                             {
-                                var block = new int[64];
+                                Array.Clear(mcuBlock);
+                                var block = mcuBlock;
                                 DecodeBlock(bits, block, ref dcPred[compIdx], dcTable!, acTable!);
                                 Dequantize(block, qt);
                                 IDCT(block);
@@ -590,7 +660,7 @@ internal static class JpegDecoder
                                     var dst = (py + y) * bw + px;
                                     var src = y * 8;
                                     for (var x = 0; x < 8; x++)
-                                        buffers[compIdx][dst + x] = Clamp(block[src + x] + 128);
+                                        buffers[compIdx][dst + x] = (byte)Clamp(block[src + x] + 128);
                                 }
                             }
                         }
@@ -607,7 +677,7 @@ internal static class JpegDecoder
         /// <summary>Colour-convert the per-component sample buffers (MCU-aligned)
         /// into the packed output pixel array. Shared by the baseline and
         /// progressive paths.</summary>
-        private void ConvertBuffersToPixels(int[][] buffers, int[] bufWidths)
+        private void ConvertBuffersToPixels(byte[][] buffers, int[] bufWidths)
         {
             // Convert to output pixels
             if (Components == 1)
@@ -655,14 +725,17 @@ internal static class JpegDecoder
                             continue;
                         }
 
-                        // YCbCr to RGB
-                        var r = yVal + 1.402 * (cr - 128);
-                        var g = yVal - 0.344136 * (cb - 128) - 0.714136 * (cr - 128);
-                        var b = yVal + 1.772 * (cb - 128);
+                        // YCbCr to RGB — the IJG fixed-point math
+                        // (SCALEBITS=16, constants 1.40200/1.77200/0.34414/0.71414,
+                        // one rounding constant folded into the G sum). Float math
+                        // rounds a hair differently and lands ±1 off.
+                        var r = yVal + ((91881 * (cr - 128) + 32768) >> 16);
+                        var g = yVal + ((-22554 * (cb - 128) - 46802 * (cr - 128) + 32768) >> 16);
+                        var b = yVal + ((116130 * (cb - 128) + 32768) >> 16);
 
-                        Pixels[idx] = (byte)Clamp((int)(r + 0.5));
-                        Pixels[idx + 1] = (byte)Clamp((int)(g + 0.5));
-                        Pixels[idx + 2] = (byte)Clamp((int)(b + 0.5));
+                        Pixels[idx] = (byte)Clamp(r);
+                        Pixels[idx + 1] = (byte)Clamp(g);
+                        Pixels[idx + 2] = (byte)Clamp(b);
                     }
                 }
             }
@@ -696,12 +769,21 @@ internal static class JpegDecoder
                         var sx3 = x * _components[3].H / _maxH;
                         int k = buffers[3][sy3 * bufWidths[3] + sx3];
 
+                        if (InvertCmyk && !ycck)
+                        {
+                            // /Decode [1 0 …]: the file stores Adobe-inverted CMYK
+                            // (255 = full ink); flip back to direct ink amounts before
+                            // the (1-C)(1-K) conversion below.
+                            s0 = 255 - s0; s1 = 255 - s1; s2 = 255 - s2; k = 255 - k;
+                        }
+
                         int chR, chG, chB;
                         if (ycck)
                         {
-                            chR = Clamp((int)(s0 + 1.402 * (s2 - 128) + 0.5));
-                            chG = Clamp((int)(s0 - 0.344136 * (s1 - 128) - 0.714136 * (s2 - 128) + 0.5));
-                            chB = Clamp((int)(s0 + 1.772 * (s1 - 128) + 0.5));
+                            // Same fixed-point YCbCr math as the 3-component path.
+                            chR = Clamp(s0 + ((91881 * (s2 - 128) + 32768) >> 16));
+                            chG = Clamp(s0 + ((-22554 * (s1 - 128) - 46802 * (s2 - 128) + 32768) >> 16));
+                            chB = Clamp(s0 + ((116130 * (s1 - 128) + 32768) >> 16));
                         }
                         else
                         {
@@ -806,91 +888,145 @@ internal static class JpegDecoder
         /// Inverse DCT using the AAN (Arai, Agui, Nakajima) fast algorithm.
         /// Operates in-place on a 64-element block in zigzag-reordered form.
         /// </summary>
-        private static void IDCT(int[] block)
-        {
-            // Use double workspace for precision
-            var ws = new double[64];
-            for (var i = 0; i < 64; i++) ws[i] = block[i];
+        // IJG "slow" integer IDCT constants: values scaled by 2^CONST_BITS.
+        private const int ConstBits = 13;
+        private const int Pass1Bits = 2;
+        private const int Fix_0_298631336 = 2446;
+        private const int Fix_0_390180644 = 3196;
+        private const int Fix_0_541196100 = 4433;
+        private const int Fix_0_765366865 = 6270;
+        private const int Fix_0_899976223 = 7373;
+        private const int Fix_1_175875602 = 9633;
+        private const int Fix_1_501321110 = 12299;
+        private const int Fix_1_847759065 = 15137;
+        private const int Fix_1_961570560 = 16069;
+        private const int Fix_2_053119869 = 16819;
+        private const int Fix_2_562915447 = 20995;
+        private const int Fix_3_072711026 = 25172;
 
-            // 1D IDCT on rows
-            for (var row = 0; row < 8; row++)
-            {
-                var off = row * 8;
-                IDCT1D(ws, off);
-            }
-
-            // 1D IDCT on columns
-            for (var col = 0; col < 8; col++)
-            {
-                // Copy column to temp
-                var tmp = new double[8];
-                for (var i = 0; i < 8; i++) tmp[i] = ws[i * 8 + col];
-                IDCT1D(tmp, 0);
-                for (var i = 0; i < 8; i++) ws[i * 8 + col] = tmp[i];
-            }
-
-            // Scale and round
-            for (var i = 0; i < 64; i++)
-                block[i] = (int)(ws[i] / 8.0 + 0.5);
-        }
+        private static int Descale(long x, int n) => (int)((x + (1L << (n - 1))) >> n);
 
         /// <summary>
-        /// 1D IDCT on 8 elements starting at offset.
-        /// Based on the IJG (Independent JPEG Group) "slow" integer IDCT algorithm.
+        /// The IJG "slow" integer IDCT, replicated bit-for-bit: fixed-point
+        /// (CONST_BITS=13), columns first with a PASS1_BITS intermediate descale,
+        /// then rows with the final descale. The staged rounding is the point —
+        /// a float IDCT rounded once at the end drifts ±1 from the IJG
+        /// output, which is enough to visibly alter a pale watermark's
+        /// ink coverage.
         /// </summary>
-        private static void IDCT1D(double[] data, int off)
+        private static void IDCT(int[] block)
         {
-            var s0 = data[off];
-            var s1 = data[off + 1];
-            var s2 = data[off + 2];
-            var s3 = data[off + 3];
-            var s4 = data[off + 4];
-            var s5 = data[off + 5];
-            var s6 = data[off + 6];
-            var s7 = data[off + 7];
+            var ws = new int[64];
 
-            // Even part — rotation of s2, s6
-            var p2p6 = (s2 + s6) * 0.541196100; // FIX_0_541196100
-            var t2 = p2p6 - s6 * 1.847759065;   // FIX_1_847759065
-            var t3 = p2p6 + s2 * 0.765366865;   // FIX_0_765366865
+            // Pass 1: process columns, store scaled by 2^PASS1_BITS.
+            for (var c = 0; c < 8; c++)
+            {
+                long z2 = block[16 + c];
+                long z3 = block[48 + c];
+                long z1 = (z2 + z3) * Fix_0_541196100;
+                var tmp2 = z1 + z3 * -Fix_1_847759065;
+                var tmp3 = z1 + z2 * Fix_0_765366865;
 
-            var t0 = s0 + s4;
-            var t1 = s0 - s4;
+                z2 = block[c];
+                z3 = block[32 + c];
+                var tmp0 = (z2 + z3) << ConstBits;
+                var tmp1 = (z2 - z3) << ConstBits;
 
-            var e0 = t0 + t3;
-            var e3 = t0 - t3;
-            var e1 = t1 + t2;
-            var e2 = t1 - t2;
+                var tmp10 = tmp0 + tmp3;
+                var tmp13 = tmp0 - tmp3;
+                var tmp11 = tmp1 + tmp2;
+                var tmp12 = tmp1 - tmp2;
 
-            // Odd part
-            var z1 = s7 + s1;
-            var z2 = s5 + s3;
-            var z3 = s7 + s3;
-            var z4 = s5 + s1;
-            var z5 = (z3 + z4) * 1.175875602; // FIX_1_175875602
+                long t0 = block[56 + c];
+                long t1 = block[40 + c];
+                long t2 = block[24 + c];
+                long t3 = block[8 + c];
 
-            var t4 = s7 * 0.298631336;   // FIX_0_298631336
-            var t5 = s5 * 2.053119869;   // FIX_2_053119869
-            var t6 = s3 * 3.072711026;   // FIX_3_072711026
-            var t7 = s1 * 1.501321110;   // FIX_1_501321110
-            var z1a = z1 * -0.899976223; // FIX_0_899976223
-            var z2a = z2 * -2.562915447; // FIX_2_562915447
-            var z3a = z3 * -1.961570560 + z5;
-            var z4a = z4 * -0.390180644 + z5;
+                z1 = t0 + t3;
+                z2 = t1 + t2;
+                z3 = t0 + t2;
+                var z4 = t1 + t3;
+                var z5 = (z3 + z4) * Fix_1_175875602;
 
-            t4 += z1a + z3a;
-            t5 += z2a + z4a;
-            t6 += z2a + z3a;
-            t7 += z1a + z4a;
+                t0 *= Fix_0_298631336;
+                t1 *= Fix_2_053119869;
+                t2 *= Fix_3_072711026;
+                t3 *= Fix_1_501321110;
+                z1 *= -Fix_0_899976223;
+                z2 *= -Fix_2_562915447;
+                z3 = z3 * -Fix_1_961570560 + z5;
+                z4 = z4 * -Fix_0_390180644 + z5;
 
-            data[off]     = e0 + t7;
-            data[off + 7] = e0 - t7;
-            data[off + 1] = e1 + t6;
-            data[off + 6] = e1 - t6;
-            data[off + 2] = e2 + t5;
-            data[off + 5] = e2 - t5;
-            data[off + 3] = e3 + t4;
-            data[off + 4] = e3 - t4;
+                t0 += z1 + z3;
+                t1 += z2 + z4;
+                t2 += z2 + z3;
+                t3 += z1 + z4;
+
+                ws[c]      = Descale(tmp10 + t3, ConstBits - Pass1Bits);
+                ws[56 + c] = Descale(tmp10 - t3, ConstBits - Pass1Bits);
+                ws[8 + c]  = Descale(tmp11 + t2, ConstBits - Pass1Bits);
+                ws[48 + c] = Descale(tmp11 - t2, ConstBits - Pass1Bits);
+                ws[16 + c] = Descale(tmp12 + t1, ConstBits - Pass1Bits);
+                ws[40 + c] = Descale(tmp12 - t1, ConstBits - Pass1Bits);
+                ws[24 + c] = Descale(tmp13 + t0, ConstBits - Pass1Bits);
+                ws[32 + c] = Descale(tmp13 - t0, ConstBits - Pass1Bits);
+            }
+
+            // Pass 2: process rows, final descale to sample scale (caller adds the
+            // +128 level shift and clamps, mirroring the IJG range limiter).
+            for (var r = 0; r < 8; r++)
+            {
+                var off = r * 8;
+                long z2 = ws[off + 2];
+                long z3 = ws[off + 6];
+                long z1 = (z2 + z3) * Fix_0_541196100;
+                var tmp2 = z1 + z3 * -Fix_1_847759065;
+                var tmp3 = z1 + z2 * Fix_0_765366865;
+
+                z2 = ws[off];
+                z3 = ws[off + 4];
+                var tmp0 = (z2 + z3) << ConstBits;
+                var tmp1 = (z2 - z3) << ConstBits;
+
+                var tmp10 = tmp0 + tmp3;
+                var tmp13 = tmp0 - tmp3;
+                var tmp11 = tmp1 + tmp2;
+                var tmp12 = tmp1 - tmp2;
+
+                long t0 = ws[off + 7];
+                long t1 = ws[off + 5];
+                long t2 = ws[off + 3];
+                long t3 = ws[off + 1];
+
+                z1 = t0 + t3;
+                z2 = t1 + t2;
+                z3 = t0 + t2;
+                var z4 = t1 + t3;
+                var z5 = (z3 + z4) * Fix_1_175875602;
+
+                t0 *= Fix_0_298631336;
+                t1 *= Fix_2_053119869;
+                t2 *= Fix_3_072711026;
+                t3 *= Fix_1_501321110;
+                z1 *= -Fix_0_899976223;
+                z2 *= -Fix_2_562915447;
+                z3 = z3 * -Fix_1_961570560 + z5;
+                z4 = z4 * -Fix_0_390180644 + z5;
+
+                t0 += z1 + z3;
+                t1 += z2 + z4;
+                t2 += z2 + z3;
+                t3 += z1 + z4;
+
+                block[off]     = Descale(tmp10 + t3, ConstBits + Pass1Bits + 3);
+                block[off + 7] = Descale(tmp10 - t3, ConstBits + Pass1Bits + 3);
+                block[off + 1] = Descale(tmp11 + t2, ConstBits + Pass1Bits + 3);
+                block[off + 6] = Descale(tmp11 - t2, ConstBits + Pass1Bits + 3);
+                block[off + 2] = Descale(tmp12 + t1, ConstBits + Pass1Bits + 3);
+                block[off + 5] = Descale(tmp12 - t1, ConstBits + Pass1Bits + 3);
+                block[off + 3] = Descale(tmp13 + t0, ConstBits + Pass1Bits + 3);
+                block[off + 4] = Descale(tmp13 - t0, ConstBits + Pass1Bits + 3);
+            }
         }
 
         private static int Clamp(int v) => v < 0 ? 0 : v > 255 ? 255 : v;

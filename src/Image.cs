@@ -34,7 +34,7 @@ namespace Aspose.Pdf
 
         public ImageFilterType ImageFilterType { get; set; }
 
-        /// <summary>Optional in-memory pixel buffer (Aspose.Pdf parity).</summary>
+        /// <summary>Optional in-memory pixel buffer (public-API parity).</summary>
         public BitmapInfo BitmapInfo { get; set; }
 
         /// <summary>Source file format hint.</summary>

@@ -43,14 +43,14 @@ internal static class TextPaginator
     /// Use the <see cref="FontData"/> overload when an embedded font is
     /// available -- Standard-14 Helvetica widths are far narrower than most
     /// non-Latin TTFs, so the fallback under-counts line widths and produces
-    /// different break-points than Aspose.Pdf does for the same content.</summary>
+    /// different break-points than the font's real metrics would.</summary>
     public static List<string> WrapToWidth(string text, string fontName, double fontSize, double maxWidth)
         => WrapToWidth(text, fontName, fontSize, maxWidth, fontData: null);
 
     /// <summary>
     /// Greedy word-wrap. When <paramref name="fontData"/> has TTF data, per-glyph
-    /// advance widths come from the font's own hmtx so wrap break-points match
-    /// what Aspose.Pdf produces for the same fragment. Without it,
+    /// advance widths come from the font's own hmtx so wrap break-points follow
+    /// the font's true advances. Without it,
     /// falls back to Standard-14 widths keyed by <paramref name="fontName"/>.
     /// </summary>
     public static List<string> WrapToWidth(string text, string fontName, double fontSize,
@@ -59,7 +59,7 @@ internal static class TextPaginator
         var baseMeasurer = BuildMeasurer(fontName, fontSize, fontData);
         // Character spacing (Tc) adds `charSpacing` after every glyph, so a run of
         // N characters is that much wider — fold it into the measurer so wrap
-        // break-points account for it (matches Aspose.Pdf).
+        // break-points account for it.
         Func<string, double> measurer = charSpacing == 0
             ? baseMeasurer
             : s => baseMeasurer(s) + s.Length * charSpacing;
@@ -77,20 +77,32 @@ internal static class TextPaginator
             var current = new StringBuilder();
             double currentWidth = 0;
             var spaceWidth = measurer(" ");
-            foreach (var word in words)
+            for (var wi = 0; wi < words.Length; wi++)
             {
-                if (word.Length == 0) continue;
+                var word = words[wi];
+                // Every token after the first is preceded by one delimiter
+                // space; empty tokens are the EXTRA spaces of a run. Both are
+                // preserved as literal glyphs —
+                // "sentence.␣␣Next" stays double-spaced and a paragraph's leading
+                // spaces indent its first line; collapsing them shifts every
+                // following line-break in the paragraph.
+                if (word.Length == 0)
+                {
+                    if (wi > 0) { current.Append(' '); currentWidth += spaceWidth; }
+                    continue;
+                }
                 var wordWidth = measurer(word);
-                var needed = current.Length == 0 ? wordWidth : wordWidth + spaceWidth;
+                var sep = wi > 0 && current.Length > 0;
+                var needed = wordWidth + (sep ? spaceWidth : 0);
                 // The very first output line is narrowed by a first-line indent so
                 // it holds fewer words (the indent shifts its start to the right).
                 var effectiveMax = lines.Count == 0 ? maxWidth - firstLineIndent : maxWidth;
                 if (currentWidth + needed > effectiveMax && current.Length > 0)
                 {
                     // The inter-word space that precedes the overflowing word stays at
-                    // the end of the finished line (matches Aspose.Pdf — the
+                    // the end of the finished line (the
                     // wrapped line keeps its trailing space before the break).
-                    lines.Add(current.ToString() + " ");
+                    lines.Add(sep ? current.ToString() + " " : current.ToString());
                     current.Clear();
                     currentWidth = 0;
                     current.Append(word);
@@ -98,7 +110,7 @@ internal static class TextPaginator
                 }
                 else
                 {
-                    if (current.Length > 0) { current.Append(' '); currentWidth += spaceWidth; }
+                    if (sep) { current.Append(' '); currentWidth += spaceWidth; }
                     current.Append(word);
                     currentWidth += wordWidth;
                 }
@@ -143,11 +155,19 @@ internal static class TextPaginator
             var current = new StringBuilder();
             double currentWidth = 0;
             var paraLines = new List<(string, double)>();
-            foreach (var word in words)
+            for (var wi = 0; wi < words.Length; wi++)
             {
-                if (word.Length == 0) continue;
+                var word = words[wi];
+                // Preserve delimiter/extra spaces (kept in lock-step with
+                // WrapToWidth above).
+                if (word.Length == 0)
+                {
+                    if (wi > 0) { current.Append(' '); currentWidth += spaceWidth; }
+                    continue;
+                }
                 var wordWidth = measurer(word);
-                var needed = current.Length == 0 ? wordWidth : wordWidth + spaceWidth;
+                var sep = wi > 0 && current.Length > 0;
+                var needed = wordWidth + (sep ? spaceWidth : 0);
                 var effectiveMax = globalLineCount == 0 && paraLines.Count == 0
                     ? maxWidth - firstLineIndent : maxWidth;
                 if (currentWidth + needed > effectiveMax && current.Length > 0)
@@ -159,7 +179,7 @@ internal static class TextPaginator
                 }
                 else
                 {
-                    if (current.Length > 0) { current.Append(' '); currentWidth += spaceWidth; }
+                    if (sep) { current.Append(' '); currentWidth += spaceWidth; }
                     current.Append(word);
                     currentWidth += wordWidth;
                 }
@@ -177,15 +197,27 @@ internal static class TextPaginator
         {
             var r = raw[i];
             char reason = !r.lastInPara ? 'M' : (r.para == lastParagraph ? 'E' : 'N');
-            // Every line except the final one carries the trailing space that
-            // separates it from the next word / paragraph.
-            if (reason == 'E')
-                result.Add((r.content, r.width, reason));
-            else
+            // Only a MARGIN break contributes a delimiter space: the wrap consumed
+            // the space that separated this line from the overflowing word, and
+            // WrapToWidth keeps it on the finished line. A line that ends because its
+            // paragraph did ('N') or because the text did ('E') ends where its own
+            // text ends -- a trailing space there is part of the paragraph and the
+            // loop above already preserved it, so adding one here would report the
+            // line one space too wide and break lock-step with WrapToWidth.
+            if (reason == 'M')
                 result.Add((r.content + " ", r.width + spaceWidth, reason));
+            else
+                result.Add((r.content, r.width, reason));
         }
         return result;
     }
+
+    /// <summary>Expose the wrap's own measurer so a caller placing text it
+    /// wrapped here (e.g. the flow layout's justified-line token placement)
+    /// positions glyph runs with exactly the metrics the wrap decided line
+    /// breaks with.</summary>
+    internal static Func<string, double> CreateMeasurer(string fontName, double fontSize, FontData? fontData)
+        => BuildMeasurer(fontName, fontSize, fontData);
 
     /// <summary>Build a single-string -> width measurer. When the supplied
     /// FontData has TtfData, instantiates a GlyphOutlineParser once and routes

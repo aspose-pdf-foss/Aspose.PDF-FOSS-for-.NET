@@ -249,6 +249,12 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
                 ? Justification.Right
                 : Justification.Center;
         }
+        // An ink annotation carries no viewer-synthesised fallback: without an /AP it
+        // renders as nothing at all. Its stroke geometry, colour, cap style and border
+        // width are all set on the object BEFORE it joins a page, so this is the point
+        // where the face can be drawn from a complete state.
+        if (annotation is InkAnnotation ink && _reader.ResolveDict(ink.Dict.Get("AP")) is null)
+            ink.UpdateAppearances();
         AddDict(annotation.Dict);
     }
 
@@ -279,9 +285,9 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
         double w = mb?.Width ?? 0, h = mb?.Height ?? 0;
         return rotation switch
         {
-            90 => new Matrix(0, 1, -1, 0, h, 0),
+            90 => new Matrix(0, -1, 1, 0, 0, w),
             180 => new Matrix(-1, 0, 0, -1, w, h),
-            270 => new Matrix(0, -1, 1, 0, 0, w),
+            270 => new Matrix(0, 1, -1, 0, h, 0),
             _ => Matrix.Identity,
         };
     }
@@ -337,7 +343,7 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
         _annotations.CopyTo(array, index);
     }
 
-    /// <summary>Remove every annotation from the collection (Aspose.Pdf
+    /// <summary>Remove every annotation from the collection (public-API
     /// alias for <see cref="Clear"/>; kept for API parity).</summary>
     public void Delete() => Clear();
 

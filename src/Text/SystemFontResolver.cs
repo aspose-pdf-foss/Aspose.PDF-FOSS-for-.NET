@@ -301,6 +301,26 @@ internal static class SystemFontResolver
             fileName = "Helvetica.ttc";
             family = "Helvetica";
         }
+        else if (family.Replace(" ", "").StartsWith("YuGothic", StringComparison.OrdinalIgnoreCase))
+        {
+            // Yu Gothic / Yu Gothic UI family. Each weight lives in a specific
+            // YuGoth*.ttc, and the UI and non-UI faces WITHIN a collection have
+            // different glyph orders — so for a Type0/Identity CID (content codes are
+            // the authoring face's glyph ids) the EXACT face must be embedded, not just
+            // one of the right weight. Map the PDF name to its collection file and the
+            // precise face name; ExtractFromTtc then matches that face by name.
+            var key = name.Replace(" ", "").Replace(",", "");
+            (fileName, family) =
+                  key.StartsWith("YuGothicUISemibold", StringComparison.OrdinalIgnoreCase) ? ("YuGothB.ttc", "Yu Gothic UI Semibold")
+                : key.StartsWith("YuGothicUISemilight", StringComparison.OrdinalIgnoreCase) ? ("YuGothR.ttc", "Yu Gothic UI Semilight")
+                : key.StartsWith("YuGothicUILight", StringComparison.OrdinalIgnoreCase) ? ("YuGothL.ttc", "Yu Gothic UI Light")
+                : key.StartsWith("YuGothicUIBold", StringComparison.OrdinalIgnoreCase) ? ("YuGothB.ttc", "Yu Gothic UI Bold")
+                : key.StartsWith("YuGothicUI", StringComparison.OrdinalIgnoreCase) ? ("YuGothM.ttc", "Yu Gothic UI Regular")
+                : key.StartsWith("YuGothicMedium", StringComparison.OrdinalIgnoreCase) ? ("YuGothM.ttc", "Yu Gothic Medium")
+                : key.StartsWith("YuGothicLight", StringComparison.OrdinalIgnoreCase) ? ("YuGothL.ttc", "Yu Gothic Light")
+                : key.StartsWith("YuGothicBold", StringComparison.OrdinalIgnoreCase) ? ("YuGothB.ttc", "Yu Gothic Bold")
+                : ("YuGothR.ttc", "Yu Gothic Regular");
+        }
 
         return (fileName, family, bold, italic);
     }
@@ -315,8 +335,15 @@ internal static class SystemFontResolver
             _ => "",
         };
 
-        // TrueType Collections
-        yield return $"{family}.ttc";
+        // TrueType Collections. Like the bare family file below, a collection must NOT
+        // preempt the styled candidates when a style was requested: a collection holds
+        // whichever faces the vendor chose to bundle, and ExtractFromTtc falls back to
+        // the FIRST face when the requested style isn't among them. Windows ships
+        // cambria.ttc with Cambria and Cambria Math only — Bold lives in its own
+        // cambriab.ttf — so an early cambria.ttc silently answered "Cambria Bold" with
+        // the regular face, measuring ~3% narrow on every bold Cambria run.
+        if (style.Length == 0)
+            yield return $"{family}.ttc";
 
         // Individual TTF files
         if (style.Length > 0)
@@ -339,9 +366,8 @@ internal static class SystemFontResolver
         // Windows-specific short filenames (lowercase, no spaces, ASCII abbreviations).
         // These are the file names Windows actually ships in C:\Windows\Fonts; they
         // don't follow the family-name convention so the generic candidates above miss
-        // them. Mapping the well-known families fixes 18331_p1 (Arial Black, Trebuchet,
-        // Arial Narrow), 31992 (Arial Narrow), and similar PDFs that name the system
-        // font without embedding it.
+        // them. Mapping the well-known families fixes PDFs that name a system
+        // font (Arial Black, Trebuchet, Arial Narrow) without embedding it.
         var winShort = (family, bold, italic) switch
         {
             // CJK system faces (collection files with non-family file names).
@@ -350,7 +376,10 @@ internal static class SystemFontResolver
             ("Yu Gothic", _, _) or ("YuGothic", _, _) => "YuGothR.ttc",
             ("Meiryo", _, _) => "meiryo.ttc",
             ("SimSun", _, _) => "simsun.ttc",
-            ("Microsoft YaHei", _, _) => "msyh.ttc",
+            // NSimSun is the second face of the SimSun collection.
+            ("NSimSun", _, _) or ("NSim Sun", _, _) => "simsun.ttc",
+            ("SimHei", _, _) or ("Sim Hei", _, _) => "simhei.ttf",
+            ("Microsoft YaHei", _, _) or ("MicrosoftYaHei", _, _) or ("Microsoft-YaHei", _, _) => "msyh.ttc",
             ("Malgun Gothic", _, _) => "malgun.ttf",
             ("Arial Narrow", false, false) => "ARIALN.TTF",
             ("Arial Narrow", true, false) => "ARIALNB.TTF",
@@ -371,12 +400,25 @@ internal static class SystemFontResolver
             ("Calibri", true, false) => "calibrib.ttf",
             ("Calibri", false, true) => "calibrii.ttf",
             ("Calibri", true, true) => "calibriz.ttf",
+            ("Palatino Linotype", false, false) or ("PalatinoLinotype", false, false) => "pala.ttf",
+            ("Palatino Linotype", true, false) or ("PalatinoLinotype", true, false) => "palab.ttf",
+            ("Palatino Linotype", false, true) or ("PalatinoLinotype", false, true) => "palai.ttf",
+            ("Palatino Linotype", true, true) or ("PalatinoLinotype", true, true) => "palabi.ttf",
             ("Georgia", false, false) => "georgia.ttf",
             ("Georgia", true, false) => "georgiab.ttf",
             ("Georgia", false, true) => "georgiai.ttf",
             ("Georgia", true, true) => "georgiaz.ttf",
             ("Cambria", false, false) => "cambria.ttc",
             ("Cambria", true, _) => "cambriab.ttf",
+            ("Segoe UI Emoji", _, _) or ("SegoeUIEmoji", _, _) => "seguiemj.ttf",
+            ("Segoe UI Symbol", _, _) or ("SegoeUISymbol", _, _) => "seguisym.ttf",
+            ("Segoe UI Historic", _, _) or ("SegoeUIHistoric", _, _) => "seguihis.ttf",
+            ("SimSun-ExtB", _, _) or ("SimSunExtB", _, _) or ("SimSun ExtB", _, _) => "simsunb.ttf",
+            ("SimSun-ExtG", _, _) or ("SimSunExtG", _, _) or ("SimSun ExtG", _, _) => "SimsunExtG.ttf",
+            ("Segoe UI", false, false) => "segoeui.ttf",
+            ("Segoe UI", true, false) => "segoeuib.ttf",
+            ("Segoe UI", false, true) => "segoeuii.ttf",
+            ("Segoe UI", true, true) => "segoeuiz.ttf",
             _ => null,
         };
         if (winShort is not null) yield return winShort;
@@ -465,10 +507,14 @@ internal static class SystemFontResolver
             yield return $"{lf}.ttf";
         }
 
-        // Last-resort bare-family fallback (deferred from above when a style was requested)
-        // so a regular face renders rather than nothing when no styled file exists.
+        // Last-resort bare-family fallbacks (deferred from above when a style was
+        // requested) so a regular face renders rather than nothing when no styled file
+        // exists. The collection is tried here too: a collection that DOES carry the
+        // requested style still answers correctly, it just no longer outranks a
+        // dedicated styled file.
         if (style.Length > 0)
         {
+            yield return $"{family}.ttc";
             yield return $"{family}.ttf";
             yield return $"{family}.otf";
         }
@@ -533,9 +579,14 @@ internal static class SystemFontResolver
         var numFonts = ReadUInt32BE(data, 8);
         if (numFonts == 0 || 12 + numFonts * 4 > data.Length) return null;
 
-        // Try each font in the collection
-        int bestOffset = -1;
+        // Try each font in the collection. An exact face-NAME match wins over a
+        // style match: collections such as YuGoth*.ttc pack faces that share a glyph
+        // count but not a glyph order (Yu Gothic vs Yu Gothic UI), so a Type0/Identity
+        // CID only renders correctly against the exact authoring face.
+        int nameOffset = -1;
+        int styleOffset = -1;
         int firstOffset = -1;
+        var wantName = (familyName ?? string.Empty).Replace(" ", "");
 
         for (var i = 0; i < numFonts; i++)
         {
@@ -543,21 +594,70 @@ internal static class SystemFontResolver
             if (fontOffset + 12 > data.Length) continue;
             if (firstOffset < 0) firstOffset = fontOffset;
 
-            // Check if this font matches the desired style
-            if (MatchesTtcFont(data, fontOffset, bold, italic))
-            {
-                bestOffset = fontOffset;
-                break;
-            }
+            if (nameOffset < 0 && wantName.Length > 0 && TtcFaceNameMatches(data, fontOffset, wantName))
+                nameOffset = fontOffset;
+            if (styleOffset < 0 && MatchesTtcFont(data, fontOffset, bold, italic))
+                styleOffset = fontOffset;
         }
 
-        var offset = bestOffset >= 0 ? bestOffset : firstOffset;
+        var offset = nameOffset >= 0 ? nameOffset : (styleOffset >= 0 ? styleOffset : firstOffset);
         if (offset < 0) return null;
 
         // Return the full TTC data but with the offset information
         // The GlyphOutlineParser needs to read from this offset
         // Simplest approach: create a synthetic standalone TTF from the TTC offset
         return CreateStandaloneTtf(data, offset);
+    }
+
+    /// <summary>True when a TTC sub-font's name table carries a family (id 1), full
+    /// (id 4) or PostScript (id 6) name that, with spaces removed, equals
+    /// <paramref name="wantNoSpace"/> (case-insensitive).</summary>
+    private static bool TtcFaceNameMatches(byte[] data, int fontOffset, string wantNoSpace)
+    {
+        if (fontOffset + 12 > data.Length) return false;
+        var numTables = ReadUInt16BE(data, fontOffset + 4);
+        var nameTableOff = -1;
+        for (var i = 0; i < numTables; i++)
+        {
+            var entryOff = fontOffset + 12 + i * 16;
+            if (entryOff + 16 > data.Length) break;
+            if (Encoding.ASCII.GetString(data, entryOff, 4) == "name")
+            {
+                nameTableOff = (int)ReadUInt32BE(data, entryOff + 8);
+                break;
+            }
+        }
+        if (nameTableOff < 0 || nameTableOff + 6 > data.Length) return false;
+
+        var count = ReadUInt16BE(data, nameTableOff + 2);
+        var storage = nameTableOff + ReadUInt16BE(data, nameTableOff + 4);
+        for (var r = 0; r < count; r++)
+        {
+            var rec = nameTableOff + 6 + r * 12;
+            if (rec + 12 > data.Length) break;
+            var platform = ReadUInt16BE(data, rec);
+            var nameId = ReadUInt16BE(data, rec + 6);
+            if (nameId != 1 && nameId != 4 && nameId != 6) continue;
+            var len = ReadUInt16BE(data, rec + 8);
+            var off = storage + ReadUInt16BE(data, rec + 10);
+            if (len <= 0 || off + len > data.Length) continue;
+
+            string s;
+            if (platform == 3 || platform == 0) // Windows / Unicode: UTF-16BE
+            {
+                var sb = new StringBuilder(len / 2);
+                for (var k = 0; k + 1 < len; k += 2)
+                    sb.Append((char)((data[off + k] << 8) | data[off + k + 1]));
+                s = sb.ToString();
+            }
+            else // Macintosh: single-byte
+            {
+                s = Encoding.ASCII.GetString(data, off, len);
+            }
+            if (s.Replace(" ", "").Equals(wantNoSpace, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 
     private static bool MatchesTtcFont(byte[] data, int fontOffset, bool wantBold, bool wantItalic)

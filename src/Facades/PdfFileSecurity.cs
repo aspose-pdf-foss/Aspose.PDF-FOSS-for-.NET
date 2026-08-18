@@ -99,8 +99,8 @@ public sealed class PdfFileSecurity : IDisposable
 
     /// <summary>Always true and cannot be changed — the direct (non-Try) methods
     /// always propagate exceptions; the <c>Try*</c> variants always capture the
-    /// last exception in <see cref="LastException"/> and return false. Matching
-    /// Aspose.Pdf, the setter throws <see cref="NotSupportedException"/>.</summary>
+    /// last exception in <see cref="LastException"/> and return false. The
+    /// setter throws <see cref="NotSupportedException"/>.</summary>
     public bool AllowExceptions
     {
         get => true;
@@ -323,7 +323,7 @@ public sealed class PdfFileSecurity : IDisposable
         if (!opened.IsEncrypted)
         {
             // No existing encryption to change the password of. If the caller
-            // supplied an access password (even ""), the reference facade
+            // supplied an access password (even ""), the facade
             // rejects the call — you should not provide a password for an
             // unencrypted document. A null password means "none supplied", so
             // fall through to the historical no-op false return (the Try*
@@ -356,7 +356,7 @@ public sealed class PdfFileSecurity : IDisposable
         if (!opened.IsEncrypted)
         {
             // No existing encryption to change the password of. If the caller
-            // supplied an access password (even ""), the reference facade
+            // supplied an access password (even ""), the facade
             // rejects the call — you should not provide a password for an
             // unencrypted document. A null password means "none supplied", so
             // fall through to the historical no-op false return (the Try*

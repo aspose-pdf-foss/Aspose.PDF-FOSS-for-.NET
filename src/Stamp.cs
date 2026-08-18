@@ -1,6 +1,6 @@
 namespace Aspose.Pdf;
 
-/// <summary>Top-level Aspose.Pdf-shape abstract base for stamps applied
+/// <summary>Top-level public-API-shape abstract base for stamps applied
 /// to a <see cref="Page"/> via <see cref="Page.AddStamp(Stamp)"/>.
 /// Coexists with <see cref="Aspose.Pdf.Stamps.Stamp"/> (the FOSS
 /// positioning-oriented base used by the existing TextStamp / ImageStamp

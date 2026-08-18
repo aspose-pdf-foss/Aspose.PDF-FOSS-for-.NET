@@ -24,14 +24,17 @@ public sealed class TextExtractionOptions
     public TextExtractionOptions(TextFormattingMode formattingMode = TextFormattingMode.Pure)
     {
         FormattingMode = formattingMode;
+        ScaleFactor = 1.0;
     }
 
     /// <summary>The text formatting mode.</summary>
     public TextFormattingMode FormattingMode { get; set; }
 
-    /// <summary>Scale factor used by the column-detection step. 0 lets the algorithm
-    /// pick automatically; values such as 0.5 force a tighter split. Stored only;
-    /// the absorber currently treats it as a hint.</summary>
+    /// <summary>Scale factor for the Pure-mode character grid: the grid cell is
+    /// <c>ScaleFactor · 0.6 · (F − 2)</c> with F the page's dominant (ceiled)
+    /// font size. The default is 1. Setting 0 lets the algorithm pick the cell
+    /// automatically from the page's measured mean glyph advance (a tighter
+    /// grid for dense multi-column text).</summary>
     public double ScaleFactor { get; set; }
 
     /// <summary>When set, tolerate a malformed content stream that shows text with no

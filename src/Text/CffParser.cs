@@ -87,7 +87,7 @@ internal sealed class CffParser
             // the FDArray (op 12 36). Subset CIDFonts almost always have a single Font
             // DICT, so use FDArray[0]'s Private. Without this defaultWidthX/nominalWidthX
             // stay 0 and every charstring width comes out as the raw delta from nominal
-            // (often negative), collapsing text spacing (e.g. 35987 banner).
+            // (often negative), collapsing text spacing.
             var fdArrayIndex = ParseIndex((int)fdArrayVals[0]);
             if (fdArrayIndex.count > 0)
             {

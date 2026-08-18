@@ -24,7 +24,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
 
     /// <summary>When set (the PdfFileStamp facade path), the imported form's /Font
     /// entries are hoisted to the TARGET page's /Resources/Font and removed from the
-    /// form's own resources — the Aspose.Pdf layout, where the stamped page
+    /// form's own resources — the reference layout, where the stamped page
     /// exposes the stamp's fonts (F1/F2…) at page level and the form inherits them.</summary>
     internal bool PromoteFontsToPage { get; set; }
 
@@ -66,7 +66,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         Height = pdfPage.Height;
     }
 
-    /// <summary>Alias for <see cref="ApplyTo"/> matching the Aspose.Pdf public surface.</summary>
+    /// <summary>Alias for <see cref="ApplyTo"/> matching the public surface.</summary>
     public void Put(Page page) => ApplyTo(page);
 
     /// <summary>Create a PdfPageStamp from page <paramref name="pageIndex"/>
@@ -135,7 +135,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
 
             // Hoist the imported form's fonts for page-level promotion (facade path):
             // capture the /Font entries and strip the key from the form's resources so
-            // the form inherits them from the page (Aspose.Pdf layout).
+            // the form inherits them from the page (the reference layout).
             if (PromoteFontsToPage)
             {
                 var formRes = targetReader.ResolveDict(formDict.Get("Resources"))
@@ -188,7 +188,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         }
 
         // Re-apply the hoisted stamp fonts to this target page's /Resources/Font
-        // (fresh names are NOT invented: Aspose.Pdf keeps the source names,
+        // (fresh names are NOT invented: the reference keeps the source names,
         // e.g. F1/F2; existing page entries win on collision).
         if (PromoteFontsToPage && _promotedFonts is { Count: > 0 })
         {
@@ -213,16 +213,33 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         xobjectDict.Set(xobjName, formObject);
 
         // Build content stream to draw the form XObject
-        var x = XIndent;
-        var y = YIndent;
         var sx = Width / mb.Width * ZoomX;
         var sy = Height / mb.Height * ZoomY;
+
+        // Stamp placement: alignment (with margins) when set; Left/Bottom keep the
+        // legacy XIndent/YIndent placement so indent-positioned stamps are unchanged.
+        // Negative/explicit indents pass through untouched; margins only kick in
+        // when the indent is exactly unset (0) under the default alignment.
+        var x = HorizontalAlignment switch
+        {
+            HorizontalAlignment.Center => (targetPage.Width - Width * ZoomX) / 2 + LeftMargin - RightMargin,
+            HorizontalAlignment.Right => targetPage.Width - Width * ZoomX - RightMargin - XIndent,
+            HorizontalAlignment.Left => XIndent != 0 ? XIndent : LeftMargin,
+            _ => XIndent,
+        };
+        var y = VerticalAlignment switch
+        {
+            VerticalAlignment.Top => targetPage.Height - Height * ZoomY - TopMargin - YIndent,
+            VerticalAlignment.Center => (targetPage.Height - Height * ZoomY) / 2 + BottomMargin - TopMargin,
+            VerticalAlignment.Bottom => YIndent != 0 ? YIndent : BottomMargin,
+            _ => YIndent,
+        };
 
         var f = (double v) => v.ToString("0.######", CultureInfo.InvariantCulture);
 
         // Placement matrix. Normally axis-aligned (sx 0 0 sy X Y), but when the target
         // page is displayed rotated 90° the stamp must be rotated with it so it lands
-        // upright in the displayed view — Aspose.Pdf bakes the /Rotate 90 into
+        // upright in the displayed view — the reference bakes the /Rotate 90 into
         // the matrix as (0 sx -sy 0  W-YIndent  XIndent), W being the page width.
         string matrix;
         var rot = ((targetPage.RotateDegrees % 360) + 360) % 360;
@@ -233,16 +250,23 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         }
         else
         {
-            matrix = $"{f(sx)} 0 0 {f(sy)} {f(x)} {f(y)}";
+            // Indents are measured from the TARGET page's box origin (a page whose
+            // MediaBox lower-left is not (0,0) still stamps at its visible corner),
+            // and the SOURCE page's own box origin maps to the placement point.
+            var tmb = targetPage.MediaBox;
+            matrix = $"{f(sx)} 0 0 {f(sy)} {f(tmb.LLX + x - mb.LLX * sx)} {f(tmb.LLY + y - mb.LLY * sy)}";
         }
 
         // Draw the stamp form inside an /Artifact marked-content block with a default
-        // graphics state (matches Aspose.Pdf): the overlay is a pagination
+        // graphics state (matches the reference): the overlay is a pagination
         // artifact, not real page content, and the leading `gs` resets the graphics
         // state so the stamp is isolated from whatever state the page content left.
         var gsName = targetPage.AddExtGState(new Content.ExtGState());
+        // %StampId identifies the block to GetStamps/DeleteStampById; the parser
+        // expects the comment immediately before the q that opens the stamp block.
+        var idComment = StampId != 0 ? $"%StampId={StampId}\n" : "";
         var content =
-            $"/Artifact BDC\nq\n/{gsName} gs\n{matrix} cm\n/{xobjName} Do\nQ\nEMC\n";
+            $"/Artifact BDC\n{idComment}q\n/{gsName} gs\n{matrix} cm\n/{xobjName} Do\nQ\nEMC\n";
         return System.Text.Encoding.ASCII.GetBytes(content);
     }
 
@@ -271,7 +295,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         else
         {
             // Isolate the existing page content in its own q…Q so the appended stamp
-            // starts from a clean graphics state (matches Aspose.Pdf, which
+            // starts from a clean graphics state (matches the reference, which
             // brackets the original content before overlaying the stamp).
             page.PrependContentStream("q\n"u8.ToArray());
             var wrapped = new byte[2 + stampBytes.Length];
@@ -315,7 +339,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
     /// the page itself declares none (an inheritable attribute). Without this, a stamped page
     /// whose resources live on an ancestor /Pages node would import an empty resource graph,
     /// so the form's fonts/images would be missing.</summary>
-    private static PdfDictionary? ResolveEffectiveResources(PdfDictionary pageDict, PdfReader reader)
+    internal static PdfDictionary? ResolveEffectiveResources(PdfDictionary pageDict, PdfReader reader)
     {
         var res = reader.ResolveDict(pageDict.Get("Resources"));
         if (res is not null) return res;
@@ -333,7 +357,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         return null;
     }
 
-    private static byte[] GetPageContent(PdfDictionary pageDict, PdfReader reader)
+    internal static byte[] GetPageContent(PdfDictionary pageDict, PdfReader reader)
     {
         var obj = reader.Resolve(pageDict.Get("Contents"));
         if (obj is PdfStream stream) return reader.DecodeStream(stream);

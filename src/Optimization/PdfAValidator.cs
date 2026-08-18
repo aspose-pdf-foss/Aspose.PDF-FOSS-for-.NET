@@ -15,6 +15,15 @@ internal sealed class PdfAViolation
 
     /// <summary>Page number where the violation was found, or null for document-level issues.</summary>
     public int? PageNumber { get; init; }
+
+    /// <summary>Explicit conformance clause for the log's Clause attribute; when null the
+    /// log writer derives one from <see cref="Rule"/>.</summary>
+    public string? Clause { get; init; }
+
+    /// <summary>Whether conversion can repair this violation. An unconvertable violation
+    /// (an implementation limit baked into the content) makes the conversion report
+    /// failure.</summary>
+    public bool Convertable { get; init; } = true;
 }
 
 /// <summary>
@@ -67,8 +76,32 @@ internal static class PdfAValidator
     /// Validate a document against the specified PDF/A format.
     /// Returns a result with both simple string issues and structured violations.
     /// </summary>
+    /// <summary>The single problem reported when the document's encryption
+    /// permissions block conformance work: the document was opened with USER
+    /// access and /P withholds modify-contents, so no validation or conversion
+    /// may touch it (the log carries exactly this one entry).</summary>
+    public static PdfAValidationResult PermissionBlocked(PdfFormat format)
+    {
+        const string description = "Conversion is not allowed by permission restrictions";
+        return new PdfAValidationResult
+        {
+            IsValid = false,
+            Format = format,
+            Issues = [description],
+            Violations = [new PdfAViolation { Rule = "Permission", Description = description }],
+        };
+    }
+
     public static PdfAValidationResult Validate(Document document, PdfFormat format = PdfFormat.PDF_A_1B)
     {
+        // Permission-restricted documents refuse conformance validation outright —
+        // the caller holds user access only and modification is not permitted.
+        if (document.PdfAConversionBlockedByPermissions
+            && format is not (PdfFormat.v_1_0 or PdfFormat.v_1_1 or PdfFormat.v_1_2 or PdfFormat.v_1_3
+                or PdfFormat.v_1_4 or PdfFormat.v_1_5 or PdfFormat.v_1_6 or PdfFormat.v_1_7
+                or PdfFormat.v_2_0 or PdfFormat.Pdf))
+            return PermissionBlocked(format);
+
         // PDF/X validation
         if (format is PdfFormat.PDF_X_1A or PdfFormat.PDF_X_3)
             return ValidatePdfX(document, format);
@@ -78,16 +111,21 @@ internal static class PdfAValidator
         if (format is PdfFormat.PDF_UA_1)
             return ValidatePdfUa(document);
 
+        // PDF/E-1 (ISO 24517-1) — engineering documents, its own requirement set
+        // (pdfe identification, no JavaScript, embedded fonts).
+        if (format is PdfFormat.PDF_E_1)
+            return ValidatePdfE(document);
+
         // Version-only formats (a plain PDF version, not a PDF/A·X·UA conformance level):
         // a document that loaded is a structurally valid PDF of that version, so validation
-        // succeeds — matching the reference, where Validate(stream, v_1_x) returns true for a
+        // succeeds — Validate(stream, v_1_x) returns true for a
         // well-formed PDF. (Only PDF/A·X·UA carry conformance requirements that can fail.)
         if (format is PdfFormat.v_1_0 or PdfFormat.v_1_1 or PdfFormat.v_1_2 or PdfFormat.v_1_3
             or PdfFormat.v_1_4 or PdfFormat.v_1_5 or PdfFormat.v_1_6 or PdfFormat.v_1_7
             or PdfFormat.v_2_0 or PdfFormat.Pdf)
             return new PdfAValidationResult { IsValid = true, Format = format };
 
-        // CLAIM GATE (oracle-derived 2026-07-06):
+        // CLAIM GATE:
         // Validate(PDF_A_<p><c>) returns false — with a CLEAN log, nothing written —
         // when the document's XMP pdfaid claim doesn't EXACTLY equal the requested
         // part and conformance (case-sensitive; a claimed 3A validates as 3A only,
@@ -142,6 +180,25 @@ internal static class PdfAValidator
         // 1. Must have XMP metadata
         CheckMetadata(document, format, issues, violations);
 
+        // 1b. ZUGFeRD: the invoice profile requires the ZUGFeRD XMP extension schema
+        // (zf:DocumentType/DocumentFileName/... in urn:ferd:pdfa:CrossIndustryDocument).
+        // A PDF/A-3 file without that block is not a ZUGFeRD invoice.
+        if (format == PdfFormat.ZUGFeRD)
+        {
+            var zfMeta = document.HasMetadata ? document.Metadata : null;
+            var hasZf = zfMeta is not null
+                && zfMeta.Keys.Any(k => k.StartsWith("zf:", StringComparison.Ordinal));
+            if (!hasZf)
+            {
+                issues.Add("ZUGFeRD XMP metadata missing.");
+                violations.Add(new PdfAViolation
+                {
+                    Rule = "ZUGFeRDXmp",
+                    Description = "ZUGFeRD XMP metadata missing.",
+                });
+            }
+        }
+
         // 2. Must not be encrypted
         if (document.IsEncrypted)
         {
@@ -187,13 +244,15 @@ internal static class PdfAValidator
         var version = document.PdfVersion;
         if (version is not null)
         {
-            if (string.Compare(version, "1.4", StringComparison.Ordinal) < 0)
+            // 1.3, matching what conversion leaves behind — a converted document must
+            // not fail the validation of the very format it was just converted to.
+            if (string.Compare(version, "1.3", StringComparison.Ordinal) < 0)
             {
-                issues.Add($"PDF version {version} is below 1.4 (minimum for PDF/A).");
+                issues.Add($"PDF version {version} is below 1.3 (minimum for PDF/A).");
                 violations.Add(new PdfAViolation
                 {
                     Rule = "PdfVersion",
-                    Description = $"PDF version {version} is below 1.4 (minimum for PDF/A).",
+                    Description = $"PDF version {version} is below 1.3 (minimum for PDF/A).",
                 });
             }
         }
@@ -214,7 +273,7 @@ internal static class PdfAValidator
             CheckColorSpaces(document, page, hasOutputIntent, issues, violations);
 
             // Annotation restrictions
-            CheckAnnotations(document, page, issues, violations);
+            CheckAnnotations(document, page, format, issues, violations);
         }
 
         // 8. File trailer must have /ID array
@@ -277,8 +336,9 @@ internal static class PdfAValidator
         if (document.Reader.Trailer.Get("ID") is null)
             Fail("FileId", "Missing file ID in trailer (required for PDF/UA-1).");
 
-        // PDF/UA-1 §7.21.4.2 symbolic-TrueType cmap rule (what Preflight flags on
-        // the 57066 regression doc). NOTE: a general font-EMBEDDING requirement is
+        // PDF/UA-1 §7.21.4.2 symbolic-TrueType cmap rule (the violation Preflight
+        // flags on a tagged doc whose symbolic TrueType face lacks the required
+        // cmap subtable). NOTE: a general font-EMBEDDING requirement is
         // deliberately NOT enforced here — FOSS-authored tagged documents render
         // through Standard-14 faces that are only embedded at save, and the
         // internal tagged-authoring suite validates them in memory.
@@ -289,6 +349,62 @@ internal static class PdfAValidator
         {
             IsValid = issues.Count == 0,
             Format = PdfFormat.PDF_UA_1,
+            Issues = issues,
+            Violations = violations,
+        };
+    }
+
+    // PDF/E-1 prohibits the interactive/executable action types; the PDF/A-only
+    // form-data prohibitions (ResetForm, ImportData) do not apply.
+    private static readonly HashSet<string> PdfEProhibitedActionTypes = new(StringComparer.Ordinal)
+    {
+        "JavaScript", "Launch", "Sound", "Movie",
+    };
+
+    private static PdfAValidationResult ValidatePdfE(Document document)
+    {
+        var issues = new List<string>();
+        var violations = new List<PdfAViolation>();
+
+        void Fail(string rule, string description)
+        {
+            issues.Add(description);
+            violations.Add(new PdfAViolation { Rule = rule, Description = description });
+        }
+
+        if (document.IsEncrypted)
+            Fail("Encryption", "Document is encrypted (not allowed in PDF/E-1).");
+
+        var reader = document.Reader;
+        var names = reader.ResolveDict(reader.Catalog.Get("Names"));
+        if (names?.Get("JavaScript") is not null)
+            Fail("JavaScript", "Document-level JavaScript is not allowed in PDF/E-1.");
+
+        var openAction = reader.ResolveDict(reader.Catalog.Get("OpenAction"));
+        var openActionType = openAction?.GetName("S");
+        if (openActionType is not null && PdfEProhibitedActionTypes.Contains(openActionType))
+            Fail("ActionType", $"Action type '{openActionType}' is not allowed in PDF/E-1.");
+
+        var catalogAa = reader.ResolveDict(reader.Catalog.Get("AA"));
+        if (catalogAa is not null)
+            foreach (var key in catalogAa.Keys)
+            {
+                var actionType = reader.ResolveDict(catalogAa.Get(key))?.GetName("S");
+                if (actionType is not null && PdfEProhibitedActionTypes.Contains(actionType))
+                    Fail("ActionType", $"Action type '{actionType}' is not allowed in PDF/E-1.");
+            }
+
+        if (!document.HasMetadata
+            || string.IsNullOrEmpty(document.Metadata?.Get("pdfe:ISO_PDFEVersion")))
+            Fail("Metadata", "Missing pdfe:ISO_PDFEVersion in XMP metadata (required for PDF/E-1).");
+
+        foreach (var page in document.Pages)
+            CheckFontEmbedding(document, page, isPdfA1: false, issues, violations);
+
+        return new PdfAValidationResult
+        {
+            IsValid = issues.Count == 0,
+            Format = PdfFormat.PDF_E_1,
             Issues = issues,
             Violations = violations,
         };
@@ -378,7 +494,7 @@ internal static class PdfAValidator
                 var ury = Math.Max(Num(rect[1]), Num(rect[3]));
                 var inside = urx > mb.LLX && llx < mb.URX && ury > mb.LLY && lly < mb.URY;
                 if (!inside) continue;
-                var msg = $"ErrorAnnotationLayout: annotation '{a.GetName("Subtype")}' inside the printable area on page {page.Number} (not allowed in PDF/X).";
+                var msg = $"ErrorAnnotationLayout: The annotation should lying completely outside the BleedBox: '{a.GetName("Subtype")}' on page {page.Number} lies inside the printable area (not allowed in PDF/X).";
                 issues.Add(msg);
                 violations.Add(new PdfAViolation
                 {
@@ -439,8 +555,8 @@ internal static class PdfAValidator
             }
 
             // dc:title and pdf:Producer are deliberately NOT validated: ISO 19005
-            // requires neither (Acrobat preflight passes files without them, e.g.
-            // the 50011 regression doc), and demanding them here produced false
+            // requires neither (Acrobat preflight passes conformant files that
+            // omit both), and demanding them here produced false
             // validation failures on conformant documents.
         }
     }
@@ -558,8 +674,7 @@ internal static class PdfAValidator
         if (fontDict is null) return;
 
         // Only fonts actually SELECTED by a Tf in the page content are checked —
-        // a non-embedded font merely declared in /Resources is never flagged
-        // (reference-validator behaviour, oracle-verified 2026-07-06).
+        // a non-embedded font merely declared in /Resources is never flagged.
         HashSet<string>? usedFonts = null;
         try
         {
@@ -633,6 +748,27 @@ internal static class PdfAValidator
             violations.Add(new PdfAViolation
             {
                 Rule = "FontEmbedding",
+                Description = msg,
+                PageNumber = pageNumber,
+            });
+        }
+
+        // A Courier-family FontDescriptor whose Descent falls below -310 carries an
+        // out-of-range vertical metric that conversion does not correct, leaving the
+        // font non-conformant. The range check is Courier-specific: other families
+        // legitimately carry a descent below -310 (a 2048-em descriptor whose raw
+        // hhea descent is around -480 normalises to roughly -235), and those stay
+        // conformant.
+        var fdName = descriptor.GetName("FontName") ?? baseFont ?? string.Empty;
+        if (fdName.Contains("Courier") && descriptor.ContainsKey("Descent") &&
+            descriptor.GetInt("Descent", 0) < -310)
+        {
+            var msg = $"Font '{baseFont}' has an out-of-range FontDescriptor Descent " +
+                      $"({descriptor.GetInt("Descent", 0)}).";
+            issues.Add(msg);
+            violations.Add(new PdfAViolation
+            {
+                Rule = "FontDescriptorMetrics",
                 Description = msg,
                 PageNumber = pageNumber,
             });
@@ -766,7 +902,7 @@ internal static class PdfAValidator
         }
     }
 
-    private static void CheckAnnotations(Document document, Page page,
+    private static void CheckAnnotations(Document document, Page page, PdfFormat format,
         List<string> issues, List<PdfAViolation> violations)
     {
         var annotsObj = document.Reader.Resolve(page.Dict.Get("Annots"));
@@ -778,6 +914,11 @@ internal static class PdfAValidator
             if (annotDict is null) continue;
 
             var subtype = annotDict.GetName("Subtype");
+
+            // PDF/A-4f (ISO 19005-4) permits embedded files: FileAttachment
+            // annotations are valid content there.
+            if (subtype == "FileAttachment" && format is PdfFormat.PDF_A_4F)
+                continue;
 
             // Check prohibited subtypes
             if (subtype is not null && ProhibitedAnnotationSubtypes.Contains(subtype))

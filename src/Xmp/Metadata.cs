@@ -24,9 +24,10 @@ public sealed class Metadata : IDictionary<string, XmpValue>
         ["xmpRights"] = "http://ns.adobe.com/xap/1.0/rights/",
         ["pdfaid"] = "http://www.aiim.org/pdfa/ns/id/",
         ["pdfuaid"] = "http://www.aiim.org/pdfua/ns/id/",
+        ["pdfe"] = "http://www.aiim.org/pdfe/ns/id/",
     };
 
-    /// <summary>Accessor mirroring the Aspose.Pdf <c>Metadata.getData()</c> surface:
+    /// <summary>Accessor mirroring the <c>Metadata.getData()</c> surface:
     /// returns the XMP packet so callers can read the raw RDF/XML.</summary>
     public XmpPacketContainer getData() => new(_xmp);
 
@@ -80,7 +81,7 @@ public sealed class Metadata : IDictionary<string, XmpValue>
 
     /// <summary>PDF/A extension fields, keyed by extension namespace prefix.
     /// Stored only in this build; full PDF/A-3 extension emission is left to
-    /// Aspose.Pdf.</summary>
+    /// a later build.</summary>
     public IDictionary<string, XmpPdfAExtensionSchema> ExtensionFields { get; }
         = new Dictionary<string, XmpPdfAExtensionSchema>(StringComparer.Ordinal);
 

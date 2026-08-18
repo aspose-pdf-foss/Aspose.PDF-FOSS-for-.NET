@@ -120,8 +120,11 @@ internal sealed class FontMetrics
         if (_cidWidths is not null && _cidWidths.TryGetValue(charCode, out var cidW))
             return cidW;
 
-        // 3. Standard 14 built-in widths
-        if (_isStandard14 && _baseFontName is not null)
+        // 3. Standard 14 built-in widths — simple fonts only. A CID font's codes are
+        // CIDs, not standard-encoding character codes, so the Standard-14 table would
+        // return an unrelated glyph's width (CID 58 is not ':'); a CID absent from /W
+        // takes the /DW default per PDF 32000 §9.7.4.3.
+        if (_isStandard14 && !_isCid && _baseFontName is not null)
         {
             var w = Standard14Fonts.GetWidth(_baseFontName, charCode);
             if (w >= 0) return w;
@@ -145,7 +148,7 @@ internal sealed class FontMetrics
         }
         if (_cidWidths is not null && _cidWidths.ContainsKey(charCode))
             return true;
-        if (_isStandard14 && _baseFontName is not null &&
+        if (_isStandard14 && !_isCid && _baseFontName is not null &&
             Standard14Fonts.GetWidth(_baseFontName, charCode) >= 0)
             return true;
         return false;
@@ -185,8 +188,35 @@ internal sealed class FontMetrics
         double total = 0;
         if (_isCid)
         {
+            // The argument is UNICODE text, not a decoded show string, so its chars are
+            // not this font's CIDs — /W (keyed by CID) only matches by coincidence, and
+            // the misses fall to /DW (typically 1000, ~2× too wide) and inflate the
+            // measure. For a standard face (Arial/Helvetica/Times/Courier) the base-face
+            // Standard-14 advance IS the right width for the character; use it so a
+            // caller wrapping fresh text into a box (post-replace reflow) gets a faithful
+            // line count. Non-standard CID faces keep the CID /W → /DW path.
+            var useStd14 = _isStandard14 && _baseFontName is not null;
             foreach (var ch in text)
-                total += GetWidth(ch);
+            {
+                if (useStd14)
+                {
+                    // Prefer a /W entry that happens to be keyed by this char code (a
+                    // Latin subset commonly numbers CIDs by the original code, so 'E'→69
+                    // hits its true advance), then the base-face Standard-14 width for
+                    // the rest, then /DW. This mirrors the width a simple-font measure of
+                    // the substitute face would give and keeps the wrapped line count and
+                    // extent faithful.
+                    if (_cidWidths is not null && _cidWidths.TryGetValue(ch, out var cw))
+                        total += cw;
+                    else
+                    {
+                        var sw = Standard14Fonts.GetWidth(_baseFontName!, ch < 256 ? ch : '?');
+                        total += sw >= 0 ? sw : _defaultWidth;
+                    }
+                }
+                else
+                    total += GetWidth(ch);
+            }
         }
         else
         {
@@ -281,6 +311,12 @@ internal sealed class FontMetrics
         }
 
         int[]? widths = null;
+        // A /Widths entry written as a real is the face's own advance: a face drawn on
+        // a 2048-unit em has advances that are not whole 1000ths, and dropping the
+        // fraction shortens a re-measured paragraph by a fifth of a point. Keep those
+        // entries alongside the integer table, which every all-integer array — very
+        // nearly every real document — leaves exactly as it was.
+        Dictionary<int, double>? exactWidths = null;
         var widthsObj = reader?.Resolve(fontDict.Get("Widths"));
         if (widthsObj is PdfArray widthsArr && widthsArr.Count > 0)
         {
@@ -288,6 +324,8 @@ internal sealed class FontMetrics
             for (var i = 0; i < widthsArr.Count; i++)
             {
                 var w = reader?.Resolve(widthsArr[i]) ?? widthsArr[i];
+                if (!isType3 && w is PdfReal exact && exact.Value != System.Math.Floor(exact.Value))
+                    (exactWidths ??= new Dictionary<int, double>())[firstChar + i] = exact.Value;
                 if (isType3)
                 {
                     double raw = w switch
@@ -301,11 +339,13 @@ internal sealed class FontMetrics
                 else
                 {
                     // Non-Type3 simple fonts: /Widths are already in 1/1000 text space.
-                    // Preserve the original truncating cast so this change is a no-op here.
+                    // An integer entry casts exactly as it always did; a real one rounds
+                    // to its nearest whole width rather than losing its fraction outright,
+                    // and the exact value above is what the extraction measure reads.
                     widths[i] = w switch
                     {
                         PdfInteger pi => (int)pi.Value,
-                        PdfReal pr => (int)pr.Value,
+                        PdfReal pr => (int)System.Math.Round(pr.Value),
                         _ => 0,
                     };
                 }
@@ -324,6 +364,17 @@ internal sealed class FontMetrics
             widths = ExtractEmbeddedCffWidths(fontDict, reader, firstChar, lastChar);
         }
 
+        // A non-embedded, non-Standard-14 simple font without /Widths: every code
+        // would otherwise measure at the 1000/1000 default — up to double the real
+        // advance — and the word-gap heuristics downstream (space synthesis in
+        // search/extraction) misfire on the phantom gaps. The BaseFont names a real
+        // face; resolve it through the repository/system sources and take the
+        // face's own advances, exactly as the producing layout measured them.
+        if (widths is null && !isStandard14)
+        {
+            widths = SystemFaceWidths(normalizedBase, firstChar, lastChar);
+        }
+
         var defaultWidth = reader is not null ? GetMissingWidth(fontDict, reader) : 0;
         if (defaultWidth == 0 && isStandard14)
             defaultWidth = Standard14Fonts.GetDefaultWidth(normalizedBase);
@@ -332,6 +383,7 @@ internal sealed class FontMetrics
 
         var metrics = new FontMetrics(widths, firstChar, lastChar, null, defaultWidth,
             normalizedBase, isStandard14, isCid: false);
+        metrics._cidWidthsExact = exactWidths;
         if (reader is not null)
             PopulateDescriptorMetrics(metrics, fontDict, reader);
         return metrics;
@@ -582,7 +634,6 @@ internal sealed class FontMetrics
                     // Use GDI+-style cell ascent for the text rectangle.
                     // .NET uses em-height = usWinAscent + usWinDescent as the em square,
                     // and cell ascent = usWinAscent scaled by (1000 / em-height-in-design-units).
-                    // This matches .NET Aspose.PDF's text rectangle computation.
                     // Use GDI+-style cell ascent when usWin metrics define a significantly
                     // larger em-square than upem (common in Calibri, Arial, etc. where
                     // usWinAsc+usWinDesc > upem). This matches .NET's text rectangle.
@@ -631,6 +682,95 @@ internal sealed class FontMetrics
     /// Try to extract glyph widths from an embedded TrueType font program (FontFile2).
     /// Returns null if no embedded font is found.
     /// </summary>
+    // Cache: BaseFont name → widths for codes 0..255 (null = the name resolved to
+    // nothing usable). One resolution per face name per process, not per Tf switch.
+    private static readonly System.Collections.Generic.Dictionary<string, int[]?> _systemFaceWidthsCache =
+        new(System.StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Widths (1/1000 units, WinAnsi/CP1252 code space) for a non-embedded
+    /// simple font whose BaseFont names an installed face — "Verdana",
+    /// "VerdanaBold", "Arial,Bold", "TimesNewRoman". Null when no face resolves.</summary>
+    private static int[]? SystemFaceWidths(string normalizedBase, int firstChar, int lastChar)
+    {
+        if (string.IsNullOrEmpty(normalizedBase)) return null;
+        int[]? full;
+        lock (_systemFaceWidthsCache)
+        {
+            if (!_systemFaceWidthsCache.TryGetValue(normalizedBase, out full))
+            {
+                full = BuildSystemFaceWidths(normalizedBase);
+                _systemFaceWidthsCache[normalizedBase] = full;
+            }
+        }
+        if (full is null) return null;
+        var count = lastChar - firstChar + 1;
+        if (count <= 0 || firstChar < 0 || lastChar > 255) return null;
+        if (firstChar == 0 && lastChar == 255) return full;
+        var widths = new int[count];
+        System.Array.Copy(full, firstChar, widths, 0, count);
+        return widths;
+    }
+
+    private static int[]? BuildSystemFaceWidths(string baseName)
+    {
+        byte[]? ttf = null;
+        foreach (var candidate in SystemFaceNameCandidates(baseName))
+        {
+            try { ttf = FontRepository.GetTtfData(candidate); } catch { ttf = null; }
+            if (ttf is not null) break;
+        }
+        if (ttf is null) return null;
+        try
+        {
+            var tp = new TrueTypeParser(ttf);
+            tp.Parse();
+            if (tp.UnitsPerEm <= 0) return null;
+            var widths = new int[256];
+            var any = false;
+            for (var code = 0; code < 256; code++)
+            {
+                var uni = Cp1252ToUnicode(code);
+                // Only really-mapped glyphs: GetCharWidth would hand unmapped codes
+                // the notdef advance, which is exactly the guess this path replaces.
+                if (uni == 0 || !tp.CMap.TryGetValue(uni, out var gid) || gid == 0
+                    || gid >= tp.GlyphWidths.Length) continue;
+                var w = tp.GlyphWidths[gid];
+                if (w <= 0) continue;
+                widths[code] = (int)System.Math.Round(w * 1000.0 / tp.UnitsPerEm);
+                any = true;
+            }
+            return any ? widths : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Lookup spellings for a PDF base-font name: as written, the comma
+    /// style split ("Arial,Bold"), and camel-case splits ("VerdanaBold" →
+    /// "Verdana Bold", "TimesNewRoman" → "Times New Roman").</summary>
+    private static System.Collections.Generic.IEnumerable<string> SystemFaceNameCandidates(string baseName)
+    {
+        yield return baseName;
+        var comma = baseName.Replace(',', ' ').Replace('-', ' ');
+        if (comma != baseName) yield return comma;
+        var camel = System.Text.RegularExpressions.Regex.Replace(
+            comma, "(?<=[a-z])(?=[A-Z])", " ");
+        if (camel != comma) yield return camel;
+    }
+
+    /// <summary>WinAnsi (CP1252) code → Unicode. 0 for the undefined 0x81/0x8D/0x8F/0x90/0x9D.</summary>
+    private static int Cp1252ToUnicode(int code) => code switch
+    {
+        0x80 => 0x20AC, 0x82 => 0x201A, 0x83 => 0x0192, 0x84 => 0x201E,
+        0x85 => 0x2026, 0x86 => 0x2020, 0x87 => 0x2021, 0x88 => 0x02C6,
+        0x89 => 0x2030, 0x8A => 0x0160, 0x8B => 0x2039, 0x8C => 0x0152,
+        0x8E => 0x017D, 0x91 => 0x2018, 0x92 => 0x2019, 0x93 => 0x201C,
+        0x94 => 0x201D, 0x95 => 0x2022, 0x96 => 0x2013, 0x97 => 0x2014,
+        0x98 => 0x02DC, 0x99 => 0x2122, 0x9A => 0x0161, 0x9B => 0x203A,
+        0x9C => 0x0153, 0x9E => 0x017E, 0x9F => 0x0178,
+        0x81 or 0x8D or 0x8F or 0x90 or 0x9D => 0,
+        _ => code,
+    };
+
     private static int[]? ExtractEmbeddedTrueTypeWidths(PdfDictionary fontDict, PdfReader reader,
         int firstChar, int lastChar)
     {

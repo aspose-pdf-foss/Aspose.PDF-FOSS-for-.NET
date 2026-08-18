@@ -5,8 +5,8 @@ using System.IO.Compression;
 namespace Aspose.Pdf;
 
 /// <summary>
-/// zlib (RFC 1950) deflating output stream — a public helper matching the
-/// Aspose.Pdf surface. Bytes written are zlib-compressed into the
+/// zlib (RFC 1950) deflating output stream — a public helper on the
+/// public API surface. Bytes written are zlib-compressed into the
 /// destination stream. Call <see cref="Finish"/> (or dispose) to flush the
 /// compression trailer; the destination stream is left open.
 /// </summary>
@@ -55,8 +55,8 @@ public sealed class ZDeflaterOutputStream : Stream
 }
 
 /// <summary>
-/// zlib (RFC 1950) inflating input stream — a public helper matching the
-/// Aspose.Pdf surface. Reads zlib-compressed data from the source
+/// zlib (RFC 1950) inflating input stream — a public helper on the
+/// public API surface. Reads zlib-compressed data from the source
 /// stream and yields the decompressed bytes. The source stream is left open.
 /// </summary>
 public sealed class ZInflaterInputStream : Stream

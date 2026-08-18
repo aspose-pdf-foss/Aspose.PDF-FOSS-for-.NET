@@ -33,19 +33,19 @@ public sealed class AutoFiller : ISaveableFacade, IDisposable
 
     /// <summary>Directory used for per-row PDF generation when batch-saving by
     /// row to separate files. The merged-output flow ignores this property —
-    /// kept for source-level compatibility with the Aspose.Pdf Facades API.</summary>
+    /// kept for source-level compatibility with the Facades API.</summary>
     public string? GeneratingPath { get; set; }
 
     /// <summary>Base name used for per-row PDF generation in batch mode. The
     /// merged-output flow ignores this property — kept for source-level
-    /// compatibility with the Aspose.Pdf Facades API.</summary>
+    /// compatibility with the Facades API.</summary>
     public string? BasicFileName { get; set; }
 
     private string[]? _unFlattenFields;
 
     /// <summary>Field names to leave editable (i.e. NOT flatten) in the output.
     /// All other fields are flattened. Null/empty = flatten everything. Set-only
-    /// to match the Aspose.Pdf reflection shape; readers go through
+    /// to match the public reflection shape; readers go through
     /// <see cref="UnFlattenFieldsValue"/> internally.</summary>
     public string[] UnFlattenFields { set => _unFlattenFields = value; }
 
@@ -79,6 +79,7 @@ public sealed class AutoFiller : ISaveableFacade, IDisposable
     {
         DisposeInput();
         using var ms = new MemoryStream();
+        if (srcStream.CanSeek && srcStream.Position != 0) srcStream.Position = 0;
         srcStream.CopyTo(ms);
         _input = Document.Open(ms.ToArray());
         _ownsInput = true;
@@ -159,7 +160,7 @@ public sealed class AutoFiller : ISaveableFacade, IDisposable
         {
             var raw = row[col];
             if (raw is null || raw == DBNull.Value) continue;
-            var field = doc.Form.FindByName(col.ColumnName);
+            var field = doc.Form.FindFieldOrNull(col.ColumnName);
             if (field is null) continue;
             field.Value = Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture) ?? "";
         }

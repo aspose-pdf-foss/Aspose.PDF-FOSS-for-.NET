@@ -37,6 +37,11 @@ internal sealed class CffType2Interpreter
     private int _hintCount;
     private bool _widthSeen;
 
+    /// <summary>The charstring's optional leading width operand (a delta against
+    /// the private dict's nominalWidthX) when one was present, else null — the
+    /// glyph then advances by defaultWidthX.</summary>
+    public double? WidthDelta { get; private set; }
+
     // Runaway subroutine recursion guard — real charstrings stay under ~20 deep;
     // anything beyond that is almost certainly a malformed font.
     private int _subrDepth;
@@ -487,6 +492,7 @@ internal sealed class CffType2Interpreter
         if ((_sp & 1) != 0)
         {
             // Leading operand is the width — drop it; nothing to emit for geometry.
+            WidthDelta = _stack[0];
             for (var i = 0; i < _sp - 1; i++) _stack[i] = _stack[i + 1];
             _sp--;
         }
@@ -500,6 +506,7 @@ internal sealed class CffType2Interpreter
         _widthSeen = true;
         if (_sp == expected + 1)
         {
+            WidthDelta = _stack[0];
             for (var i = 0; i < _sp - 1; i++) _stack[i] = _stack[i + 1];
             _sp--;
         }
@@ -510,6 +517,6 @@ internal sealed class CffType2Interpreter
     {
         if (_widthSeen) return;
         _widthSeen = true;
-        if (_sp == 1) _sp = 0;
+        if (_sp == 1) { WidthDelta = _stack[0]; _sp = 0; }
     }
 }

@@ -330,11 +330,17 @@ namespace Aspose.Pdf.Forms
         private static List<FieldExportingData> BuildChildFields(Field field)
         {
             var list = new List<FieldExportingData>();
+            // A radio group's option widgets carry no /T of their own (they share the
+            // group's name and differ only by /AP state), yet each holds a distinct
+            // /Rect + /AP that must round-trip so the re-imported group renders every
+            // option in place. Surface those placed widgets as child entries too;
+            // for every other field a kid without /T is just a plain widget already
+            // covered by the field's own /Rect + /AP.
+            var includeWidgetKids = field is RadioButtonField;
             foreach (var kidDict in field.AllKids())
             {
-                // A kid is a child field only when it carries its own partial
-                // name (/T); kids without /T are plain widgets of this field.
-                if (!kidDict.ContainsKey("T"))
+                var named = kidDict.ContainsKey("T");
+                if (!named && !(includeWidgetKids && kidDict.ContainsKey("Rect")))
                     continue;
                 var child = BuildField(new Field(kidDict, field.Reader));
                 // A directly placed widget child references the page.

@@ -1,74 +1,44 @@
+using System.Collections;
+using System.Collections.Generic;
+
 namespace Aspose.Pdf;
 
 /// <summary>
-/// Document-level bookmark (outline) collection. Returned by
-/// <see cref="OutlineItemCollection.Parent"/> so callers can navigate from a
-/// nested bookmark back to the top-level outline tree.
+/// Base class for a bookmark (outline) collection. <see cref="OutlineCollection"/>
+/// derives from it, so a document's <see cref="Document.Outlines"/> and any
+/// <see cref="OutlineItem.Parent"/> are both assignable to <c>Outlines</c>
+/// (matching the public type hierarchy).
 /// </summary>
-public sealed class Outlines
+public abstract class Outlines : IEnumerable<OutlineItemCollection>
 {
-    private readonly OutlineCollection _backing;
-
-    internal Outlines(OutlineCollection backing) => _backing = backing;
+    private protected Outlines() { }
 
     /// <summary>Number of top-level outline items.</summary>
-    public int Count => _backing.Count;
-
-    /// <summary>Whether the collection is read-only. Always false.</summary>
-    public bool IsReadOnly => false;
+    public abstract int Count { get; }
 
     /// <summary>Number of bookmarks that are visible (counts /Count entries recursively).</summary>
-    public int VisibleCount => _backing.Count;
+    public virtual int VisibleCount => Count;
+
+    /// <summary>Whether the collection is read-only. Always false.</summary>
+    public virtual bool IsReadOnly => false;
 
     /// <summary>Append an outline item.</summary>
-    public void Add(OutlineItemCollection item)
-    {
-        if (item is null) return;
-        _backing.Add(item);
-    }
+    public abstract void Add(OutlineItemCollection item);
 
     /// <summary>Remove every outline item.</summary>
-    public void Clear()
-    {
-        // Backing collection lacks Clear; iterate top-level items and remove each.
-        var snapshot = new List<OutlineItem>();
-        foreach (var i in _backing) snapshot.Add(i);
-        foreach (var i in snapshot) _backing.Remove(i);
-    }
+    public abstract void Clear();
 
     /// <summary>Whether the supplied item is present at the top level.</summary>
-    public bool Contains(OutlineItemCollection item)
-    {
-        if (item is null) return false;
-        foreach (var i in _backing)
-            if (ReferenceEquals(i, item)) return true;
-        return false;
-    }
+    public abstract bool Contains(OutlineItemCollection item);
 
     /// <summary>Copy the collection into an array starting at <paramref name="arrayIndex"/>.</summary>
-    public void CopyTo(OutlineItemCollection[] array, int arrayIndex)
-    {
-        if (array is null) throw new ArgumentNullException(nameof(array));
-        var i = arrayIndex;
-        foreach (var item in _backing)
-        {
-            if (item is OutlineItemCollection oic) array[i++] = oic;
-        }
-    }
-
-    /// <summary>Enumerator over the top-level outline items.</summary>
-    public IEnumerator<OutlineItemCollection> GetEnumerator()
-    {
-        foreach (var item in _backing)
-        {
-            if (item is OutlineItemCollection oic) yield return oic;
-        }
-    }
+    public abstract void CopyTo(OutlineItemCollection[] array, int arrayIndex);
 
     /// <summary>Remove the supplied item and report whether it was present.</summary>
-    public bool Remove(OutlineItemCollection item)
-    {
-        if (item is null) return false;
-        return _backing.Remove(item);
-    }
+    public abstract bool Remove(OutlineItemCollection item);
+
+    /// <summary>Enumerator over the top-level outline items.</summary>
+    public abstract IEnumerator<OutlineItemCollection> GetEnumerator();
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 }

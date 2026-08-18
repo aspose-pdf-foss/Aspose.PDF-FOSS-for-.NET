@@ -46,6 +46,23 @@ public class FontRepository
     internal static byte[]? GetTtfData(string fontName)
         => FindFontInternal(fontName, ignoreCase: true)?.TtfData;
 
+    /// <summary>Case-insensitive repository lookup returning the raw FontData.</summary>
+    internal static FontData? FindFontData(string fontName)
+        => FindFontInternal(fontName, ignoreCase: true);
+
+    /// <summary>Strict installed-face test: registered sources only (filename or
+    /// real family-name match) — no Standard-14 mapping and none of the
+    /// substitution aliasing the last-resort resolver applies ("Helvetica Neue"
+    /// is NOT installed on a stock Windows box even though a substitute exists).
+    /// A CSS font-family STACK walk needs installed-or-not truth, not a stand-in.</summary>
+    internal static bool FaceInstalled(string family)
+    {
+        if (string.IsNullOrEmpty(family)) return false;
+        foreach (var source in _sources)
+            if (source.FindFont(family, ignoreCase: true) is not null) return true;
+        return false;
+    }
+
     /// <summary>
     /// Find a font by family name and style. Style is honoured by family lookup
     /// (no synthesis); when no styled variant exists the closest match is returned.
@@ -300,7 +317,18 @@ public class FontRepository
                 ttp.Parse();
                 var fam = ttp.FamilyName;
                 if (!string.IsNullOrWhiteSpace(fam) && fam != "Unknown")
-                    realName = fam;
+                {
+                    // A styled face carries its style in the subfamily; the reported
+                    // name is family+style ("Times New Roman Bold Italic") so an
+                    // embedded round-trip reports the styled face, not the family.
+                    var sub = ttp.SubfamilyName;
+                    realName = !string.IsNullOrWhiteSpace(sub)
+                        && !sub.Equals("Regular", StringComparison.OrdinalIgnoreCase)
+                        && !sub.Equals("Normal", StringComparison.OrdinalIgnoreCase)
+                        && !fam.EndsWith(sub, StringComparison.OrdinalIgnoreCase)
+                        ? fam + " " + sub
+                        : fam;
+                }
             }
             catch { /* keep the query name if the face can't be parsed */ }
 
@@ -781,7 +809,7 @@ public class FontRepository
 
     /// <summary>
     /// Force the font sources to enumerate available fonts. The FOSS resolver
-    /// is fully lazy so this is a no-op; provided for Aspose.Pdf API parity.
+    /// is fully lazy so this is a no-op; provided for API compatibility.
     /// </summary>
     public static void LoadFonts() { }
 
@@ -981,7 +1009,17 @@ public sealed class FolderFontSource : FontSource
                     var names = new string[CjkFallbackFont.TtcFaceCount(raw)];
                     for (int i = 0; i < names.Length; i++)
                     {
-                        try { names[i] = FontRepository.ReadTtfFontName(CjkFallbackFont.NormalizeToSfnt(raw, i)); }
+                        // Store BOTH the full name and the family ("full|family"):
+                        // a query may target either ("HelveticaNeueLTStd" is the
+                        // family of the face whose full name is "…LTStd-Roman").
+                        try
+                        {
+                            var sfnt = CjkFallbackFont.NormalizeToSfnt(raw, i);
+                            var full = FontRepository.ReadTtfFontName(sfnt);
+                            string fam;
+                            try { fam = FontRepository.ReadTtfFamilyName(sfnt); } catch { fam = "Unknown"; }
+                            names[i] = full + "|" + fam;
+                        }
                         catch { names[i] = "Unknown"; }
                     }
                     return names;
@@ -990,10 +1028,17 @@ public sealed class FolderFontSource : FontSource
             });
             for (int face = 0; face < faceNames.Length; face++)
             {
-                var actualName = faceNames[face];
-                if (string.IsNullOrEmpty(actualName) || actualName == "Unknown") continue;
-                if (string.Equals(actualName, name, comparison) ||
-                    string.Equals(actualName.Replace(" ", "").Replace("-", ""), normalizedName, StringComparison.OrdinalIgnoreCase))
+                var faceEntry = faceNames[face];
+                if (string.IsNullOrEmpty(faceEntry) || faceEntry == "Unknown") continue;
+                var sep = faceEntry.IndexOf('|');
+                var fullN = sep < 0 ? faceEntry : faceEntry[..sep];
+                var famN = sep < 0 ? string.Empty : faceEntry[(sep + 1)..];
+                var actualName = fullN;
+                bool Matches(string candidate) =>
+                    candidate.Length > 0 && candidate != "Unknown"
+                    && (string.Equals(candidate, name, comparison)
+                        || string.Equals(candidate.Replace(" ", "").Replace("-", ""), normalizedName, StringComparison.OrdinalIgnoreCase));
+                if (Matches(fullN) || Matches(famN))
                 {
                     byte[] data;
                     try { data = CjkFallbackFont.NormalizeToSfnt(System.IO.File.ReadAllBytes(file), face); }
@@ -1219,7 +1264,7 @@ public sealed class SystemFontSource : FontSource
                     string.Equals(fileBase.Replace(" ", "").Replace("-", ""), normalizedName, StringComparison.OrdinalIgnoreCase))
                     // Name the face from its own 'name' table, not the query string, so
                     // FindFont("arial") yields a font whose FontName is "Arial" (real
-                    // family) — matching the Aspose.Pdf surface. The query
+                    // family). The query
                     // string is only used to locate the file; fall back to it if the
                     // family can't be parsed (e.g. an unusual .ttc layout).
                     return new FontData(RealFamilyName(file) ?? name, FontType.TrueType, file);
@@ -1262,6 +1307,17 @@ public sealed class FontSourceCollection : System.Collections.Generic.IEnumerabl
     public FontSourceCollection()
     {
         _sources.Add(new SystemFontSource());
+        // The default source set also carries the per-user Windows
+        // fonts folder (%LOCALAPPDATA%\Microsoft\Windows\Fonts) as a
+        // FolderFontSource when it exists — callers enumerate Sources expecting
+        // to find it without ever calling LoadFonts. Resolution
+        // is unaffected on machines without the folder, and the system source
+        // already exposes those fonts for lookup.
+        var userFonts = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Microsoft", "Windows", "Fonts");
+        if (Directory.Exists(userFonts))
+            _sources.Add(new FolderFontSource(userFonts));
     }
 
     public int Count { get { lock (SyncRoot) return _sources.Count; } }

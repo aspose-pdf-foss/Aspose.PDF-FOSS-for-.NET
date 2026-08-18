@@ -31,7 +31,7 @@ public sealed class PageCollection : IEnumerable<Page>
     // pointed at the slot and the page itself, when it is among the copied pages, is
     // written at that slot (see RebuildPagesTree) so the destination resolves to the
     // imported page. Slots for pages that were not copied resolve to null (a valid, empty
-    // PDF destination), matching Aspose.Pdf.
+    // PDF destination).
     //
     // Keyed WEAKLY on the source reader (like _cloneCache): a strong key would pin every
     // merged-in source document's reader/stream/byte[] for the destination's lifetime
@@ -174,9 +174,12 @@ public sealed class PageCollection : IEnumerable<Page>
     public void Accept(Text.TextFragmentAbsorber visitor)
     {
         // Clear once then visit all pages without clearing between them.
+        // Whole-document sweeps are tolerant of undecodable fonts — one bad
+        // font must not abort the other pages (strictness is a page-level
+        // Accept behaviour).
         visitor.TextFragments.Clear();
         foreach (var page in this)
-            visitor.VisitInternal(page);
+            visitor.VisitInternal(page, tolerantFonts: true);
     }
 
     /// <summary>Accept an ImagePlacementAbsorber visitor across every page.</summary>
@@ -229,6 +232,15 @@ public sealed class PageCollection : IEnumerable<Page>
             if (docMargin.BottomTouched) pm.Bottom = docMargin.Bottom;
         }
         return page;
+    }
+
+    /// <summary>
+    /// Add a new blank page bypassing licensing page-count restrictions. This build
+    /// carries no evaluation limits, so the behaviour matches <see cref="Add()"/>.
+    /// </summary>
+    public Page AddUnrestricted()
+    {
+        return Add();
     }
 
     /// <summary>
@@ -373,8 +385,17 @@ public sealed class PageCollection : IEnumerable<Page>
     /// </summary>
     public Page Insert(int pageNumber)
     {
+        // A no-size Insert inherits the document's prevailing page size
+        // (a TOC page inserted into a US-Letter document
+        // renders 612×792). The page is flagged size-inherited: if the caller
+        // then REQUESTS landscape via PageInfo.IsLandscape, layout replaces
+        // the inherited box with the A4-landscape default (842×595) — such
+        // a page resolves from its PageInfo defaults, not from
+        // the inherited box.
         var (w, h) = GetMostFrequentPageSize();
-        return Insert(pageNumber, w, h);
+        var page = Insert(pageNumber, w, h);
+        page.SizeInherited = true;
+        return page;
     }
 
     /// <summary>
@@ -641,11 +662,11 @@ public sealed class PageCollection : IEnumerable<Page>
             var docInfo = OwnerDocument?.PageInfo;
             if (docInfo is not null)
                 return (docInfo.Width, docInfo.Height);
-            return (595, 842); // A4, the Aspose.Pdf default
+            return (595, 842); // A4, the library default
         }
 
         // Find most frequent page size from a bounded sample (avoids O(n²) on bulk Add).
-        // On ties, use first page's size (Aspose.Pdf behavior).
+        // On ties, use first page's size.
         var sampleCount = Math.Min(_pages!.Count, 100);
         var counts = new Dictionary<(double w, double h), int>();
         for (int i = 0; i < sampleCount; i++)
@@ -713,6 +734,14 @@ public sealed class PageCollection : IEnumerable<Page>
         }
         else
         {
+            // An encrypted source must be decrypted before any of its raw stream bytes are
+            // copied into this document: RemapObject clones PdfStream.RawData verbatim, so
+            // ciphertext copied into an unencrypted (or differently-keyed) document would be
+            // Flate-decoded into garbage on read — the page's content, fonts and images all
+            // come out empty/corrupt. EnsurePlaintextStreams decrypts the source in place and
+            // is idempotent (it forgets the decryptor after the first call), so repeating it
+            // per imported page costs nothing.
+            sourceReader.EnsurePlaintextStreams();
             // Cross-document: remap indirect refs from source to new object numbers
             var remap = GetOrCreateCloneCache(sourceReader);
             clone = (PdfDictionary)RemapObject(dict, sourceReader, remap);
@@ -970,6 +999,44 @@ public sealed class PageCollection : IEnumerable<Page>
         {
             fieldsArr = new PdfArray();
             acroForm.Set("Fields", fieldsArr);
+        }
+
+        // Carry the source AcroForm's default resources across the merge: imported
+        // widgets' /DA strings name fonts by /DR alias (e.g. /HeBo), so the
+        // destination AcroForm needs those /DR entries (and a default /DA) or the
+        // aliases dangle — appearance regeneration and DefaultResources readers
+        // would come up empty after the merge.
+        if (sourceReader != _reader
+            && sourceReader.ResolveDict(sourceReader.Catalog.Get("AcroForm")) is { } srcAcro)
+        {
+            if (acroForm.Get("DA") is null && srcAcro.Get("DA") is PdfString srcDa)
+                acroForm.Set("DA", srcDa);
+            if (sourceReader.ResolveDict(srcAcro.Get("DR")) is { } srcDr)
+            {
+                var remapDr = GetOrCreateCloneCache(sourceReader);
+                var destDr = _reader.ResolveDict(acroForm.Get("DR"));
+                if (destDr is null)
+                {
+                    acroForm.Set("DR", RemapObject(srcDr, sourceReader, remapDr));
+                }
+                else if (sourceReader.ResolveDict(srcDr.Get("Font")) is { } srcDrFonts)
+                {
+                    // Merge font aliases that don't collide with existing ones.
+                    var destFonts = _reader.ResolveDict(destDr.Get("Font"));
+                    if (destFonts is null)
+                    {
+                        destFonts = new PdfDictionary();
+                        destDr.Set("Font", destFonts);
+                    }
+                    foreach (var alias in srcDrFonts.Keys)
+                    {
+                        if (destFonts.ContainsKey(alias)) continue;
+                        var entry = srcDrFonts.Get(alias);
+                        if (entry is not null)
+                            destFonts.Set(alias, RemapObject(entry, sourceReader, remapDr));
+                    }
+                }
+            }
         }
 
         // Collect existing field names for deduplication

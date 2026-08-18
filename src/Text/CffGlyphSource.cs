@@ -121,6 +121,26 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
         catch { return null; }
     }
 
+    /// <summary>Advance width in font units: the charstring's own width operand
+    /// (nominalWidthX + delta) when it carries one, else the private dict's
+    /// defaultWidthX. 0 for an out-of-range or unreadable glyph.</summary>
+    public int GetAdvanceWidth(int glyphId)
+    {
+        if (glyphId < 0 || glyphId >= _charStrings.count) return 0;
+        var csData = CffParser.ReadIndexEntry(_data, _charStrings, glyphId);
+        if (csData.Length == 0) return 0;
+        var fd = _fonts[GetFdIndex(glyphId)];
+        var interp = new CffType2Interpreter(_data, _globalSubrs, fd.LocalSubrs);
+        try
+        {
+            interp.Run(csData);
+            return interp.WidthDelta is { } d
+                ? (int)Math.Round(fd.NominalWidthX + d)
+                : fd.DefaultWidthX;
+        }
+        catch { return 0; }
+    }
+
     private int GetFdIndex(int glyphId)
     {
         if (_fdSelect is null || glyphId < 0 || glyphId >= _fdSelect.Length) return 0;

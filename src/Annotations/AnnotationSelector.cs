@@ -35,7 +35,7 @@ public class AnnotationSelector
         if (annotation is null) return;
         // When constructed with a template annotation, the selector acts as
         // a type filter: only annotations whose runtime class equals the
-        // template's class are admitted. This matches the Aspose.Pdf
+        // template's class are admitted. This matches the
         // expectation that a caller passing 'new LinkAnnotation(page, rect)'
         // as the template gets back ONLY LinkAnnotation instances
         // (the cast '(LinkAnnotation)anno' would otherwise crash when a
@@ -81,7 +81,7 @@ public class AnnotationSelector
 
 // ── Stub annotation types (pre-press marker annotations) ───────────────────
 //
-// These six types exist in the public Aspose.Pdf API surface but the
+// These six types exist in the public API surface but the
 // underlying PDF semantics are pre-press / printer-mark only -- the FOSS
 // HTML / image-output paths don't render them, so the stubs hold just the
 // bare ctor + visitor-Accept hookup needed to compile reflection-equivalent
@@ -278,14 +278,17 @@ public sealed partial class PDF3DAnnotation : Annotation
         private set { _artwork = value; _artworkResolved = true; }
     }
 
-    /// <summary>Default (annotation-level) 3D view, taken from the artwork's
-    /// first view when present.</summary>
+    /// <summary>Default (annotation-level) 3D view: the 1-based
+    /// <see cref="SetDefaultViewIndex"/> selection, or the artwork's first view
+    /// when no (valid) index was set.</summary>
     public PDF3DView? DefaultView
     {
         get
         {
             var va = Pdf3DArtwork?.ViewArray;
-            return va is { Count: > 0 } ? va[_defaultViewIndex + 1] : null;
+            if (va is not { Count: > 0 }) return null;
+            var idx = _defaultViewIndex >= 1 && _defaultViewIndex <= va.Count ? _defaultViewIndex : 1;
+            return va[idx];
         }
     }
 
@@ -297,7 +300,13 @@ public sealed partial class PDF3DAnnotation : Annotation
 
     public PDF3DLightingScheme? LightingScheme => Pdf3DArtwork?.LightingScheme;
     public PDF3DRenderMode? RenderMode => Pdf3DArtwork?.RenderMode;
-    public PDF3DViewArray? ViewArray => Pdf3DArtwork?.ViewArray;
+
+    private PDF3DViewArray? _fallbackViews;
+
+    /// <summary>The artwork's views; an annotation with no resolvable artwork
+    /// (e.g. one re-read from a dictionary that carries no /3DD stream yet)
+    /// reports an empty collection rather than null.</summary>
+    public PDF3DViewArray ViewArray => Pdf3DArtwork?.ViewArray ?? (_fallbackViews ??= new PDF3DViewArray());
 
     public void SetDefaultViewIndex(int index) => _defaultViewIndex = index;
 
@@ -395,7 +404,7 @@ public sealed partial class PDF3DAnnotation : Annotation
     }
 
     // A 3D colour is written as [/DeviceRGB r g b] (or a bare [r g b]); map to
-    // the FOSS Color (0–1 components rounded to 8-bit, matching the reference).
+    // a Color (0–1 components rounded to 8-bit).
     private static Color? ReadColor(PdfReader reader, PdfObject? obj)
     {
         if (reader.Resolve(obj) is not PdfArray a) return null;

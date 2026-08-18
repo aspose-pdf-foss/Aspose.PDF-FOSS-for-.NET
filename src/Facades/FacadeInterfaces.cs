@@ -39,6 +39,8 @@ namespace Aspose.Pdf.Facades
 
     public class PdfPrintPageInfo
     {
+        public PdfPrintPageInfo(int pageNumber) => PageNumber = pageNumber;
+
         public int PageNumber { get; }
     }
 }

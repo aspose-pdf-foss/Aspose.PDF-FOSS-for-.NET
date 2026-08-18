@@ -5,7 +5,7 @@ namespace Aspose.Pdf.IO;
 
 internal sealed class PdfLexer
 {
-    private readonly byte[] _data;
+    private byte[] _data;
     private long _pos;
 
     public PdfLexer(byte[] data)
@@ -13,6 +13,9 @@ internal sealed class PdfLexer
         _data = data;
         _pos = 0;
     }
+
+    /// <summary>Drops the source buffer so it can be collected once the owning document is disposed.</summary>
+    internal void ReleaseBuffer() => _data = Array.Empty<byte>();
 
     public long Position
     {
@@ -328,6 +331,16 @@ internal sealed class PdfLexer
             }
         }
 
+        // A damaged stream can fuse two numbers into one lexeme ("100.1239200.456"
+        // where a separator byte was overwritten, or "0.00-25614825" with an embedded
+        // sign). The lexer emits exactly ONE number per numeric lexeme: the
+        // longest valid prefix (up to the second '.' or an interior sign) is the value
+        // and the remainder of the run is discarded — it must not become a second
+        // token, or every downstream operand count / array element shifts by one.
+        while (_pos < _data.Length && (_data[_pos] == '.' || _data[_pos] == '+' || _data[_pos] == '-'
+               || (_data[_pos] >= '0' && _data[_pos] <= '9')))
+            _pos++;
+
         var text = sb.ToString();
 
         // Bare sign ("-" or "+") with no digits/decimal — treat as 0
@@ -362,6 +375,18 @@ internal sealed class PdfLexer
             var b = _data[_pos];
             if (IsWhitespace(b) || IsDelimiter(b))
                 break;
+            // A digit (or '.') ends an operator lexeme — no PDF keyword contains one
+            // EXCEPT the Type 3 glyph operators d0/d1. Damaged streams fuse numbers
+            // straight onto operators ("re9 w"); splitting here keeps the following
+            // number a real token instead of producing an unknown "re9" keyword.
+            if (sb.Length > 0 && ((b >= '0' && b <= '9') || b == '.'))
+            {
+                var isD01 = sb.Length == 1 && sb[0] == 'd' && (b == '0' || b == '1')
+                    && (_pos + 1 >= _data.Length
+                        || IsWhitespace(_data[_pos + 1]) || IsDelimiter(_data[_pos + 1]));
+                if (!isD01)
+                    break;
+            }
             sb.Append((char)b);
             _pos++;
         }

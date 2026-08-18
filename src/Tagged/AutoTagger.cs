@@ -38,7 +38,7 @@ internal static class AutoTagger
     {
         var tc = document.TaggedContent;
         // Regenerate from scratch: clear any pre-existing structure tree, then root the new
-        // one in a Document element (matching Aspose.Pdf's auto-tagger output).
+        // one in a Document element.
         var structRoot = tc.StructTreeRootElement;
         structRoot.ClearChildren();
         var docRoot = new LogicalStructure.DocumentElement();
@@ -121,14 +121,14 @@ internal static class AutoTagger
 
         // Figures: place each image at its rendered position so it lands in the correct
         // section. The section a figure belongs to is the heading band containing the
-        // figure's BOTTOM Y (its baseline) — verified to reproduce the reference tagger's
-        // per-section figure grouping, whereas the image's top/centre Y crosses bands for
+        // figure's BOTTOM Y (its baseline) — that anchor keeps per-section figure
+        // grouping stable, whereas the image's top/centre Y crosses bands for
         // tall floated images. A figure sitting on a heading's line is absorbed into that
         // HeaderElement; otherwise it becomes an image-only paragraph interleaved by Y.
         MergeFigures(result, CollectFigures(page));
 
         // A page whose body is a single paragraph carries its in-text link annotations as
-        // children of that paragraph (Link → OBJR + content), matching the reference tagger.
+        // children of that paragraph (Link → OBJR + content).
         var links = GetLinkRefs(page);
         if (links.Count > 0 && result.Count(b => b.Kind == BlockKind.Paragraph) == 1
             && result.All(b => b.Kind != BlockKind.Heading && b.Kind != BlockKind.Figure))
@@ -274,7 +274,7 @@ internal static class AutoTagger
     {
         // Each leaf wraps a marked-content reference (the actual page content); a heading and a
         // body run are an H/P with one MCR, an image is a P that holds a Figure (the Figure
-        // wraps the MCR) — mirroring Aspose.Pdf's auto-tagger.
+        // wraps the MCR).
         LogicalStructure.StructureElement WithMcr(LogicalStructure.StructureElement el)
         {
             el.AppendChild(new LogicalStructure.MCRElement());

@@ -1,6 +1,6 @@
 namespace Aspose.Pdf;
 
-/// <summary>4×3 affine 3D matrix (Aspose.Pdf shape for PDF 3D camera
+/// <summary>4×3 affine 3D matrix (public-API shape for PDF 3D camera
 /// positioning). Stored only — the FOSS build does not yet render 3D
 /// content streams.</summary>
 public sealed class Matrix3D
@@ -98,11 +98,9 @@ public sealed class Matrix3D
         return HashCode.Combine(h1, h2);
     }
 
+    // Current-culture on purpose: reports embed this text under the caller's
+    // culture. Exact shape is "[ " + 12 comma-joined values + "  ]" (one space
+    // after the opening bracket, two before the closing one).
     public override string ToString()
-    {
-        var c = System.Globalization.CultureInfo.InvariantCulture;
-        return $"[{A.ToString(c)}, {B.ToString(c)}, {C.ToString(c)}, {D.ToString(c)}, "
-             + $"{E.ToString(c)}, {F.ToString(c)}, {G.ToString(c)}, {H.ToString(c)}, "
-             + $"{I.ToString(c)}, {Tx.ToString(c)}, {Ty.ToString(c)}, {Tz.ToString(c)}]";
-    }
+        => "[ " + string.Join(", ", new[] { A, B, C, D, E, F, G, H, I, Tx, Ty, Tz }) + "  ]";
 }

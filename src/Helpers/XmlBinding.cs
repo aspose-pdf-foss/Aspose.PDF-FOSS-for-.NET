@@ -19,10 +19,22 @@ internal static class XmlBinding
     internal static void Bind(Document document, string xmlContent, string? baseDir = null)
     {
         var xdoc = new XmlDocument();
-        xdoc.LoadXml(xmlContent);
+        // A non-XML or empty binding source must not blow up: BindXml tolerates it
+        // and still yields a saveable (blank) document. Page.AsXml() is a stub that
+        // returns "", so round-tripping a page through BindXml lands here.
+        if (!string.IsNullOrWhiteSpace(xmlContent))
+        {
+            try { xdoc.LoadXml(xmlContent); }
+            catch (System.Xml.XmlException) { xdoc = new XmlDocument(); }
+        }
 
         var root = xdoc.DocumentElement;
-        if (root is null) return;
+        if (root is null)
+        {
+            // Guarantee at least one page so the resulting document saves cleanly.
+            if (document.PageCount == 0) document.Pages.Add();
+            return;
+        }
 
         // Validate every Font attribute the XML references; an unresolved name
         // throws FontNotFoundException so XmlBinding-driven generation aborts
@@ -34,7 +46,7 @@ internal static class XmlBinding
         var imageFiles = new List<string>();
 
         // The document-level <PageInfo><DefaultTextState LineSpacing=…> supplies the
-        // inter-line leading used when laying out page text (per-paragraph the reference
+        // inter-line leading used when laying out page text (per-paragraph the layout
         // engine reserves an empty leading line at font size + this leading).
         double docLineSpacing = 0;
         foreach (XmlNode node in root.ChildNodes)
@@ -45,12 +57,14 @@ internal static class XmlBinding
                         docLineSpacing = GetAttrLength(ic, "LineSpacing", 0);
         }
 
-        // Process <Page> elements
+        // Process <Page> elements. Auto-sequenced <Heading> numbering runs
+        // document-wide, so the counters live for the whole bind.
+        var headingCounters = new Dictionary<int, int>();
         foreach (XmlNode node in root.ChildNodes)
         {
             if (node.NodeType != XmlNodeType.Element) continue;
             if (node.LocalName == "Page")
-                ProcessPage(document, node, imageFiles, baseDir, docLineSpacing);
+                ProcessPage(document, node, imageFiles, baseDir, docLineSpacing, headingCounters);
             // Skip PageInfo at document level (used for defaults)
         }
 
@@ -103,7 +117,7 @@ internal static class XmlBinding
         _ => false,
     };
 
-    private static void ProcessPage(Document document, XmlNode pageNode, List<string> imageFiles, string? baseDir, double docLineSpacing = 0)
+    private static void ProcessPage(Document document, XmlNode pageNode, List<string> imageFiles, string? baseDir, double docLineSpacing = 0, Dictionary<int, int>? headingCounters = null)
     {
         var page = document.Pages.Add();
 
@@ -111,14 +125,14 @@ internal static class XmlBinding
         foreach (XmlNode child in pageNode.ChildNodes)
         {
             if (child.NodeType != XmlNodeType.Element) continue;
-            ProcessPageChild(page, child, imageFiles, baseDir, docLineSpacing);
+            ProcessPageChild(document, page, child, imageFiles, baseDir, docLineSpacing, headingCounters);
         }
     }
 
     // Dispatch one child of <Page> (or equivalently one child of a container such
     // as <FloatingBox> that participates in the page's flow). Kept as a separate
     // method so FloatingBox/FootNote flattening can reuse it.
-    private static void ProcessPageChild(Page page, XmlNode child, List<string> imageFiles, string? baseDir, double docLineSpacing = 0)
+    private static void ProcessPageChild(Document document, Page page, XmlNode child, List<string> imageFiles, string? baseDir, double docLineSpacing = 0, Dictionary<int, int>? headingCounters = null)
     {
         switch (child.LocalName)
         {
@@ -127,13 +141,40 @@ internal static class XmlBinding
                 break;
             case "Header":
             case "Footer":
+            {
+                // Build the page band: its TextFragments render on every page the
+                // flow produces ($p/$P placeholders resolve at draw time).
                 CollectImagesRecursive(child, imageFiles, baseDir);
+                var band = new HeaderFooter();
+                foreach (XmlNode hf in child.ChildNodes)
+                {
+                    if (hf.NodeType != XmlNodeType.Element) continue;
+                    switch (hf.LocalName)
+                    {
+                        case "Margin":
+                            band.Margin = ParseMargin(hf);
+                            break;
+                        case "TextFragment":
+                        {
+                            var bandText = ExtractTextFromFragment(hf);
+                            if (!string.IsNullOrEmpty(bandText))
+                                band.Paragraphs.Add(new TextFragment(bandText));
+                            break;
+                        }
+                        case "Table":
+                            band.Paragraphs.Add(BuildTable(hf, imageFiles, baseDir));
+                            break;
+                    }
+                }
+                if (child.LocalName == "Header") page.Header = band;
+                else page.Footer = band;
                 break;
+            }
             case "Table":
                 ProcessTable(page, child, imageFiles, baseDir);
                 break;
             case "TextFragment":
-                ProcessTextFragment(page, child, docLineSpacing);
+                ProcessTextFragment(document, page, child, docLineSpacing);
                 break;
             case "Image":
                 CollectImageFile(child, imageFiles, baseDir);
@@ -142,14 +183,34 @@ internal static class XmlBinding
                 ProcessFloatingBox(page, child, imageFiles, baseDir);
                 break;
             case "Heading":
-                // Headings here are styled paragraph text, not TOC entries.
-                ProcessTextFragment(page, child, docLineSpacing);
+                // Headings here are styled paragraph text, not TOC entries. An
+                // auto-sequenced heading prints its hierarchical section number
+                // before the text ("1   Table of content"), counting per level
+                // across the whole document; a level-N heading restarts the
+                // deeper counters.
+                var headingPrefix = string.Empty;
+                if (headingCounters is not null
+                    && string.Equals(GetAttr(child, "IsAutoSequence"), "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    var lvl = 1;
+                    if (GetAttr(child, "Level") is { } lvlStr && int.TryParse(lvlStr, out var parsed) && parsed > 0)
+                        lvl = parsed;
+                    headingCounters[lvl] = (headingCounters.TryGetValue(lvl, out var c) ? c : 0) + 1;
+                    foreach (var deeper in headingCounters.Keys.Where(k => k > lvl).ToList())
+                        headingCounters.Remove(deeper);
+                    var parts = new List<string>();
+                    for (var k = 1; k <= lvl; k++)
+                        if (headingCounters.TryGetValue(k, out var ck) && ck > 0)
+                            parts.Add(ck.ToString(CultureInfo.InvariantCulture));
+                    if (parts.Count > 0) headingPrefix = string.Join(".", parts) + "   ";
+                }
+                ProcessTextFragment(document, page, child, docLineSpacing, headingPrefix);
                 break;
             case "FootNote":
                 // Inline the footnote body as flow text; a true footnote pass
                 // would anchor it at the page foot, but getting the text onto
                 // *some* page is the correct baseline for pagination.
-                ProcessTextFragment(page, child, docLineSpacing);
+                ProcessTextFragment(document, page, child, docLineSpacing);
                 break;
         }
     }
@@ -282,6 +343,28 @@ internal static class XmlBinding
                     break;
             }
         }
+
+        // A stylesheet-bearing HtmlFragment in any cell sets the table's base
+        // font size (CSS px, browser 0.75 px→pt): sibling plain-text cells lay
+        // out at the same size as the styled HTML content.
+        if (table.DefaultCellTextState is { FontSizeTouched: false })
+            foreach (Row r in table.Rows)
+            {
+                foreach (Cell c in r.Cells)
+                    foreach (var p in c.Paragraphs)
+                        if (p is HtmlFragment hf
+                            && System.Text.RegularExpressions.Regex.Match(hf.HtmlContent ?? "",
+                                @"font-size\s*:\s*([\d.]+)\s*px") is { Success: true } fs
+                            && double.TryParse(fs.Groups[1].Value,
+                                System.Globalization.NumberStyles.Float,
+                                System.Globalization.CultureInfo.InvariantCulture, out var pxSize)
+                            && pxSize > 0)
+                        {
+                            table.DefaultCellTextState.FontSize = (float)(pxSize * 0.75);
+                            goto cssSizeDone;
+                        }
+            }
+        cssSizeDone: ;
     }
 
     private static void ApplyPageInfo(Page page, XmlNode node)
@@ -292,8 +375,8 @@ internal static class XmlBinding
             page.SetPageSize(w, h);
 
         // IsLandscape swaps the page dimensions so the wider side becomes the
-        // width (matching Aspose.Pdf's PageInfo), which the generator
-        // paginator then lays content across.
+        // width (the PageInfo semantics), which the generator paginator then
+        // lays content across.
         if (string.Equals(GetAttr(node, "IsLandscape"), "true", StringComparison.OrdinalIgnoreCase))
             page.PageInfo.IsLandscape = true;
 
@@ -371,8 +454,8 @@ internal static class XmlBinding
             var fs = table.DefaultCellTextState?.FontSize > 0 ? table.DefaultCellTextState!.FontSize : 10f;
             var pad = row.DefaultCellPadding ?? table.DefaultCellPadding;
             var padV = (pad?.Top ?? 0) + (pad?.Bottom ?? 0);
-            // Each blank line adds one cell line pitch; the reference's measured cell
-            // leading is ≈ 1.14 × fontSize (vs the 1.2 the flow uses for body text).
+            // Each blank line adds one cell line pitch; the cell leading is
+            // ≈ 1.14 × fontSize (vs the 1.2 the flow uses for body text).
             var pitch = fs * 1.14;
             row.MinRowHeight = Math.Max(row.MinRowHeight, fs + padV + blank * pitch);
         }
@@ -380,8 +463,8 @@ internal static class XmlBinding
 
     // Count the largest number of leading + trailing blank lines across a row's cell
     // texts (blank = a run separated by '\n' that holds only whitespace, before the first
-    // / after the last non-blank line). Reproduces the reference's rendering of a
-    // stylesheet-indented cell literal as extra blank rows.
+    // / after the last non-blank line). A stylesheet-indented cell literal thus
+    // renders as extra blank rows.
     private static int MaxCellBlankLines(XmlNode rowNode)
     {
         var max = 0;
@@ -486,10 +569,19 @@ internal static class XmlBinding
         }
     }
 
-    private static void ProcessTextFragment(Page page, XmlNode fragNode, double docLineSpacing = 0)
+    private static void ProcessTextFragment(Document document, Page page, XmlNode fragNode, double docLineSpacing = 0, string textPrefix = "")
     {
         var text = ExtractTextFromFragment(fragNode);
-        if (string.IsNullOrEmpty(text)) return;
+        if (!string.IsNullOrEmpty(text)) text = textPrefix + text;
+        var id = GetAttr(fragNode, "id");
+        if (string.IsNullOrEmpty(text))
+        {
+            // A text-less fragment produces no layout, but an id-carrying one must
+            // still be resolvable through Document.GetObjectById.
+            if (id is not null)
+                document.RegisterXmlObject(id, new TextFragment(string.Empty) { Id = id });
+            return;
+        }
 
         // Aspose's generator default body size is 10 pt (the document-level
         // <DefaultTextState> is a descriptor, not applied to these fragments).
@@ -533,8 +625,8 @@ internal static class XmlBinding
         // line height, on top of the paragraph's top margin. Reserve the same space before
         // the text so multi-paragraph flow occupies the same vertical extent — the total
         // text height is what decides where a following table paginates. Two line heights
-        // (empty + text seating) at (fontSize + docLineSpacing) reproduce the reference's
-        // per-paragraph advance to within the pagination tolerance.
+        // (empty + text seating) at (fontSize + docLineSpacing) give the per-paragraph
+        // advance to within the pagination tolerance.
         // Per-paragraph vertical reservation calibrated to the layout engine's
         // per-paragraph advance (an empty leading line plus text seating): 1.85 line
         // heights at the paragraph font size, plus the document line spacing.
@@ -542,6 +634,11 @@ internal static class XmlBinding
         var mTop = (margin?.Top ?? 0) + leadReserve;
 
         var tf = new TextFragment(text);
+        if (id is not null)
+        {
+            tf.Id = id;
+            document.RegisterXmlObject(id, tf);
+        }
         tf.Margin = new MarginInfo { Top = mTop };
         tf.TextState.FontSize = (float)fontSize;
         if (fontName is not null)
@@ -626,7 +723,11 @@ internal static class XmlBinding
         // stylesheet's indentation, which would otherwise render as a leading
         // blank line / trailing space line and knock the cell text out of
         // vertical alignment with its neighbours. Collapse runs to one space.
-        return System.Text.RegularExpressions.Regex.Replace(sb.ToString(), @"\s+", " ").Trim();
+        // Text authored WITHOUT line structure keeps its spacing verbatim — a
+        // segment's deliberate trailing space ("Table of content ") survives.
+        var raw = sb.ToString();
+        if (raw.IndexOfAny(new[] { '\n', '\r', '\t' }) < 0) return raw;
+        return System.Text.RegularExpressions.Regex.Replace(raw, @"\s+", " ").Trim();
     }
 
     // The Aspose XML schema stores an HtmlFragment's body two ways: as a
@@ -764,7 +865,8 @@ internal static class XmlBinding
         val = val.Trim();
         double factor = 1.0; // points
         string num = val;
-        foreach (var (suffix, f) in new[] { ("cm", 72.0 / 2.54), ("mm", 72.0 / 25.4), ("in", 72.0), ("pt", 1.0), ("px", 1.0) })
+        // Longest suffix first: "inch" must match before its "in" prefix would.
+        foreach (var (suffix, f) in new[] { ("inch", 72.0), ("cm", 72.0 / 2.54), ("mm", 72.0 / 25.4), ("in", 72.0), ("pt", 1.0), ("px", 1.0) })
         {
             if (val.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
             {

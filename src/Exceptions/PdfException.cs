@@ -2,7 +2,7 @@ namespace Aspose.Pdf;
 
 /// <summary>
 /// Represents errors that occur during PDF application execution.
-/// Mirrors the public Aspose.Pdf exception type.
+/// Mirrors the public exception type.
 /// </summary>
 public class PdfException : Exception
 {
@@ -91,7 +91,7 @@ public class InvalidFormTypeOperationException : PdfException
 
 /// <summary>Thrown when text content cannot be decoded — e.g. a show-string
 /// references character codes a font's encoding/CMap can't map to Unicode, so
-/// the run can't be extracted or edited. Mirrors the public Aspose.PDF type.</summary>
+/// the run can't be extracted or edited. Mirrors the public type.</summary>
 public class PdfTextDecodingException : PdfException
 {
     public PdfTextDecodingException() { }
@@ -105,7 +105,7 @@ public class PdfTextDecodingException : PdfException
 /// graphics state — i.e. no preceding <c>Tf</c> is in effect (the document is
 /// malformed). Strict by default; suppressed when
 /// <see cref="Aspose.Pdf.Text.TextSearchOptions.IgnoreResourceFontErrors"/> is set,
-/// in which case extraction proceeds tolerantly. Mirrors the public Aspose.PDF type.</summary>
+/// in which case extraction proceeds tolerantly. Mirrors the public type.</summary>
 public class IncorrectFontUsageException : PdfException
 {
     public IncorrectFontUsageException() { }

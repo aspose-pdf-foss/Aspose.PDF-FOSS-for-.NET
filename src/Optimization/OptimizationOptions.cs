@@ -20,8 +20,8 @@ public class OptimizationOptions
     public bool CompressObjects { get; set; }
 
     /// <summary>Maximum image resolution; higher resolution images are scaled down.
-    /// Note: the public reference spells this 'MaxResoultion' (typo in the original
-    /// Aspose.Pdf API); retained for source compatibility. Forwards to
+    /// Note: the public API spells this 'MaxResoultion' (a typo retained
+    /// for source compatibility). Forwards to
     /// <see cref="ImageCompressionOptions.MaxResolution"/>.</summary>
     public int MaxResoultion
     {
@@ -94,7 +94,10 @@ public class OptimizationOptions
 
     internal bool RemoveMetadata { get; set; }
 
-    internal static OptimizationOptions Default => new();
+    // The no-arg OptimizeResources() collapses content-identical images (same decoded
+    // pixels and soft mask): duplicate streams that differ only in their compressed
+    // bytes must still merge to one object.
+    internal static OptimizationOptions Default => new() { RemoveDuplicateImages = true };
 
     /// <summary>Factory returning an optimization strategy with all non-destructive
     /// options enabled.</summary>

@@ -73,6 +73,14 @@ internal static class FieldCalculateScript
             @"var\s+(\w+)\s*=\s*(?:AFMakeNumber\s*\(\s*)?(?:this\.)?getField\s*\(\s*""([^""]*)""\s*\)\s*\.\s*value"))
             vars[vm.Groups[1].Value] = getNum(vm.Groups[2].Value);
 
+        // Field-OBJECT declarations: var X = this.getField("F");  (no .value) — the
+        // expression then reads X.value. Bind X.value up front so the substitution
+        // pass below sees a plain variable.
+        foreach (Match vm in Regex.Matches(script,
+            @"var\s+(\w+)\s*=\s*(?:this\.)?getField\s*\(\s*""([^""]*)""\s*\)\s*;"))
+            if (!vars.ContainsKey(vm.Groups[1].Value + ".value"))
+                vars[vm.Groups[1].Value + ".value"] = getNum(vm.Groups[2].Value);
+
         // event.value = <expression>. There may be several (e.g. an if/else that
         // clears the field); take the first non-empty-string assignment that
         // evaluates to a number.

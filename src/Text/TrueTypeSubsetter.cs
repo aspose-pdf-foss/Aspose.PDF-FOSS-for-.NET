@@ -217,13 +217,16 @@ internal sealed class TrueTypeSubsetter
         // never through the program's cmap, and a CJK face's cmap alone runs to
         // ~100 KB. No hinting either (nothing in the pipeline executes it).
         // hmtx/maxp/hhea are rebuilt at the truncated glyph count with one long
-        // entry per glyph (advance + LSB 0, as the renumbering subsetter does).
+        // entry per glyph (advance + the ORIGINAL lsb — see OriginalLsb).
         var hmtx = new byte[keptGlyphCount * 4];
         for (var gid = 0; gid < keptGlyphCount; gid++)
         {
             var width = gid < _parser.GlyphWidths.Length ? _parser.GlyphWidths[gid] : 0;
             hmtx[gid * 4] = (byte)(width >> 8);
             hmtx[gid * 4 + 1] = (byte)width;
+            var lsb = (ushort)OriginalLsb(gid);
+            hmtx[gid * 4 + 2] = (byte)(lsb >> 8);
+            hmtx[gid * 4 + 3] = (byte)lsb;
         }
         tables["hmtx"] = hmtx;
         tables["maxp"] = BuildMaxp(keptGlyphCount);
@@ -425,11 +428,29 @@ internal sealed class TrueTypeSubsetter
         {
             var width = gid < _parser.GlyphWidths.Length ? _parser.GlyphWidths[gid] : 0;
             WriteUInt16(result, idx * 4, (ushort)width);
-            // LSB = 0 (simplified; proper subsetting would copy from the original hmtx)
-            WriteUInt16(result, idx * 4 + 2, 0);
+            WriteUInt16(result, idx * 4 + 2, (ushort)OriginalLsb(gid));
             idx++;
         }
         return result;
+    }
+
+    /// <summary>Left side bearing of a glyph from the ORIGINAL hmtx. A renderer
+    /// seats each outline so its xMin lands on the lsb, so writing 0 slides the
+    /// glyph horizontally inside its advance cell — invisible on most upright Latin
+    /// faces, glaring on italics whose bearings are large ('f' drifts a third of an
+    /// em and text reads "identi fy").</summary>
+    private short OriginalLsb(int gid)
+    {
+        if (!_tables.TryGetValue("hhea", out var hh) || !_tables.TryGetValue("hmtx", out var hm))
+            return 0;
+        if (hh.offset + 36 > _data.Length) return 0;
+        int numH = ReadUInt16(hh.offset + 34);
+        if (numH <= 0) return 0;
+        var off = gid < numH
+            ? hm.offset + gid * 4 + 2
+            : hm.offset + numH * 4 + (gid - numH) * 2;
+        if (off + 2 > _data.Length || off + 2 > hm.offset + hm.length) return 0;
+        return (short)ReadUInt16(off);
     }
 
     private byte[] BuildMaxp(int numGlyphs)

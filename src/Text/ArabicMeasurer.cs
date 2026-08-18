@@ -5,7 +5,7 @@ namespace Aspose.Pdf.Text;
 /// (<see cref="ArabicShaper"/>) and summing the advance widths of the resulting glyphs in
 /// an Arabic-capable face. A Latin base font (the layout default) carries no Arabic glyphs,
 /// so its simple-font metrics would measure every Arabic codepoint as a missing glyph. The
-/// fallback face is Times New Roman, matching the default Aspose.PDF uses for complex scripts.
+/// fallback face is Times New Roman, matching the default used for complex scripts.
 /// </summary>
 internal static class ArabicMeasurer
 {

@@ -21,6 +21,15 @@ public sealed class PdfFileSignature : IDisposable
     /// for reading its fields / signatures.</summary>
     public Document Document => _document ??= OpenDoc(RequireBound());
 
+    /// <summary>True when the bound document reports version 2.0 (header or
+    /// catalog /Version override). Unopenable bytes are treated as non-2.0 so
+    /// the signing pipeline surfaces its own error for them.</summary>
+    private bool BoundDocumentIsPdf20()
+    {
+        try { return Document.Version == "2.0"; }
+        catch { return false; }
+    }
+
     /// <summary>Open bound PDF bytes, re-authenticating with the captured
     /// password when the document is encrypted.</summary>
     private Document OpenDoc(byte[] data)
@@ -119,7 +128,7 @@ public sealed class PdfFileSignature : IDisposable
     }
 
     /// <summary>All signed signature fields wrapped as <see cref="SignatureName"/>
-    /// entries (matches the partial+full+HasSignature shape Aspose.Pdf expects).</summary>
+    /// entries (the partial+full+HasSignature shape callers expect).</summary>
     public IList<SignatureName> GetSignatureNames()
     {
         var input = RequireBound();
@@ -283,8 +292,111 @@ public sealed class PdfFileSignature : IDisposable
 
     public bool VerifySignature(string signName)
     {
+        var forgery = DetectSignatureForgery(signName);
+        if (forgery is not null)
+            throw new Aspose.Pdf.Sanitization.SanitizationException(forgery);
         var input = RequireBound();
         return PdfSigner.Verify(input, signName, _password);
+    }
+
+    /// <summary>
+    /// Detect a Universal Signature Forgery (USF) attack on the named signature.
+    /// A signature whose CMS envelope (/Contents) is absent/empty, or whose
+    /// /ByteRange is absent or malformed, is a forgery — verifiers that skip
+    /// validation for such structures would wrongly report it as valid. Returns
+    /// a description of the forgery, or <c>null</c> when the signature is sound.
+    /// </summary>
+    private string? DetectSignatureForgery(string signName)
+    {
+        var input = RequireBound();
+        using var doc = OpenDoc(input);
+        var sig = Signature.EnumerateSignatures(doc).FirstOrDefault(s => s.FieldName == signName);
+        if (sig is null) return null;
+
+        const string usf = "Universal Signature Forgery";
+
+        // Absent/empty CMS envelope or absent/malformed byte range.
+        if (sig.ByteRangeRaw is null || sig.ByteRangeRaw.Length < 4
+            || sig.ContentsRaw is null || sig.ContentsRaw.Length == 0)
+        {
+            return $"Signature '{signName}' is compromised by USF ({usf}): " +
+                   "its /Contents or /ByteRange is missing, empty, or malformed.";
+        }
+
+        // A hollow CMS envelope: /Contents is present and well-formed hex, but
+        // every byte is zero. Real envelopes zero-pad only the tail after the
+        // DER structure; an all-zero envelope holds no signature at all, and a
+        // verifier that trusts the padding would report it valid.
+        var contents = sig.ContentsRaw;
+        var allZero = true;
+        for (var i = 0; i < contents.Length; i++)
+        {
+            if (contents[i] != 0) { allZero = false; break; }
+        }
+        if (allZero)
+        {
+            return $"Signature '{signName}' is compromised by USF ({usf}): " +
+                   "its /Contents holds no signature data.";
+        }
+
+        // A fabricated /ByteRange whose covered region extends beyond the end of
+        // the file (or starts before it): the signed range cannot be honoured, so
+        // the signature validates nothing. A sound range never reaches past EOF.
+        var br = sig.ByteRangeRaw;
+        if (br[0] < 0 || br[1] < 0 || br[2] < 0 || br[3] < 0
+            || br[2] + br[3] > input.Length || br[0] + br[1] > br[2])
+        {
+            return $"Signature '{signName}' is compromised by USF ({usf}): " +
+                   "its /ByteRange does not correspond to the document.";
+        }
+
+        // SWA (Signature Wrapping Attack): the /ByteRange and /Contents are
+        // structurally valid, but the unsigned gap between the two signed ranges
+        // (which must hold only the /Contents hex string <…>) is larger than that
+        // hex string. The surplus unsigned bytes hide injected objects the
+        // signature does not cover. On-disk hex length = 2·bytes + 2 delimiters;
+        // a small slack absorbs optional whitespace around the delimiters.
+        var gap = br[2] - (br[0] + br[1]);
+        var contentsHexLen = 2L * sig.ContentsRaw.Length + 2;
+        if (gap - contentsHexLen > 128)
+        {
+            return $"Signature '{signName}' is compromised by SWA (Signature Wrapping Attack): " +
+                   "the /ByteRange leaves unsigned content in the /Contents gap.";
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Non-throwing signature verification. Returns whether the signature is valid
+    /// and reports the outcome (including forgery detection) via
+    /// <paramref name="verificationResult"/>.
+    /// </summary>
+    public bool TryVerifySignature(SignatureName signName, out VerificationResult verificationResult)
+    {
+        if (signName is null)
+        {
+            verificationResult = VerificationResult.Undefined("Signature name is null.");
+            return false;
+        }
+        try
+        {
+            var ok = VerifySignature(signName.FullName);
+            verificationResult = ok
+                ? VerificationResult.Valid()
+                : VerificationResult.Invalid($"Signature '{signName.FullName}' failed cryptographic verification.");
+            return ok;
+        }
+        catch (Aspose.Pdf.Sanitization.SanitizationException e)
+        {
+            // A recognised forgery attack — undefined verdict, flagged compromised.
+            verificationResult = VerificationResult.Compromised(e.Message, e);
+            return false;
+        }
+        catch (Exception e)
+        {
+            verificationResult = VerificationResult.Undefined(e.Message, e);
+            return false;
+        }
     }
 
     public string? GetSignerName(string signName)
@@ -509,8 +621,8 @@ public sealed class PdfFileSignature : IDisposable
     public bool ContainsSignature() => IsContainSignature();
 
     /// <summary>A signing error that <see cref="Sign(int, string, string, string, bool, System.Drawing.Rectangle, Forms.Signature)"/>
-    /// records but defers to <see cref="Save(string)"/> — matching Aspose.Pdf,
-    /// where the incompatible-algorithm check surfaces when the document is written.</summary>
+    /// records but defers to <see cref="Save(string)"/> — the
+    /// incompatible-algorithm check surfaces when the document is written.</summary>
     private Exception? _deferredSignException;
 
     public void Save(string outputFile)
@@ -525,7 +637,7 @@ public sealed class PdfFileSignature : IDisposable
         if (_deferredSignException is not null) throw _deferredSignException;
         var input = RequireBound();
         outputStream.Write(input, 0, input.Length);
-        // Aspose.Pdf leaves a seekable output rewound so callers can read
+        // A seekable output is left rewound so callers can read
         // the signed bytes back without seeking.
         if (outputStream.CanSeek) outputStream.Position = 0;
     }
@@ -558,6 +670,7 @@ public sealed class PdfFileSignature : IDisposable
     /// embedded in <paramref name="sig"/>.</summary>
     public void Sign(int page, bool visible, System.Drawing.Rectangle annotRect, Forms.Signature sig)
     {
+        if (TrySignDocumentTimestamp(sig, fieldName: null)) return;
         var cert = RequireCertificate(sig);
         SignCore(cert, fieldName: null, page, sig.Reason, sig.ContactInfo, sig.Location, visible, annotRect, sig);
     }
@@ -567,6 +680,7 @@ public sealed class PdfFileSignature : IDisposable
     public void Sign(int page, string SigReason, string SigContact, string SigLocation,
         bool visible, System.Drawing.Rectangle annotRect, Forms.Signature sig)
     {
+        if (TrySignDocumentTimestamp(sig, fieldName: null)) return;
         var cert = RequireCertificate(sig);
         SignCore(cert, fieldName: null, page, SigReason, SigContact, SigLocation, visible, annotRect, sig);
     }
@@ -575,6 +689,7 @@ public sealed class PdfFileSignature : IDisposable
     public void Sign(int page, string SigName, string SigReason, string SigContact, string SigLocation,
         bool visible, System.Drawing.Rectangle annotRect, Forms.Signature sig)
     {
+        if (TrySignDocumentTimestamp(sig, SigName)) return;
         var cert = RequireCertificate(sig);
         SignCore(cert, SigName, page, SigReason, SigContact, SigLocation, visible, annotRect, sig);
     }
@@ -582,6 +697,7 @@ public sealed class PdfFileSignature : IDisposable
     /// <summary>Sign an existing blank signature field by name.</summary>
     public void Sign(string SigName, Forms.Signature sig)
     {
+        if (TrySignDocumentTimestamp(sig, SigName)) return;
         var cert = RequireCertificate(sig);
         SignCore(cert, SigName, page: 1, sig.Reason, sig.ContactInfo, sig.Location, visible: false, default, sig);
     }
@@ -589,8 +705,32 @@ public sealed class PdfFileSignature : IDisposable
     /// <summary>Sign an existing blank signature field by name with explicit metadata.</summary>
     public void Sign(string SigName, string SigReason, string SigContact, string SigLocation, Forms.Signature sig)
     {
+        if (TrySignDocumentTimestamp(sig, SigName)) return;
         var cert = RequireCertificate(sig);
         SignCore(cert, SigName, page: 1, SigReason, SigContact, SigLocation, visible: false, default, sig);
+    }
+
+    /// <summary>When <paramref name="sig"/> is a standalone RFC 3161 document
+    /// timestamp (built via <see cref="Forms.PKCS7Detached(Aspose.Pdf.TimestampSettings)"/>),
+    /// produce an <c>ETSI.RFC3161</c> DocTimeStamp signature via the TSA and
+    /// update the bound bytes. Returns true when handled (no certificate is
+    /// required); false for an ordinary certificate-based signature.</summary>
+    private bool TrySignDocumentTimestamp(Forms.Signature? sig, string? fieldName)
+    {
+        if (sig is null || !sig.IsDocumentTimestamp) return false;
+        var input = RequireBound();
+        var settings = sig.TimestampSettings ?? new TimestampSettings();
+        var opts = new Security.SignatureOptions
+        {
+            Password = _password,
+            FieldName = fieldName,
+            SubFilter = "ETSI.RFC3161",
+            TimestampUrl = settings.ServerUrl,
+            TimestampBasicAuth = settings.BasicAuthCredentials,
+            TimestampDigest = settings.DigestHashAlgorithm,
+        };
+        _boundPdf = Security.PdfSigner.SignDocumentTimestamp(input, opts);
+        return true;
     }
 
     /// <summary>Sign on the given page with a /DocMDP reference so the
@@ -617,7 +757,7 @@ public sealed class PdfFileSignature : IDisposable
     }
 
     /// <summary>Verifies that a signed signature is intact. Alias for
-    /// <see cref="VerifySignature(string)"/> matching Aspose.Pdf naming.</summary>
+    /// <see cref="VerifySignature(string)"/>.</summary>
     public bool VerifySigned(string signName) => VerifySignature(signName);
 
     /// <summary>Verify a signature with explicit options + return a
@@ -760,7 +900,11 @@ public sealed class PdfFileSignature : IDisposable
                 var dot = leaf.LastIndexOf('.');
                 if (dot >= 0) leaf = leaf.Substring(dot + 1);
             }
-            result.Add(Security.SignatureAlgorithmInfo.FromPkcs7(sig.ContentsRaw, sig.SubFilter, leaf));
+            // An ETSI.RFC3161 document timestamp reports as a TimestampAlgorithmInfo
+            // (its /Contents is a TSTInfo token, not an ordinary CMS signature).
+            result.Add(sig.SubFilter == "ETSI.RFC3161"
+                ? Security.SignatureAlgorithmInfo.FromTimestampToken(sig.ContentsRaw, leaf)
+                : Security.SignatureAlgorithmInfo.FromPkcs7(sig.ContentsRaw, sig.SubFilter, leaf));
         }
         return result;
     }
@@ -894,8 +1038,16 @@ public sealed class PdfFileSignature : IDisposable
         bool visible, System.Drawing.Rectangle annotRect, Forms.Signature? sig,
         int? docMdpPermissions = null)
     {
+        // PDF 2.0 (ISO 32000-2 §12.8.3) removes the SHA-1-era signature
+        // subfilters — adbe.x509.rsa_sha1 (PKCS#1) and the enveloping
+        // adbe.pkcs7.sha1 (PKCS#7); only adbe.pkcs7.detached remains legal.
+        // Refuse them up front on a 2.0 document.
+        if (sig is Forms.PKCS1 or Forms.PKCS7 && BoundDocumentIsPdf20())
+            throw new DeprecatedFeatureException(
+                "SHA-1-based signature subfilters are deprecated in PDF 2.0; use PKCS7Detached.");
+
         // A PKCS#1 (adbe.x509.rsa_sha1) signature is raw RSA and cannot carry a
-        // DSA/ECDSA signature — Aspose.Pdf rejects the combination when the
+        // DSA/ECDSA signature — the combination is rejected when the
         // document is written. Record the error and defer it to Save().
         if (sig is Forms.PKCS1 && cert.KeyKind != Security.SignatureKeyKind.Rsa)
         {
@@ -922,12 +1074,14 @@ public sealed class PdfFileSignature : IDisposable
             if (sig.DefaultSignatureLength > 0) opts.ContentsSize = sig.DefaultSignatureLength;
             if (sig.AvoidEstimatingSignatureLength) opts.AvoidEstimating = true;
             if (sig.CustomSignHash is not null) opts.CustomSignHash = sig.CustomSignHash;
+            opts.Digest = sig.RequestedDigest;
             if (sig.UseLtv) opts.UseLtv = true;
             // /SubFilter reflects the concrete signature subtype so the reloaded
             // signature round-trips to the same type (an enveloping PKCS7 vs a
             // detached PKCS7 — the CMS bytes are detached either way here).
             opts.SubFilter = sig switch
             {
+                Forms.ExternalSignature ext => ext.Detached ? "adbe.pkcs7.detached" : "adbe.pkcs7.sha1",
                 Forms.PKCS7Detached => "adbe.pkcs7.detached",
                 Forms.PKCS7 => "adbe.pkcs7.sha1",
                 _ => opts.SubFilter,

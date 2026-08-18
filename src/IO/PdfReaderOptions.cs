@@ -16,4 +16,9 @@ internal sealed class PdfReaderOptions
     /// by scanning the file for object headers. Default: true.
     /// </summary>
     public bool RepairXref { get; set; } = true;
+
+    /// <summary>Handler to decrypt the document with when its /Encrypt /Filter
+    /// names something other than the Standard handler. Null leaves the built-in
+    /// Standard handler in charge.</summary>
+    public Aspose.Pdf.Security.ICustomSecurityHandler? CustomSecurityHandler { get; set; }
 }

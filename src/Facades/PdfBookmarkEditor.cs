@@ -274,11 +274,84 @@ public sealed class PdfBookmarkEditor : IDisposable
         doc.Load(stream);
         var root = doc.DocumentElement;
         if (root is null) return;
+        // Legacy exporter schema: <Bookmark><Title Page="1 FitV " Action="GoTo">text
+        // <Title …>child</Title></Title></Bookmark> — nested Title elements form the
+        // outline hierarchy and the Page attribute carries "<page> <fit-type> [args…]".
+        if (string.Equals(root.LocalName, "Bookmark", StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (System.Xml.XmlNode node in root.ChildNodes)
+            {
+                if (node is System.Xml.XmlElement el) ImportLegacyTitleElement(el, parent: null);
+            }
+            return;
+        }
         _builder ??= new OutlineBuilder(_document);
         foreach (System.Xml.XmlNode node in root.ChildNodes)
         {
             if (node is System.Xml.XmlElement el) ImportBookmarkElement(el);
         }
+    }
+
+    private void ImportLegacyTitleElement(System.Xml.XmlElement el, OutlineItem? parent)
+    {
+        if (!string.Equals(el.LocalName, "Title", StringComparison.OrdinalIgnoreCase)) return;
+
+        // The bookmark's own text = the element's DIRECT text nodes; nested <Title>
+        // elements are child bookmarks, whose text must not leak into this title.
+        var titleText = new System.Text.StringBuilder();
+        foreach (System.Xml.XmlNode node in el.ChildNodes)
+        {
+            if (node is System.Xml.XmlText or System.Xml.XmlCDataSection)
+                titleText.Append(node.Value);
+        }
+
+        var item = new OutlineItemCollection(_document!.Outlines)
+        {
+            Title = titleText.ToString().Trim(),
+        };
+        if (ParseLegacyDestination(el.GetAttribute("Page")) is { } dest)
+            item.Destination = dest;
+
+        if (parent is null) _document.Outlines.Add(item);
+        else parent.Add(item);
+
+        foreach (System.Xml.XmlNode node in el.ChildNodes)
+        {
+            if (node is System.Xml.XmlElement childEl) ImportLegacyTitleElement(childEl, item);
+        }
+    }
+
+    /// <summary>Parse the legacy Page attribute — "&lt;page&gt; &lt;fit-type&gt; [args…]",
+    /// e.g. "1 FitV " or "3 XYZ 0 792 0" — into an explicit destination.</summary>
+    private static Annotations.ExplicitDestination? ParseLegacyDestination(string? pageAttr)
+    {
+        if (string.IsNullOrWhiteSpace(pageAttr)) return null;
+        var tokens = pageAttr.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length == 0) return null;
+        if (!int.TryParse(tokens[0], System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var page) || page < 1)
+            return null;
+
+        double? Arg(int i)
+        {
+            if (i + 1 >= tokens.Length) return null;
+            return double.TryParse(tokens[i + 1], System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
+        }
+
+        var fit = tokens.Length > 1 ? tokens[1] : "XYZ";
+        return fit switch
+        {
+            "Fit" => new Annotations.FitExplicitDestination(page),
+            "FitH" => new Annotations.FitHExplicitDestination(page, Arg(0)),
+            "FitV" => new Annotations.FitVExplicitDestination(page, Arg(0)),
+            "FitB" => new Annotations.FitBExplicitDestination(page),
+            "FitBH" => new Annotations.FitBHExplicitDestination(page, Arg(0)),
+            "FitBV" => new Annotations.FitBVExplicitDestination(page, Arg(0)),
+            "FitR" when Arg(0) is { } l && Arg(1) is { } b && Arg(2) is { } r && Arg(3) is { } t
+                => new Annotations.FitRExplicitDestination(page, l, b, r, t),
+            _ => new Annotations.XYZExplicitDestination(page, Arg(0) ?? 0, Arg(1) ?? 0, Arg(2) ?? 0),
+        };
     }
 
     /// <summary>Read bookmarks from an XML file and add them to the bound document.</summary>

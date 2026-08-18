@@ -90,7 +90,7 @@ public sealed class TextParagraph
     /// <summary>
     /// Vertical alignment of text within the paragraph rectangle. Defaults to
     /// <see cref="VerticalAlignment.Bottom"/> (the text block sits just above the
-    /// rectangle's bottom edge), matching the Aspose.Pdf default.
+    /// rectangle's bottom edge).
     /// </summary>
     public VerticalAlignment VerticalAlignment { get; set; } = VerticalAlignment.Bottom;
 
@@ -120,13 +120,24 @@ public sealed class TextParagraph
             foreach (var line in _lines)
             {
                 var fontSize = line.TextState.FontSize;
-                var lineHeight = fontSize * 1.2; // approximate line height
-                totalHeight += lineHeight;
+                // Same per-line leading the renderer stacks lines by (FontSize +
+                // explicit LineSpacing) — the reported height must equal the drawn
+                // block height, or a caller that seats the paragraph at
+                // (URY − TextRectangle.Height) gets a block that misses the target
+                // by the difference.
+                totalHeight += fontSize + (line.TextState.LineSpacing > 0 ? line.TextState.LineSpacing : 0);
                 var font = line.TextState.Font;
                 double lineWidth;
                 try { lineWidth = font?.MeasureString(line.Text, fontSize) ?? (line.Text.Length * fontSize * 0.5); }
                 catch { lineWidth = line.Text.Length * fontSize * 0.5; }
                 if (lineWidth > width) width = lineWidth;
+            }
+            // The renderer seats the block's descender box at the anchor, so the
+            // drawn height also carries the last line's descent.
+            if (_lines.Count > 0)
+            {
+                var lastTs = _lines[_lines.Count - 1].TextState;
+                totalHeight += GetDescentCompensation(lastTs, lastTs.FontSize);
             }
             return new Rectangle(x, y, x + width, y + totalHeight);
         }
@@ -154,8 +165,11 @@ public sealed class TextParagraph
     /// Amount to raise a bottom-anchored block so the absorbed fragment
     /// Rectangle.LLY (baseline − descriptor descent) sits at the rect bottom
     /// rather than one descent below it.
-    /// Gated to real/embedded fonts: only they carry the descriptor descent the
-    /// absorber subtracts, so Standard-14 mapped text gets no lift (keeps
+    /// Gated on an explicit real font backing the line (a TTF glyph source): an
+    /// author-set font — even one whose NAME maps to Standard-14, e.g.
+    /// FindFont("Arial") — carries the descriptor descent and lifts
+    /// (Add_Paragraph_Fragments1's Arial block renders one descent above the rect
+    /// bottom), while default (unset) text has no TTF and gets no lift (keeps
     /// Add_Paragraph_VerticalAlignment_Bottom's bottom-line YIndent == rect LLY).
     /// </summary>
     private double BottomAnchorDescentLift(List<List<(string text, TextState ts)>> visualLines)
@@ -164,7 +178,7 @@ public sealed class TextParagraph
             return 0;
         var lastLine = visualLines[visualLines.Count - 1];
         var lastTs = lastLine.Count > 0 ? lastLine[0].ts : _lines[_lines.Count - 1].TextState;
-        return UsesRealFont(lastTs) ? GetDescentCompensation(lastTs, LineFontSize(lastLine)) : 0;
+        return GetGlyphParser(lastTs) is not null ? GetDescentCompensation(lastTs, LineFontSize(lastLine)) : 0;
     }
 
     /// <summary>Pick a value by the paragraph's vertical alignment within its
@@ -381,8 +395,8 @@ public sealed class TextParagraph
             else
             {
                 // The word that triggered the break carries its preceding space onto
-                // the next line's start, so the completed line keeps a trailing space
-                // (matching the reference wrap). The final line gets none.
+                // the next line's start, so the completed line keeps a trailing
+                // space. The final line gets none.
                 if (currentLine.Length > 0) result.Add(currentLine + " ");
                 currentLine = word;
             }
@@ -511,7 +525,7 @@ public sealed class TextParagraph
 
         // A Position-anchored (or anchorless) paragraph that explicitly asks for
         // wrapping breaks its lines against the default paragraph rectangle,
-        // which is 500pt wide from the anchor X (probed: a line wraps at X+500
+        // which is 500pt wide from the anchor X (a line wraps at X+500
         // even when more would fit before the page edge, and runs past the page
         // margins). Undefined stays unwrapped here so existing single-line
         // layouts are untouched.
@@ -530,6 +544,33 @@ public sealed class TextParagraph
         // land inside a later segment ("the" Arial 30 + " quick brown…" MSGothic
         // 10 keeps "the quick" together then wraps the rest).
         var visualLines = BuildVisualLines(needsWrap ? clipWidth!.Value : 0, wrapMode);
+
+        // A Position-anchored paragraph that did NOT ask for wrapping still lays
+        // out against the 500pt default paragraph rectangle: glyphs past X+500 are
+        // dropped at a character boundary — not wrapped onto a new line, and not
+        // drawn on past the box. Lines that fit are left untouched.
+        if (Rectangle is null && Position is not null && !needsWrap)
+        {
+            for (int li = 0; li < visualLines.Count; li++)
+            {
+                var line = visualLines[li];
+                double run = 0; bool cut = false;
+                var kept = new List<(string text, TextState ts)>();
+                foreach (var (text, ts) in line)
+                {
+                    if (cut) break;
+                    int keep = text.Length;
+                    for (int ci = 0; ci < text.Length; ci++)
+                    {
+                        var w = CharWidth(text[ci], ts);
+                        if (run + w > 500.0001) { keep = ci; cut = true; break; }
+                        run += w;
+                    }
+                    if (keep > 0) kept.Add((text.Substring(0, keep), ts));
+                }
+                if (cut) visualLines[li] = kept;
+            }
+        }
 
         // Per-line leading = max over the line's runs of (FontSize + LineSpacing).
         // With LineSpacing == 0 this is just FontSize, matching the historical
@@ -607,7 +648,10 @@ public sealed class TextParagraph
         // subtracts each line's leading before drawing, hence the totalLeading
         // offset here. The rotated path keeps its own local bottom-anchoring
         // (RenderLocal places the last baseline at the cm origin).
-        if (!hasRotation && Rectangle is null && Position is not null)
+        // A paragraph with NO anchor at all behaves as Position (0,0): the block
+        // stacks upward from the page origin (bottom-left corner), so all lines
+        // stay on the page instead of running below y=0.
+        if (!hasRotation && Rectangle is null)
         {
             var lastLine = visualLines[visualLines.Count - 1];
             var lastTs = lastLine.Count > 0 ? lastLine[0].ts : _lines[_lines.Count - 1].TextState;
@@ -996,8 +1040,8 @@ public sealed class TextParagraph
                 var fd = ts.FontData ?? ts.Font?.SourceFontData;
                 // A fragment that explicitly carries a real font program embeds it
                 // (with its descriptor) rather than downgrading to a bare
-                // Standard-14 alias dict — the reference embeds an explicitly set
-                // FontRepository font even for pure-Latin text, and the absorber
+                // Standard-14 alias dict — an explicitly set FontRepository font
+                // is embedded even for pure-Latin text, and the absorber
                 // needs the descriptor descent to seat the read-back rectangle.
                 var needsCid = ensureCidFont is not null &&
                                fd is { TtfData: not null };
@@ -1072,14 +1116,18 @@ public sealed class TextParagraph
             double lineWidth = 0;
             foreach (var (text, ts) in line) lineWidth += MeasureLineWidth(text, ts);
 
-            // Emit background rectangle with cm translation.
+            // Emit background rectangle with cm translation. A rotated line folds
+            // its rotation into the same cm — the box stays (0, 0, w, h) in the
+            // line's local frame and turns with the text.
             var bg = firstTs.BackgroundColor;
             if (bg is not null)
             {
                 double bgH = lineFs * 1.1;
+                var bgRad = firstTs.Rotation * Math.PI / 180.0;
+                double bgCos = Math.Cos(bgRad), bgSin = Math.Sin(bgRad);
                 builder.SaveState();
                 builder.SetFillColor(bg.R / 255.0, bg.G / 255.0, bg.B / 255.0);
-                builder.SetMatrix(1, 0, 0, 1, lineStartX, localBgY);
+                builder.SetMatrix(bgCos, bgSin, -bgSin, bgCos, lineStartX, localBgY);
                 builder.Rectangle(0, 0, lineWidth, bgH);
                 builder.FillEvenOdd();
                 builder.RestoreState();
@@ -1112,8 +1160,8 @@ public sealed class TextParagraph
                 var fd = ts.FontData ?? ts.Font?.SourceFontData;
                 // A fragment that explicitly carries a real font program embeds it
                 // (with its descriptor) rather than downgrading to a bare
-                // Standard-14 alias dict — the reference embeds an explicitly set
-                // FontRepository font even for pure-Latin text, and the absorber
+                // Standard-14 alias dict — an explicitly set FontRepository font
+                // is embedded even for pure-Latin text, and the absorber
                 // needs the descriptor descent to seat the read-back rectangle.
                 var needsCid = ensureCidFont is not null &&
                                fd is { TtfData: not null };

@@ -69,12 +69,12 @@ public class TextStamp : Stamp
     public double Height { get; set; }
 
     /// <summary>When true, the stamp text is scaled to fit
-    /// <see cref="Width"/> × <see cref="Height"/>. Stored only; matches
-    /// the Aspose.Pdf public API.</summary>
+    /// <see cref="Width"/> × <see cref="Height"/>. Stored only, for API
+    /// compatibility.</summary>
     public bool Scale { get; set; }
 
-    /// <summary>Zoom factor applied to the stamp. Stored only; matches
-    /// the Aspose.Pdf public API.</summary>
+    /// <summary>Zoom factor applied to the stamp. Stored only, for API
+    /// compatibility.</summary>
     public double Zoom { get; set; } = 1.0;
 
     /// <summary>
@@ -116,6 +116,11 @@ public class TextStamp : Stamp
     /// glyphs the primary font lacks. Null when no fallback is configured. Overridden by the
     /// public <c>Aspose.Pdf.TextStamp</c>, which exposes the <c>ReplacementFont</c> property.</summary>
     protected virtual (byte[] ttf, string name)? ReplacementFontProgram => null;
+
+    /// <summary>True when the caller declared YIndent to be the text BASELINE rather than
+    /// the box edge — the bottom seat then lands exactly on it, with no descent inset.
+    /// Overridden by the public <c>Aspose.Pdf.TextStamp</c> (TreatYIndentAsBaseLine).</summary>
+    protected virtual bool YIndentIsBaseline => false;
 
     /// <summary>True when at least one character of <paramref name="text"/> could not be
     /// encoded by the primary font (it collapsed to '?' although the source char was not '?').</summary>
@@ -197,9 +202,95 @@ public class TextStamp : Stamp
         return fontDict;
     }
 
+    /// <summary>True when the text contains any supplementary-plane code point
+    /// (encoded as a UTF-16 surrogate pair).</summary>
+    private static bool HasSupplementaryChars(string text)
+    {
+        foreach (var ch in text)
+            if (char.IsSurrogate(ch)) return true;
+        return false;
+    }
+
+    // Per-font-program glyph coverage, shared across stamps (parsing a face is
+    // costly; the resolver caches the byte[] per name so reference identity holds).
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<byte[], GlyphOutlineParser>
+        _runCoverage = new();
+
+    private static bool CoversCp(byte[] ttf, int cp)
+    {
+        try
+        {
+            var parser = _runCoverage.GetValue(ttf, static t => new GlyphOutlineParser(t));
+            return parser.CMap.TryGetValue(cp, out var gid) && gid != 0;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>The system face for a code point the stamp's primary face lacks,
+    /// chosen by script block and verified to actually cover the code point.</summary>
+    private static (byte[] ttf, string name)? ResolveSupplementaryFont(int cp)
+    {
+        var candidates = cp switch
+        {
+            >= 0x13000 and <= 0x1345F => new[] { "Segoe UI Historic" },                 // Egyptian hieroglyphs
+            >= 0x20000 and <= 0x3FFFF => new[] { "SimSun-ExtB", "SimSun-ExtG" },        // CJK Ext-B and later
+            >= 0x1F300 and <= 0x1FAFF => new[] { "Segoe UI Emoji", "Segoe UI Symbol" }, // emoji / pictographs
+            >= 0x10000 => new[] { "Segoe UI Historic", "Segoe UI Symbol" },             // other historic scripts
+            _ => new[] { "Arial", "SimSun", "MS Gothic", "Segoe UI Symbol" },           // uncovered BMP
+        };
+        foreach (var name in candidates)
+        {
+            var ttf = SystemFontResolver.Resolve(name);
+            if (ttf is { Length: > 12 } && CoversCp(ttf, cp)) return (ttf, name);
+        }
+        return null;
+    }
+
+    /// <summary>Split one text row into (face, text) runs: the primary face keeps
+    /// everything it covers (spaces always stay with the current run), while code
+    /// points it lacks pull in their script's face when one resolves — so a mixed
+    /// CJK-Ext-B / hieroglyph / Latin stamp draws every script with real glyphs.</summary>
+    private static System.Collections.Generic.List<(byte[] ttf, string name, string text)>
+        SplitFontRuns(string row, byte[] primaryTtf, string primaryName)
+    {
+        var runs = new System.Collections.Generic.List<(byte[] ttf, string name, string text)>();
+        var sb = new StringBuilder();
+        var curTtf = primaryTtf;
+        var curName = primaryName;
+        void Flush()
+        {
+            if (sb.Length > 0) { runs.Add((curTtf, curName, sb.ToString())); sb.Clear(); }
+        }
+        for (var i = 0; i < row.Length; i++)
+        {
+            int cp = row[i];
+            var pair = false;
+            if (char.IsHighSurrogate(row[i]) && i + 1 < row.Length && char.IsLowSurrogate(row[i + 1]))
+            {
+                cp = char.ConvertToUtf32(row[i], row[i + 1]);
+                pair = true;
+            }
+            var tgtTtf = primaryTtf;
+            var tgtName = primaryName;
+            if (cp == ' ')
+            {
+                tgtTtf = curTtf; tgtName = curName;
+            }
+            else if (!CoversCp(primaryTtf, cp) && ResolveSupplementaryFont(cp) is { } fb)
+            {
+                tgtTtf = fb.ttf; tgtName = fb.name;
+            }
+            if (!ReferenceEquals(tgtTtf, curTtf)) { Flush(); curTtf = tgtTtf; curName = tgtName; }
+            sb.Append(row[i]);
+            if (pair) { sb.Append(row[i + 1]); i++; }
+        }
+        Flush();
+        return runs;
+    }
+
     /// <summary>The candidate system CJK faces for the script of <paramref name="text"/>,
     /// resolved to standalone TTF bytes (ttc entries extracted). Null when none load.</summary>
-    private static (byte[] ttf, string name)? TryResolveCjkTtf(string text)
+    internal static (byte[] ttf, string name)? TryResolveCjkTtf(string text)
     {
         bool kana = false, hangul = false, han = false;
         foreach (var ch in text)
@@ -232,15 +323,20 @@ public class TextStamp : Stamp
     {
         var fontDict = GetPageFontDict(page);
         var rows = Text.Replace("\r\n", "\n").Split('\n');
-        var resName = "";
-        var hexes = new byte[rows.Length][];
+        var rowRuns = new System.Collections.Generic.List<(string res, byte[] hex, double width)>[rows.Length];
         var widths = new double[rows.Length];
         for (var i = 0; i < rows.Length; i++)
         {
-            (resName, hexes[i]) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
-                fontDict, ttf, fontName, rows[i], stripSpacesInBaseFont: true);
-            widths[i] = Aspose.Pdf.Text.Type0FontEmbedder.MeasureText(
-                fontDict, ttf, fontName, rows[i], fontSize, stripSpacesInBaseFont: true);
+            rowRuns[i] = new();
+            foreach (var (runTtf, runName, runText) in SplitFontRuns(rows[i], ttf, fontName))
+            {
+                var (res, hex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
+                    fontDict, runTtf, runName, runText, stripSpacesInBaseFont: true);
+                var w = Aspose.Pdf.Text.Type0FontEmbedder.MeasureText(
+                    fontDict, runTtf, runName, runText, fontSize, stripSpacesInBaseFont: true);
+                rowRuns[i].Add((res, hex, w));
+                widths[i] += w;
+            }
         }
         var blockW = widths.Length > 0 ? widths.Max() : 0.0;
 
@@ -268,8 +364,7 @@ public class TextStamp : Stamp
             builder.SetExtGState(gsName);
         }
         builder.BeginText()
-            .SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0)
-            .SetFont(resName, fontSize);
+            .SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
         for (var i = 0; i < rows.Length; i++)
         {
             var rowX = TextAlignment switch
@@ -278,8 +373,9 @@ public class TextStamp : Stamp
                 HorizontalAlignment.Center => x + (blockW - widths[i]) / 2,
                 _ => x,
             };
-            builder.SetTextMatrix(1, 0, 0, 1, rowX, y - i * fontSize)
-                   .ShowTextHex(hexes[i]);
+            builder.SetTextMatrix(1, 0, 0, 1, rowX, y - i * fontSize);
+            foreach (var (res, hex, _) in rowRuns[i])
+                builder.SetFont(res, fontSize).ShowTextHex(hex);
         }
         builder
             .EndText();
@@ -289,8 +385,8 @@ public class TextStamp : Stamp
 
     internal override byte[] BuildContentStream(Page page)
     {
-        // Pull effective font/size/colour from TextState first (mirrors the
-        // Aspose.Pdf API where setting TextState.* on a stamp wins over the
+        // Pull effective font/size/colour from TextState first (setting
+        // TextState.* on a stamp wins over the
         // bare TextStamp.FontSize/Color), falling back to the stamp's own
         // properties for callers that don't touch TextState.
         var baseFontName = ResolveBaseFontName();
@@ -329,6 +425,15 @@ public class TextStamp : Stamp
             && TryResolveCjkTtf(Text) is { } cjk)
             return BuildCidStamp(page, cjk.ttf, cjk.name, fontSize, color);
 
+        // Supplementary-plane text (CJK Ext-B, Egyptian hieroglyphs, emoji …) with no
+        // BMP-CJK face matched above: the Latin base face's TrueType substitute anchors
+        // the stamp and each supplementary run brings its own script face (resolved per
+        // code point inside BuildCidStamp), so the text renders where a face exists and
+        // always round-trips through extraction via per-CID ToUnicode.
+        if (replacement is null && HasUnencodableGlyphs(Text, encoded)
+            && HasSupplementaryChars(Text) && TryResolveUnicodeFallback() is { } ufb)
+            return BuildCidStamp(page, ufb.ttf, ufb.name, fontSize, color);
+
         // No explicit replacement font, but the text carries glyphs outside WinAnsi (Polish
         // ę/ą/ś/…, etc.) that a non-embedded Standard-14 base font can't display: embed the
         // matching TrueType substitute as a Type0 font so the glyphs render and round-trip
@@ -340,21 +445,21 @@ public class TextStamp : Stamp
         var fontResName = EnsureFontResource(page, baseFontName, diffMap);
 
         // Wrapping is enabled by the WordWrap bool OR a non-NoWrap WordWrapMode
-        // (Aspose.Pdf exposes both; this sets only the bool).
+        // (both are exposed; this ctor path sets only the bool).
         var wrapping = WordWrap || WordWrapMode != TextFormattingOptions.WordWrapMode.NoWrap;
 
         // Scale-to-fit: a stamp with Scale=true and an explicit Width×Height box
         // lays its text out at the base font, then non-uniformly scales that block
-        // to exactly fill the box, anchored at (XIndent, YIndent) — matching
-        // Aspose.Pdf, which emits `sx 0 0 sy XIndent YIndent cm` over a natural-size
+        // to exactly fill the box, anchored at (XIndent, YIndent) —
+        // emitting `sx 0 0 sy XIndent YIndent cm` over a natural-size
         // form. Wrapped text fills width at scale ~1 and stretches
         // vertically; un-wrapped text is laid as a single line and squished to width.
         if (Scale && Width > 0 && Height > 0)
             return BuildScaledToBox(page, encoded, baseFontName, fontResName, fontSize, color, wrapping);
 
-        // Rotated stamp with an explicit Width×Height box: Aspose.Pdf scales the text
-        // non-uniformly to fill the box (sx=Width/textW, sy=Height/textH), centres the
-        // box per Horizontal/VerticalAlignment, then rotates it about the box centre.
+        // Rotated stamp with an explicit Width×Height box: the text scales
+        // non-uniformly to fill the box (sx=Width/textW, sy=Height/textH), the box is
+        // centred per Horizontal/VerticalAlignment, then rotated about the box centre.
         // The plain path below only applies the horizontal scale and
         // rotates about the block anchor, which mis-sizes/positions the result.
         double rot = RotateAngle != 0 ? RotateAngle : (double)Rotate;
@@ -363,8 +468,8 @@ public class TextStamp : Stamp
 
         // Word-wrapped stamp with a background box and Scale=false: wrap the text to the
         // inner width (Width minus L/R margins), grow the box to the widest wrapped line,
-        // and emit the box as the leading `q / x y w h re / rg / RG / f*` block that
-        // Aspose.Pdf produces — the text follows inside it.
+        // and emit the box as the leading `q / x y w h re / rg / RG / f*`
+        // block — the text follows inside it.
         var bgEarly = TextState?.BackgroundColor;
         if (!Scale && wrapping && Width > 0 && bgEarly is { IsEmpty: false })
             return BuildWrappedBackgroundBox(page, encoded, baseFontName, fontResName, fontSize, color, bgEarly!);
@@ -374,7 +479,25 @@ public class TextStamp : Stamp
         // FormattedText (AddNewLineText) or a multi-line Value carries. The old
         // no-wrap path emitted the raw '\n' byte inside a single Tj string, which
         // is not a line break in PDF — every line collapsed onto one row.
-        var wrapWidth = WrapWidth;
+        // When wrapping is requested but no explicit stamp width is set, wrap to the
+        // page's available extent along the text's advance axis so a WordWrap stamp lays
+        // out as multiple on-page lines instead of one line running off the edge — which
+        // page-bounds text extraction would then crop. The extent is the UNROTATED
+        // MediaBox dimension: the stamp's own Rotate turns the advance vertical at 90/270
+        // (Rotation values are degrees, %180==90 catches both), while page /Rotate is a
+        // view transform only — extraction bounds are the unrotated MediaBox, so page.Width
+        // /Height (which swap for a rotated page) must not choose the wrap axis.
+        var stampDeg = (int)Math.Round(Math.Abs(RotateAngle != 0 ? RotateAngle : (double)Rotate));
+        var wrapVertical = stampDeg % 180 == 90;
+        var mb = page.MediaBox;
+        var advanceDim = wrapVertical ? mb.Height : mb.Width;
+        var wrapLead = wrapVertical ? (YIndent > 0 ? YIndent : BottomMargin) : (XIndent > 0 ? XIndent : LeftMargin);
+        var wrapTrail = wrapVertical ? TopMargin : RightMargin;
+        var wrapWidth = WrapWidth > 0
+            ? WrapWidth
+            : (WordWrapMode != TextFormattingOptions.WordWrapMode.NoWrap
+                ? Math.Max(0.0, advanceDim - wrapLead - wrapTrail)
+                : 0.0);
         var rows = (wrapWidth > 0 && WordWrapMode != TextFormattingOptions.WordWrapMode.NoWrap)
             ? WrapEncoded(encoded, baseFontName, fontSize, wrapWidth)
             : SplitRows(encoded);
@@ -384,18 +507,18 @@ public class TextStamp : Stamp
         var blockWidth = rowWidths.Count > 0 ? rowWidths.Max() : 0.0;
 
         // A stamp with an explicit Width stretches/condenses its text horizontally
-        // to fill that width (matches Aspose.Pdf, which scales the whole stamp form
+        // to fill that width (the whole stamp form scales
         // by Width / naturalWidth). No Width ⇒ draw at natural size.
         var scaleX = (Width > 0 && blockWidth > 0) ? Width / blockWidth : 1.0;
         var scaledBlockWidth = blockWidth * scaleX;
 
-        // Leading of one em (Aspose.Pdf spaces stamp lines by exactly the font size).
+        // Leading of one em (stamp lines are spaced by exactly the font size).
         var lineHeight = fontSize;
 
         // Position the block on the page. The block's left/top is derived from the
         // SCALED width so Right/Center alignment lands the right/centre at the page
         // edge/centre, and the first baseline sits one line below the top edge.
-        var (originX, topBaseline) = ComputeBlockOrigin(page, scaledBlockWidth, fontSize, lineHeight, rows.Count);
+        var (originX, topBaseline) = ComputeBlockOrigin(page, scaledBlockWidth, fontSize, lineHeight, rows.Count, baseFontName);
 
         var builder = new ContentStreamBuilder();
         builder.SaveState();
@@ -421,8 +544,8 @@ public class TextStamp : Stamp
         var bgColor = TextState?.BackgroundColor;
         var hasBg = bgColor is { IsEmpty: false };
 
-        // Multi-line block without a background box: Aspose.Pdf anchors the
-        // block at its BOTTOM — the last row's baseline sits one font-descent above
+        // A multi-line block without a background box anchors
+        // at its BOTTOM — the last row's baseline sits one font-descent above
         // the block origin and each row's Tm carries the absolute in-block Y
         // ((N-1-li)·lineHeight + descent). The cm translation is lowered by the same
         // amount, so the net page placement is unchanged; only the Tm/cm split moves.
@@ -434,10 +557,94 @@ public class TextStamp : Stamp
             bottomAnchor = (rows.Count - 1) * lineHeight + descentInset;
         }
         var cmY = topBaseline - bottomAnchor;
-        if (Math.Abs(rotateDeg) > 0.01)
+        // A 90/270-rotated stamp advances along page Y; the corner-anchored matrix below
+        // would swing the block off the page (advance one way off the baseline, rows into
+        // −X). Re-anchor so the block's rotated page-space bounding box honours
+        // Horizontal/VerticalAlignment inside the unrotated MediaBox, keeping every glyph
+        // on-page. Upright 0/180 stamps keep their existing anchor.
+        var rotQuarter = ((int)Math.Round(Math.Abs(rotateDeg))) % 360;
+        if (rotQuarter == 90 || rotQuarter == 270)
+        {
+            var advExtent = scaledBlockWidth;                                                // page-Y span
+            var crossExtent = (rows.Count - 1) * lineHeight + (hasBg ? 1.1 : 1.0) * fontSize; // page-X span
+            var pageXMin = HorizontalAlignment == HorizontalAlignment.Right
+                ? mb.Width - RightMargin - crossExtent
+                : HorizontalAlignment == HorizontalAlignment.Center
+                    ? (mb.Width - crossExtent) / 2
+                    : (XIndent > 0 ? XIndent : LeftMargin);
+            var pageYMin = VerticalAlignment == VerticalAlignment.Top
+                ? mb.Height - TopMargin - advExtent
+                : VerticalAlignment == VerticalAlignment.Center
+                    ? (mb.Height - advExtent) / 2
+                    : (YIndent > 0 ? YIndent : BottomMargin);
+            originX = pageXMin + crossExtent;                          // rows map to X in [pageXMin, pageXMin+cross]
+            cmY = rotQuarter == 90 ? pageYMin : pageYMin + advExtent;  // advance spans [pageYMin, pageYMin+adv]
+        }
+        else if (rotQuarter == 180)
+        {
+            // A 180-flipped block runs its (horizontal) advance and rows in the negative
+            // direction from the corner anchor — HAlign.Left would push the text off the
+            // left/top edge. Re-anchor so the flipped page-space box honours alignment
+            // inside the unrotated MediaBox (advance along page X, rows down page Y).
+            var advExtent = scaledBlockWidth;                                                // page-X span
+            var crossExtent = (rows.Count - 1) * lineHeight + (hasBg ? 1.1 : 1.0) * fontSize; // page-Y span
+            var pageXMin = HorizontalAlignment == HorizontalAlignment.Right
+                ? mb.Width - RightMargin - advExtent
+                : HorizontalAlignment == HorizontalAlignment.Center
+                    ? (mb.Width - advExtent) / 2
+                    : (XIndent > 0 ? XIndent : LeftMargin);
+            var pageYMin = VerticalAlignment == VerticalAlignment.Top
+                ? mb.Height - TopMargin - crossExtent
+                : VerticalAlignment == VerticalAlignment.Center
+                    ? (mb.Height - crossExtent) / 2
+                    : (YIndent > 0 ? YIndent : BottomMargin);
+            originX = pageXMin + advExtent;    // page X spans [pageXMin, pageXMin+adv]
+            cmY = pageYMin + crossExtent;      // page Y spans [pageYMin, pageYMin+cross]
+        }
+        // An OFF-AXIS rotated stamp (e.g. 45°) is anchored by its ROTATED BOUNDING BOX,
+        // not by the baseline start: the stamp's content box rotates about
+        // the box origin and translates so the rotated box's min corner lands at
+        // (XIndent, YIndent) (the matrix composes size·scale·rotation·shift(point);
+        // the anchor is offset by the rotated box extents). Pinning the baseline start
+        // (originX, cmY) leaves the stamp shifted by the rotated box's overhang. Applied
+        // only to the SIMPLE case it is derived for — a single-line, XIndent/YIndent-placed
+        // stamp with no alignment override, background box, wrap or width; quarter rotations
+        // (90/180/270) use the alignment re-anchor above instead.
+        var rotAnchorSimple = Math.Abs(rotateDeg) > 0.01
+            && rotQuarter != 90 && rotQuarter != 180 && rotQuarter != 270
+            && (HorizontalAlignment == HorizontalAlignment.Left
+                || HorizontalAlignment == HorizontalAlignment.None)
+            && !hasBg
+            && rows.Count == 1
+            && Width <= 0;
+        if (rotAnchorSimple)
+        {
+            var boxW = scaledBlockWidth;
+            var descF = Aspose.Pdf.Text.Standard14Fonts.GetDescent(baseFontName);
+            var descent = (descF < 0 ? -descF / 1000.0 : 0.2) * fontSize;
+            // Content box in block-local space: x∈[0,boxW]; y spans one line box above
+            // the top baseline (≈1.13 em, the Position.YIndent plus the fragment
+            // height) down to a font descent below the bottom baseline.
+            var yTop = 1.13 * fontSize;
+            var yBot = -bottomAnchor - descent;
+            double minX = double.MaxValue;
+            foreach (var (lx, ly) in new[] { (0.0, yBot), (boxW, yBot), (boxW, yTop), (0.0, yTop) })
+            {
+                var rx = lx * cos - ly * sin;
+                if (rx < minX) minX = rx;
+            }
+            // X is anchored by the rotated box overhang; Y stays on the baseline
+            // (TreatYIndentAsBaseLine), which needs no re-anchoring.
+            builder.SetMatrix(cos * scaleX, sin * scaleX, -sin, cos, originX - minX, cmY);
+        }
+        else if (Math.Abs(rotateDeg) > 0.01)
+        {
             builder.SetMatrix(cos * scaleX, sin * scaleX, -sin, cos, originX, cmY);
+        }
         else
+        {
             builder.SetMatrix(scaleX, 0, 0, 1, originX, cmY);
+        }
 
         // Optional background box: when TextState.BackgroundColor is set, fill a
         // rectangle behind the text in the block-local (already rotated/placed)
@@ -495,7 +702,7 @@ public class TextStamp : Stamp
     // then emit one cm that non-uniformly scales that block to fill the Width×Height
     // box at (XIndent, YIndent). Wrapped text breaks to Width (so scaleX ≈ 1 and only
     // the height stretches); un-wrapped text is a single line (newlines → spaces) that
-    // is squished horizontally to Width and stretched to Height. Mirrors Aspose.Pdf.
+    // is squished horizontally to Width and stretched to Height.
     private byte[] BuildScaledToBox(Page page, byte[] encoded, string baseFontName,
         string fontResName, double fontSize, Color color, bool wrapping)
     {
@@ -522,6 +729,19 @@ public class TextStamp : Stamp
             builder.SetExtGState(gsName);
         }
         builder.SetMatrix(sX, 0, 0, sY, XIndent, YIndent);
+
+        // Background box: fills the whole natural block in block-local space, so the
+        // cm scale above stretches it to exactly the Width×Height box.
+        if (TextState?.BackgroundColor is { IsEmpty: false } bg)
+        {
+            builder.SaveState();
+            builder.Rectangle(0, 0, blockWidth, blockHeight);
+            builder.SetFillColor(bg);
+            builder.SetStrokeColor(bg);
+            builder.FillEvenOdd();
+            builder.RestoreState();
+        }
+
         builder.BeginText()
             .SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0)
             .SetFont(fontResName, fontSize);
@@ -615,7 +835,7 @@ public class TextStamp : Stamp
     // Word-wrapped stamp with a background box (Scale=false). Wrap to the inner width
     // (Width minus left/right margins), grow the box to the widest wrapped line, and emit:
     //   q  x y w h re  r g b rg  r g b RG  f*  BT ... ET  Q
-    // so the rectangle is the first painted operator (matching Aspose.Pdf). The box
+    // so the rectangle is the first painted operator. The box
     // is placed per the stamp's Horizontal/Vertical alignment; the text fills it top-down.
     private byte[] BuildWrappedBackgroundBox(Page page, byte[] encoded, string baseFontName,
         string fontResName, double fontSize, Color color, Color bgColor)
@@ -722,7 +942,7 @@ public class TextStamp : Stamp
     // Greedy word wrap for the auto-fit measurement. Unlike the render-side
     // WrapAtSpaces, the fit test ignores each line's TRAILING space: a word joins
     // the current line when (line + inter-word space + word), with no trailing
-    // space, still fits — matching the box-fit rule Aspose.Pdf uses.
+    // space, still fits — the box-fit rule.
     // Rows are returned already trailing-trimmed so their measured width is exact.
     private static List<byte[]> AutoFitWrap(byte[] enc, string baseFont, double fontSize, double maxW)
     {
@@ -1251,7 +1471,8 @@ public class TextStamp : Stamp
     // alignment keeps the text inside the page instead of overflowing — the old
     // 0.5-em-per-char estimate placed a 42pt right-aligned stamp off the page.
     private (double originX, double topBaseline) ComputeBlockOrigin(
-        Page page, double scaledBlockWidth, double fontSize, double lineHeight, int rowCount)
+        Page page, double scaledBlockWidth, double fontSize, double lineHeight, int rowCount,
+        string baseFontName)
     {
         var pageWidth = page.Width;
         var pageHeight = page.Height;
@@ -1261,16 +1482,25 @@ public class TextStamp : Stamp
         {
             HorizontalAlignment.Center => (pageWidth - scaledBlockWidth) / 2,
             HorizontalAlignment.Right => pageWidth - scaledBlockWidth - XIndent - RightMargin,
-            _ => XIndent,
+            // LeftMargin stands in when no XIndent is set — the same fallback the
+            // CID-stamp block placement applies.
+            _ => XIndent > 0 ? XIndent : LeftMargin,
         };
 
         // topBaseline is the first line's baseline. Top: one line below the top
         // edge; Bottom: leave room for the remaining lines above the bottom edge;
         // Center: centre the whole block vertically.
+        // BottomMargin measures to the bottom of the text box (the descender), so
+        // the last baseline seats one font descent above it — unless the caller
+        // declared YIndent to BE the baseline, which seats exactly there.
+        var d = Aspose.Pdf.Text.Standard14Fonts.GetDescent(baseFontName);
+        var descentInset = (d < 0 ? -d / 1000.0 : 0.2) * fontSize;
         var topBaseline = VerticalAlignment switch
         {
             VerticalAlignment.Top => pageHeight - TopMargin - YIndent - fontSize,
             VerticalAlignment.Center => (pageHeight + blockHeight) / 2 - fontSize,
+            VerticalAlignment.Bottom => YIndent + BottomMargin + blockHeight - fontSize
+                + (YIndentIsBaseline ? 0 : descentInset),
             _ => YIndent + BottomMargin + blockHeight - fontSize,
         };
 

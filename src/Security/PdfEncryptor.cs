@@ -32,11 +32,22 @@ internal sealed class PdfEncryptor
     private readonly byte[]? _ueValue;
     private readonly byte[]? _permsValue;
 
+    // When set, BuildEncryptDict returns this dict verbatim (public-key /Recipients
+    // handler) instead of synthesising a Standard-handler dict.
+    private readonly PdfDictionary? _prebuiltDict;
+
+    // When set, per-object encryption is delegated to this handler instead of the
+    // Standard handler's key derivation and RC4/AES ciphers.
+    private readonly ICustomSecurityHandler? _custom;
+
     private PdfEncryptor(byte[] encryptionKey, CryptoAlgorithm algorithm,
         int version, int revision, byte[] oValue, byte[] uValue,
         int permissions, byte[] fileId,
-        byte[]? oeValue = null, byte[]? ueValue = null, byte[]? permsValue = null)
+        byte[]? oeValue = null, byte[]? ueValue = null, byte[]? permsValue = null,
+        PdfDictionary? prebuiltDict = null,
+        ICustomSecurityHandler? custom = null)
     {
+        _custom = custom;
         _encryptionKey = encryptionKey;
         _algorithm = algorithm;
         _version = version;
@@ -48,10 +59,57 @@ internal sealed class PdfEncryptor
         _oeValue = oeValue;
         _ueValue = ueValue;
         _permsValue = permsValue;
+        _prebuiltDict = prebuiltDict;
+    }
+
+    /// <summary>Create an encryptor around a pre-derived file key and a pre-built
+    /// /Encrypt dictionary — used by the public-key (certificate) security handler,
+    /// whose key comes from CMS recipients rather than a password. Object-level
+    /// encryption reuses the Standard handler's per-object key derivation.</summary>
+    public static PdfEncryptor CreateWithFileKey(byte[] fileKey, CryptoAlgorithm algorithm,
+        int version, int revision, PdfDictionary encryptDict)
+        => new(fileKey, algorithm, version, revision,
+            System.Array.Empty<byte>(), System.Array.Empty<byte>(), 0,
+            CryptoRandom.GetBytes(16), prebuiltDict: encryptDict);
+
+    /// <summary>Create an encryptor driven by a custom security handler. The handler
+    /// supplies the /O and /U values, the /Perms string and the file key; the /Encrypt
+    /// dictionary it implies is built here and written verbatim at save time.</summary>
+    public static PdfEncryptor CreateWithCustomHandler(ICustomSecurityHandler handler,
+        string userPassword, string ownerPassword, int permissions, byte[]? fileId = null)
+    {
+        var uValue = handler.GetUserKey(userPassword) ?? System.Array.Empty<byte>();
+        var oValue = handler.GetOwnerKey(userPassword, ownerPassword) ?? System.Array.Empty<byte>();
+        var permsValue = handler.EncryptPermissions(permissions) ?? System.Array.Empty<byte>();
+
+        var dict = new PdfDictionary();
+        dict.Set("Filter", new PdfName(handler.Filter));
+        if (!string.IsNullOrEmpty(handler.SubFilter))
+            dict.Set("SubFilter", new PdfName(handler.SubFilter));
+        dict.Set("V", new PdfInteger(handler.Version));
+        dict.Set("R", new PdfInteger(handler.Revision));
+        dict.Set("Length", new PdfInteger(handler.KeyLength));
+        dict.Set("P", new PdfInteger(permissions));
+        dict.Set("O", new PdfString(oValue, isHex: true));
+        dict.Set("U", new PdfString(uValue, isHex: true));
+        dict.Set("Perms", new PdfString(permsValue, isHex: true));
+
+        // The handler derives its file key from the values it just produced, so it
+        // has to see them before CalculateEncryptionKey runs.
+        handler.Initialize(new EncryptionParameters(
+            handler.Filter, handler.SubFilter, handler.Version, handler.Revision,
+            handler.KeyLength, oValue, uValue, permsValue,
+            (Aspose.Pdf.Permissions)permissions, permissions, userPassword));
+
+        return new PdfEncryptor(handler.CalculateEncryptionKey(userPassword),
+            CryptoAlgorithm.RC4x128, handler.Version, handler.Revision,
+            oValue, uValue, permissions, fileId ?? CryptoRandom.GetBytes(16),
+            permsValue: permsValue, prebuiltDict: dict, custom: handler);
     }
 
     public byte[] OValue => _oValue;
     public byte[] UValue => _uValue;
+    public CryptoAlgorithm Algorithm => _algorithm;
     public int Permissions => _permissions;
     public int Version => _version;
     public int Revision => _revision;
@@ -93,10 +151,14 @@ internal sealed class PdfEncryptor
     {
         fileId ??= CryptoRandom.GetBytes(16);
 
-        // UTF-8 encode password, truncate to 127 bytes
-        var userPwBytes = System.Text.Encoding.UTF8.GetBytes(userPassword);
+        // SASLprep (RFC 4013) the passwords, then UTF-8 encode and truncate to
+        // 127 bytes (ISO 32000-2 §7.6.4.3.3 / algorithm 2.B). SASLprep makes
+        // visually-equivalent Unicode passwords derive the same key.
+        var userPwBytes = System.Text.Encoding.UTF8.GetBytes(
+            Engine.Security.Impl.Sasl.Stringprep.PrepareForKeyDerivation(userPassword));
         if (userPwBytes.Length > 127) userPwBytes = userPwBytes[..127];
-        var ownerPwBytes = System.Text.Encoding.UTF8.GetBytes(ownerPassword);
+        var ownerPwBytes = System.Text.Encoding.UTF8.GetBytes(
+            Engine.Security.Impl.Sasl.Stringprep.PrepareForKeyDerivation(ownerPassword));
         if (ownerPwBytes.Length > 127) ownerPwBytes = ownerPwBytes[..127];
 
         // Generate random 32-byte file encryption key (FEK)
@@ -189,6 +251,9 @@ internal sealed class PdfEncryptor
     /// </summary>
     public PdfDictionary BuildEncryptDict()
     {
+        // Public-key handler: return the dict built by PubSecHandler verbatim.
+        if (_prebuiltDict is not null) return _prebuiltDict;
+
         var dict = new PdfDictionary();
         dict.Set("Filter", new PdfName("Standard"));
         dict.Set("V", new PdfInteger(_version));
@@ -245,6 +310,7 @@ internal sealed class PdfEncryptor
     /// </summary>
     public byte[] EncryptString(byte[] data, int objectNumber, int generation)
     {
+        if (_custom is not null) return _custom.Encrypt(data, objectNumber, generation, _encryptionKey);
         var key = DeriveObjectKey(objectNumber, generation);
         return EncryptData(data, key);
     }
@@ -254,6 +320,7 @@ internal sealed class PdfEncryptor
     /// </summary>
     public byte[] EncryptStream(byte[] data, int objectNumber, int generation)
     {
+        if (_custom is not null) return _custom.Encrypt(data, objectNumber, generation, _encryptionKey);
         var key = DeriveObjectKey(objectNumber, generation);
         return EncryptData(data, key);
     }

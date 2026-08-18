@@ -146,7 +146,7 @@ public sealed partial class XmpMetadata
 
     /// <summary>
     /// Add a metadata property with a string value. Convenience overload that
-    /// matches the Aspose.Pdf XmpMetadata.Add(string, string) public surface.
+    /// matches the XmpMetadata.Add(string, string) public surface.
     /// </summary>
     public void Add(string key, string value)
     {
@@ -167,15 +167,18 @@ public sealed partial class XmpMetadata
 
     internal static XmpValue ParseXmpValue(string raw)
     {
+        // The property is typed for the numeric/date accessors, but carries its
+        // ORIGINAL spelling for stringification — the packet stores text, and a
+        // value such as a "1.0" version must read back as it was written.
         if (int.TryParse(raw, System.Globalization.NumberStyles.Integer,
                 System.Globalization.CultureInfo.InvariantCulture, out var intVal))
-            return new XmpValue(intVal);
+            return new XmpValue(intVal, raw);
         if (double.TryParse(raw, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var dblVal))
-            return new XmpValue(dblVal);
+            return new XmpValue(dblVal, raw);
         if (DateTime.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture,
                 System.Globalization.DateTimeStyles.RoundtripKind, out var dtVal))
-            return new XmpValue(dtVal);
+            return new XmpValue(dtVal, raw);
         return new XmpValue(raw);
     }
 

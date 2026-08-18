@@ -23,7 +23,7 @@ public class TimestampSettings
 
     public TimestampSettings(string serverUrl,
         string basicAuthCredentials,
-        DigestHashAlgorithm digestHashAlgorithm)
+        DigestHashAlgorithm digestHashAlgorithm = DigestHashAlgorithm.Sha256)
     {
         ServerUrl = serverUrl ?? string.Empty;
         BasicAuthCredentials = basicAuthCredentials ?? string.Empty;

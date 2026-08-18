@@ -139,7 +139,7 @@ public sealed class TiffDevice : ImageDevice
         Settings = settings ?? new TiffSettings();
     }
 
-    // ── Public surface that mirrors Aspose.Pdf ───────────────────────
+    // ── Public device surface (reflection-shape compatibility) ───────
 
     /// <summary>Pixel width of the output bitmap. 0 when the device follows the
     /// page's natural size at <see cref="Resolution"/>.</summary>
@@ -154,9 +154,9 @@ public sealed class TiffDevice : ImageDevice
     /// run as Production.</summary>
     public new FormPresentationMode FormPresentationMode { get; set; } = FormPresentationMode.Production;
 
-    /// <summary>Redeclares the inherited Resolution property on TiffDevice so the
-    /// Aspose.Pdf reflection signature (which uses BindingFlags.DeclaredOnly)
-    /// finds it on this type.</summary>
+    /// <summary>Redeclares the inherited Resolution property on TiffDevice so
+    /// reflection lookups that use BindingFlags.DeclaredOnly
+    /// find it on this type.</summary>
     public new Resolution Resolution => base.Resolution;
 
     /// <summary>Redeclares the inherited RenderingOptions property on TiffDevice
@@ -208,13 +208,45 @@ public sealed class TiffDevice : ImageDevice
     // thresholding. Other depths get the normal RenderPage output.
     private RgbaBuffer RenderForOutput(Page page, out int superFactor)
     {
+        RgbaBuffer buf;
         if (EffectiveDepth(Settings) == ColorDepth.Format1bpp)
         {
             superFactor = BilevelSupersample;
-            return RenderSupersampled(page, superFactor);
+            buf = RenderSupersampled(page, superFactor);
         }
-        superFactor = 1;
-        return RenderPage(page);
+        else
+        {
+            superFactor = 1;
+            buf = RenderPage(page);
+        }
+        // TiffSettings.Shape forces the frame orientation: Landscape rotates a
+        // portrait render 90° (and Portrait the reverse) so every frame comes
+        // out in the requested aspect.
+        if (Settings.Shape == ShapeType.Landscape && buf.Height > buf.Width)
+            buf = Rotate90(buf);
+        else if (Settings.Shape == ShapeType.Portrait && buf.Width > buf.Height)
+            buf = Rotate90(buf);
+        return buf;
+    }
+
+    /// <summary>Rotate 90° clockwise (top of the source becomes the right edge).</summary>
+    private static RgbaBuffer Rotate90(RgbaBuffer src)
+    {
+        int w = src.Width, h = src.Height;
+        var dst = new byte[src.Data.Length];
+        for (var y = 0; y < h; y++)
+        {
+            for (var x = 0; x < w; x++)
+            {
+                var s = (y * w + x) * 4;
+                var d = (x * h + (h - 1 - y)) * 4;
+                dst[d] = src.Data[s];
+                dst[d + 1] = src.Data[s + 1];
+                dst[d + 2] = src.Data[s + 2];
+                dst[d + 3] = src.Data[s + 3];
+            }
+        }
+        return new RgbaBuffer(dst, h, w);
     }
 
     // Render at superFactor × the natural output pixel size. When the caller
@@ -243,8 +275,8 @@ public sealed class TiffDevice : ImageDevice
     }
 
     // CCITT3/CCITT4 are bilevel-only fax encodings, so they imply 1-bit depth even
-    // when the caller leaves Settings.Depth at the (24bpp) default. Mirroring the
-    // behaviour of Aspose.Pdf: requesting CCITT compression produces a 1bpp TIFF.
+    // when the caller leaves Settings.Depth at the (24bpp) default:
+    // requesting CCITT compression produces a 1bpp TIFF.
     private static bool IsBilevelRequested(TiffSettings s)
         => s.Compression is CompressionType.CCITT3 or CompressionType.CCITT4
         || s.Depth == ColorDepth.Format1bpp;
@@ -257,7 +289,7 @@ public sealed class TiffDevice : ImageDevice
 
     // Maps TiffSettings.Brightness (0..1) to the 0..255 bilevel cutoff used by both
     // 1bpp packers: a pixel is black when its lightness (min RGB channel) is below the
-    // cutoff. Aspose.Pdf binarises with a floor at the mid-grey cutoff 128
+    // cutoff. Binarisation floors at the mid-grey cutoff 128
     // (the value both packers hard-coded before) and only *raises* it as Brightness
     // climbs above 0.5, linearly to 255 at Brightness 1.0 — cutoff = max(128,
     // Brightness×255). Brightness ≤ 0.5 (the default) leaves output unchanged; higher
@@ -276,8 +308,8 @@ public sealed class TiffDevice : ImageDevice
     {
         // Ink-coverage threshold: a pixel is white only when every channel is light
         // (near paper white), so coloured ink — e.g. a cyan/azure heading printed as
-        // CMYK — binarises to black rather than dropping out, matching how the
-        // Aspose.Pdf fax/bilevel converter preserves any non-white ink. For grey
+        // CMYK — binarises to black rather than dropping out: the
+        // fax/bilevel conversion preserves any non-white ink. For grey
         // content (R=G=B) this is identical to the previous Rec.601 luminance cutoff.
         for (var i = 0; i < rgb.Length; i += 3)
         {
@@ -288,11 +320,20 @@ public sealed class TiffDevice : ImageDevice
     }
 
     // Downsample a supersampled RGBA buffer to 1bpp bilevel bits packed MSB-first.
-    // Each output bit is the area-averaged ink coverage (255 − min channel) of the
-    // corresponding (super × super) source block, thresholded at 128 — identical to a
-    // luminance cutoff for grey content but keeping coloured ink (e.g. a CMYK cyan
+    // Each output bit is derived from the area-averaged ink coverage (255 − min
+    // channel) of the corresponding (super × super) source block — identical to a
+    // luminance metric for grey content but keeping coloured ink (e.g. a CMYK cyan
     // heading) black instead of dropping it. Output uses the WhiteIsZero convention
     // (bit set ⇒ black) to match the IFD's Photometric=0 below.
+    //
+    // At the default mid-grey cutoff the block value quantises to THREE levels, not
+    // two: dark thirds go solid black, light thirds solid white, and the middle
+    // third renders as a 50%-coverage checkerboard (black on odd x+y parity). A
+    // mid-grey fill in a fax/bilevel conversion thus keeps its tone as a halftone
+    // instead of vanishing to paper white, while light greys still threshold
+    // cleanly to white and dark greys to black. A raised Brightness cutoff keeps
+    // the plain two-level threshold — its calibration expects strictly more black,
+    // never a halftone.
     private static byte[] PackSupersampledRgbaToBilevel(byte[] rgba, int srcW, int srcH, int super,
                                                        int cutoff, out int dstW, out int dstH)
     {
@@ -301,7 +342,9 @@ public sealed class TiffDevice : ImageDevice
         var bytesPerRow = (dstW + 7) / 8;
         var output = new byte[bytesPerRow * dstH];
         var samplesPerBlock = super * super;
-        var threshold = cutoff * samplesPerBlock;
+        var useHalftone = cutoff == 128;
+        var blackBelow = (useHalftone ? 85 : cutoff) * samplesPerBlock;
+        var whiteFrom = (useHalftone ? 170 : cutoff) * samplesPerBlock;
         var stride = srcW * 4;
         for (var dy = 0; dy < dstH; dy++)
         {
@@ -322,7 +365,9 @@ public sealed class TiffDevice : ImageDevice
                         sum += System.Math.Min(rgba[si], System.Math.Min(rgba[si + 1], rgba[si + 2]));
                     }
                 }
-                if (sum < threshold)
+                var black = sum < blackBelow
+                            || (sum < whiteFrom && ((dx + dy) & 1) == 1);
+                if (black)
                     output[rowDst + (dx >> 3)] |= (byte)(0x80 >> (dx & 7));
             }
         }
@@ -519,8 +564,8 @@ public sealed class TiffDevice : ImageDevice
         var is4bpp = depth == ColorDepth.Format4bpp;
         var isBilevel = depth == ColorDepth.Format1bpp;
         // Default depth keeps the source alpha channel — emits 32bpp RGBA. Explicit
-        // Format24bpp drops alpha. The Aspose.Pdf default is 32bpp ARGB; this
-        // matches PixelFormat.Format32bppArgb when the TIFF is read back.
+        // Format24bpp drops alpha. The default is 32bpp ARGB; it reads
+        // back as PixelFormat.Format32bppArgb.
         var isAlpha = depth == ColorDepth.Default;
 
         // Pick the strip layout per requested depth:

@@ -25,6 +25,16 @@ internal static class MarkdownToPdfConverter
     private const double CodeBlockSize = 9.0;   // fenced / indented code
     private const double InlineCodeSize = 10.4; // a whole line wrapped in `...`
 
+    // Pipe-table geometry. A table hugs the page edge rather than the text
+    // margin: columns anchor at x = 9pt, and a table opening the page puts its
+    // first-row baseline 19.2pt below the page top. Rows advance on a 16.48pt
+    // pitch and columns are separated by a 2.9pt gutter beyond the widest cell.
+    private const double TableLeft = 9.0;
+    private const double TableTopBaselineOffset = 19.2;
+    private const double TableFirstBaselineDrop = BaseFontSize * 0.85;
+    private const double TableRowPitch = 16.48;
+    private const double TableColumnGutter = 2.9;
+
     public static Document Convert(string mdPath, MdLoadOptions? options = null)
     {
         var mdText = File.ReadAllText(mdPath, Encoding.UTF8);
@@ -39,8 +49,8 @@ internal static class MarkdownToPdfConverter
 
     private static Document ConvertFromText(string mdText, MdLoadOptions? options)
     {
-        var pageWidth = options?.PageInfo?.Width ?? 612;
-        var pageHeight = options?.PageInfo?.Height ?? 792;
+        var pageWidth = options?.PageInfo?.Width ?? 595.276;
+        var pageHeight = options?.PageInfo?.Height ?? 841.89;
         var marginLeft = options?.PageInfo?.Margin?.Left ?? 36;
         var marginTop = options?.PageInfo?.Margin?.Top ?? 36;
         var marginRight = options?.PageInfo?.Margin?.Right ?? 36;
@@ -102,6 +112,28 @@ internal static class MarkdownToPdfConverter
             }
 
             var trimmed = line.Trim();
+
+            // GitHub pipe table: a cell row directly above a divider row of dashes
+            // (optionally with colons/pipes). Rendered as a borderless grid — bold
+            // header centred over each column, body cells left-aligned, column
+            // width = the column's widest cell.
+            if (line.Contains('|') && i + 1 < lines.Length
+                && IsTableDividerLine(lines[i + 1].TrimEnd('\r')))
+            {
+                var header = SplitTableRow(line);
+                var body = new List<List<string>>();
+                var j = i + 2;
+                for (; j < lines.Length; j++)
+                {
+                    var rowLine = lines[j].TrimEnd('\r');
+                    if (string.IsNullOrWhiteSpace(rowLine) || !rowLine.Contains('|')) break;
+                    body.Add(SplitTableRow(rowLine));
+                }
+                var atPageTop = Math.Abs(y - (pageHeight - marginTop)) < 0.01;
+                EmitTable(sb, header, body, pageHeight, atPageTop, ref y);
+                i = j - 1;
+                continue;
+            }
 
             // Setext heading: a plain text line underlined by a run of = (H1) or - (H2).
             if (!IsBlockLine(line) && i + 1 < lines.Length)
@@ -218,6 +250,83 @@ internal static class MarkdownToPdfConverter
             page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
 
         return doc;
+    }
+
+    /// <summary>A table divider row: only pipes, colons, dashes and spaces,
+    /// with at least one dash (e.g. <c>--- | :--- | ---:</c>).</summary>
+    private static bool IsTableDividerLine(string line)
+        => line.Contains('-') && Regex.IsMatch(line, @"^\s*\|?[\s:|\-]+\|?\s*$");
+
+    /// <summary>Split a pipe-table row into trimmed, entity-decoded, de-markdowned
+    /// cell texts. Outer pipes are optional; a cell that decodes to whitespace
+    /// (e.g. <c>&amp;nbsp;</c>) becomes the empty string.</summary>
+    private static List<string> SplitTableRow(string line)
+    {
+        var t = line.Trim();
+        if (t.StartsWith("|")) t = t[1..];
+        if (t.EndsWith("|")) t = t[..^1];
+        var cells = new List<string>();
+        foreach (var raw in t.Split('|'))
+        {
+            var text = System.Net.WebUtility.HtmlDecode(raw).Replace('\u00A0', ' ');
+            cells.Add(TrimText(StripInlineMarkdown(text.Trim())).Trim());
+        }
+        return cells;
+    }
+
+    /// <summary>Render a pipe table as a borderless grid: bold header cells
+    /// centred over their column, body cells left-aligned in the base font;
+    /// each column is as wide as its widest cell plus a small gutter. The grid
+    /// anchors at the page-edge <see cref="TableLeft"/> (not the text margin);
+    /// a table opening the page starts at <see cref="TableTopBaselineOffset"/>
+    /// below the page top.</summary>
+    private static void EmitTable(StringBuilder sb, List<string> header,
+        List<List<string>> body, double pageHeight, bool atPageTop, ref double y)
+    {
+        var x = TableLeft;
+        var columnCount = header.Count;
+        foreach (var row in body) columnCount = Math.Max(columnCount, row.Count);
+        if (columnCount == 0) return;
+
+        var normal = Text.TextPaginator.CreateMeasurer("Times-Roman", BaseFontSize, null);
+        var bold = Text.TextPaginator.CreateMeasurer("Times-Bold", BaseFontSize, null);
+
+        var widths = new double[columnCount];
+        for (var c = 0; c < columnCount; c++)
+        {
+            if (c < header.Count && header[c].Length > 0)
+                widths[c] = bold(header[c]);
+            foreach (var row in body)
+                if (c < row.Count && row[c].Length > 0)
+                    widths[c] = Math.Max(widths[c], normal(row[c]));
+        }
+
+        var baseline = atPageTop ? pageHeight - TableTopBaselineOffset : y - TableFirstBaselineDrop;
+        for (var c = 0; c < header.Count; c++)
+        {
+            if (header[c].Length == 0) continue;
+            var cellX = x + ColumnOffset(widths, c);
+            EmitTextLine(sb, Bold, BaseFontSize,
+                cellX + (widths[c] - bold(header[c])) / 2, baseline, EscapePdf(header[c]));
+        }
+        foreach (var row in body)
+        {
+            baseline -= TableRowPitch;
+            for (var c = 0; c < row.Count && c < columnCount; c++)
+            {
+                if (row[c].Length == 0) continue;
+                EmitTextLine(sb, Normal, BaseFontSize,
+                    x + ColumnOffset(widths, c), baseline, EscapePdf(row[c]));
+            }
+        }
+        y = baseline - TableRowPitch;
+    }
+
+    private static double ColumnOffset(double[] widths, int column)
+    {
+        var offset = 0.0;
+        for (var c = 0; c < column; c++) offset += widths[c] + TableColumnGutter;
+        return offset;
     }
 
     /// <summary>Whether a line already opens a Markdown block construct

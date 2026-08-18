@@ -62,7 +62,14 @@ public class TextSearchOptions
     public Rectangle? Rectangle { get; set; }
 
     /// <summary>
-    /// Alias for IsRegularExpression (matches .NET Aspose.PDF API).
+    /// Gets or sets areas in which text is NOT absorbed. Characters that fall
+    /// inside any of these rectangles are dropped and the surrounding run is
+    /// split into separate fragments at the excluded region's edges.
+    /// </summary>
+    public Rectangle[]? ExcludeRectangles { get; set; }
+
+    /// <summary>
+    /// Alias for IsRegularExpression (matches the public API).
     /// </summary>
     public bool IsRegularExpressionUsed
     {

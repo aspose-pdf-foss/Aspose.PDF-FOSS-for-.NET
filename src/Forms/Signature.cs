@@ -43,10 +43,10 @@ public class Signature
     public DateTime Date { get; set; }
 
     /// <summary>FOSS-only long[] backing of the underlying signature's
-    /// /ByteRange entry — int[] is exposed publicly to match Aspose.Pdf.</summary>
+    /// /ByteRange entry — int[] is exposed publicly to match the public API.</summary>
     internal long[]? ByteRangeRaw { get; set; }
 
-    /// <summary>The signature's /ByteRange entry. Aspose.Pdf shape int[].
+    /// <summary>The signature's /ByteRange entry. public-API shape int[].
     /// Returns the raw /ByteRange (e.g. four entries: offset, length,
     /// offset, length) for the bytes the signature covers.</summary>
     public int[] ByteRange
@@ -64,6 +64,13 @@ public class Signature
     /// <summary>RFC 3161 TSA settings; honoured by the signer when set.</summary>
     public Aspose.Pdf.TimestampSettings TimestampSettings { get; set; } = new();
 
+    /// <summary>When true, this configuration produces a standalone RFC 3161
+    /// document timestamp (PAdES DocTimeStamp, /SubFilter <c>ETSI.RFC3161</c>)
+    /// rather than a certificate-based signature — the signer contacts the TSA
+    /// in <see cref="TimestampSettings"/> and no signing certificate is used.
+    /// Set by <see cref="PKCS7Detached(Aspose.Pdf.TimestampSettings)"/>.</summary>
+    internal bool IsDocumentTimestamp { get; set; }
+
     /// <summary>OCSP / revocation-check settings; honoured by the signer
     /// when set.</summary>
     public Aspose.Pdf.OcspSettings OcspSettings { get; set; } = new();
@@ -79,6 +86,11 @@ public class Signature
     /// remote-signing service produce the signature without exposing the
     /// private key.</summary>
     public SignHash? CustomSignHash { get; set; }
+
+    /// <summary>Digest requested through a (certificate, digest) constructor.
+    /// <see cref="DigestHashAlgorithm.Auto"/> — the default — lets the signer
+    /// pick from the /SubFilter.</summary>
+    internal DigestHashAlgorithm RequestedDigest { get; set; } = DigestHashAlgorithm.Auto;
 
     public bool UseLtv { get; set; }
 
@@ -212,9 +224,19 @@ public class Signature
         foreach (var field in form.Fields)
         {
             if (field.Type != FieldType.Signature) continue;
+            // A field with no /V is an unsigned placeholder, not a signature.
+            if (!field.Dict.ContainsKey("V")) continue;
 
             var sigDict = document.Reader.ResolveDict(field.Dict.Get("V"));
-            if (sigDict is null) continue;
+            if (sigDict is null)
+            {
+                // /V is present but does not resolve to a proper signature dictionary
+                // (e.g. a null value). That is a malformed/forged signature — surface
+                // it (with empty byte range/contents) so verification flags the forgery
+                // rather than silently reporting "no signatures".
+                yield return new Signature { FieldName = field.FullName, _sourceDocumentBytes = sourceBytes };
+                continue;
+            }
 
             var sig = FromDict(sigDict, document.Reader, field.FullName);
             sig._sourceDocumentBytes = sourceBytes;
@@ -353,4 +375,88 @@ public class PKCS7Detached : Signature
     public PKCS7Detached() { }
     public PKCS7Detached(string pfx, string password) : base(pfx, password) { }
     public PKCS7Detached(Stream pfx, string password) : base(pfx, password) { }
+
+    /// <summary>Sign with an explicitly chosen message digest rather than the
+    /// /SubFilter default. <see cref="DigestHashAlgorithm.Auto"/> keeps the
+    /// default (SHA-256).</summary>
+    public PKCS7Detached(string pfx, string password, DigestHashAlgorithm digestHashAlgorithm)
+        : base(pfx, password)
+    {
+        RequestedDigest = digestHashAlgorithm;
+    }
+
+    public PKCS7Detached(Stream pfx, string password, DigestHashAlgorithm digestHashAlgorithm)
+        : base(pfx, password)
+    {
+        RequestedDigest = digestHashAlgorithm;
+    }
+
+    /// <summary>Construct a standalone RFC 3161 document-timestamp
+    /// configuration. When signed, the signer requests a timestamp token from
+    /// the TSA in <paramref name="timestampSettings"/> and writes an
+    /// <c>ETSI.RFC3161</c> DocTimeStamp signature — no signing certificate is
+    /// required.</summary>
+    public PKCS7Detached(Aspose.Pdf.TimestampSettings timestampSettings)
+    {
+        TimestampSettings = timestampSettings ?? new Aspose.Pdf.TimestampSettings();
+        IsDocumentTimestamp = true;
+    }
+}
+
+/// <summary>A detached PKCS#7 signature configuration built around an
+/// already-loaded platform certificate — typically from the OS certificate
+/// store, a smartcard or an HSM — rather than a PFX file. When the
+/// certificate carries no private key, supply the crypto via
+/// <see cref="Signature.CustomSignHash"/>.</summary>
+public class ExternalSignature : Signature
+{
+    /// <summary>The certificate this instance was constructed with. Shadows
+    /// the internal PFX-loaded certificate of the base class, which is wired
+    /// from this one so the existing signing pipeline applies.</summary>
+    public new System.Security.Cryptography.X509Certificates.X509Certificate2 Certificate { get; }
+
+    public ExternalSignature(
+        System.Security.Cryptography.X509Certificates.X509Certificate2 certificate)
+        : this(certificate, detached: true)
+    {
+    }
+
+    /// <summary><paramref name="detached"/> selects the handler, exactly as the
+    /// <see cref="PKCS7"/> / <see cref="PKCS7Detached"/> pair does: true emits an
+    /// <c>adbe.pkcs7.detached</c> envelope over a SHA-256 digest, false the
+    /// <c>adbe.pkcs7.sha1</c> handler over a SHA-1 digest.</summary>
+    public ExternalSignature(
+        System.Security.Cryptography.X509Certificates.X509Certificate2 certificate, bool detached)
+    {
+        Detached = detached;
+        Certificate = certificate ?? throw new System.ArgumentNullException(nameof(certificate));
+        base.Certificate = Security.PdfCertificate.FromX509(certificate);
+    }
+
+    /// <summary>Which PKCS#7 handler this configuration signs with; see the
+    /// (certificate, detached) constructor.</summary>
+    internal bool Detached { get; } = true;
+
+    public ExternalSignature(
+        System.Security.Cryptography.X509Certificates.X509Certificate2 certificate,
+        DigestHashAlgorithm digestHashAlgorithm)
+        : this(certificate, detached: true)
+    {
+        RequestedDigest = digestHashAlgorithm;
+    }
+
+    /// <summary>Construct from a base64-encoded public certificate (no
+    /// private key) for deferred/external signing via
+    /// <see cref="Signature.CustomSignHash"/>.</summary>
+    public ExternalSignature(string base64Certificate, bool detached)
+    {
+        Detached = detached;
+        if (string.IsNullOrEmpty(base64Certificate))
+            throw new System.ArgumentNullException(nameof(base64Certificate));
+#pragma warning disable SYSLIB0057 // X509Certificate2(byte[]) still works on .NET 8; loader API is .NET 9+
+        Certificate = new System.Security.Cryptography.X509Certificates.X509Certificate2(
+            System.Convert.FromBase64String(base64Certificate));
+#pragma warning restore SYSLIB0057
+        base.Certificate = Security.PdfCertificate.FromX509(Certificate);
+    }
 }

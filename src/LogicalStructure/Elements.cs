@@ -368,20 +368,32 @@ public class StructureElement : Element, ITextElement
     /// renderer to place an authored block. Null when no position was requested.</summary>
     internal MarginInfo? _positionMargin;
 
+    /// <summary>The element starts on a new page (PositionSettings.IsInNewPage).</summary>
+    internal bool _posInNewPage;
+
+    /// <summary>The element continues the current text line instead of opening
+    /// its own (PositionSettings.IsInLineParagraph).</summary>
+    internal bool _posInline;
+
     /// <summary>Capture the requested layout position for an authored structure
     /// element. The settings object is an <c>Aspose.Pdf.Tagged.PositionSettings</c>
-    /// exposing a <c>Margin</c> property.
-    /// The margin is stored so the tagged-content renderer can offset the block
-    /// (Left/Right indent the column, Top adds space above it).</summary>
+    /// exposing Margin / IsInNewPage / IsInLineParagraph.
+    /// The values are stored so the tagged-content renderer can place the block
+    /// (Left/Right indent the column, Top/Bottom add space around it, IsInNewPage
+    /// breaks the page, IsInLineParagraph flows the element inline).</summary>
     public void AdjustPosition(object settings)
     {
         if (settings is null) return;
-        // Both the Tagged-side and LogicalStructure PositionSettings expose a
-        // MarginInfo? Margin; read it structurally so we don't hard-depend on
-        // either concrete type here.
-        var marginProp = settings.GetType().GetProperty("Margin");
-        if (marginProp?.GetValue(settings) is MarginInfo margin)
+        // Both the Tagged-side and LogicalStructure PositionSettings expose these
+        // properties; read them structurally so we don't hard-depend on either
+        // concrete type here.
+        var t = settings.GetType();
+        if (t.GetProperty("Margin")?.GetValue(settings) is MarginInfo margin)
             _positionMargin = margin;
+        if (t.GetProperty("IsInNewPage")?.GetValue(settings) is bool newPage)
+            _posInNewPage = newPage;
+        if (t.GetProperty("IsInLineParagraph")?.GetValue(settings) is bool inline)
+            _posInline = inline;
     }
 
     /// <summary>Move this element under <paramref name="newParent"/>.
@@ -655,10 +667,10 @@ internal sealed class IdRegistry
 
 // ── Typed structure-element subclasses ────────────────────────────────
 //
-// Each subclass just fixes the /S role for its node; Aspose.Pdf declares
+// Each subclass just fixes the /S role for its node; the public API declares
 // these as distinct nominal types so callers can pattern-match on the
 // element kind. No subclass adds members beyond what the base provides
-// (matches Aspose.Pdf DeclaredOnly reflection, which reports zero
+// (matches DeclaredOnly reflection, which reports zero
 // declared members on most of these subclasses).
 
 internal sealed class GenericStructureElement : StructureElement
@@ -896,6 +908,39 @@ public sealed class TOCElement : StructureElement
 {
     internal TOCElement() : base("TOC") { }
     internal TOCElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
+
+    // PDF/UA-1 tagged-TOC navigation: the TOC page whose TocInfo.Title the
+    // linked header element mirrors (LinkTocPageTitleToHeaderElement).
+    private Page? _linkedTocPage;
+    private HeaderElement? _linkedTitleHeader;
+
+    /// <summary>Links the TOC page's <see cref="TocInfo"/> title to the given
+    /// header element so the tagged navigation header carries the page title
+    /// (PDF/UA-1 tagged TOC). Throws <see cref="TOCpageHasNoTitleException"/>
+    /// when the page's TocInfo has no title to link.</summary>
+    public void LinkTocPageTitleToHeaderElement(Page tocPage, HeaderElement tocTitleHeader)
+    {
+        if (tocPage?.TocInfo?.Title is not { } title || string.IsNullOrEmpty(title.Text))
+            throw new TOCpageHasNoTitleException();
+        _linkedTocPage = tocPage;
+        _linkedTitleHeader = tocTitleHeader;
+    }
+
+    /// <summary>Save-time consistency check for the linked title (called from
+    /// the document's tagged-save path): a header that carries its OWN text
+    /// different from the TOC page title is a conflict; an empty header
+    /// inherits the page title.</summary>
+    internal void ValidateLinkedTitleOnSave()
+    {
+        if (_linkedTocPage?.TocInfo?.Title is not { } title || _linkedTitleHeader is null)
+            return;
+        var headerText = _linkedTitleHeader.ActualText;
+        var titleText = title.Text ?? string.Empty;
+        if (!string.IsNullOrEmpty(headerText) && headerText != titleText)
+            throw new HeaderElementTextConflictException();
+        if (string.IsNullOrEmpty(headerText))
+            _linkedTitleHeader.SetText(titleText);
+    }
 }
 public sealed class TOCIElement : StructureElement
 {

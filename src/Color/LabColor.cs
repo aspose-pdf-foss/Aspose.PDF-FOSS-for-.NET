@@ -16,9 +16,12 @@ internal static class LabColor
         var fx = fy + a / 500.0;
         var fz = fy - bb / 200.0;
         const double xn = 0.9642, yn = 1.0, zn = 0.8249; // D50 reference white
-        var x = xn * Finv(fx);
-        var y = yn * Finv(fy);
-        var z = zn * Finv(fz);
+        // Out-of-gamut Lab (e.g. L=0 with saturated a/b) can yield negative
+        // tristimulus values; XYZ is clamped at zero BEFORE the RGB
+        // matrix (Lab(0,−128,−128) → (0,30,195), not (0,59,195)).
+        var x = Math.Max(0, xn * Finv(fx));
+        var y = Math.Max(0, yn * Finv(fy));
+        var z = Math.Max(0, zn * Finv(fz));
 
         // XYZ (D50) → linear sRGB (Bradford-adapted D50→sRGB matrix).
         var rl = 3.1338561 * x - 1.6168667 * y - 0.4906146 * z;

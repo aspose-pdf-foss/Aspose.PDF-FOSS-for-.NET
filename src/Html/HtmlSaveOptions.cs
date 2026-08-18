@@ -54,8 +54,11 @@ public class HtmlSaveOptions : UnifiedSaveOptions
     /// <summary>Default font name used when a glyph has no resolvable face. Stored only.</summary>
     public string DefaultFontName { get; set; }
 
-    /// <summary>HTML doc-type emitted by the writer.</summary>
-    public HtmlDocumentType DocumentType { get; set; }
+    /// <summary>HTML doc-type emitted by the writer. A save that does not ask for a
+    /// flavour gets HTML5: the XHTML transitional DOCTYPE carries a w3.org URL of its
+    /// own, so a converted page would list a hyperlink the document does not
+    /// contain.</summary>
+    public HtmlDocumentType DocumentType { get; set; } = HtmlDocumentType.Html5;
 
     /// <summary>1-based page numbers to render. Null/empty means render all pages.</summary>
     public int[] ExplicitListOfSavedPages { get; set; }
@@ -120,7 +123,7 @@ public class HtmlSaveOptions : UnifiedSaveOptions
     /// <summary>Honour z-order of overlapping content when emitting HTML. Stored only.</summary>
     public bool UseZOrder { get; set; }
 
-    // ── Public fields (matches Aspose.Pdf reflection shape) ─────────
+    // ── Public fields (matches public reflection shape) ─────────
 
     public AntialiasingProcessingType AntialiasingProcessing;
     public string CssClassNamesPrefix;
@@ -133,18 +136,98 @@ public class HtmlSaveOptions : UnifiedSaveOptions
     public FontEncodingRules FontEncodingStrategy;
     public FontSavingModes FontSavingMode;
     public HtmlMarkupGenerationModes HtmlMarkupGenerationMode;
-    public LettersPositioningMethods LettersPositioningMethod;
+    // The enum's FIRST member is the em-compensation mode, but the DEFAULT
+    // behaviour is the pixel mode: a save that never touches this field
+    // solves its letter/word-spacing at four decimals, while an EXPLICIT
+    // em-compensation save quantizes to the 0.01 em grid. Same pattern as
+    // DocumentType: the enum order is public reflection shape and stays; the
+    // default is the initializer.
+    public LettersPositioningMethods LettersPositioningMethod =
+        LettersPositioningMethods.UsePixelUnitsInCssLetterSpacingForIE;
     public SaveOptions.BorderInfo PageBorderIfAny;
     public SaveOptions.MarginInfo PageMarginIfAny;
     public bool PagesFlowTypeDependsOnViewersScreenSize;
-    public PartsEmbeddingModes PartsEmbeddingMode = PartsEmbeddingModes.EmbedAllIntoHtml;
-    public RasterImagesSavingModes RasterImagesSavingMode;
+    // By default, resources go to the sidecar folder unless the caller
+    // explicitly asks for a single self-contained file (a default
+    // PNG-background save produces a "<stem>_files" sidecar folder, while an
+    // explicit EmbedAllIntoHtml inlines the page rasters).
+    public PartsEmbeddingModes PartsEmbeddingMode = PartsEmbeddingModes.NoEmbedding;
+    // The default is External (img_NN.png sidecars referenced from the page
+    // SVG), NOT the enum's first member: an explicit AsPngImagesEmbeddedIntoSvg
+    // inlines every raster as a data URI inside the page SVG instead.
+    public RasterImagesSavingModes RasterImagesSavingMode = RasterImagesSavingModes.AsExternalPngFilesReferencedViaSvg;
     public bool RemoveEmptyAreasOnTopAndBottom;
     public bool SaveShadowedTextsAsTransparentTexts;
     public bool SaveTransparentTexts;
     public string SpecialFolderForAllImages;
     public string SpecialFolderForSvgImages;
     public bool TrySaveTextUnderliningAndStrikeoutingInCss;
+
+    // ── Consistency validation ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Validate that the combination of splitting flags and custom saving
+    /// strategies is self-consistent for the requested output target, throwing an
+    /// <see cref="System.ArgumentException"/> describing the first conflict found.
+    /// Called by <see cref="Document"/> before an HTML save; the message text is
+    /// contractual.
+    /// </summary>
+    /// <param name="targetIsStream">True when the destination is a bare stream
+    /// (no directory to derive resource folders from), false for a file path.</param>
+    internal void CheckParametersConsistensyAndThrowExceptionOtherwise(bool targetIsStream)
+    {
+        if (targetIsStream)
+        {
+            if (SplitIntoPages)
+                throw new System.ArgumentException(
+                    "Inconsistent saving options detected: 'SplitIntoPages' may not be 'true' when requested saving to stream!");
+            if (SplitCssIntoPages)
+                throw new System.ArgumentException(
+                    "Inconsistent saving options detected: 'SplitCssIntoPages' may not be 'true' when requested saving to stream!");
+
+            // Saving external CSS/resources to a stream target has no folder to write
+            // into, so it is only possible when the caller supplies all three custom
+            // strategies. Supplying some but not all is the inconsistency.
+            var anyCustom = CustomStrategyOfCssUrlCreation != null
+                || CustomCssSavingStrategy != null
+                || CustomResourceSavingStrategy != null;
+            var allCustom = CustomStrategyOfCssUrlCreation != null
+                && CustomCssSavingStrategy != null
+                && CustomResourceSavingStrategy != null;
+            if (anyCustom && !allCustom)
+                throw new System.ArgumentException(
+                    "Inconsistent saving options detected: 'CustomStrategyOfCssUrlCreation', 'CustomCssSavingStrategy', " +
+                    "'CustomResourceSavingStrategy' may not be null when requested saving to stream without embedding CSS and resources!");
+            return;
+        }
+
+        if (SplitCssIntoPages && !SplitIntoPages)
+            throw new System.ArgumentException(
+                "Inconsistent saving options detected: 'SplitCssIntoPages' can be 'true' only if 'SplitIntoPages' also is 'true'!");
+
+        // A custom CSS URL maker only makes sense paired with a custom CSS saver,
+        // and vice versa — one without the other leaves either the href or the file
+        // undefined.
+        if ((CustomStrategyOfCssUrlCreation != null) != (CustomCssSavingStrategy != null))
+            throw new System.ArgumentException(
+                "Inconsistent saving options detected: 'CustomStrategyOfCssUrlCreation' and " +
+                "'CustomCssSavingStrategy' must be both set or both unset!");
+
+        // When the CSS is split per page, the caller's URL maker must yield a
+        // string.Format template with a '{0}' slot for the page number.
+        if (SplitCssIntoPages && CustomStrategyOfCssUrlCreation != null)
+        {
+            string url = null;
+            try { url = CustomStrategyOfCssUrlCreation(new CssUrlRequestInfo()); }
+            catch { /* a throwing caller strategy is treated as a non-conforming URL */ }
+            if (url is null || url.IndexOf("{0}", System.StringComparison.Ordinal) < 0)
+                throw new System.ArgumentException(
+                    "Inconsistent saving options detected: if 'SplitCssIntoPages' set as 'true' and " +
+                    "'CustomStrategyOfCssUrlCreation' set, then 'CustomStrategyOfCssUrlCreation()' must " +
+                    "return formatting string like this one : 'SomeTargetLocation-page_{0}.css' that can be " +
+                    "used with string.Format() method to generate URL for this or that page number!");
+        }
+    }
 
     // ── Nested enums ─────────────────────────────────────────────────────────
 
@@ -155,7 +238,7 @@ public class HtmlSaveOptions : UnifiedSaveOptions
         TryCorrectResultHtml,
     }
 
-    /// <summary>Backing-byte enum: the Aspose.Pdf reflection signature is byte-typed.</summary>
+    /// <summary>Backing-byte enum: the public reflection signature is byte-typed.</summary>
     public enum FontEncodingRules : byte
     {
         Default,
@@ -249,8 +332,10 @@ public class HtmlSaveOptions : UnifiedSaveOptions
         public string SupposedFileName;
     }
 
-    /// <summary>Context passed to a per-image saving callback.</summary>
-    public class HtmlImageSavingInfo
+    /// <summary>Context passed to a per-image saving callback. Derives from
+    /// <see cref="SaveOptions.ResourceSavingInfo"/> so a
+    /// <see cref="ResourceSavingStrategy"/> can downcast to reach the page numbers.</summary>
+    public class HtmlImageSavingInfo : SaveOptions.ResourceSavingInfo
     {
         public int HtmlHostPageNumber;
         public HtmlImageType ImageType;

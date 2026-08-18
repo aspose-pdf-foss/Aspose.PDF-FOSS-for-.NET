@@ -110,7 +110,7 @@ public sealed class FormattedText
     /// <summary>The first line text content.</summary>
     public string Text => _lines.Count > 0 ? _lines[0].Text : "";
 
-    /// <summary>Font size in points. Defaults to 10 to match the Aspose.Pdf
+    /// <summary>Font size in points. Defaults to 10 to match the public
     /// simple-constructor default (e.g. <c>new FormattedText("text")</c>).</summary>
     public double FontSize { get; set; } = 10;
 
@@ -317,7 +317,7 @@ public sealed class FormattedText
     {
     }
 
-    // ── System.Drawing.Color forwarders (Aspose.Pdf declares these as
+    // ── System.Drawing.Color forwarders (the public API declares these as
     //    distinct overloads alongside the Aspose.Pdf.Color ones). ──────────
 
     /// <summary>System.Drawing.Color foreground + foreground/background pair.</summary>
@@ -393,7 +393,7 @@ public sealed class FormattedText
 
     /// <summary>
     /// Create a FormattedText with Aspose.Pdf.Color foreground/background and a line spacing.
-    /// (Matches the Aspose.Pdf 7-arg <c>(text, textColor, textFont, textEncoding, embedded,
+    /// (Matches the 7-arg <c>(text, textColor, textFont, textEncoding, embedded,
     /// textSize, lineSpacing)</c> overload.)
     /// </summary>
     public FormattedText(string text, Color textColor, FontStyle textFont,
@@ -406,9 +406,11 @@ public sealed class FormattedText
         _lines.Add(new TextLine(text, lineSpacing));
     }
 
-    /// <summary>Total height of the formatted text block (sum of line heights).
-    /// Returns 0 in this build — the FormattedText facade doesn't compute layout.</summary>
-    public float TextHeight => 0f;
+    /// <summary>Height of the formatted text, in points. Matches the em height of a
+    /// single line at the current font size (mirrors <see cref="TextWidth"/>, which
+    /// measures the first line), so facade stamps built from a <see cref="FormattedText"/>
+    /// get a non-zero background/logo box.</summary>
+    public float TextHeight => string.IsNullOrEmpty(Text) ? 0f : (float)FontSize;
 
     /// <summary>
     /// Add a new line of text.
@@ -483,7 +485,7 @@ public sealed class FormattedText
         FontStyle.Symbol => "Symbol",
         FontStyle.ZapfDingbats => "ZapfDingbats",
         FontStyle.CjkFont => "MS-Gothic",
-        // Aspose.Pdf resolves FontStyle.Unknown to Times-Roman (a plain
+        // The reference resolves FontStyle.Unknown to Times-Roman (a plain
         // Standard-14 Type1 with WinAnsi — the EncodingType is not honoured for it).
         FontStyle.Unknown => "Times-Roman",
         _ => "Helvetica",

@@ -106,9 +106,12 @@ public class ManagedInflaterTests
     {
         // Compress less-compressible bytes so the deflate stream has substantial
         // body. Truncate just enough that the closing block is missing — the
-        // inflater should still emit the valid prefix it managed to decode.
+        // inflater should still emit the valid prefix it managed to decode,
+        // rounded down to whole 4096-byte chunks (the bytes past that boundary
+        // are what chunked-read consumers lose in flight, so keeping them would
+        // surface garbled spans other readers never see).
         var rnd = new Random(7);
-        var input = new byte[2048];
+        var input = new byte[16384];
         rnd.NextBytes(input);
         var compressed = CompressZlib(input);
         // Drop just enough trailing bytes (adler32 + a few body bytes) to make
@@ -118,13 +121,13 @@ public class ManagedInflaterTests
         try
         {
             var result = ManagedInflater.InflateZlib(truncated);
-            // Should get a meaningful prefix of the original, not zero or one byte.
-            Assert.True(result.Length > input.Length / 2,
+            // Whole chunks only, and a substantial prefix of the original.
+            Assert.True(result.Length % 4096 == 0,
+                $"expected whole 4096-byte chunks, got {result.Length}");
+            Assert.True(result.Length >= 8192,
                 $"expected substantial partial output, got {result.Length}");
-            // The last few bytes may be garbage when bit input runs out mid-symbol;
-            // the prefix up to that point should match the original.
-            int prefix = result.Length - 8;
-            Assert.Equal(input.AsSpan(0, prefix).ToArray(), result.AsSpan(0, prefix).ToArray());
+            // Every kept byte decoded before the fault, so the prefix matches.
+            Assert.Equal(input.AsSpan(0, result.Length).ToArray(), result);
         }
         catch (InvalidDataException)
         {

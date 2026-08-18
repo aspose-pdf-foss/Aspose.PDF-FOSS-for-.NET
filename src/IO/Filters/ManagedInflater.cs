@@ -102,8 +102,13 @@ internal static class ManagedInflater
         {
             // If we never produced anything, let the caller know — they may
             // want to try a different filter. If we have partial output, keep
-            // it: that's what every real PDF reader does.
+            // it: that's what every real PDF reader does. Readers consume
+            // inflate through fixed-size chunked reads and lose the partial
+            // chunk in flight when the error surfaces, so keep only whole
+            // 4096-byte chunks — the bytes past that boundary are exactly the
+            // garbled span other readers never see.
             if (outPos == 0) throw;
+            outPos &= ~0xFFF;
         }
 
         var result = new byte[outPos];

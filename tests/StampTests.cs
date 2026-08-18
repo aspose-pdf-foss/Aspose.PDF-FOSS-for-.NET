@@ -64,8 +64,9 @@ public class StampTests
         var content = stamp.BuildContentStream(page);
         var text = System.Text.Encoding.ASCII.GetString(content);
         // The stamp positions its text block with a cm transform at the XIndent/YIndent
-        // anchor (Left/Bottom), then draws each line relative to it — so a 72,72 stamp
-        // anchors the block at "72 72 cm" rather than the old single-line "72 72 Td".
-        Assert.Contains("72 72 cm", text);
+        // anchor (Left/Bottom), then draws each line relative to it. A bottom seat
+        // measures to the text box's DESCENDER, so the baseline anchors one font
+        // descent above the indent: 72 + 10pt · 0.207 (Helvetica) = 74.07.
+        Assert.Contains("72 74.07 cm", text);
     }
 }

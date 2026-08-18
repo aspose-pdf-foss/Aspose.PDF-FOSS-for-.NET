@@ -1,4 +1,4 @@
-namespace Aspose.Pdf.Converters;
+namespace Aspose.Pdf;
 
 /// <summary>
 /// Options for loading Markdown files as PDF documents.
@@ -17,11 +17,11 @@ public sealed class MdLoadOptions : LoadOptions
 /// </summary>
 public sealed class PageSizeInfo
 {
-    /// <summary>Page width in points.</summary>
-    public double Width { get; set; } = 612;
+    /// <summary>Page width in points. Defaults to ISO A4.</summary>
+    public double Width { get; set; } = 595.276;
 
-    /// <summary>Page height in points.</summary>
-    public double Height { get; set; } = 792;
+    /// <summary>Page height in points. Defaults to ISO A4.</summary>
+    public double Height { get; set; } = 841.89;
 
     /// <summary>Page margins.</summary>
     public MarginInfo? Margin { get; set; }

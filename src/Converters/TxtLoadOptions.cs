@@ -6,7 +6,7 @@ namespace Aspose.Pdf
     /// <summary>
     /// Options for loading a plain-text (.txt) file as a PDF document. The text is
     /// laid out line-by-line at the configured font size and margins. Lives in the
-    /// Aspose.Pdf namespace to match the Aspose.Pdf public API surface.
+    /// Aspose.Pdf namespace to match the public API surface.
     /// </summary>
     public sealed class TxtLoadOptions : LoadOptions
     {

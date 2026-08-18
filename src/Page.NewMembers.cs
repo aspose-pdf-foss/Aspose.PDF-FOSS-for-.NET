@@ -3,7 +3,7 @@ using Aspose.Pdf.Vector;
 
 namespace Aspose.Pdf;
 
-/// <summary>Aspose.Pdf-shape additions to <see cref="Page"/> — every method
+/// <summary>Public-API-shape additions to <see cref="Page"/> — every method
 /// either delegates to a real working pipeline or throws
 /// NotSupportedException with a clear message about the missing capability.</summary>
 public sealed partial class Page
@@ -19,7 +19,7 @@ public sealed partial class Page
 
     /// <summary>Internal hook called by <see cref="Document"/>'s save pipeline.
     /// Public mutability isn't exposed — the event slot is reflection-only
-    /// via the Aspose.Pdf-shape <c>event</c> declaration.</summary>
+    /// via the public-API-shape <c>event</c> declaration.</summary>
     internal void RaiseBeforePageGenerate() => OnBeforePageGenerate?.Invoke(this);
 
     /// <summary>Render this page through a <see cref="PageDevice"/> to a stream.</summary>

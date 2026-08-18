@@ -65,7 +65,11 @@ public sealed class TocInfo
 /// margins, indent, text state). Stored only by the FOSS TOC pipeline.</summary>
 public sealed class LevelFormat
 {
-    public TabLeaderType LineDash { get; set; } = TabLeaderType.None;
+    /// <summary>Leader style for this level's entries. The per-level default
+    /// is Dot: once a FormatArray is in play, each level's own LineDash governs
+    /// its leader (an explicit None suppresses it) and the TocInfo-level
+    /// LineDash is consulted only when no level format exists.</summary>
+    public TabLeaderType LineDash { get; set; } = TabLeaderType.Dot;
 
     /// <summary>Margin for this level's TOC entry. Auto-initialized so callers
     /// can write <c>level.Margin.Left = 0</c> on a fresh instance.</summary>
@@ -212,41 +216,98 @@ public class Heading : BaseParagraph
         string fontName, string numberPrefix)
     {
         var builder = new Content.ContentStreamBuilder();
-        var totalText = numberPrefix + string.Join("", Segments.Select(s => s.Text));
-        var fontSize = Segments.Count > 0 ? Segments[1].TextState.FontSize : 12;
+        var totalText = string.Join("", Segments.Select(s => s.Text));
+        // Real Helvetica advances for the wrap: the crude half-em estimate
+        // under-fills typical lines (breaking ~10 chars early); each line
+        // must fill to the real measured width.
+        static double MeasureHelv(string s, double fs)
+        {
+            double w = 0;
+            foreach (var c in s)
+            {
+                var cw = Aspose.Pdf.Text.Standard14Fonts.GetWidth("Helvetica", c < 256 ? c : '?');
+                if (cw < 0) cw = 500;
+                w += cw * fs / 1000.0;
+            }
+            return w;
+        }
+        // The heading's OWN TextState wins when the caller set it (a content
+        // heading with TextState.FontSize = 12 renders 12 pt even though its
+        // segment was created at the 10 pt default); an explicitly-sized
+        // segment comes next; the legacy segment fallback stays for untouched
+        // headings so their metrics don't shift.
+        double fontSize = TextState.FontSizeTouched ? TextState.FontSize
+            : Segments.FirstOrDefault(s => s.TextState.FontSizeTouched)?.TextState.FontSize
+            ?? (Segments.Count > 0 ? Segments[1].TextState.FontSize : 12);
         var lineSpacing = Segments.Count > 0 && Segments[1].TextState.LineSpacing > 0
             ? Segments[1].TextState.LineSpacing
             : fontSize * 1.2;
 
-        // Word-wrap the text to fit page width
+        // Word-wrap the text to fit page width, filling each line to the REAL
+        // measured width ("…under the plan onaccount" /
+        // "of each allowed" break exactly where the Helvetica advances run out).
         var availWidth = page.Width - x - 72; // right margin
-        var charWidth = fontSize * 0.5; // approximate
-        var charsPerLine = (int)(availWidth / charWidth);
-        if (charsPerLine < 10) charsPerLine = 10;
 
         var lines = new List<string>();
-        var remaining = totalText;
-        while (remaining.Length > 0)
+        var cur = new System.Text.StringBuilder();
+        foreach (var word in totalText.Split(' '))
         {
-            if (remaining.Length <= charsPerLine)
+            var trial = cur.Length == 0 ? word : cur + " " + word;
+            if (MeasureHelv(trial, fontSize) <= availWidth || cur.Length == 0)
             {
-                lines.Add(remaining);
-                break;
+                if (cur.Length > 0) cur.Append(' ');
+                cur.Append(word);
             }
-            var breakAt = remaining.LastIndexOf(' ', Math.Min(charsPerLine, remaining.Length - 1));
-            if (breakAt <= 0) breakAt = charsPerLine;
-            lines.Add(remaining[..breakAt]);
-            remaining = remaining[breakAt..].TrimStart();
+            else
+            {
+                lines.Add(cur.ToString());
+                cur.Clear();
+                cur.Append(word);
+            }
+        }
+        if (cur.Length > 0 || lines.Count == 0) lines.Add(cur.ToString());
+
+        // First baseline drops by the cap-height ascent from the band top (the
+        // same placement the flow's plain-fragment writer uses), so a heading
+        // line chains bottoms with its neighbours by exactly its own font size
+        // — stepping 758 → 748 → … → next heading at −12.
+        var capHeight = Aspose.Pdf.Text.Standard14Fonts.GetCapHeight("Helvetica");
+        var ascent = capHeight > 0 ? capHeight / 1000.0 * fontSize : fontSize * 0.7;
+        var baseline = y - ascent;
+
+        // Every content heading opens with an EMPTY text show at
+        // the line start in the auto-created first segment's own size (so
+        // extraction reports an empty 10 pt fragment before a 12 pt heading).
+        if (Segments.Count > 1 && string.IsNullOrEmpty(Segments[0].Text))
+            builder.BeginText().SetFont(fontName, Segments[0].TextState.FontSize > 0
+                    ? (double)Segments[0].TextState.FontSize : 10)
+                .SetFillColor(0, 0, 0)
+                .MoveTextPosition(x, baseline).ShowText(string.Empty).EndText();
+
+        // The auto-sequence number is its OWN show at the margin and the
+        // heading text starts at a fixed 20 pt tab stop after it
+        // ("1  " at x=40, "Heading 0" at x=60 regardless of the number width).
+        var textX = x;
+        if (numberPrefix.Length > 0)
+        {
+            builder.BeginText().SetFont(fontName, fontSize).SetFillColor(0, 0, 0)
+                .MoveTextPosition(x, baseline).ShowText(numberPrefix).EndText();
+            textX = x + 20;
         }
 
         builder.BeginText();
         builder.SetFont(fontName, fontSize);
         builder.SetFillColor(0, 0, 0);
-        builder.MoveTextPosition(x, y);
+        builder.MoveTextPosition(textX, baseline);
 
         for (var i = 0; i < lines.Count; i++)
         {
-            if (i > 0)
+            // Continuation lines return to the heading's left edge (the
+            // number-tab indent applies to the FIRST line only —
+            // "b.a  the value…" wraps back to the margin).
+            if (i == 1)
+                builder.MoveTextPosition(x - textX, -lineSpacing);
+            else if (i > 1)
                 builder.MoveTextPosition(0, -lineSpacing);
             builder.ShowText(lines[i]);
         }

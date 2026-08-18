@@ -1,8 +1,11 @@
 namespace Aspose.Pdf.Text;
 
 /// <summary>
-/// Implements a simplified Unicode Bidi Algorithm (UAX #9) for reordering
-/// visual-order RTL text to logical order during PDF text extraction.
+/// Implements the Unicode Bidi Algorithm (UAX #9) for reordering visual-order RTL
+/// text to logical order during PDF text extraction. Levels are computed on the
+/// input string (rules W1–W7, N1–N2, I1–I2, L1), then maximal runs at each level
+/// from the highest down to the lowest odd level are flipped (L2). Applying this
+/// to a PDF's physically (visually) ordered string yields the logical string.
 /// </summary>
 internal static class BidiReorderer
 {
@@ -14,8 +17,7 @@ internal static class BidiReorderer
     {
         if (string.IsNullOrEmpty(text) || !ContainsRtl(text))
             return text;
-
-        return Reorder(text);
+        return ReorderCore(text, out _);
     }
 
     /// <summary>
@@ -28,8 +30,7 @@ internal static class BidiReorderer
         perm = null;
         if (string.IsNullOrEmpty(text) || !ContainsRtl(text))
             return text;
-
-        return ReorderWithPerm(text, out perm);
+        return ReorderCore(text, out perm);
     }
 
     /// <summary>
@@ -62,302 +63,290 @@ internal static class BidiReorderer
             || (c >= 0xFE70 && c <= 0xFEFF);   // Arabic Presentation Forms-B
     }
 
-    /// <summary>
-    /// Get the bidi character type for embedding level resolution.
-    /// Simplified from full UAX #9 — covers the main categories needed for text extraction.
-    /// </summary>
-    private static BidiType GetBidiType(char c)
+    // Bidi character types (UAX #9 table 4).
+    private const sbyte L = 0;    // Left-to-Right
+    private const sbyte R = 1;    // Right-to-Left
+    private const sbyte AL = 2;   // Right-to-Left Arabic
+    private const sbyte EN = 3;   // European Number
+    private const sbyte ES = 4;   // European Number Separator
+    private const sbyte ET = 5;   // European Number Terminator
+    private const sbyte AN = 6;   // Arabic Number
+    private const sbyte CS = 7;   // Common Number Separator
+    private const sbyte NSM = 8;  // Non-Spacing Mark
+    private const sbyte BN = 9;   // Boundary Neutral (formatting / zero-width)
+    private const sbyte S = 10;   // Segment Separator
+    private const sbyte WS = 11;  // Whitespace
+    private const sbyte ON = 12;  // Other Neutral
+
+    private static sbyte GetBidiType(char c)
     {
-        // Explicit directional formatting characters
-        if (c == 0x200F) return BidiType.R;  // RLM
-        if (c == 0x200E) return BidiType.L;  // LRM
-        if (c >= 0x202A && c <= 0x202E) return BidiType.Format; // LRE, RLE, PDF, LRO, RLO
-        if (c >= 0x2066 && c <= 0x2069) return BidiType.Format; // LRI, RLI, FSI, PDI
+        // Directional marks / zero-width formatting characters.
+        if (c == 0x200F) return R;   // RLM
+        if (c == 0x200E) return L;   // LRM
+        if (c is (>= (char)0x200B and <= (char)0x200D) or (>= (char)0x202A and <= (char)0x202E)
+              or (>= (char)0x2066 and <= (char)0x2069) or (char)0xFEFF)
+            return BN;
 
-        // Strong RTL
-        if (IsRtlChar(c)) return BidiType.R;
+        // Non-spacing marks (combining ranges relevant to extraction).
+        if (c is (>= (char)0x0300 and <= (char)0x036F)     // combining diacriticals
+              or (>= (char)0x0591 and <= (char)0x05BD)     // Hebrew points
+              or (char)0x05BF or (char)0x05C1 or (char)0x05C2 or (char)0x05C4 or (char)0x05C5 or (char)0x05C7
+              or (>= (char)0x0610 and <= (char)0x061A)     // Arabic marks
+              or (>= (char)0x064B and <= (char)0x065F) or (char)0x0670
+              or (>= (char)0x06D6 and <= (char)0x06DC) or (>= (char)0x06DF and <= (char)0x06E4)
+              or (char)0x06E7 or (char)0x06E8 or (>= (char)0x06EA and <= (char)0x06ED))
+            return NSM;
 
-        // European numbers
-        if (c >= '0' && c <= '9') return BidiType.EN;
+        // Strong RTL: Arabic-script ranges are AL, the rest (Hebrew etc.) R.
+        if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)
+            || (c >= 0xFB50 && c <= 0xFDFF) || (c >= 0xFE70 && c <= 0xFEFF))
+            return AL;
+        if (IsRtlChar(c)) return R;
 
-        // European number separators
-        if (c == '+' || c == '-') return BidiType.ES;
+        // Numbers.
+        if (c >= '0' && c <= '9') return EN;
+        if (c >= 0x0660 && c <= 0x0669) return AN;  // Arabic-Indic digits
 
-        // European number terminators
+        // Number separators / terminators.
+        if (c == '+' || c == '-') return ES;
         if (c == '#' || c == '$' || c == '%' || c == 0x00B0 || c == 0x00A2 || c == 0x00A3 || c == 0x00A5)
-            return BidiType.ET;
+            return ET;
+        if (c == '/' || c == ':' || c == ',' || c == '.' || c == 0x00A0) return CS;
 
-        // Common separators
-        if (c == '/' || c == ':') return BidiType.CS;
+        // Whitespace / segment separators. U+E000 is TextAbsorber's masked
+        // line-end glyph space (EolShowSpaceSentinel) — it stands for a space.
+        if (c == '\t') return S;
+        if (c == ' ' || c == '\n' || c == '\r' || c == 0x000C || c == 0xE000) return WS;
 
-        // Whitespace / segment separator
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0x00A0)
-            return BidiType.WS;
-
-        // Other neutrals (punctuation, symbols)
-        if (c < 0x0041) return BidiType.ON; // ASCII controls and punctuation before 'A'
-        if (c > 0x005A && c < 0x0061) return BidiType.ON; // [\]^_`
-        if (c > 0x007A && c < 0x00C0) return BidiType.ON; // {|}~ through extended Latin start
-
-        // Mirrored punctuation
-        if (c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' ||
-            c == 0x00AB || c == 0x00BB || c == 0x2018 || c == 0x2019 ||
-            c == 0x201C || c == 0x201D || c == 0x2039 || c == 0x203A)
-            return BidiType.ON;
+        // Neutral punctuation and symbols.
+        if (c < 0x0041) return ON;
+        if (c > 0x005A && c < 0x0061) return ON;
+        if (c > 0x007A && c < 0x00C0) return ON;
+        if (c == 0x2018 || c == 0x2019 || c == 0x201C || c == 0x201D
+            || c == 0x2039 || c == 0x203A || c == 0x00AB || c == 0x00BB
+            || (c >= 0x2010 && c <= 0x2015)) return ON;
 
         // Default: strong LTR (Latin, Cyrillic, Greek, CJK, etc.)
-        return BidiType.L;
+        return L;
     }
 
     /// <summary>
-    /// Perform bidi reordering and return a permutation array where perm[i] = original index.
+    /// Core UBA pass: compute levels on the input string, reorder, mirror, strip formats.
+    /// perm[outPos] = index in the original string.
     /// </summary>
-    private static string ReorderWithPerm(string text, out int[] perm)
+    private static string ReorderCore(string text, out int[] perm)
     {
         var len = text.Length;
-        var types = new BidiType[len];
-        var levels = new byte[len];
-        perm = new int[len];
-        for (var i = 0; i < len; i++) perm[i] = i;
-
+        var initialTypes = new sbyte[len];
         for (var i = 0; i < len; i++)
-            types[i] = GetBidiType(text[i]);
+            initialTypes[i] = GetBidiType(text[i]);
 
-        byte paragraphLevel = 0;
+        // P2/P3: paragraph embedding level from the first strong character.
+        sbyte para = 0;
         for (var i = 0; i < len; i++)
         {
-            if (types[i] == BidiType.R) { paragraphLevel = 1; break; }
-            if (types[i] == BidiType.L) break;
+            var t = initialTypes[i];
+            if (t == L) break;
+            if (t == R || t == AL) { para = 1; break; }
         }
 
+        var types = (sbyte[])initialTypes.Clone();
+        var levels = new sbyte[len];
+        for (var i = 0; i < len; i++) levels[i] = para;
+
+        // The whole line is one level run (no explicit embedding codes are honoured
+        // during extraction); sor/eor take the paragraph direction.
+        var sor = (sbyte)((para & 1) == 1 ? R : L);
+        var eor = sor;
+
+        ResolveWeakTypes(types, 0, len, sor);
+        ResolveNeutralTypes(types, levels, 0, len, para, sor, eor);
+        ResolveImplicitLevels(types, levels, 0, len);
+
+        // L1: segment separators and trailing whitespace reset to the paragraph level.
         for (var i = 0; i < len; i++)
         {
-            switch (types[i])
-            {
-                case BidiType.R:
-                    levels[i] = (byte)(paragraphLevel % 2 == 1 ? paragraphLevel : paragraphLevel + 1);
-                    break;
-                case BidiType.L:
-                    levels[i] = (byte)(paragraphLevel % 2 == 0 ? paragraphLevel : paragraphLevel + 1);
-                    break;
-                case BidiType.EN: case BidiType.ES: case BidiType.ET: case BidiType.CS:
-                    levels[i] = paragraphLevel == 1 ? (byte)2 : (byte)0;
-                    break;
-                case BidiType.WS: case BidiType.ON: case BidiType.Format:
-                    levels[i] = ResolveNeutralLevel(types, levels, i, len, paragraphLevel);
-                    break;
-            }
+            var t = initialTypes[i];
+            if (t != S) continue;
+            levels[i] = para;
+            for (var j = i - 1; j >= 0 && IsWhitespaceType(initialTypes[j]); j--)
+                levels[j] = para;
         }
+        for (var j = len - 1; j >= 0 && IsWhitespaceType(initialTypes[j]); j--)
+            levels[j] = para;
 
-        byte maxLevel = 0;
-        foreach (var level in levels) if (level > maxLevel) maxLevel = level;
-
-        var result = text.ToCharArray();
-        for (var level = maxLevel; level >= 1; level--)
+        // L2: from the highest level down to the lowest odd level, flip maximal runs.
+        sbyte highest = 0, lowestOdd = 63;
+        foreach (var lv in levels)
+        {
+            if (lv > highest) highest = lv;
+            if ((lv & 1) == 1 && lv < lowestOdd) lowestOdd = lv;
+        }
+        var order = new int[len];
+        for (var i = 0; i < len; i++) order[i] = i;
+        for (var level = highest; level >= lowestOdd && lowestOdd != 63; level--)
         {
             var i = 0;
             while (i < len)
             {
-                if (levels[i] >= level)
+                if (levels[i] < level) { i++; continue; }
+                var start = i;
+                while (i < len && levels[i] >= level) i++;
+                var a = start;
+                var b = i - 1;
+                while (a < b)
                 {
-                    var start = i;
-                    while (i < len && levels[i] >= level) i++;
-                    ReverseRange(result, start, i - 1);
-                    ReverseRange(perm, start, i - 1);
-                }
-                else i++;
-            }
-        }
-
-        for (var i = 0; i < len; i++)
-            if (levels[i] % 2 == 1) result[i] = MirrorChar(result[i]);
-
-        var reordered = RemoveFormatChars(new string(result));
-        // If format chars were removed, the perm array may be longer than the result — trim it
-        if (reordered.Length < len)
-        {
-            // Rebuild perm without format-char positions
-            var filteredPerm = new int[reordered.Length];
-            var outIdx = 0;
-            for (var i = 0; i < len && outIdx < reordered.Length; i++)
-            {
-                var c = result[i];
-                if (c is not ('\u200B' or '\u200C' or '\u200D' or '\u200E' or '\u200F'
-                    or '\u202A' or '\u202B' or '\u202C' or '\u202D' or '\u202E'
-                    or '\u2066' or '\u2067' or '\u2068' or '\u2069' or '\uFEFF'))
-                {
-                    filteredPerm[outIdx++] = perm[i];
-                }
-            }
-            perm = filteredPerm;
-        }
-
-        return reordered;
-    }
-
-    private static void ReverseRange(int[] arr, int start, int end)
-    {
-        while (start < end)
-        {
-            (arr[start], arr[end]) = (arr[end], arr[start]);
-            start++;
-            end--;
-        }
-    }
-
-    /// <summary>
-    /// Perform bidi reordering on a string containing RTL characters.
-    /// Implements a simplified version of the Unicode Bidi Algorithm.
-    /// </summary>
-    private static string Reorder(string text)
-    {
-        var len = text.Length;
-        var types = new BidiType[len];
-        var levels = new byte[len];
-
-        // Step 1: Assign initial bidi types
-        for (var i = 0; i < len; i++)
-            types[i] = GetBidiType(text[i]);
-
-        // Step 2: Determine paragraph embedding level
-        // For PDF text extraction, the paragraph level is determined by the first strong character
-        byte paragraphLevel = 0;
-        for (var i = 0; i < len; i++)
-        {
-            if (types[i] == BidiType.R)
-            {
-                paragraphLevel = 1;
-                break;
-            }
-            if (types[i] == BidiType.L)
-                break;
-        }
-
-        // Step 3: Assign embedding levels
-        // Simplified: all strong characters get the paragraph level or paragraph level + 1
-        for (var i = 0; i < len; i++)
-        {
-            switch (types[i])
-            {
-                case BidiType.R:
-                    levels[i] = (byte)(paragraphLevel % 2 == 1 ? paragraphLevel : paragraphLevel + 1);
-                    break;
-                case BidiType.L:
-                    levels[i] = (byte)(paragraphLevel % 2 == 0 ? paragraphLevel : paragraphLevel + 1);
-                    break;
-                case BidiType.EN:
-                case BidiType.ES:
-                case BidiType.ET:
-                case BidiType.CS:
-                    // Numbers in RTL context get level 2 (still LTR but inside RTL)
-                    levels[i] = paragraphLevel == 1 ? (byte)2 : (byte)0;
-                    break;
-                case BidiType.WS:
-                case BidiType.ON:
-                case BidiType.Format:
-                    // Neutrals: resolve based on surrounding strong types
-                    levels[i] = ResolveNeutralLevel(types, levels, i, len, paragraphLevel);
-                    break;
-            }
-        }
-
-        // Step 4: Reverse characters at each level
-        // Find the maximum embedding level
-        byte maxLevel = 0;
-        foreach (var level in levels)
-        {
-            if (level > maxLevel) maxLevel = level;
-        }
-
-        var result = text.ToCharArray();
-
-        // Reverse from max level down to 1
-        for (var level = maxLevel; level >= 1; level--)
-        {
-            // Find contiguous runs at this level or higher
-            var i = 0;
-            while (i < len)
-            {
-                if (levels[i] >= level)
-                {
-                    var start = i;
-                    while (i < len && levels[i] >= level) i++;
-                    // Reverse the run [start, i)
-                    ReverseRange(result, start, i - 1);
-                }
-                else
-                {
-                    i++;
+                    (order[a], order[b]) = (order[b], order[a]);
+                    a++;
+                    b--;
                 }
             }
         }
 
-        // Mirror bracket/punctuation characters in RTL runs
-        for (var i = 0; i < len; i++)
+        // L4: mirror characters at odd levels (indexed by ORIGINAL position), then emit
+        // in reordered sequence, skipping zero-width / directional formatting characters.
+        var outChars = new char[len];
+        var outPerm = new int[len];
+        var pos = 0;
+        for (var k = 0; k < len; k++)
         {
-            if (levels[i] % 2 == 1)
-            {
-                result[i] = MirrorChar(result[i]);
-            }
+            var idx = order[k];
+            var c = text[idx];
+            if (IsFormatChar(c)) continue;
+            if ((levels[idx] & 1) == 1) c = MirrorChar(c);
+            outChars[pos] = c;
+            outPerm[pos] = idx;
+            pos++;
         }
-
-        // Remove directional formatting characters
-        return RemoveFormatChars(new string(result));
+        perm = pos == len ? outPerm : outPerm[..pos];
+        return new string(outChars, 0, pos);
     }
 
-    private static byte ResolveNeutralLevel(BidiType[] types, byte[] levels, int pos, int len, byte paragraphLevel)
+    private static bool IsWhitespaceType(sbyte t) => t == WS || t == BN;
+
+    // W1–W7 (UAX #9), operating on one level run [start, limit).
+    private static void ResolveWeakTypes(sbyte[] types, int start, int limit, sbyte sor)
     {
-        // Look left for the nearest strong type
-        var leftType = BidiType.ON;
-        for (var i = pos - 1; i >= 0; i--)
+        // W1: NSM takes the type of the previous character.
+        var prev = sor;
+        for (var i = start; i < limit; i++)
         {
-            if (types[i] == BidiType.L || types[i] == BidiType.R)
+            if (types[i] == NSM) types[i] = prev;
+            else prev = types[i];
+        }
+
+        // W2: EN → AN when the last strong type before it is AL.
+        for (var i = start; i < limit; i++)
+        {
+            if (types[i] != EN) continue;
+            for (var j = i - 1; j >= start; j--)
             {
-                leftType = types[i];
-                break;
-            }
-            if (types[i] == BidiType.EN)
-            {
-                leftType = BidiType.R; // EN treated as R for neutral resolution in RTL
+                var t = types[j];
+                if (t != L && t != R && t != AL) continue;
+                if (t == AL) types[i] = AN;
                 break;
             }
         }
 
-        // Look right for the nearest strong type
-        var rightType = BidiType.ON;
-        for (var i = pos + 1; i < len; i++)
+        // W3: AL → R.
+        for (var i = start; i < limit; i++)
+            if (types[i] == AL) types[i] = R;
+
+        // W4: single ES between two ENs → EN; single CS between EN/EN or AN/AN → that number type.
+        for (var i = start + 1; i < limit - 1; i++)
         {
-            if (types[i] == BidiType.L || types[i] == BidiType.R)
-            {
-                rightType = types[i];
-                break;
-            }
-            if (types[i] == BidiType.EN)
-            {
-                rightType = BidiType.R;
-                break;
-            }
+            if (types[i] != ES && types[i] != CS) continue;
+            var prevType = types[i - 1];
+            var nextType = types[i + 1];
+            if (prevType == EN && nextType == EN) types[i] = EN;
+            else if (types[i] == CS && prevType == AN && nextType == AN) types[i] = AN;
         }
 
-        // If both sides agree, use that level
-        if (leftType == BidiType.R && rightType == BidiType.R)
-            return (byte)(paragraphLevel % 2 == 1 ? paragraphLevel : paragraphLevel + 1);
-        if (leftType == BidiType.L && rightType == BidiType.L)
-            return (byte)(paragraphLevel % 2 == 0 ? paragraphLevel : paragraphLevel + 1);
+        // W5: a run of ETs adjacent to an EN becomes EN.
+        for (var i = start; i < limit; i++)
+        {
+            if (types[i] != ET) continue;
+            var runStart = i;
+            var runLimit = i;
+            while (runLimit < limit && types[runLimit] == ET) runLimit++;
+            var before = runStart > start ? types[runStart - 1] : sor;
+            var after = runLimit < limit ? types[runLimit] : sor;
+            if (before == EN || after == EN)
+                for (var j = runStart; j < runLimit; j++) types[j] = EN;
+            i = runLimit - 1;
+        }
 
-        // Otherwise, use paragraph level
-        return paragraphLevel;
+        // W6: remaining separators/terminators → ON.
+        for (var i = start; i < limit; i++)
+            if (types[i] == ES || types[i] == ET || types[i] == CS) types[i] = ON;
+
+        // W7: EN → L when the last strong type before it is L.
+        for (var i = start; i < limit; i++)
+        {
+            if (types[i] != EN) continue;
+            var prevStrong = sor;
+            for (var j = i - 1; j >= start; j--)
+            {
+                var t = types[j];
+                if (t == L || t == R) { prevStrong = t; break; }
+            }
+            if (prevStrong == L) types[i] = L;
+        }
     }
 
-    private static void ReverseRange(char[] arr, int start, int end)
+    // N1–N2: neutrals take the surrounding direction when both sides agree
+    // (numbers count as R), otherwise the embedding direction.
+    private static void ResolveNeutralTypes(sbyte[] types, sbyte[] levels, int start, int limit,
+        sbyte para, sbyte sor, sbyte eor)
     {
-        while (start < end)
+        for (var i = start; i < limit; i++)
         {
-            (arr[start], arr[end]) = (arr[end], arr[start]);
-            start++;
-            end--;
+            var t = types[i];
+            if (t != WS && t != ON && t != S && t != BN) continue;
+            var runStart = i;
+            var runLimit = i;
+            while (runLimit < limit)
+            {
+                var rt = types[runLimit];
+                if (rt != WS && rt != ON && rt != S && rt != BN) break;
+                runLimit++;
+            }
+
+            var leading = runStart == start ? sor : types[runStart - 1];
+            if (leading == EN || leading == AN) leading = R;
+            var trailing = runLimit == limit ? eor : types[runLimit];
+            if (trailing == EN || trailing == AN) trailing = R;
+
+            var resolved = leading == trailing ? leading : (sbyte)((para & 1) == 1 ? R : L);
+            for (var j = runStart; j < runLimit; j++) types[j] = resolved;
+            i = runLimit - 1;
         }
     }
+
+    // I1–I2: resolved types to implicit levels.
+    private static void ResolveImplicitLevels(sbyte[] types, sbyte[] levels, int start, int limit)
+    {
+        for (var i = start; i < limit; i++)
+        {
+            var level = levels[i];
+            var t = types[i];
+            if ((level & 1) == 0)
+            {
+                // Even (LTR) level: R goes up one, numbers go up two.
+                if (t == R) levels[i] = (sbyte)(level + 1);
+                else if (t == AN || t == EN) levels[i] = (sbyte)(level + 2);
+            }
+            else
+            {
+                // Odd (RTL) level: L and numbers go up one.
+                if (t == L || t == EN || t == AN) levels[i] = (sbyte)(level + 1);
+            }
+        }
+    }
+
+    private static bool IsFormatChar(char c) =>
+        (c >= 0x200B && c <= 0x200F) || (c >= 0x202A && c <= 0x202E)
+        || (c >= 0x2066 && c <= 0x2069) || c == 0xFEFF;
 
     private static char MirrorChar(char c)
     {
@@ -371,61 +360,17 @@ internal static class BidiReorderer
             '}' => '{',
             '<' => '>',
             '>' => '<',
-            '\u00AB' => '\u00BB', // «»
-            '\u00BB' => '\u00AB',
-            '\u2039' => '\u203A', // ‹›
-            '\u203A' => '\u2039',
-            '\u2018' => '\u2019', // ''
-            '\u2019' => '\u2018',
-            '\u201C' => '\u201D', // ""
-            '\u201D' => '\u201C',
+            '«' => '»', // «»
+            '»' => '«',
+            '‹' => '›', // ‹›
+            '›' => '‹',
+            '⁅' => '⁆', // ⁅⁆
+            '⁆' => '⁅',
+            '⌈' => '⌉', // ⌈⌉
+            '⌉' => '⌈',
+            '⌊' => '⌋', // ⌊⌋
+            '⌋' => '⌊',
             _ => c,
         };
-    }
-
-    private static string RemoveFormatChars(string text)
-    {
-        // Remove zero-width and directional format characters
-        var hasFormat = false;
-        foreach (var c in text)
-        {
-            if (c is '\u200B' or '\u200C' or '\u200D' or '\u200E' or '\u200F'
-                or '\u202A' or '\u202B' or '\u202C' or '\u202D' or '\u202E'
-                or '\u2066' or '\u2067' or '\u2068' or '\u2069'
-                or '\uFEFF')
-            {
-                hasFormat = true;
-                break;
-            }
-        }
-
-        if (!hasFormat) return text;
-
-        var chars = new char[text.Length];
-        var pos = 0;
-        foreach (var c in text)
-        {
-            if (c is not ('\u200B' or '\u200C' or '\u200D' or '\u200E' or '\u200F'
-                or '\u202A' or '\u202B' or '\u202C' or '\u202D' or '\u202E'
-                or '\u2066' or '\u2067' or '\u2068' or '\u2069'
-                or '\uFEFF'))
-            {
-                chars[pos++] = c;
-            }
-        }
-        return new string(chars, 0, pos);
-    }
-
-    private enum BidiType
-    {
-        L,      // Left-to-Right
-        R,      // Right-to-Left
-        EN,     // European Number
-        ES,     // European Number Separator
-        ET,     // European Number Terminator
-        CS,     // Common Number Separator
-        WS,     // Whitespace
-        ON,     // Other Neutral
-        Format, // Directional formatting characters
     }
 }

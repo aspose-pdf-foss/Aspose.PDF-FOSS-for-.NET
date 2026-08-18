@@ -112,7 +112,7 @@ public sealed class Rectangle
     /// <summary>An empty rectangle (all coordinates zero). Equivalent to <c>new Rectangle(0, 0, 0, 0)</c>.</summary>
     public static Rectangle Empty => new(0, 0, 0, 0);
 
-    /// <summary>The trivial / sentinel rectangle (-1, -1, -1, -1) used by Aspose.PDF as a "no value" marker.</summary>
+    /// <summary>The trivial / sentinel rectangle (-1, -1, -1, -1) used as a "no value" marker.</summary>
     public static Rectangle Trivial => new(-1, -1, -1, -1, normalizeCoordinates: true);
 
     /// <summary>True when this rectangle has zero width AND zero height (LLX == URX and LLY == URY).</summary>
@@ -205,7 +205,7 @@ public sealed class Rectangle
     public void Rotate(int angle)
     {
         var a = ((angle % 360) + 360) % 360;
-        // Match Aspose.Pdf: a quarter-turn (90/270) swaps the X and Y
+        // A quarter-turn (90/270) swaps the X and Y
         // coordinate pairs (the box keeps positive coords and takes the rotated
         // dimensions); a half-turn (0/180) leaves the axis-aligned box unchanged.
         // Earlier this rotated the corners about the ORIGIN, which pushed the box to
@@ -378,9 +378,9 @@ public sealed class PageSize
     /// <summary>ISO A3 — 297 × 420 mm (841.890 × 1190.551 pt).</summary>
     public static PageSize A3 => new(841.890, 1190.551);
 
-    /// <summary>ISO A4. Aspose.Pdf exposes this as the rounded 595 × 842 pt
-    /// (not the exact 595.276 × 841.890), so callers that resize/compare against
-    /// PageSize.A4 match the reference API.</summary>
+    /// <summary>ISO A4. Exposed as the rounded 595 × 842 pt
+    /// (not the exact 595.276 × 841.890) — the values callers resize/compare
+    /// against via PageSize.A4.</summary>
     public static PageSize A4 => new(595, 842);
 
     /// <summary>ISO A5 — 148 × 210 mm (419.528 × 595.276 pt).</summary>

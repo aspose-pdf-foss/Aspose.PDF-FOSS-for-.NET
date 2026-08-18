@@ -7,3 +7,6 @@ TestResults/
 *.trx
 .idea/
 .vs/
+
+# local-only solutions (e.g. generated compat TestProject wired in for local dev)
+*.local.sln

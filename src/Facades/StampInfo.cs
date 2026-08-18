@@ -4,7 +4,7 @@ namespace Aspose.Pdf.Facades;
 /// Contains information about a stamp on a page.
 /// Stamps are content-stream blocks wrapped in q/Q save/restore pairs
 /// that were added by stamp operations (AddStamp, PdfFileStamp, etc.).
-/// Lives in <c>Aspose.Pdf.Facades</c> to match the Aspose.Pdf surface.
+/// Lives in <c>Aspose.Pdf.Facades</c> to match the public surface.
 /// </summary>
 public sealed class StampInfo
 {
@@ -51,16 +51,16 @@ public sealed class StampInfo
     /// <summary>The rectangle area of this stamp (if determinable).</summary>
     public Rectangle? Rect { get; internal set; }
 
-    /// <summary>Alias for <see cref="Rect"/> matching the Aspose.Pdf property name.</summary>
+    /// <summary>Alias for <see cref="Rect"/> matching the public property name.</summary>
     public Rectangle? Rectangle => Rect;
 }
 
-/// <summary>Stamp kind exposed by <see cref="StampInfo"/>. Lives in Facades to match the Aspose.Pdf reflection shape.</summary>
+/// <summary>Stamp kind exposed by <see cref="StampInfo"/>. Lives in Facades to match the public reflection shape.</summary>
 public enum StampType
 {
     Form = 0,
     Image = 1,
     /// <summary>FOSS-only convenience value used by the stamp parser when it
-    /// recognises a text-only block. Aspose.Pdf omits this value.</summary>
+    /// recognises a text-only block. The reference omits this value.</summary>
     Text = 2,
 }

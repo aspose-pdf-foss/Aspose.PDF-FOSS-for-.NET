@@ -3,7 +3,7 @@ namespace Aspose.Pdf.Text;
 /// <summary>
 /// Fragment-level text formatting state. Wraps the underlying
 /// <see cref="TextState"/> on a <see cref="TextFragment"/> and exposes
-/// the additional Aspose.Pdf-shape members (Font typed as
+/// the additional fragment-level members (Font typed as
 /// <see cref="Aspose.Pdf.Text.Font"/>, DrawTextRectangleBorder,
 /// TabStops, IsFitRectangle).
 /// </summary>
@@ -20,7 +20,7 @@ public class TextFragmentState : TextState
     }
 
     // ── new shadows so DeclaredOnly reflection surfaces these on the
-    //    derived type (Aspose.Pdf reports them as declared on
+    //    derived type (they must appear as declared on
     //    TextFragmentState, not inherited). All forward to base.
 
     /// <summary>Background fill applied behind the fragment text.</summary>
@@ -126,7 +126,7 @@ public class TextFragmentState : TextState
             else { lines++; current = word; }
         }
         // Lines stack with ~1.2x leading (one line's glyph height plus interline
-        // gap), matching the reference fit calculation.
+        // gap) in the fit calculation.
         return lines * fontSize * 1.2 <= rect.Height;
     }
 

@@ -48,7 +48,7 @@ public class CollectionItem
     /// <summary>One typed value pulled out of a <see cref="CollectionItem"/>
     /// dict by <c>TryGet*Value</c>. Carries both the value and any prefix
     /// the collection schema decorates it with. Nested under
-    /// <see cref="CollectionItem"/> per the Aspose.Pdf reflection signature.</summary>
+    /// <see cref="CollectionItem"/> per the public reflection signature.</summary>
     public sealed class Value<T>
     {
         /// <summary>The typed value.</summary>

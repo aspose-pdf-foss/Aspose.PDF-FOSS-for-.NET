@@ -267,10 +267,9 @@ internal static class ScanlineFiller
     /// <summary>
     /// Stroke a path with the given line width by expanding each line segment into a
     /// thin rectangle, then filling it. Axis-aligned ~1px strokes are hinted to the
-    /// pixel grid so their rasterization matches the template renderer used
-    /// to generate the Template PNGs; without hinting, a 1.39-pixel stroke at a
-    /// fractional-pixel position smears across three rows at partial coverage while
-    /// the template renderer produces either 2-row 50% AA or 1-row bilevel depending
+    /// pixel grid to keep hairlines crisp; without hinting, a 1.39-pixel stroke at a
+    /// fractional-pixel position smears across three rows at partial coverage, where
+    /// the hinted stroke produces either 2-row 50% AA or 1-row bilevel depending
     /// on how close the stroke's sub-pixel position is to the pixel grid.
     /// </summary>
     public static void StrokeLine(byte[] pixels, int pixelW, int pixelH,
@@ -305,22 +304,20 @@ internal static class ScanlineFiller
     }
 
     /// <summary>
-    /// Position a horizontal or vertical 1-pixel-wide stroke on the pixel grid the
-    /// way the template renderer does. Reverse-engineered from eight reference-
-    /// image data points covering borders, form-field underlines and mid-page rules:
+    /// Position a horizontal or vertical 1-pixel-wide stroke on the device pixel
+    /// grid. Covers borders, form-field underlines and mid-page rules:
     ///   1. Offset the path coordinate by <c>+hw</c> (half the raw pixel line width).
-    ///      PDF strokes are centred on the path, but the template renderer effectively
-    ///      places them so the path becomes the **top** edge in pixel coordinates —
-    ///      without this shift, interior 1pt strokes land one row above their template.
+    ///      PDF strokes are centred on the path, but this device places them so the
+    ///      path becomes the **top** edge in pixel coordinates — without this shift,
+    ///      interior 1pt strokes land one row too high.
     ///   2. Snap to the nearest X.0 or X.5 — X.0 produces 2-pixel 50/50 AA straddling
     ///      the row boundary, X.5 produces 1-pixel bilevel on a single row.
     ///   3. When the shifted position lands on X.25 or X.75 (equidistant from both
-    ///      snap candidates), don't snap — render with pure AA. This is what yields
-    ///      the 75/25 coverage split the template shows for form-field underlines.
+    ///      snap candidates), don't snap — render with pure AA. This yields the
+    ///      75/25 coverage split form-field underlines show.
     /// Line width rounds to 1 (on 100-DPI pages a 1pt PDF stroke is 1.39 device
-    /// pixels, and the template proves the template renderer quantises it down to
-    /// a clean single device pixel). Non-axis-aligned or non-~1px strokes pass
-    /// through unchanged; the rule was derived from width=1 samples only.
+    /// pixels, quantised down to a clean single device pixel). Non-axis-aligned or
+    /// non-~1px strokes pass through unchanged; the rule applies to width=1 only.
     /// </summary>
     private static void HintAxisAlignedStroke(ref double x0, ref double y0,
         ref double x1, ref double y1, ref double lineWidth)

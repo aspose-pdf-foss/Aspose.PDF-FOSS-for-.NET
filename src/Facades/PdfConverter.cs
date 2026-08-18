@@ -79,7 +79,7 @@ public sealed class PdfConverter : IDisposable
     }
 
     /// <summary>
-    /// Construct with a PDF document already bound. Matches Aspose.Pdf's
+    /// Construct with a PDF document already bound — the
     /// <c>new PdfConverter(Document)</c> convenience constructor.
     /// </summary>
     public PdfConverter(Document document) : this()
@@ -93,8 +93,7 @@ public sealed class PdfConverter : IDisposable
     public void BindPdf(Document srcDoc)
     {
         // A null document is tolerated here (it surfaces later at conversion time)
-        // rather than throwing — matching the Aspose.Pdf facade, which does not
-        // reject the bind itself.
+        // rather than throwing — the bind itself is not rejected.
         _document = srcDoc;
         EndPage = srcDoc?.PageCount ?? 0;
         _converted = false;
@@ -140,7 +139,7 @@ public sealed class PdfConverter : IDisposable
 
     /// <summary>
     /// Check if there is another page available for conversion. Auto-initializes
-    /// the iterator like the Aspose.Pdf API does — callers don't need to call
+    /// the iterator — callers don't need to call
     /// DoConvert() explicitly. Setting <see cref="StartPage"/> after iteration
     /// has begun also moves the cursor.
     /// </summary>
@@ -169,8 +168,8 @@ public sealed class PdfConverter : IDisposable
         return device.Process(page);
     }
 
-    // Aspose.Pdf implicitly initialises the iterator inside GetNextImage
-    // when BindPdf → GetNextImage is called without an explicit DoConvert. Mirror that.
+    // The iterator initialises implicitly inside GetNextImage
+    // when BindPdf → GetNextImage is called without an explicit DoConvert.
     private void EnsureConverted()
     {
         if (!_converted && _document is not null) DoConvert();
@@ -202,6 +201,14 @@ public sealed class PdfConverter : IDisposable
     /// </summary>
     public void GetNextImage(string outputFile, PdfConverterImageFormat format)
     {
+        EnsureConverted();
+        if (!HasNextImage())
+        {
+            // An exhausted iterator writes a zero-length file rather than
+            // throwing — callers detect the end by checking the file length.
+            File.WriteAllBytes(outputFile, Array.Empty<byte>());
+            return;
+        }
         var bytes = GetNextImage(format);
         File.WriteAllBytes(outputFile, bytes);
     }
@@ -332,6 +339,7 @@ public sealed class PdfConverter : IDisposable
             PdfConverterImageFormat.Png  => new PngDevice(imageWidth, imageHeight, devRes),
             PdfConverterImageFormat.Jpeg => new JpegDevice(imageWidth, imageHeight, devRes, quality),
             PdfConverterImageFormat.Bmp  => new BmpDevice(imageWidth, imageHeight, devRes),
+            PdfConverterImageFormat.Gif  => new GifDevice(imageWidth, imageHeight, devRes),
             PdfConverterImageFormat.Tiff => new TiffDevice(devRes),
             _ => new PngDevice(imageWidth, imageHeight, devRes),
         };
@@ -369,6 +377,7 @@ public sealed class PdfConverter : IDisposable
             PdfConverterImageFormat.Png => new PngDevice(pxW, pxH, devRes),
             PdfConverterImageFormat.Jpeg => new JpegDevice(pxW, pxH, devRes),
             PdfConverterImageFormat.Bmp => new BmpDevice(pxW, pxH, devRes),
+            PdfConverterImageFormat.Gif => new GifDevice(pxW, pxH, devRes),
             PdfConverterImageFormat.Tiff => new TiffDevice(devRes),
             _ => new PngDevice(pxW, pxH, devRes),
         };
@@ -776,25 +785,39 @@ public sealed class PdfConverter : IDisposable
 
     private ImageDevice CreateDevice(PdfConverterImageFormat format)
     {
-        var devRes = new Aspose.Pdf.Devices.Resolution(Resolution.X, Resolution.Y);
+        // BarcodeOptimization pins the render at 220 dpi — the requested Resolution is
+        // ignored entirely, not clamped — and the device rasterizes vector fills
+        // aliased (it reads the flag from RenderingOptions). The page canvas floors
+        // per dimension at that dpi, which the natural-size render path already does.
+        var devRes = RenderingOptions?.BarcodeOptimization == true
+            ? new Aspose.Pdf.Devices.Resolution(220, 220)
+            : new Aspose.Pdf.Devices.Resolution(Resolution.X, Resolution.Y);
+        ImageDevice device;
         if (_renderer is null)
         {
-            return format switch
+            device = format switch
             {
                 PdfConverterImageFormat.Png => new PngDevice(devRes),
                 PdfConverterImageFormat.Jpeg => new JpegDevice(devRes),
                 PdfConverterImageFormat.Bmp => new BmpDevice(devRes),
+                PdfConverterImageFormat.Gif => new GifDevice(devRes),
                 PdfConverterImageFormat.Tiff => new TiffDevice(devRes),
                 _ => new PngDevice(devRes),
             };
         }
-        return format switch
+        else
         {
-            PdfConverterImageFormat.Png => new PngDevice(_renderer, devRes),
-            PdfConverterImageFormat.Jpeg => new JpegDevice(_renderer, devRes),
-            PdfConverterImageFormat.Bmp => new BmpDevice(_renderer, devRes),
-            PdfConverterImageFormat.Tiff => new TiffDevice(_renderer, devRes),
-            _ => new PngDevice(_renderer, devRes),
-        };
+            device = format switch
+            {
+                PdfConverterImageFormat.Png => new PngDevice(_renderer, devRes),
+                PdfConverterImageFormat.Jpeg => new JpegDevice(_renderer, devRes),
+                PdfConverterImageFormat.Bmp => new BmpDevice(_renderer, devRes),
+                PdfConverterImageFormat.Gif => new GifDevice(_renderer, devRes),
+                PdfConverterImageFormat.Tiff => new TiffDevice(_renderer, devRes),
+                _ => new PngDevice(_renderer, devRes),
+            };
+        }
+        if (RenderingOptions is not null) device.RenderingOptions = RenderingOptions;
+        return device;
     }
 }

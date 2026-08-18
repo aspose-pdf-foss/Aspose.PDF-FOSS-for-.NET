@@ -42,6 +42,18 @@ internal static class PdfLinearizer
         catch { return normalPdf; }
     }
 
+    /// <summary>The <c>%PDF-x.y</c> version of <paramref name="src"/>, or 1.7 when the
+    /// header is missing or malformed.</summary>
+    private static string HeaderVersion(byte[] src)
+    {
+        if (src.Length < 8 || src[0] != '%' || src[1] != 'P' || src[2] != 'D' || src[3] != 'F' || src[4] != '-')
+            return "1.7";
+        var end = 5;
+        while (end < src.Length && end < 12 && src[end] != '\r' && src[end] != '\n') end++;
+        var v = Encoding.ASCII.GetString(src, 5, end - 5).Trim();
+        return v.Length == 0 ? "1.7" : v;
+    }
+
     private static byte[] LinearizeCore(byte[] src)
     {
         var reader = PdfReader.FromBytes(src);
@@ -106,7 +118,11 @@ internal static class PdfLinearizer
         void W(string s) { var b = Encoding.ASCII.GetBytes(s); ms.Write(b, 0, b.Length); }
 
         // 1. Header — mirror PdfWriter.WriteHeader (version, binary comment, producer comment).
-        W("%PDF-1.7\n");
+        // Linearizing re-serialises a document the writer has already emitted; it must carry
+        // that document's version over. Stamping a fixed version here silently rewrote the
+        // header of every linearized save, so a document converted to an older version came
+        // back reporting a newer one.
+        W($"%PDF-{HeaderVersion(src)}\n");
         ms.WriteByte((byte)'%'); ms.Write(new byte[] { 0xE2, 0xE3, 0xCF, 0xD3 }, 0, 4); ms.WriteByte((byte)'\n');
         W("%   \n");
 

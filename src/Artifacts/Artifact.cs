@@ -522,7 +522,7 @@ public class Artifact
 
     /// <summary>Advance width of <paramref name="text"/> in points for a Standard-14
     /// base font (AFM widths); falls back to a half-em estimate for embedded fonts.</summary>
-    private static double MeasureTextWidth(string text, string baseFont, double fontSize)
+    protected static double MeasureTextWidth(string text, string baseFont, double fontSize)
     {
         if (!Standard14Fonts.IsStandard14(baseFont)) return text.Length * fontSize * 0.5;
         var sum = 0;

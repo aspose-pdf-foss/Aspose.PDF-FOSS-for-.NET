@@ -234,7 +234,7 @@ public class Element
 }
 
 /// <summary>A live, mutable collection of structure elements held
-/// under a parent's /K array. Mirrors the Aspose.Pdf
+/// under a parent's /K array. Mirrors the
 /// <c>Aspose.Pdf.Structure.ElementCollection</c> surface.</summary>
 public class ElementCollection : IEnumerable<Element>
 {
@@ -352,7 +352,7 @@ public class FigureElement : Element
     /// <summary>The figure's image extracted from the page's /Resources
     /// /XObject dictionary, or null when the figure has no embedded
     /// image stream. Returned as a <see cref="System.Drawing.Image"/>
-    /// matching the Aspose.Pdf public type. Throws
+    /// matching the public type. Throws
     /// <see cref="System.PlatformNotSupportedException"/> on non-Windows
     /// runtimes (per System.Drawing.Common's runtime contract).</summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]

@@ -20,6 +20,10 @@ public class ImageStamp : BaseParagraph
     private byte[]? _smaskData;
     // Optional /DecodeParms for filters that need them (e.g. CCITTFaxDecode K/Columns/Rows).
     private PdfDictionary? _decodeParms;
+    // Optional /Decode array. A standalone Adobe CMYK JPEG stores its samples
+    // inverted (255 = no ink); embedding it verbatim needs /Decode [1 0 ×4] so
+    // conforming readers flip the values back to direct ink amounts.
+    private double[]? _decodeArray;
 
     private ImageStamp(byte[] imageData, int width, int height,
         string colorSpace, string filter, int bitsPerComponent)
@@ -58,6 +62,8 @@ public class ImageStamp : BaseParagraph
             seeded = FromJpeg(sourceBytes);
         else if (IsPng(sourceBytes))
             seeded = FromPngData(sourceBytes);
+        else if (IsSvg(sourceBytes) && ImageRasterizer.RasterizeSvg(sourceBytes) is { } svgPng)
+            seeded = FromPngData(svgPng);
         else if (OperatingSystem.IsWindows())
             seeded = TryFromGdiPlusDecoder(sourceBytes);
         // Final fallback: try PNG anyway so the caller still gets a
@@ -78,6 +84,18 @@ public class ImageStamp : BaseParagraph
     private static bool IsPng(byte[] data) =>
         data.Length >= 4 && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47;
 
+    /// <summary>SVG source: XML text whose leading kilobyte mentions an &lt;svg&gt; root.</summary>
+    private static bool IsSvg(byte[] data)
+    {
+        if (data.Length < 5) return false;
+        var head = System.Text.Encoding.UTF8.GetString(data, 0, Math.Min(data.Length, 1024));
+        var trimmed = head.TrimStart('﻿', ' ', '\t', '\r', '\n');
+        return (trimmed.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("<svg", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("<!DOCTYPE svg", StringComparison.OrdinalIgnoreCase))
+               && head.Contains("<svg", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>Position X in points from bottom-left.</summary>
     public double X { get; set; }
 
@@ -90,10 +108,10 @@ public class ImageStamp : BaseParagraph
     /// <summary>Display height in points. Defaults to image pixel height.</summary>
     public double DisplayHeight { get; set; }
 
-    /// <summary>Aspose.Pdf-shape alias for <see cref="DisplayWidth"/>.</summary>
+    /// <summary>Public-API-shape alias for <see cref="DisplayWidth"/>.</summary>
     public double Width { get => DisplayWidth; set => DisplayWidth = value; }
 
-    /// <summary>Aspose.Pdf-shape alias for <see cref="DisplayHeight"/>.</summary>
+    /// <summary>Public-API-shape alias for <see cref="DisplayHeight"/>.</summary>
     public double Height { get => DisplayHeight; set => DisplayHeight = value; }
 
     /// <summary>Horizontal offset from the stamp's anchor point. Stored only.</summary>
@@ -157,13 +175,13 @@ public class ImageStamp : BaseParagraph
     public System.IO.Stream Image =>
         new System.IO.MemoryStream(_originalImageBytes ?? _imageData, writable: false);
 
-    /// <summary>Aspose.Pdf-shape alias for <see cref="ApplyTo"/>.</summary>
+    /// <summary>Public-API-shape alias for <see cref="ApplyTo"/>.</summary>
     public void Put(Page page) => ApplyTo(page);
 
     /// <summary>When set (the Page.AddImage path), the anchor rectangle is interpreted
     /// in the ROTATED (as-displayed) coordinate system of a /Rotate page and the image
-    /// is drawn upright for the viewer — Aspose.Pdf's AddImage prepends the
-    /// same rotation-compensating cm. Stamps keep the raw page coordinate system.</summary>
+    /// is drawn upright for the viewer — the AddImage path prepends the
+    /// matching rotation-compensating cm. Stamps keep the raw page coordinate system.</summary>
     internal bool CompensatePageRotation;
 
     /// <summary>
@@ -326,12 +344,47 @@ public class ImageStamp : BaseParagraph
     /// </summary>
     public static ImageStamp FromJpeg(byte[] jpegData, int width, int height)
     {
-        var stamp = new ImageStamp(jpegData, width, height, "DeviceRGB", "DCTDecode", 8)
+        // A 4-component (CMYK) JPEG must be declared DeviceCMYK; and when it carries
+        // an Adobe APP14 marker the samples are stored INVERTED (255 = no ink, the
+        // Photoshop/libjpeg convention for standalone .jpg files), which the PDF
+        // image dictionary expresses as /Decode [1 0 1 0 1 0 1 0]. PDF-embedded CMYK
+        // DCT images use direct values, so only the file-import path needs this.
+        var (comps, hasAdobe) = ParseJpegColorInfo(jpegData);
+        var stamp = new ImageStamp(jpegData, width, height,
+            comps == 4 ? "DeviceCMYK" : "DeviceRGB", "DCTDecode", 8)
         {
             DisplayWidth = width,
             DisplayHeight = height
         };
+        if (comps == 4 && hasAdobe)
+            stamp._decodeArray = new double[] { 1, 0, 1, 0, 1, 0, 1, 0 };
         return stamp;
+    }
+
+    /// <summary>SOF component count + Adobe APP14 presence, from the JPEG marker chain.</summary>
+    private static (int components, bool hasAdobeMarker) ParseJpegColorInfo(byte[] data)
+    {
+        int comps = 3;
+        var adobe = false;
+        var i = 2;
+        while (i + 3 < data.Length)
+        {
+            if (data[i] != 0xFF) { i++; continue; }
+            var marker = data[i + 1];
+            if (marker == 0xDA || marker == 0xD9) break; // scan data / EOI
+            if (marker == 0xFF || marker == 0x00 || marker == 0xD8
+                || (marker >= 0xD0 && marker <= 0xD7)) { i += 2; continue; }
+            var segLen = (data[i + 2] << 8) | data[i + 3];
+            if (marker is 0xC0 or 0xC1 or 0xC2 && i + 9 < data.Length)
+                comps = data[i + 9];
+            else if (marker == 0xEE && segLen >= 7
+                     && i + 9 < data.Length
+                     && data[i + 4] == 'A' && data[i + 5] == 'd' && data[i + 6] == 'o'
+                     && data[i + 7] == 'b' && data[i + 8] == 'e')
+                adobe = true;
+            i += 2 + segLen;
+        }
+        return (comps, adobe);
     }
 
     /// <summary>
@@ -356,6 +409,22 @@ public class ImageStamp : BaseParagraph
 
         var (w, h) = ParseJpegDimensions(data);
         return FromJpeg(data, w, h);
+    }
+
+    /// <summary>Create a stamp from an encoded image file's bytes, picking the
+    /// decoder by header the same way Page.AddImage does: JPEG and PNG embed
+    /// natively; anything else goes through the GDI+ codec set. Throws when no
+    /// decoder recognises the bytes.</summary>
+    internal static ImageStamp FromEncodedBytes(byte[] imageData)
+    {
+        if (imageData.Length >= 2 && imageData[0] == 0xFF && imageData[1] == 0xD8)
+            return FromJpeg(imageData);
+        if (imageData.Length >= 4 && imageData[0] == 0x89 && imageData[1] == 0x50
+            && imageData[2] == 0x4E && imageData[3] == 0x47)
+            return FromPngData(imageData);
+        if (OperatingSystem.IsWindows() && TryFromGdiPlusDecoder(imageData) is { } gdi)
+            return gdi;
+        return FromPngData(imageData);
     }
 
     /// <summary>Last-resort image decoder: delegate to System.Drawing so any
@@ -441,9 +510,11 @@ public class ImageStamp : BaseParagraph
         var bitDepth = pngData[24];
         var colorType = pngData[25];
 
-        // Collect all IDAT chunks, plus the PLTE palette for indexed-colour PNGs.
+        // Collect all IDAT chunks, plus the PLTE palette and the tRNS per-index
+        // alpha table for indexed-colour PNGs.
         var idatData = new MemoryStream();
         byte[]? palette = null;
+        byte[]? trns = null;
         var pos = 8; // skip signature
         while (pos + 8 < pngData.Length)
         {
@@ -455,6 +526,11 @@ public class ImageStamp : BaseParagraph
             {
                 palette = new byte[chunkLen];
                 Array.Copy(pngData, pos + 8, palette, 0, chunkLen);
+            }
+            else if (chunkType == "tRNS" && pos + 8 + chunkLen <= pngData.Length)
+            {
+                trns = new byte[chunkLen];
+                Array.Copy(pngData, pos + 8, trns, 0, chunkLen);
             }
             else if (chunkType == "IEND")
                 break;
@@ -495,9 +571,13 @@ public class ImageStamp : BaseParagraph
 
         // Alpha channel for the truecolour/grayscale+alpha types is split out into a
         // DeviceGray soft mask so transparent pixels show the page behind instead of
-        // rendering as black. Built only when the source actually carries alpha (4/6).
+        // rendering as black. Built only when the source actually carries alpha:
+        // an alpha channel (4/6), or an indexed image's tRNS per-index table —
+        // without which a transparent palette entry would paint its PLTE colour
+        // (typically black) over the page.
         var hasAlphaChannel = colorType == 4 || colorType == 6;
-        var alpha = hasAlphaChannel ? new byte[width * height] : null;
+        var indexedAlpha = colorType == 3 && trns is not null;
+        var alpha = hasAlphaChannel || indexedAlpha ? new byte[width * height] : null;
         var anyTransparent = false;
 
         // Reverse PNG filtering and extract RGB
@@ -577,6 +657,14 @@ public class ImageStamp : BaseParagraph
                             rgb[rgbIdx + 1] = palette[pi + 1];
                             rgb[rgbIdx + 2] = palette[pi + 2];
                         }
+                        if (indexedAlpha)
+                        {
+                            // tRNS lists alpha per palette index; indices past its
+                            // end are fully opaque.
+                            var ia = idx < trns!.Length ? trns[idx] : (byte)255;
+                            alpha![y * width + x] = ia;
+                            if (ia != 255) anyTransparent = true;
+                        }
                         break;
                 }
             }
@@ -613,7 +701,7 @@ public class ImageStamp : BaseParagraph
 
         // Anchor at XIndent/YIndent (the bottom-left placement) when set, else X/Y,
         // else derive it from Horizontal/VerticalAlignment against the page box
-        // (matches Aspose.Pdf: a Right/Bottom-aligned image with no explicit
+        // (a Right/Bottom-aligned image with no explicit
         // indent lands at pageWidth-imageWidth / 0).
         var pageBox = page.MediaBox;
         double ax = XIndent != 0 ? XIndent
@@ -674,8 +762,8 @@ public class ImageStamp : BaseParagraph
         }
         // Rotated-page compensation (AddImage semantics): map the as-displayed
         // coordinate system back onto page space so the anchor rect is where the
-        // viewer sees it and the image is upright. Reference emission for /Rotate 90
-        // on a 612-wide box is "0 1 -1 0 612 0 cm" ahead of the placement cm.
+        // viewer sees it and the image is upright. For /Rotate 90 on a 612-wide
+        // box this emits "0 1 -1 0 612 0 cm" ahead of the placement cm.
         var rotCm = string.Empty;
         if (CompensatePageRotation)
         {
@@ -692,7 +780,7 @@ public class ImageStamp : BaseParagraph
         var stampBody = $"q {resetCm}{gsOp}{rotCm}{Format(ma)} {Format(mb)} {Format(mc)} {Format(md)} {Format(me)} {Format(mf)} cm /{imgName} Do Q\n";
 
         // A foreground image stamp is a pagination artifact: wrap it in an
-        // /Artifact BDC … EMC marked-content block, matching Aspose.Pdf.
+        // /Artifact BDC … EMC marked-content block.
         // The BDC/EMC sit outside the q…Q draw block, so GetStamps still recognises
         // the clean q gs cm /Im Do Q shape inside. Background stamps stay bare.
         var contentOps = Background
@@ -736,6 +824,12 @@ public class ImageStamp : BaseParagraph
         imgDict.Set("Filter", new PdfName(_filter));
         if (_decodeParms is not null)
             imgDict.Set("DecodeParms", _decodeParms);
+        if (_decodeArray is not null)
+        {
+            var decArr = new PdfArray();
+            foreach (var v in _decodeArray) decArr.Add(new PdfInteger((long)v));
+            imgDict.Set("Decode", decArr);
+        }
         imgDict.Set("Length", new PdfInteger(imageData.Length));
 
         // A transparent source carries its alpha as a DeviceGray /SMask so the
@@ -849,6 +943,22 @@ public class ImageStamp : BaseParagraph
         if (res is null)
         {
             res = new PdfDictionary();
+            // /Resources is inheritable: a page without its own dict draws with the
+            // nearest ancestor's. A fresh page-level dict SHADOWS that one, so every
+            // inherited entry (/Font above all) must carry over or the page's text
+            // loses its fonts the moment the stamp adds its XObject.
+            for (var anc = page.Reader.ResolveDict(pageDict.Get("Parent"));
+                 anc is not null;
+                 anc = page.Reader.ResolveDict(anc.Get("Parent")))
+            {
+                if (page.Reader.ResolveDict(anc.Get("Resources")) is { } inherited)
+                {
+                    foreach (var key in inherited.Keys)
+                        if (inherited.Get(key) is { } entry)
+                            res.Set(key, entry);
+                    break;
+                }
+            }
             pageDict.Set("Resources", res);
         }
         return res;

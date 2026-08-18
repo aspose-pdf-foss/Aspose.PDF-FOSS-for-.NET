@@ -13,6 +13,8 @@ public sealed class ContentStreamBuilder
     // Graphics state
     public ContentStreamBuilder SaveState() { _sb.Append("q\n"); return this; }
     public ContentStreamBuilder RestoreState() { _sb.Append("Q\n"); return this; }
+    /// <summary>Select the named /ExtGState from the resources (<c>gs</c>, PDF32000 §8.4.4).</summary>
+    public ContentStreamBuilder SetGraphicsState(string name) { _sb.Append($"/{name} gs\n"); return this; }
 
     public ContentStreamBuilder SetMatrix(double a, double b, double c, double d, double e, double f)
     {
@@ -118,6 +120,7 @@ public sealed class ContentStreamBuilder
     public ContentStreamBuilder Fill() { _sb.Append("f\n"); return this; }
     public ContentStreamBuilder FillEvenOdd() { _sb.Append("f*\n"); return this; }
     public ContentStreamBuilder FillAndStroke() { _sb.Append("B\n"); return this; }
+    public ContentStreamBuilder FillAndStrokeEvenOdd() { _sb.Append("B*\n"); return this; }
     public ContentStreamBuilder CloseAndStroke() { _sb.Append("s\n"); return this; }
     public ContentStreamBuilder EndPath() { _sb.Append("n\n"); return this; }
 
@@ -192,10 +195,23 @@ public sealed class ContentStreamBuilder
 
     public ContentStreamBuilder ShowText(string text)
     {
+        Span<char> one = stackalloc char[1];
+        Span<byte> oneB = stackalloc byte[1];
         _sb.Append('(');
         foreach (var c in text)
         {
             var ch = ToWinAnsi(c);
+            // Fold chars > 0xFF down to the byte Build()'s Latin-1 pass would
+            // produce BEFORE deciding on escapes: Latin-1's best-fit maps e.g.
+            // fullwidth （ U+FF08 to ASCII '(' — deciding escapes on the source
+            // char lets that paren land unescaped and (when unbalanced, as in
+            // CJK titles) swallow the rest of the content stream.
+            if (ch > 0xFF)
+            {
+                one[0] = ch;
+                Encoding.Latin1.GetBytes(one, oneB);
+                ch = (char)oneB[0];
+            }
             if (ch is '(' or ')' or '\\')
                 _sb.Append('\\');
             _sb.Append(ch);
@@ -209,7 +225,7 @@ public sealed class ContentStreamBuilder
     /// &lt;= 0xFF pass through unchanged; the CP1252 C1 punctuation block (en/em dash, curly
     /// quotes, ellipsis, bullet, euro, ...) maps to 0x80-0x9F. Unmapped &gt;0xFF chars pass
     /// through (Build's Latin-1 substitutes them, as before).</summary>
-    private static char ToWinAnsi(char c) => c <= 0xFF ? c : c switch
+    internal static char ToWinAnsi(char c) => c <= 0xFF ? c : c switch
     {
         '\u20AC' => (char)0x80, '\u201A' => (char)0x82, '\u0192' => (char)0x83,
         '\u201E' => (char)0x84, '\u2026' => (char)0x85, '\u2020' => (char)0x86,
@@ -252,6 +268,34 @@ public sealed class ContentStreamBuilder
         foreach (var b in glyphIds)
             _sb.Append(b.ToString("X2"));
         _sb.Append("> Tj\n");
+        return this;
+    }
+
+    /// <summary>Show hex-encoded 2-byte glyph ids as a TJ array with inter-glyph
+    /// adjustments. <paramref name="adjustments"/>[i] (thousandths of text space,
+    /// TJ convention: positive moves the following glyphs left) is inserted between
+    /// glyph i and glyph i+1; zero entries merge into one hex run.</summary>
+    public ContentStreamBuilder ShowTextHexKerned(byte[] glyphIds, double[] adjustments)
+    {
+        var n = glyphIds.Length / 2;
+        _sb.Append('[');
+        var seg = 0;
+        void Flush(int endExcl)
+        {
+            _sb.Append('<');
+            for (var g = seg * 2; g < endExcl * 2; g++)
+                _sb.Append(glyphIds[g].ToString("X2"));
+            _sb.Append('>');
+            seg = endExcl;
+        }
+        for (var i = 0; i + 1 < n && i < adjustments.Length; i++)
+        {
+            if (adjustments[i] == 0) continue;
+            Flush(i + 1);
+            _sb.Append(adjustments[i].ToString("0.######", CultureInfo.InvariantCulture));
+        }
+        Flush(n);
+        _sb.Append("] TJ\n");
         return this;
     }
 
@@ -331,6 +375,21 @@ public sealed class ContentStreamBuilder
     /// </remarks>
     public byte[] Build() => Encoding.Latin1.GetBytes(_sb.ToString());
 
+    /// <summary>Splice an already-built content stream in at this point, inside its own
+    /// q/Q so its graphics state cannot leak. Used to keep a nested grid's operators in
+    /// DOCUMENT order within the enclosing stream rather than appending them to the page
+    /// as a separate stream, which reorders the page for anything reading it back.</summary>
+    internal ContentStreamBuilder AppendStream(byte[] bytes)
+    {
+        if (bytes is { Length: > 0 })
+        {
+            _sb.Append("q\n").Append(Encoding.Latin1.GetString(bytes));
+            if (_sb.Length > 0 && _sb[^1] != '\n') _sb.Append('\n');
+            _sb.Append("Q\n");
+        }
+        return this;
+    }
+
     /// <summary>
     /// Build the content stream as a string.
     /// </summary>
@@ -350,7 +409,7 @@ public sealed class ContentStreamBuilder
     }
 
     // Colour components (rg/RG/g/G operands) keep more precision than geometry:
-    // Aspose.Pdf writes e.g. 119/255 as "0.4666666667" (10 fractional digits), and
+    // The reference writes e.g. 119/255 as "0.4666666667" (10 fractional digits), and
     // an exact-string check on the parsed operator needs that form.
     // 10 digits, no exponent, trailing zeros trimmed.
     private static string Fc(double v)

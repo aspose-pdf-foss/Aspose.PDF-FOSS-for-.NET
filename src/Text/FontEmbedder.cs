@@ -130,6 +130,14 @@ public sealed class FontEmbedder
     }
 
     private int _fontObjNum;
+
+    /// <summary>The font dictionary this embedder created, and the object numbers of the
+    /// descriptor and font-program streams hanging off it. Exposed so a caller that later
+    /// cancels the embedding can rewrite the dictionary and free the stranded objects.</summary>
+    internal PdfDictionary? FontDict { get; private set; }
+    internal int DescriptorObjNum { get; private set; }
+    internal int FontFileObjNum { get; private set; }
+
     private bool _isSubset;
     private string? _originalPostScriptName;
     private HashSet<int>? _charCodes;
@@ -304,15 +312,13 @@ public sealed class FontEmbedder
         if (cidFontDict.GetName("Subtype") == "CIDFontType0")
             cidFontDict.Set("Subtype", new PdfName("CIDFontType2"));
 
-        var encoding = type0Dict.GetName("Encoding");
-        if (encoding is null or "Identity-H" or "Identity-V")
-        {
-            if (cidFontDict.Get("CIDToGIDMap") is null)
-                cidFontDict.Set("CIDToGIDMap", new PdfName("Identity"));
-            return;
-        }
-
-        // Predefined national CMap: content-stream CIDs are registry CIDs.
+        // The content-stream CIDs are registry CIDs whenever CIDSystemInfo names a
+        // predefined Adobe ordering (Japan1/GB1/CNS1/Korea1) — even under an Identity
+        // encoding, which producers use to reference a registry-subset of a system CJK
+        // face. The original face is absent (this is the substitution path), so a
+        // CID→GID map through CID→Unicode→(substitute cmap) is required; an Identity
+        // map would draw the substitute's glyph N for registry CID N (garbled Latin and
+        // kana). Build the national map first, before the Identity fallback.
         var csi = reader.ResolveDict(cidFontDict.Get("CIDSystemInfo"));
         var orderingObj = csi?.Get("Ordering");
         var ordering = orderingObj is PdfString os ? os.ToText()
@@ -320,9 +326,31 @@ public sealed class FontEmbedder
         var map = BuildCidToGidMap(ordering, parser);
         if (map is not null)
         {
-            var mapObjNum = document.AllocateObjectNumber();
-            document.AddNewObject(mapObjNum, new PdfStream(new PdfDictionary(), map));
+            // The map depends only on (program, ordering) — share one stream across
+            // every CID font that embeds the same face (a document repeating one CJK
+            // family across pages would otherwise carry N identical ~50 KB maps).
+            var mapKey = cacheKey is null ? null : $"cid2gid:{cacheKey}:{ordering}";
+            int mapObjNum;
+            if (mapKey is not null && fontFileCache!.TryGetValue(mapKey, out var cachedMap))
+                mapObjNum = cachedMap.objNum;
+            else
+            {
+                mapObjNum = document.AllocateObjectNumber();
+                document.AddNewObject(mapObjNum, new PdfStream(new PdfDictionary(), map));
+                if (mapKey is not null)
+                    fontFileCache![mapKey] = (mapObjNum, "");
+            }
             cidFontDict.Set("CIDToGIDMap", new PdfIndirectRef(mapObjNum, 0));
+            return;
+        }
+
+        // Identity ordering (or an unknown one): the CIDs are the original face's glyph
+        // ids, so a same-named real face embeds against an Identity CIDToGIDMap.
+        var encoding = type0Dict.GetName("Encoding");
+        if (encoding is null or "Identity-H" or "Identity-V")
+        {
+            if (cidFontDict.Get("CIDToGIDMap") is null)
+                cidFontDict.Set("CIDToGIDMap", new PdfName("Identity"));
         }
     }
 
@@ -418,6 +446,10 @@ public sealed class FontEmbedder
         }
 
         _document.AddNewObject(_fontObjNum, font);
+
+        FontDict = font;
+        DescriptorObjNum = descriptorObjNum;
+        FontFileObjNum = fontFileObjNum;
     }
 
     private static string GenerateSubsetTag()

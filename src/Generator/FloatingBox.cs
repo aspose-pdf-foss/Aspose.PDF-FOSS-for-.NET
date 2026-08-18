@@ -103,6 +103,114 @@ public class FloatingBox : BaseParagraph
     /// </summary>
     /// <param name="page">The page context (used for coordinate conversion and resource registration).</param>
     /// <returns>PDF content stream bytes ready to be appended to the page.</returns>
+    /// <summary>Bottom margin of the hosting page's content area, set by the
+    /// layout dispatcher before <see cref="Build"/>. A columned box flows its
+    /// text down to this line (its own Height does not clip the content).</summary>
+    internal double PageBottomMargin { get; set; } = 72;
+
+    /// <summary>Columned text content (ColumnInfo with explicit widths): each column
+    /// is a y-flipped, clipped band at the box's top; text is the concatenated
+    /// paragraph text in the HtmlFragment default face (Times New Roman 12, embedded
+    /// CID), lines on an (ascent+descent+lineGap)/em pitch filling column after
+    /// column; the border wraps the FIRST column only and grows to the content
+    /// height when that exceeds the box Height.</summary>
+    private byte[]? BuildColumnContent(Page page, double boxX, double yTop, out double contentHeight)
+    {
+        contentHeight = 0;
+        var widthsStr = ColumnInfo?.ColumnWidths;
+        if (ColumnInfo is null || ColumnInfo.ColumnCount < 2 || string.IsNullOrWhiteSpace(widthsStr))
+            return null;
+        var parts = widthsStr.Split(new[] { ' ', '\t', ',' }, StringSplitOptions.RemoveEmptyEntries);
+        var colWidths = new double[parts.Length];
+        for (var i = 0; i < parts.Length; i++)
+            if (!double.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out colWidths[i]))
+                return null;
+        if (colWidths.Length == 0) return null;
+        double.TryParse(ColumnInfo.ColumnSpacing, NumberStyles.Float, CultureInfo.InvariantCulture,
+            out var colSpacing);
+
+        // Concatenate the box's text content (HtmlFragments stripped to text).
+        var sb = new System.Text.StringBuilder();
+        foreach (var para in Paragraphs)
+        {
+            var t = para switch
+            {
+                HtmlFragment hf => HtmlFragment.StripHtmlTags(hf.HtmlContent ?? ""),
+                TextFragment tf => tf.Text,
+                _ => null,
+            };
+            if (!string.IsNullOrWhiteSpace(t))
+            {
+                if (sb.Length > 0) sb.Append(' ');
+                sb.Append(t);
+            }
+        }
+        if (sb.Length == 0) return null;
+
+        var ttf = Text.FontRepository.GetTtfData("Times New Roman");
+        if (ttf is null) return null;
+        const double size = 12;
+        // Layout metrics for the Times New Roman face revision these rules were
+        // tuned on (hhea 1843/-461 over 2048): pitch = (ascent+|descent|)/em =
+        // 1.125 em, first baseline = ascent/em below the column top. Pinned
+        // rather than parsed — the locally installed face revision carries
+        // slightly different values (1825/-443) and would drift every line off
+        // the expected pitch.
+        var pitch = 1.125 * size;
+        var firstBaseline = 0.899902 * size;
+
+        var fontData = new Text.FontData("Times New Roman", Text.FontType.TrueType);
+        fontData.SetTtfData(ttf);
+        var lines = Text.TextPaginator.WrapToWidth(sb.ToString(), "Times New Roman", size,
+            colWidths[0], fontData);
+        if (lines.Count == 0) return null;
+
+        var clipH = yTop - PageBottomMargin;
+        if (clipH <= pitch) return null;
+        var perColumn = Math.Max(1, (int)Math.Floor(clipH / pitch));
+
+        var fontDict = Table.ResolvePageFontDict(page);
+        var b = new ContentStreamBuilder();
+        var lineIdx = 0;
+        var colX = boxX;
+        for (var col = 0; col < ColumnInfo.ColumnCount && lineIdx < lines.Count; col++)
+        {
+            var colW = colWidths[Math.Min(col, colWidths.Length - 1)];
+            b.SaveState();
+            // Top-down local frame at the column's top-left, clipped to the
+            // column width and the band down to the page bottom margin.
+            b.SetMatrix(1, 0, 0, -1, colX, yTop);
+            b.Rectangle(0, 0, colW, clipH);
+            b.ClipEvenOdd();
+            for (var i = 0; i < perColumn && lineIdx < lines.Count; i++, lineIdx++)
+            {
+                var line = lines[lineIdx];
+                if (line.Length == 0) continue;
+                var y = firstBaseline + pitch * i;
+                if (col == 0) contentHeight = y;
+                var (resName, hex) = Text.Type0FontEmbedder.Embed(
+                    fontDict, ttf, "Times New Roman", line, stripSpacesInBaseFont: true);
+                b.BeginText();
+                b.SetFont(resName, size);
+                b.SetTextMatrix(1, 0, 0, -1, 0, y);
+                b.ShowTextHex(hex);
+                b.EndText();
+            }
+            b.RestoreState();
+            colX += colW + colSpacing;
+        }
+        return b.Build();
+    }
+
+    private double? ParseFirstColumnWidth()
+    {
+        var parts = ColumnInfo?.ColumnWidths?.Split(new[] { ' ', '\t', ',' },
+            StringSplitOptions.RemoveEmptyEntries);
+        return parts is { Length: > 0 }
+               && double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var w)
+            ? w : null;
+    }
+
     public byte[] Build(Page page)
     {
         var pageHeight = page.Height;
@@ -128,6 +236,36 @@ public class FloatingBox : BaseParagraph
         {
             // Default: place at top of page with margin
             boxY = pageHeight - marginTop - Height;
+        }
+
+        // Columned text content: the columns flow past the box Height down to the
+        // page bottom margin; the border wraps the first column only and grows to
+        // the content height. Emitted as its own op run (content, then border).
+        if (ColumnInfo is { ColumnCount: > 1 }
+            && BuildColumnContent(page, boxX, boxY + Height, out var colContentH) is { } colOps)
+        {
+            if (Border is not null && Border.Side != BorderSide.None)
+            {
+                var borderH = Math.Max(Height, colContentH);
+                var borderW = ParseFirstColumnWidth() ?? Width;
+                var bb = new ContentStreamBuilder();
+                bb.SaveState();
+                bb.SetLineWidth(Border.Width);
+                bb.SetStrokeColor(Border.Color);
+                // One rect outset by half the stroke width around the first
+                // column band.
+                var half = Border.Width / 2;
+                bb.Rectangle(boxX - half, boxY + Height - borderH - half,
+                    borderW + Border.Width, borderH + Border.Width);
+                bb.Stroke();
+                bb.RestoreState();
+                var borderOps = bb.Build();
+                var combined = new byte[colOps.Length + borderOps.Length];
+                colOps.CopyTo(combined, 0);
+                borderOps.CopyTo(combined, colOps.Length);
+                return combined;
+            }
+            return colOps;
         }
 
         var padLeft = Padding?.Left ?? 0;
@@ -229,6 +367,18 @@ public class FloatingBox : BaseParagraph
                     : fontSize * 0.2; // Default 20% of font size as inter-paragraph spacing
                 contentY -= lineSpacing;
             }
+            else if (paragraph is HtmlFragment htmlChild)
+            {
+                // An HtmlFragment child sets in the HTML engine's own face and rhythm
+                // (Times New Roman 12 in a 13.5 pt line box, bold runs inline, <br> a
+                // forced break) — the box only supplies the content origin. Without this
+                // the fragment was silently dropped: the loop knew TextFragment, Table
+                // and Image only.
+                var htmlW = Width - padLeft - padRight;
+                var consumed = Table.DrawHtmlEngineFragment(builder, page, htmlChild.HtmlContent,
+                    contentX, contentY, htmlW > 0 ? htmlW : 0);
+                if (consumed is { } usedH) contentY -= usedH;
+            }
             else if (paragraph is Table table)
             {
                 // Position the nested table at the box's content origin. Table.Build
@@ -270,14 +420,17 @@ public class FloatingBox : BaseParagraph
                 }
                 if (data is null) continue;
 
-                // Size: explicit Fix dimensions win; otherwise the image's natural size.
+                // Size: explicit Fix dimensions win; otherwise the image's natural
+                // size scaled by ImageScale (the page-level flow path applies the
+                // same factor to a box-contained image).
                 double imgW = image.FixWidth, imgH = image.FixHeight;
                 if (imgW <= 0 || imgH <= 0)
                 {
                     if (Document.TryGetImageNaturalSizePt(data, out var natW, out var natH))
                     {
-                        if (imgW <= 0) imgW = natW;
-                        if (imgH <= 0) imgH = natH;
+                        var imScale = image.ImageScale > 0 ? image.ImageScale : 1.0;
+                        if (imgW <= 0) imgW = natW * imScale;
+                        if (imgH <= 0) imgH = natH * imScale;
                     }
                 }
                 if (imgW <= 0 || imgH <= 0) continue;

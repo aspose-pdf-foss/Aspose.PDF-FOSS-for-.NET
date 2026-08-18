@@ -10,11 +10,10 @@ namespace Aspose.Pdf.Facades;
 /// <summary>
 /// Façade for viewing / printing a PDF document. Wraps a bound
 /// <see cref="Aspose.Pdf.Document"/>; the configuration surface mirrors the
-/// Aspose.Pdf public API but printing methods reject calls because the FOSS
+/// public API but printing methods reject calls because the FOSS
 /// build does not depend on a print spooler. Page rasterisation
-/// (<see cref="DecodePage"/>, <see cref="DecodeAllPages"/>) is left to
-/// <see cref="ImageDevice"/> + SkiaSharp; the Bitmap-returning surface here
-/// throws.
+/// (<see cref="DecodePage"/>, <see cref="DecodeAllPages"/>) renders through
+/// the same device pipeline as <see cref="ImageDevice"/>.
 /// </summary>
 public class PdfViewer : IFacade, System.IDisposable
 {
@@ -59,8 +58,8 @@ public class PdfViewer : IFacade, System.IDisposable
 
     public Aspose.Pdf.RenderingOptions RenderingOptions { get; set; }
 
-    /// <summary>Target rasterisation DPI consulted by viewer-level rendering
-    /// (the FOSS Decode methods throw, so this is currently configuration-only).</summary>
+    /// <summary>Target rasterisation DPI used by <see cref="DecodePage"/> /
+    /// <see cref="DecodeAllPages"/>.</summary>
     public int Resolution { get; set; } = 150;
 
     public float ScaleFactor { get; set; } = 1f;
@@ -126,22 +125,38 @@ public class PdfViewer : IFacade, System.IDisposable
         _document.Save(destStream);
     }
 
-    // ── Page rasterisation (not implemented in FOSS) ───────────────────────
+    // ── Page rasterisation ─────────────────────────────────────────────────
 
-    /// <summary>Always throws: FOSS does not produce <see cref="Bitmap"/>
-    /// objects from the viewer; render via <see cref="ImageDevice"/>
-    /// (SkiaSharp-backed) instead.</summary>
+    /// <summary>Renders one page (1-based) to a <see cref="Bitmap"/> at
+    /// <see cref="Resolution"/> DPI.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public Bitmap DecodePage(int pageNumber)
     {
-        _ = pageNumber;
-        throw new System.NotImplementedException(
-            "PdfViewer.DecodePage is not implemented in FOSS. Use Aspose.Pdf.Devices.ImageDevice.");
+        EnsureBound();
+        if (pageNumber < 1 || pageNumber > _document.Pages.Count)
+            throw new System.ArgumentOutOfRangeException(nameof(pageNumber));
+
+        var device = new BmpDevice(new Devices.Resolution(Resolution));
+        using var ms = new MemoryStream();
+        device.Process(_document.Pages[pageNumber], ms);
+        ms.Position = 0;
+        // Copy out of the stream-backed image: GDI+ requires the source stream
+        // to outlive a Bitmap decoded from it, and callers own the result.
+        using var decoded = new Bitmap(ms);
+        return new Bitmap(decoded);
     }
 
-    /// <summary>Always throws: see <see cref="DecodePage(int)"/>.</summary>
+    /// <summary>Renders every page to a <see cref="Bitmap"/>; see
+    /// <see cref="DecodePage(int)"/>.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public Bitmap[] DecodeAllPages()
-        => throw new System.NotImplementedException(
-            "PdfViewer.DecodeAllPages is not implemented in FOSS. Use Aspose.Pdf.Devices.ImageDevice.");
+    {
+        EnsureBound();
+        var pages = new Bitmap[_document.Pages.Count];
+        for (var i = 0; i < pages.Length; i++)
+            pages[i] = DecodePage(i + 1);
+        return pages;
+    }
 
     // ── Print methods (not implemented in FOSS) ────────────────────────────
 

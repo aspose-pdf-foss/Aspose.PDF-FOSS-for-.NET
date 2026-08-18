@@ -30,6 +30,37 @@ public class ImageXObject
     /// <summary>The resource name (e.g., "Im0").</summary>
     public string Name { get; internal set; }
 
+    /// <summary>The /XObject resources dictionary this image was found in, when known.
+    /// Renaming the image rewrites its key here so the new name survives save.</summary>
+    internal PdfDictionary? OwnerXObjects { get; set; }
+
+    /// <summary>Rename the image's resource entry in the owning /XObject dictionary
+    /// (no-op when the owner is unknown or the name is unchanged).</summary>
+    internal void RenameResource(string newName)
+    {
+        if (string.IsNullOrEmpty(newName) || newName == Name) { Name = newName ?? Name; return; }
+        // Two images in one /XObject dictionary cannot share a key — the second
+        // entry would shadow the first — so a duplicate rename is refused.
+        if (OwnerXObjects is not null && OwnerXObjects.ContainsKey(newName))
+            throw new ArgumentException($"Duplicate image name: {newName}");
+        var oldName = Name;
+        if (OwnerXObjects is not null && OwnerXObjects.ContainsKey(Name))
+        {
+            var raw = OwnerXObjects.Get(Name);
+            OwnerXObjects.Remove(Name);
+            OwnerXObjects.Set(newName, raw!);
+        }
+        Name = newName;
+        // Content-stream references follow the rename so the page keeps painting
+        // the same XObject under its new key.
+        Owner?.RewriteDoReferences(oldName, newName);
+    }
+
+    /// <summary>The collection this image was materialised from. Lets
+    /// instance-level edits (<see cref="XImage.Delete()"/>) reach the owning
+    /// resources dictionary.</summary>
+    internal ImageCollection? Owner { get; set; }
+
     /// <summary>
     /// Replace the raw image stream data with the given bytes. If the new bytes
     /// look like JPEG (SOI + marker), also update the stream dictionary's
@@ -293,12 +324,12 @@ public class ImageXObject
     }
 
     /// <summary>
-    /// Save the image to a stream as JPEG (matching Aspose.Pdf, whose
-    /// <c>XImage.Save(Stream)</c> emits a JFIF-tagged JPEG for the base image).
+    /// Save the image to a stream as JPEG: <c>XImage.Save(Stream)</c> emits a
+    /// JFIF-tagged JPEG for the base image.
     /// Source JPEGs are streamed out verbatim so their JFIF density survives;
     /// other formats are re-encoded to JPEG from the base colour plane. A soft
-    /// mask is a separate image XObject and is not composited here, matching the
-    /// reference. Because JFIF density is an integer dots-per-inch, a resolution
+    /// mask is a separate image XObject and is not composited
+    /// here. Because JFIF density is an integer dots-per-inch, a resolution
     /// set on the round-tripped bitmap round-trips exactly — a PNG's
     /// pixels-per-metre pHYs cannot represent e.g. 200 dpi without rounding.
     /// </summary>
@@ -352,8 +383,8 @@ public class ImageXObject
     /// Save the decoded image rotated <paramref name="clockwiseQuarterTurns"/> × 90°
     /// clockwise. A JPEG source re-encodes as JPEG; every other format is written as
     /// PNG. Used when an image is drawn on a rotated page so the extracted file keeps
-    /// the orientation in which the image appears on the displayed page (matching
-    /// Aspose.Pdf, which extracts the rotated image upright).
+    /// the orientation in which the image appears on the displayed page (the
+    /// rotated image extracts upright).
     /// </summary>
     internal void SaveRotated(Stream output, int clockwiseQuarterTurns)
     {
@@ -400,9 +431,9 @@ public class ImageXObject
         output.Write(IO.PngEncoder.Encode(rgb, ow, oh, 2, 8));
     }
 
-    // Aspose.Pdf XImage.Save renders the image at ~150 DPI, which downscales
+    // XImage.Save effectively renders the image at ~150 DPI, which downscales
     // pathologically over-resolution images (e.g. a 35000x35000 fax scan placed on a
-    // 8400pt page) to a manageable size. Mirror that: cap a huge image's longest side
+    // 8400pt page) to a manageable size: cap a huge image's longest side
     // and box-average the source so sparse scan lines survive the reduction (a plain
     // subsample would drop them and leave the output blank). Normal-sized images
     // (below the threshold) are returned untouched.
@@ -723,7 +754,103 @@ public class ImageXObject
             colorType = 2; // RGB
         }
 
-        return IO.PngEncoder.Encode(decoded, w, h, colorType, bpc > 8 ? 8 : bpc);
+        // A soft mask (PDF 32000 §11.6.5.3) carries per-pixel opacity. PNG can
+        // represent it as an alpha channel, so composite it into an RGBA/gray+alpha
+        // image (JPEG output, which cannot, still drops it). Only the gray (0) and
+        // RGB (2) raster paths are promoted; other paths already return above.
+        var bd = bpc > 8 ? 8 : bpc;
+        if (bd == 8 && colorType is 0 or 2 &&
+            ((HasSoftMask && TryBuildSoftMaskAlpha(w, h, out var alpha))
+             || TryBuildColorKeyAlpha(decoded, w, h, colorType == 2 ? 3 : 1, out alpha)))
+        {
+            var (withAlpha, alphaColorType) = InterleaveAlpha(decoded, alpha, w, h, colorType == 2 ? 3 : 1);
+            return IO.PngEncoder.Encode(withAlpha, w, h, alphaColorType, 8);
+        }
+
+        return IO.PngEncoder.Encode(decoded, w, h, colorType, bd);
+    }
+
+    /// <summary>Build a per-pixel alpha plane from a colour-key /Mask array
+    /// (PDF 32000 §8.9.6.4): a pixel whose every component falls inside its
+    /// [min,max] range is fully transparent. The common producer shape is
+    /// /Mask [255 255 255 255 255 255] — white knocked out — for annotation
+    /// overlays drawn on a white ground.</summary>
+    private bool TryBuildColorKeyAlpha(byte[] decoded, int w, int h, int components, out byte[] alpha)
+    {
+        alpha = System.Array.Empty<byte>();
+        if (_reader.Resolve(_stream.Dict.Get("Mask")) is not PdfArray maskArr
+            || maskArr.Count != components * 2)
+            return false;
+        var lo = new int[components];
+        var hi = new int[components];
+        for (var c = 0; c < components; c++)
+        {
+            lo[c] = _reader.Resolve(maskArr[c * 2]) is PdfInteger l ? (int)l.Value : 0;
+            hi[c] = _reader.Resolve(maskArr[c * 2 + 1]) is PdfInteger u ? (int)u.Value : 0;
+        }
+        if (decoded.Length < w * h * components) return false;
+        alpha = new byte[w * h];
+        for (var i = 0; i < w * h; i++)
+        {
+            var masked = true;
+            for (var c = 0; c < components; c++)
+            {
+                int v = decoded[i * components + c];
+                if (v < lo[c] || v > hi[c]) { masked = false; break; }
+            }
+            alpha[i] = masked ? (byte)0 : (byte)255;
+        }
+        return true;
+    }
+
+    /// <summary>Decode the image's /SMask soft mask into a per-pixel alpha plane
+    /// resampled to this image's dimensions (0=transparent, 255=opaque).</summary>
+    private bool TryBuildSoftMaskAlpha(int w, int h, out byte[] alpha)
+    {
+        alpha = System.Array.Empty<byte>();
+        var raw = Devices.SoftwarePageRenderer.ResolveSMaskAlpha(
+            _stream.Dict.Get("SMask"), _reader, out var mw, out var mh);
+        if (raw is null || mw <= 0 || mh <= 0) return false;
+
+        if (mw == w && mh == h)
+        {
+            alpha = raw;
+            return true;
+        }
+        // Nearest-neighbour resample the mask onto the base-image grid.
+        var scaled = new byte[w * h];
+        for (var y = 0; y < h; y++)
+        {
+            var sy = mh == h ? y : (int)((long)y * mh / h);
+            if (sy >= mh) sy = mh - 1;
+            for (var x = 0; x < w; x++)
+            {
+                var sx = mw == w ? x : (int)((long)x * mw / w);
+                if (sx >= mw) sx = mw - 1;
+                scaled[y * w + x] = raw[sy * mw + sx];
+            }
+        }
+        alpha = scaled;
+        return true;
+    }
+
+    /// <summary>Interleave an alpha plane into an RGB (→RGBA) or gray (→gray+alpha)
+    /// pixel buffer, returning the widened buffer and its PNG colour type.</summary>
+    private static (byte[] pixels, int colorType) InterleaveAlpha(
+        byte[] color, byte[] alpha, int w, int h, int colorComponents)
+    {
+        var outComponents = colorComponents + 1;
+        var outColorType = colorComponents == 3 ? 6 : 4;
+        var result = new byte[w * h * outComponents];
+        for (var i = 0; i < w * h; i++)
+        {
+            var src = i * colorComponents;
+            var dst = i * outComponents;
+            for (var c = 0; c < colorComponents; c++)
+                result[dst + c] = src + c < color.Length ? color[src + c] : (byte)0;
+            result[dst + colorComponents] = i < alpha.Length ? alpha[i] : (byte)255;
+        }
+        return (result, outColorType);
     }
 
     private static byte[] CmykToRgb(byte[] cmyk, int width, int height)
@@ -775,28 +902,16 @@ public class ImageXObject
         if (csObj is not PdfArray arr || arr.Count < 4) return null;
         if (arr[0] is not PdfName name || name.Value != "Indexed") return null;
 
-        var baseCs = _reader.Resolve(arr[1]);
         var hival = arr[2] is PdfInteger hi ? (int)hi.Value : 255;
         paletteSize = hival + 1;
 
-        byte[] lookup;
-        var lookupObj = _reader.Resolve(arr[3]);
-        if (lookupObj is PdfStream ls)
-            lookup = _reader.DecodeStream(ls);
-        else if (lookupObj is PdfString s)
-            lookup = s.Value;
-        else
-            return null;
-
-        var baseComps = baseCs switch
-        {
-            PdfName bn when bn.Value is "DeviceRGB" or "CalRGB" => 3,
-            PdfName bn when bn.Value is "DeviceGray" or "CalGray" => 1,
-            PdfName bn when bn.Value is "DeviceCMYK" => 4,
-            PdfArray ba when ba.Count > 0 && ba[0] is PdfName bn0 && bn0.Value == "ICCBased"
-                => (int)(_reader.ResolveStream(ba[1])?.Dict.GetInt("N", 3) ?? 3),
-            _ => 3,
-        };
+        // Shared resolver: bakes a /Separation or single-colorant /DeviceN base's
+        // tint palette to RGB and reports the per-entry component count for the
+        // device bases (an indexed-of-DeviceN palette is 1 byte per entry, not 3).
+        var info = Devices.SoftwarePageRenderer.ResolveImageColorSpace(arr, _reader);
+        var lookup = info.Palette;
+        if (lookup is null) return null;
+        var baseComps = info.PaletteComponents;
 
         var rgb = new byte[paletteSize * 3];
         for (var i = 0; i < paletteSize; i++)
@@ -876,6 +991,27 @@ public class ImageCollection : IReadOnlyList<ImageXObject>
     private protected readonly PdfDictionary? _ownerDict;
     private protected readonly PdfReader _ownerReader;
 
+    /// <summary>The page whose resources this collection was materialised from,
+    /// when known. Lets a resource rename follow through into the page's
+    /// content-stream references (<see cref="RewriteDoReferences"/>).</summary>
+    internal Page? OwnerPage { get; set; }
+
+    /// <summary>Point every content-stream <c>Do</c> operator that paints the
+    /// renamed XObject at its new key. Enumerating materialises the collection,
+    /// so the rewritten operators re-serialize on save.</summary>
+    internal void RewriteDoReferences(string oldName, string newName)
+    {
+        var contents = OwnerPage?.Contents;
+        if (contents is null) return;
+        // Enumerating an unmaterialised collection yields transient parsed
+        // instances; materialise first so the mutation lands on the stable
+        // operators the collection re-serializes on save.
+        contents.EnsureMaterialized();
+        foreach (var op in contents)
+            if (op is Aspose.Pdf.Operators.Do d && d.Name == oldName)
+                d.Name = newName;
+    }
+
     internal ImageCollection(PdfDictionary pageDict, PdfReader reader)
     {
         _ownerDict = pageDict;
@@ -888,8 +1024,10 @@ public class ImageCollection : IReadOnlyList<ImageXObject>
         // there). Cycle-guarded by stream identity so a self-referencing
         // form can't loop forever.
         var visited = new HashSet<PdfStream>();
-        CollectImages(InheritedResources(pageDict, reader), reader, list, visited);
+        CollectImages(InheritedResources(pageDict, reader), reader, list, visited,
+            new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance));
         _images = list;
+        foreach (var img in list) img.Owner = this;
     }
 
     /// <summary>Register a new image XObject stream in the owning resources'
@@ -913,7 +1051,7 @@ public class ImageCollection : IReadOnlyList<ImageXObject>
         while (xobjects.ContainsKey($"Im{n}")) n++;
         var name = $"Im{n}";
         xobjects.Set(name, imageStream);
-        _images.Add(new XImage(name, imageStream, _ownerReader));
+        _images.Add(new XImage(name, imageStream, _ownerReader) { OwnerXObjects = xobjects, Owner = this });
         return name;
     }
 
@@ -930,24 +1068,30 @@ public class ImageCollection : IReadOnlyList<ImageXObject>
     }
 
     private static void CollectImages(PdfDictionary? resources, PdfReader reader,
-        List<ImageXObject> sink, HashSet<PdfStream> visited)
+        List<ImageXObject> sink, HashSet<PdfStream> visited, HashSet<PdfDictionary> visitedResources)
     {
-        if (resources is null) return;
+        if (resources is null || !visitedResources.Add(resources)) return;
 
-        // Direct XObjects -- Subtype=Image is harvested; Subtype=Form is a
-        // wrapper, recurse into its own Resources.
+        // Direct XObjects -- only Subtype=Image entries count. Form XObjects are
+        // NOT recursed into: Resources.Images reports the resource dictionary's own
+        // image entries, so an image that lives inside a stamped page's Form XObject
+        // stays that form's private resource (a stamped-then-saved document reports
+        // 0 page images; PdfExtractor reaches nested images through its own
+        // form/pattern collectors).
         var xobjectDict = reader.ResolveDict(resources.Get("XObject"));
         if (xobjectDict is not null)
         {
             foreach (var key in xobjectDict.Keys)
             {
                 var obj = reader.ResolveStream(xobjectDict.Get(key));
-                if (obj is null || !visited.Add(obj)) continue;
+                if (obj is null) continue;
+                // Every named entry surfaces, even when two names share one stream
+                // object (image dedupe leaves e.g. Im1 and Im42 pointing at the same
+                // stream — the collection still reports both). Cycle safety comes from
+                // the visited-resources guard above, not from stream identity.
                 var subtype = obj.Dict.GetName("Subtype");
                 if (subtype == "Image")
-                    sink.Add(new XImage(key, obj, reader));
-                else if (subtype == "Form")
-                    CollectImages(reader.ResolveDict(obj.Dict.Get("Resources")), reader, sink, visited);
+                    sink.Add(new XImage(key, obj, reader) { OwnerXObjects = xobjectDict });
             }
         }
 
@@ -966,14 +1110,14 @@ public class ImageCollection : IReadOnlyList<ImageXObject>
                 // and we just skip it.
                 var pat = reader.ResolveStream(patternDict.Get(key));
                 if (pat is null || !visited.Add(pat)) continue;
-                CollectImages(reader.ResolveDict(pat.Dict.Get("Resources")), reader, sink, visited);
+                CollectImages(reader.ResolveDict(pat.Dict.Get("Resources")), reader, sink, visited, visitedResources);
             }
         }
     }
 
     public int Count => _images.Count;
 
-    /// <summary>Get an image by its 1-based index (Aspose convention, matching
+    /// <summary>Get an image by its 1-based index (matching
     /// <see cref="Replace(int, Stream)"/> and <see cref="XImageCollection.Delete(int)"/>).</summary>
     public ImageXObject this[int index] => _images[index - 1];
 
@@ -1043,6 +1187,58 @@ public class ImageCollection : IReadOnlyList<ImageXObject>
         ((IEnumerable<ImageXObject>)_images).GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    /// <summary>Remove the image XObject with the given resource name from the
+    /// owning resources (page /Resources/XObject, recursing into nested form
+    /// XObjects) and from this collection. The orphaned image stream becomes
+    /// unreachable and is dropped when the document is saved, shrinking the file.
+    /// Returns true when an image was removed.</summary>
+    internal bool RemoveImageResource(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        var removed = RemoveFromResources(InheritedResources(_ownerDict!, _ownerReader), name, new HashSet<PdfStream>());
+        if (removed)
+        {
+            var img = GetByName(name);
+            if (img is not null) _images.Remove(img);
+        }
+        return removed;
+    }
+
+    /// <summary>Remove the image at the given 1-based index. See <see cref="RemoveImageResource(string)"/>.</summary>
+    internal bool RemoveImageAt(int index)
+    {
+        if (index < 1 || index > _images.Count) return false;
+        return RemoveImageResource(_images[index - 1].Name);
+    }
+
+    private bool RemoveFromResources(PdfDictionary? resources, string name, HashSet<PdfStream> visited)
+    {
+        if (resources is null) return false;
+        var xobjectDict = _ownerReader.ResolveDict(resources.Get("XObject"));
+        if (xobjectDict is null) return false;
+
+        if (xobjectDict.ContainsKey(name))
+        {
+            var img = _ownerReader.ResolveStream(xobjectDict.Get(name));
+            if (img is not null && img.Dict.GetName("Subtype") == "Image")
+            {
+                xobjectDict.Remove(name);
+                return true;
+            }
+        }
+
+        // Recurse into form XObjects (their own /Resources/XObject may hold the image).
+        foreach (var key in xobjectDict.Keys)
+        {
+            var obj = _ownerReader.ResolveStream(xobjectDict.Get(key));
+            if (obj is null || !visited.Add(obj)) continue;
+            if (obj.Dict.GetName("Subtype") == "Form" &&
+                RemoveFromResources(_ownerReader.ResolveDict(obj.Dict.Get("Resources")), name, visited))
+                return true;
+        }
+        return false;
+    }
 }
 
 /// <summary>
@@ -1077,6 +1273,10 @@ public class XImageCollection : ImageCollection
 
     /// <summary>True when the collection holds an image with the given resource name.</summary>
     public bool ContainsName(string name) => GetByName(name) is not null;
+
+    /// <summary>True when the collection holds an image with the given resource name
+    /// (matches the public surface; same lookup as <see cref="ContainsName"/>).</summary>
+    public bool HasImage(string name) => ContainsName(name);
 
     /// <summary>Get an image by 1-based index (narrows the base indexer's return type to <see cref="XImage"/>).</summary>
     public new XImage this[int index] => (XImage)base[index];
@@ -1308,58 +1508,6 @@ public class XImageCollection : ImageCollection
         _images.Clear();
     }
 
-    /// <summary>Remove the image XObject with the given resource name from the
-    /// owning resources (page /Resources/XObject, recursing into nested form
-    /// XObjects) and from this collection. The orphaned image stream becomes
-    /// unreachable and is dropped when the document is saved, shrinking the file.
-    /// Returns true when an image was removed.</summary>
-    internal bool RemoveImageResource(string name)
-    {
-        if (string.IsNullOrEmpty(name)) return false;
-        var removed = RemoveFromResources(InheritedResources(_ownerDict!, _ownerReader), name, new HashSet<PdfStream>());
-        if (removed)
-        {
-            var img = GetByName(name);
-            if (img is not null) _images.Remove(img);
-        }
-        return removed;
-    }
-
-    /// <summary>Remove the image at the given 1-based index. See <see cref="RemoveImageResource(string)"/>.</summary>
-    internal bool RemoveImageAt(int index)
-    {
-        if (index < 1 || index > _images.Count) return false;
-        return RemoveImageResource(_images[index - 1].Name);
-    }
-
-    private bool RemoveFromResources(PdfDictionary? resources, string name, HashSet<PdfStream> visited)
-    {
-        if (resources is null) return false;
-        var xobjectDict = _ownerReader.ResolveDict(resources.Get("XObject"));
-        if (xobjectDict is null) return false;
-
-        if (xobjectDict.ContainsKey(name))
-        {
-            var img = _ownerReader.ResolveStream(xobjectDict.Get(name));
-            if (img is not null && img.Dict.GetName("Subtype") == "Image")
-            {
-                xobjectDict.Remove(name);
-                return true;
-            }
-        }
-
-        // Recurse into form XObjects (their own /Resources/XObject may hold the image).
-        foreach (var key in xobjectDict.Keys)
-        {
-            var obj = _ownerReader.ResolveStream(xobjectDict.Get(key));
-            if (obj is null || !visited.Add(obj)) continue;
-            if (obj.Dict.GetName("Subtype") == "Form" &&
-                RemoveFromResources(_ownerReader.ResolveDict(obj.Dict.Get("Resources")), name, visited))
-                return true;
-        }
-        return false;
-    }
-
     /// <summary>Whether the collection contains the supplied image.</summary>
     public bool Contains(XImage item)
     {
@@ -1433,14 +1581,16 @@ public class XImageCollection : ImageCollection
 }
 
 /// <summary>
-/// Image XObject wrapper that mirrors the Aspose.Pdf XImage public surface.
+/// Image XObject wrapper exposing the public XImage surface.
 /// </summary>
 public class XImage : ImageXObject
 {
     internal XImage(string name, PdfStream stream, PdfReader reader) : base(name, stream, reader) { }
 
-    /// <summary>The resource name (e.g., "Im0"); writable on the derived type.</summary>
-    public new string Name { get => base.Name; set => base.Name = value; }
+    /// <summary>The resource name (e.g., "Im0"); writable on the derived type.
+    /// Setting it renames the image's entry in the owning /XObject resources so the
+    /// new name is what a reload of the saved document reports.</summary>
+    public new string Name { get => base.Name; set => RenameResource(value); }
 
     /// <summary>Image width in pixels.</summary>
     public new int Width => base.Width;
@@ -1450,6 +1600,25 @@ public class XImage : ImageXObject
 
     /// <summary>Whether the image has an /SMask or /Mask entry indicating per-pixel transparency.</summary>
     public bool ContainsTransparency => HasSoftMask;
+
+    /// <summary>Delete this image from the resources it was retrieved from. The
+    /// image object becomes unreachable and is dropped when the document is saved.</summary>
+    public void Delete()
+    {
+        Reader.MayHaveOrphansOnSave = true;
+        Owner?.RemoveImageResource(Name);
+    }
+
+    /// <summary>Replace this image's data with the supplied image stream, keeping
+    /// its resource name so existing content-stream references show the new pixels.</summary>
+    public void Replace(Stream stream)
+    {
+        if (stream is null) throw new ArgumentNullException(nameof(stream));
+        if (stream.CanSeek) stream.Seek(0, SeekOrigin.Begin);
+        using var ms = new MemoryStream();
+        stream.CopyTo(ms);
+        ReplaceImageData(ms.ToArray());
+    }
 
     /// <summary>Whether the image is a 1-bit stencil mask (matches base <see cref="ImageXObject.IsImageMask"/>).</summary>
     public bool ImageMask => IsImageMask;
@@ -1507,10 +1676,53 @@ public class XImage : ImageXObject
         return new Metadata(xmp);
     }
 
-    /// <summary>Attach a stencil mask from a stream. Stored only — the mask is not currently emitted into the image XObject's /SMask.</summary>
+    /// <summary>Attach a stencil mask built from the given image stream. Dark mask
+    /// pixels keep the corresponding image area painted; light pixels knock it out.
+    /// Stored as a 1-bit /ImageMask stream in this image's /Mask entry (sample 1 =
+    /// masked under the default /Decode [0 1]), which both renderers honour.</summary>
     public void AddStencilMask(Stream maskStream)
     {
-        _ = maskStream;
+        if (maskStream is null) return;
+        using var ms = new MemoryStream();
+        maskStream.CopyTo(ms);
+        ms.Position = 0;
+        int w, h;
+        byte[] packed;
+#pragma warning disable CA1416
+        using (var bmp = new System.Drawing.Bitmap(ms))
+        {
+            w = bmp.Width; h = bmp.Height;
+            var rowBytes = (w + 7) / 8;
+            packed = new byte[rowBytes * h];
+            for (var y = 0; y < h; y++)
+            {
+                for (var x = 0; x < w; x++)
+                {
+                    var p = bmp.GetPixel(x, y);
+                    // Luminance with alpha composited over white — transparent mask
+                    // areas count as light (masked out).
+                    var a = p.A / 255.0;
+                    var luma = (0.299 * p.R + 0.587 * p.G + 0.114 * p.B) * a + 255.0 * (1.0 - a);
+                    if (luma >= 128.0)
+                        packed[y * rowBytes + (x >> 3)] |= (byte)(0x80 >> (x & 7));
+                }
+            }
+        }
+#pragma warning restore CA1416
+        using var compressed = new MemoryStream();
+        using (var z = new System.IO.Compression.ZLibStream(compressed, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+            z.Write(packed, 0, packed.Length);
+        var data = compressed.ToArray();
+        var dict = new PdfDictionary();
+        dict.Set("Type", new PdfName("XObject"));
+        dict.Set("Subtype", new PdfName("Image"));
+        dict.Set("Width", new PdfInteger(w));
+        dict.Set("Height", new PdfInteger(h));
+        dict.Set("ImageMask", PdfBoolean.True);
+        dict.Set("BitsPerComponent", new PdfInteger(1));
+        dict.Set("Filter", new PdfName("FlateDecode"));
+        dict.Set("Length", new PdfInteger(data.Length));
+        Stream.Dict.Set("Mask", new PdfStream(dict, data));
     }
 
     /// <summary>Detect whether a bitmap is grayscale, RGB, or CMYK by sampling its pixels.</summary>
@@ -1694,7 +1906,7 @@ public class XImage : ImageXObject
 
     /// <summary>Detect the colour family of the image. The declared /ColorSpace gives the
     /// base family, but an image stored in an RGB space whose pixels are all neutral
-    /// (R==G==B) is really a black-and-white image — Aspose.Pdf reports it as
+    /// (R==G==B) is really a black-and-white image and is reported as
     /// Grayscale. So RGB-family images are sampled and downgraded to Grayscale when their
     /// decoded content carries no colour. Declared Gray/CMYK keep their name-based type.</summary>
     public ColorType GetColorType()
@@ -1877,6 +2089,9 @@ public class XImage : ImageXObject
         figure.Set("K", new PdfInteger(mcid));
         if (page.SourceObjectNumber > 0)
             figure.Set("Pg", new PdfIndirectRef(page.SourceObjectNumber, 0));
+        else if (reader.OwnerDocument is { } ownerDoc)
+            // New page — no object number until save; the save pipeline stamps /Pg.
+            ownerDoc.PendingStructPgFixups.Add((figure, page));
 
         var kids = reader.Resolve(root.Get("K"));
         if (kids is PdfArray arr)

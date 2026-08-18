@@ -278,7 +278,7 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
 
         // Surface each artifact's marked-content block as typed operators via
         // Artifact.Contents — from "/Artifact BMC|BDC" through the closing "EMC"
-        // inclusive, matching the reference operator count.
+        // inclusive.
         for (int i = 0; i < _items.Count; i++)
         {
             if (_items[i].Contents.Count > 0) continue;

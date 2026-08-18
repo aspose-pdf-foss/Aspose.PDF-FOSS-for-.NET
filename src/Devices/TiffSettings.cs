@@ -2,7 +2,6 @@ namespace Aspose.Pdf.Devices;
 
 /// <summary>
 /// Color depth options for TIFF encoding.
-/// Mirrors <c>Aspose.Pdf.Devices.ColorDepth</c>.
 /// </summary>
 public enum ColorDepth
 {
@@ -20,7 +19,6 @@ public enum ColorDepth
 
 /// <summary>
 /// TIFF compression algorithm options.
-/// Mirrors <c>Aspose.Pdf.Devices.CompressionType</c>.
 /// </summary>
 public enum CompressionType
 {
@@ -40,7 +38,6 @@ public enum CompressionType
 
 /// <summary>
 /// Settings for TIFF image generation (color depth, compression).
-/// Mirrors <c>Aspose.Pdf.Devices.TiffSettings</c>.
 /// </summary>
 public sealed class TiffSettings
 {
@@ -118,7 +115,7 @@ public sealed class TiffSettings
     public float Brightness { get; set; } = 0.5f;
 
     /// <summary>Preferred page orientation for rendered TIFF output. Stored
-    /// for API-parity with Aspose.Pdf; the current renderer keeps
+    /// for API parity; the current renderer keeps
     /// each page's native aspect ratio regardless of this hint.</summary>
     public ShapeType Shape { get; set; } = ShapeType.None;
 
@@ -157,7 +154,6 @@ public sealed class Margins
 
 /// <summary>
 /// Abstract base class for converting rendered images to indexed (1/4/8bpp) bitmaps.
-/// Mirrors <c>Aspose.Pdf.Devices.IndexBitmapConverter</c>.
 /// </summary>
 public abstract class IndexBitmapConverter
 {

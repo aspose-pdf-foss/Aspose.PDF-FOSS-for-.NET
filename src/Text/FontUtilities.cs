@@ -103,9 +103,19 @@ public sealed class FontUtilities : Document.IDocumentFontUtilities
     {
         if (subsetStrategy == FontSubsetStrategy.None) return;
 
-        var subsetEmbedded = subsetStrategy == FontSubsetStrategy.SubsetAllFonts ||
-                             subsetStrategy == FontSubsetStrategy.SubsetEmbeddedFontsOnly;
+        if (subsetStrategy == FontSubsetStrategy.SubsetAllFonts)
+        {
+            // SubsetAllFonts covers fonts the document does NOT embed as well: give each
+            // used non-embedded face (including the Standard-14, resolved to a system
+            // face) a real program first, then subset. The fresh programs are pending
+            // objects until save, so the subsetter needs the pending-stream resolver;
+            // stripStandard14 stays off or the optimizer would undo the embed.
+            _document.EmbedAllFontsForSubsetting();
+            FontSubsetter.SubsetFonts(_document.Reader, subsetEmbedded: true,
+                resolveNewStream: _document.ResolvePendingStreamInternal, stripStandard14: false);
+            return;
+        }
 
-        FontSubsetter.SubsetFonts(_document.Reader, subsetEmbedded);
+        FontSubsetter.SubsetFonts(_document.Reader, subsetEmbedded: true);
     }
 }

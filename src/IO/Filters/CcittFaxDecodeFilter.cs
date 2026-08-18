@@ -8,7 +8,12 @@ namespace Aspose.Pdf.IO.Filters;
 /// </summary>
 internal static class CcittFaxDecodeFilter
 {
-    public static byte[] Decode(byte[] data, PdfDictionary? parms)
+    /// <param name="group4ColumnShift">
+    /// When true (the default, for CCITT image XObjects), Group 4 lines are shifted one
+    /// column left on output to match the producer convention noted in <see cref="DecodeGroup4"/>.
+    /// JBIG2's embedded MMR data is strict T.6 without that quirk, so it passes false.
+    /// </param>
+    public static byte[] Decode(byte[] data, PdfDictionary? parms, bool group4ColumnShift = true)
     {
         var k = parms is not null ? (int)parms.GetInt("K", 0) : 0;
         var columns = parms is not null ? (int)parms.GetInt("Columns", 1728) : 1728;
@@ -33,7 +38,7 @@ internal static class CcittFaxDecodeFilter
         else
         {
             // Group 4 (k < 0)
-            DecodeGroup4(reader, columns, rows, encodedByteAlign, output, rowBytes);
+            DecodeGroup4(reader, columns, rows, encodedByteAlign, output, rowBytes, group4ColumnShift);
         }
 
         // Invert if BlackIs1 is false (default: white=0, black=1 in CCITT,
@@ -100,7 +105,7 @@ internal static class CcittFaxDecodeFilter
     }
 
     private static void DecodeGroup4(CcittBitReader reader, int columns, int rows,
-        bool byteAlign, List<byte> output, int rowBytes)
+        bool byteAlign, List<byte> output, int rowBytes, bool columnShift)
     {
         var maxRows = rows > 0 ? rows : int.MaxValue;
         var refLine = new bool[columns]; // all white
@@ -117,17 +122,46 @@ internal static class CcittFaxDecodeFilter
             var line = new bool[columns];
             if (!Decode2DLine(reader, refLine, line, columns))
                 break;
-            // Producers that wrote the reference PDFs place each painted run
-            // one column to the LEFT of where the T.6 §2.4 algorithm with
-            // a0 = "first pixel of current run" semantics lands them. Mirror
-            // that convention by shifting the decoded line one column left on
-            // output. The pre-shift line is retained as the reference for
-            // the next row so the 2D run-coding state remains consistent.
-            for (var i = 0; i < columns - 1; i++) shifted[i] = line[i + 1];
-            shifted[columns - 1] = false;
-            OutputLine(shifted, output, rowBytes);
+            if (columnShift)
+            {
+                // Some producers place each painted run
+                // one column to the LEFT of where the T.6 §2.4 algorithm with
+                // a0 = "first pixel of current run" semantics lands them. Mirror
+                // that convention by shifting the decoded line one column left on
+                // output. The pre-shift line is retained as the reference for
+                // the next row so the 2D run-coding state remains consistent.
+                for (var i = 0; i < columns - 1; i++) shifted[i] = line[i + 1];
+                shifted[columns - 1] = false;
+                OutputLine(shifted, output, rowBytes);
+            }
+            else
+            {
+                // JBIG2 embedded MMR is strict T.6 with no producer column-shift quirk.
+                OutputLine(line, output, rowBytes);
+            }
             Array.Copy(line, refLine, columns);
         }
+    }
+
+    /// <summary>
+    /// Decode <paramref name="rows"/> lines of a strict-T.6 (Group 4) bitmap from a shared
+    /// reader, returned row-major packed with black = 1 (no BlackIs1 inversion, no column
+    /// shift). Leaves the reader positioned right after the last decoded line so successive
+    /// bitplanes (JBIG2 gray-scale image, T.88 §C.5) can be chained on a single reader.
+    /// </summary>
+    internal static byte[] DecodeGroup4Region(CcittBitReader reader, int columns, int rows)
+    {
+        var rowBytes = (columns + 7) / 8;
+        var output = new List<byte>(rowBytes * (rows > 0 ? rows : 0));
+        var refLine = new bool[columns];
+        for (var row = 0; row < rows; row++)
+        {
+            var line = new bool[columns];
+            if (!Decode2DLine(reader, refLine, line, columns)) break;
+            OutputLine(line, output, rowBytes);
+            Array.Copy(line, refLine, columns);
+        }
+        return output.ToArray();
     }
 
     private static bool Decode1DLine(CcittBitReader reader, bool[] line, int columns)
@@ -242,7 +276,7 @@ internal static class CcittFaxDecodeFilter
         // not merely any pixel of opposite colour. Skipping the changing-element
         // requirement (just scanning for the first opposite-colour pixel) lands
         // b1 on positions inside same-colour runs, which throws V0/VR/VL coding
-        // off and compounds across rows — 33703 page 2 produced 108 valid rows
+        // off and compounds across rows — one scanned page decoded 108 valid rows
         // before the bit-stream drifted out of sync and Read2DMode hit a long
         // zero prefix.
         // wantBlack=true when a0 is white (need opposite-colour changing element).
@@ -658,6 +692,33 @@ internal static class CcittFaxDecodeFilter
                 _bitPos = 0;
                 _bytePos++;
             }
+        }
+
+        /// <summary>
+        /// Consume a trailing T.6 EOFB (end-of-facsimile-block: two EOL codes,
+        /// 000000000001 000000000001 = 0x001001, 24 bits) if one begins at the current bit
+        /// position, then advance to the next byte boundary. Used between the successive
+        /// bitplanes of a JBIG2 MMR gray-scale image (T.88 §C.5), each of which is an
+        /// independent T.6 image terminated by an EOFB and byte-aligned to the next plane.
+        /// </summary>
+        public void ConsumeEofbAndByteAlign()
+        {
+            var savedByte = _bytePos;
+            var savedBit = _bitPos;
+            var word = 0;
+            var ok = true;
+            for (var i = 0; i < 24; i++)
+            {
+                var bit = ReadBit();
+                if (bit < 0) { ok = false; break; }
+                word = (word << 1) | bit;
+            }
+            if (!ok || word != 0x001001)
+            {
+                _bytePos = savedByte; // not an EOFB — leave the bits for the next plane
+                _bitPos = savedBit;
+            }
+            AlignToByte();
         }
 
         /// <summary>

@@ -3,7 +3,7 @@ namespace Aspose.Pdf.Facades;
 /// <summary>
 /// A single bookmark extracted from a document's outline tree by
 /// <see cref="PdfBookmarkEditor.ExtractBookmarks()"/>. Mirrors the
-/// shape exposed by the public Aspose.Pdf facade.
+/// shape exposed by the public facade.
 /// </summary>
 public sealed class Bookmark
 {

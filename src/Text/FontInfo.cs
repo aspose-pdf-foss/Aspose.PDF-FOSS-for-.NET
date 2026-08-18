@@ -35,9 +35,13 @@ public class FontInfo
         }
         if (descriptor is not null)
         {
-            IsEmbedded = descriptor.ContainsKey("FontFile") ||
-                         descriptor.ContainsKey("FontFile2") ||
-                         descriptor.ContainsKey("FontFile3");
+            // Assign the backing field, not the property: what the file says is not a
+            // caller choice, so it must neither be pinned as explicit nor trigger the
+            // setter's embed-on-demand side effect.
+            _isEmbedded = descriptor.ContainsKey("FontFile") ||
+                          descriptor.ContainsKey("FontFile2") ||
+                          descriptor.ContainsKey("FontFile3");
+            _isEmbeddedExplicit = true;
             _isSubset = baseFont is not null && baseFont.Length > 7 && baseFont[6] == '+';
             var flagsVal = (int)descriptor.GetInt("Flags");
             IsItalic = (flagsVal & 64) != 0;
@@ -194,6 +198,35 @@ public class FontInfo
     /// </summary>
     public string UniqueId => $"{ResourceName}+{BaseFont}";
 
+    /// <summary>The underlying PDF font dictionary — the identity the absorber
+    /// dedupes on (one instance per resolved indirect object).</summary>
+    internal PdfDictionary FontDict => _fontDict;
+
+    /// <summary>Decoded embedded font program (FontFile2 / FontFile3 / FontFile),
+    /// or null when the font is not embedded or has no reachable program.</summary>
+    internal byte[]? GetEmbeddedProgramBytes()
+    {
+        if (_reader is null) return null;
+        try
+        {
+            var descriptor = _reader.ResolveDict(_fontDict.Get("FontDescriptor"));
+            if (descriptor is null && Subtype == "Type0"
+                && _reader.Resolve(_fontDict.Get("DescendantFonts")) is PdfArray df && df.Count > 0)
+                descriptor = _reader.ResolveDict(_reader.ResolveDict(df[0])?.Get("FontDescriptor"));
+            if (descriptor is null) return null;
+            foreach (var key in new[] { "FontFile2", "FontFile3", "FontFile" })
+            {
+                if (_reader.ResolveStream(descriptor.Get(key)) is { } s)
+                {
+                    var d = _reader.DecodeStream(s);
+                    if (d.Length > 0) return d;
+                }
+            }
+        }
+        catch { }
+        return null;
+    }
+
     /// <summary>Font subtype (Type1, TrueType, Type0, Type3, etc.).</summary>
     public string Subtype { get; }
 
@@ -208,11 +241,26 @@ public class FontInfo
         get => _isEmbedded;
         set
         {
+            var was = _isEmbedded;
             _isEmbedded = value;
             _isEmbeddedExplicit = true;
             // A font that is not embedded cannot carry a subset — keep the two
             // consistent unless the caller pins the subset flag separately later.
             if (!value && !_isSubsetExplicit) _isSubset = false;
+
+            if (value)
+            {
+                // Turning embedding ON for a font read out of the document embeds the
+                // whole program under the bare name, so the reloaded font reads as
+                // embedded and non-subset.
+                if (!was) EmbedInPlace();
+            }
+            else
+            {
+                // Turning it OFF discards a program this font already put into the
+                // document as a replacement resource.
+                UnembedMaterialised();
+            }
         }
     }
     private bool _isEmbedded;
@@ -270,11 +318,114 @@ public class FontInfo
                 // Recorded even when already non-subset (a non-embedded face has no prefix
                 // yet still gets embedded on save). Transient: the embed pass removes it.
                 _fontDict.Set("AsposeEmbedFull", PdfBoolean.True);
+                // A replacement font is put into the document as an embedded subset when
+                // it is assigned to a TextState. Only subset embedding is offered for
+                // those, so clearing the subset flag drops the program entirely and
+                // leaves a plain by-name reference behind.
+                UnembedMaterialised();
             }
         }
     }
     private bool _isSubset;
     private bool _isSubsetExplicit;
+
+    /// <summary>Font resources the text pipeline created in a document to render this
+    /// font, along with the objects that carry the embedded program. A font is assigned
+    /// to a <see cref="TextState"/> first and configured afterwards, so a later
+    /// IsEmbedded/IsSubset change has to reach back into what was already written.</summary>
+    private List<(Document doc, PdfDictionary fontDict, string bareName,
+        int descriptorObjNum, int fontFileObjNum)>? _materialised;
+
+    /// <summary>Record a font resource created from this font, so cancelling the
+    /// embedding later can rewrite it.</summary>
+    internal void TrackMaterialised(Document doc, PdfDictionary fontDict, string bareName,
+        int descriptorObjNum, int fontFileObjNum)
+    {
+        _materialised ??= [];
+        _materialised.Add((doc, fontDict, bareName, descriptorObjNum, fontFileObjNum));
+    }
+
+    /// <summary>Turn every font resource created from this font into a by-name reference:
+    /// drop the subset tag, detach the embedded program, and free the now-stranded
+    /// descriptor and font-file objects so they don't bloat the output.</summary>
+    private void UnembedMaterialised()
+    {
+        if (_materialised is null) return;
+        foreach (var (doc, fontDict, bareName, descriptorObjNum, fontFileObjNum) in _materialised)
+        {
+            fontDict.Set("BaseFont", new PdfName(bareName));
+            fontDict.Remove("FontDescriptor");
+            doc.RemoveNewObject(descriptorObjNum);
+            doc.RemoveNewObject(fontFileObjNum);
+        }
+        _materialised.Clear();
+    }
+
+    /// <summary>Embed the full program of the face this font names into its own
+    /// dictionary, in place. Applies to a font read out of a document that carries no
+    /// program of its own; the resource reference that points at the dictionary is
+    /// preserved, so the page keeps rendering the same run.</summary>
+    private void EmbedInPlace()
+    {
+        var doc = _reader?.OwnerDocument;
+        if (doc is null) return;
+        // EmbedIntoFontDict rewrites the dictionary as a simple WinAnsi TrueType. Doing
+        // that to a composite (Type0/CID) font would orphan its DescendantFonts and
+        // rewrite Subtype, so the 2-byte codes decode one byte at a time and the
+        // ToUnicode CMap no longer matches — text extraction turns to mojibake. A
+        // non-embedded composite is embedded through the CID path at save time
+        // (EmbedNonEmbeddedCidFont); leave it by-name here.
+        if (IsCid) return;
+        // A font that already carries a program, or one assigned from FontRepository
+        // (embedded through the text pipeline when it reaches a TextState), is not this
+        // case.
+        if (SourceFontData is not null) return;
+        if (GetEmbeddedProgramBytes() is { Length: > 0 }) return;
+        try
+        {
+            var ttf = SystemFontResolver.Resolve(FontName);
+            if (ttf is null || ttf.Length == 0) return;
+            FontEmbedder.EmbedIntoFontDict(doc, ttf, _fontDict, FontName, subset: false);
+            _isSubset = false;
+            // The face that got embedded is a host substitute whenever its family
+            // differs from the requested one (Helvetica→Arial, Courier→Courier New);
+            // report that replacement through the document's substitution event.
+            var reported = SubstitutedFaceDisplayName(FontName, ttf);
+            if (reported is not null)
+                doc.RaiseFontSubstitution(new Font(FontName, Subtype ?? "Type1"),
+                    // SynthesizedFontName carries the display name verbatim — FontName's
+                    // space-stripping is for /BaseFont-derived names, not event reporting.
+                    new Font(reported, "TrueType") { SynthesizedFontName = reported });
+        }
+        catch { /* best-effort: leave the font by-name if the face can't be embedded */ }
+    }
+
+    /// <summary>The user-facing name of the substitute face actually embedded for
+    /// <paramref name="requestedName"/> — the resolved program's family plus the style
+    /// the requested standard name asked for ("Helvetica-BoldOblique" over an Arial
+    /// program → "Arial Bold Italic"). Null when the resolved family IS the requested
+    /// family (no substitution to report) or the program can't be parsed.</summary>
+    internal static string? SubstitutedFaceDisplayName(string requestedName, byte[] ttf)
+    {
+        var dash = requestedName.IndexOf('-');
+        var requestedFamily = dash > 0 ? requestedName[..dash] : requestedName;
+        var suffix = dash > 0 ? requestedName[(dash + 1)..] : string.Empty;
+        string family;
+        try
+        {
+            var ttp = new TrueTypeParser(ttf);
+            ttp.Parse();
+            family = ttp.FamilyName;
+        }
+        catch { return null; }
+        if (string.IsNullOrWhiteSpace(family) || family == "Unknown") return null;
+        if (string.Equals(family.Replace(" ", ""), requestedFamily.Replace(" ", ""),
+                StringComparison.OrdinalIgnoreCase))
+            return null;
+        var style = (suffix.Contains("Bold") ? " Bold" : "")
+                  + (suffix.Contains("Oblique") || suffix.Contains("Italic") ? " Italic" : "");
+        return family + style;
+    }
 
     /// <summary>Whether the font is italic.</summary>
     public bool IsItalic { get; }
@@ -641,7 +792,7 @@ public class Font : FontInfo
 
     public IFontOptions FontOptions { get; } = new FontOptionsImpl();
 
-    /// <summary>Lower-level PDF-font view of this Font. Aspose.Pdf exposes
+    /// <summary>Lower-level PDF-font view of this Font. The public API exposes
     /// the engine's IPdfFont through here; FOSS returns a thin wrapper
     /// that surfaces just <c>BaseFontNameOnly</c>.</summary>
     public PdfFontView iPdfFont => new PdfFontView(this);
@@ -654,12 +805,18 @@ public class Font : FontInfo
     public double MeasureString(string str, float fontSize) =>
         MeasureString(str, (double)fontSize);
 
-    /// <summary>Write the raw font file data to a stream. Requires the font to
-    /// have been loaded with embeddable data (via FontRepository.OpenFont).</summary>
+    /// <summary>Write the raw font file data to a stream: data loaded via
+    /// FontRepository.OpenFont, the program embedded in the source PDF (an absorbed
+    /// font), or the installed system face resolved by name — in that order.</summary>
     public void Save(System.IO.Stream stream)
     {
         if (stream is null) throw new ArgumentNullException(nameof(stream));
-        var data = SourceFontData?.TtfData;
+        var data = SourceFontData?.TtfData ?? GetEmbeddedProgramBytes();
+        if (data is null || data.Length == 0)
+        {
+            try { data = FontRepository.GetTtfData(FontName); }
+            catch { data = null; }
+        }
         if (data is null || data.Length == 0)
         {
             _lastEmbeddingError = "No embeddable font data is available for this Font.";
@@ -694,7 +851,7 @@ public interface IFontOptions
     bool NotifyAboutFontEmbeddingError { get; set; }
 }
 
-/// <summary>Thin engine-font view used by Aspose.Pdf parity (Font.iPdfFont).
+/// <summary>Thin engine-font view used by public-API parity (Font.iPdfFont).
 /// Stripped down to the members the test corpus actually reads.</summary>
 public sealed class PdfFontView
 {

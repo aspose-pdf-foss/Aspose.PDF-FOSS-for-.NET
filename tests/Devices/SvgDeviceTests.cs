@@ -17,7 +17,9 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.StartsWith("<svg", svg);
+        Assert.StartsWith("<?xml", svg);
+        Assert.Contains("<svg", svg);
+        Assert.Contains("version=\"1.1\"", svg);
         Assert.Contains("</svg>", svg);
     }
 
@@ -42,8 +44,10 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("width=\"612\"", svg);
-        Assert.Contains("height=\"792\"", svg);
+        // width/height are CSS px (pt / 0.75); the viewBox stays in points.
+        Assert.Contains("width=\"816\"", svg);
+        Assert.Contains("height=\"1056\"", svg);
+        Assert.Contains("viewBox=\"0 0 612 792\"", svg);
     }
 
     [Fact]
@@ -82,7 +86,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.StartsWith("<svg", svg);
+        Assert.Contains("<svg", svg);
         Assert.Contains("</svg>", svg);
     }
 
@@ -123,7 +127,7 @@ public class SvgDeviceTests
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("<path", svg);
-        Assert.Contains("fill=\"rgb(255,0,0)\"", svg);
+        Assert.Contains("fill=\"#ff0000\"", svg);
     }
 
     [Fact]
@@ -152,8 +156,8 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"rgb(255,0,0)\"", svg);
-        Assert.Contains("fill=\"rgb(0,0,0)\"", svg);
+        Assert.Contains("fill=\"#ff0000\"", svg);
+        Assert.Contains("fill=\"#000000\"", svg);
     }
 
     [Fact]
@@ -165,7 +169,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("stroke=\"rgb(0,0,255)\"", svg);
+        Assert.Contains("stroke=\"#0000ff\"", svg);
     }
 
     [Fact]
@@ -178,8 +182,8 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"rgb(255,0,0)\"", svg);
-        Assert.Contains("stroke=\"rgb(0,0,255)\"", svg);
+        Assert.Contains("fill=\"#ff0000\"", svg);
+        Assert.Contains("stroke=\"#0000ff\"", svg);
     }
 
     [Fact]
@@ -302,8 +306,8 @@ public class SvgDeviceTests
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("fill-rule=\"evenodd\"", svg);
-        Assert.Contains("fill=\"rgb(255,0,0)\"", svg);
-        Assert.Contains("stroke=\"rgb(0,255,0)\"", svg);
+        Assert.Contains("fill=\"#ff0000\"", svg);
+        Assert.Contains("stroke=\"#00ff00\"", svg);
     }
 
     [Fact]
@@ -316,7 +320,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"rgb(0,255,255)\"", svg);
+        Assert.Contains("fill=\"#00ffff\"", svg);
     }
 
     [Fact]
@@ -329,7 +333,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("stroke=\"rgb(255,0,255)\"", svg);
+        Assert.Contains("stroke=\"#ff00ff\"", svg);
     }
 
     [Fact]
@@ -342,7 +346,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"rgb(0,0,0)\"", svg);
+        Assert.Contains("fill=\"#000000\"", svg);
     }
 
     [Fact]
@@ -354,7 +358,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("stroke=\"rgb(127,127,127)\"", svg);
+        Assert.Contains("stroke=\"#808080\"", svg);
     }
 
     [Fact]
@@ -366,7 +370,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"rgb(127,127,127)\"", svg);
+        Assert.Contains("fill=\"#808080\"", svg);
     }
 
     [Fact]
@@ -381,11 +385,11 @@ public class SvgDeviceTests
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("Line1", svg);
         Assert.Contains("Line2", svg);
-        // T* moves the line down by the leading (700 - 14 = 686). Text runs are
-        // placed by their text matrix as matrix(a,b,-c,-d,e,f) (the y-column is
-        // negated to cancel the page flip), so Line2's moved-down baseline shows
-        // up as the f-translation of its run, not a legacy y="686" attribute.
-        Assert.Contains("matrix(1,0,0,-1,100,686)", svg);
+        // T* moves the line down by the leading (700 - 14 = 686). Runs are emitted
+        // in top-down page coordinates with per-glyph x positions, so Line2 lands
+        // at y = 792 - 686 = 106 with its x list starting at 100.
+        Assert.Contains("y=\"106.0\"", svg);
+        Assert.Contains("x=\"100.0", svg);
     }
 
     [Fact]
@@ -403,7 +407,7 @@ public class SvgDeviceTests
     }
 
     [Fact]
-    public void Process_CmTransform_EmitsGGroup()
+    public void Process_CmTransform_BakedIntoCoordinates()
     {
         var content = Encoding.ASCII.GetBytes("q 2 0 0 2 100 200 cm 50 50 20 20 re f Q");
         var data = PdfBuilder.BuildWithTextContent(content);
@@ -411,23 +415,25 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("transform=\"matrix(2,0,0,2,100,200)\"", svg);
-        Assert.Contains("<path", svg);
+        // Coordinates are flattened: (50,50) under [2 0 0 2 100 200] is (200,300)
+        // in PDF space, i.e. y = 792 - 300 = 492 top-down. No <g> groups emitted.
+        Assert.Contains("M200 492", svg);
+        Assert.DoesNotContain("<g ", svg);
     }
 
     [Fact]
-    public void Process_CmTransform_ClosedByQ()
+    public void Process_CmTransform_RestoredByQ()
     {
-        // q/cm/.../Q should result in <g> ... </g>
         var content = Encoding.ASCII.GetBytes("q 1 0 0 1 50 50 cm 10 10 20 20 re f Q 30 30 10 10 re f");
         var data = PdfBuilder.BuildWithTextContent(content);
         using var doc = Document.Open(data);
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        // Should contain an opening g with transform and a closing g
-        Assert.Contains("<g transform=\"matrix(1,0,0,1,50,50)\">", svg);
-        Assert.Contains("</g>", svg);
+        // First rect translated by (50,50): (60,60) → y' = 792-60 = 732.
+        // After Q the translation is gone: (30,30) → y' = 762.
+        Assert.Contains("M60 732", svg);
+        Assert.Contains("M30 762", svg);
     }
 
     [Fact]
@@ -456,8 +462,8 @@ public class SvgDeviceTests
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
         // First fill red, after Q restore fill is back to black (default)
-        Assert.Contains("fill=\"rgb(255,0,0)\"", svg);
-        Assert.Contains("fill=\"rgb(0,0,0)\"", svg);
+        Assert.Contains("fill=\"#ff0000\"", svg);
+        Assert.Contains("fill=\"#000000\"", svg);
     }
 
     [Fact]
@@ -487,8 +493,8 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"rgb(0,255,0)\"", svg);
-        Assert.Contains("stroke=\"rgb(255,0,0)\"", svg);
+        Assert.Contains("fill=\"#00ff00\"", svg);
+        Assert.Contains("stroke=\"#ff0000\"", svg);
     }
 
     [Fact]
@@ -503,8 +509,8 @@ public class SvgDeviceTests
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("<path", svg);
         Assert.Contains("Z", svg); // path should be closed
-        Assert.Contains("fill=\"rgb(0,255,0)\"", svg);
-        Assert.Contains("stroke=\"rgb(255,0,0)\"", svg);
+        Assert.Contains("fill=\"#00ff00\"", svg);
+        Assert.Contains("stroke=\"#ff0000\"", svg);
     }
 
     [Fact]

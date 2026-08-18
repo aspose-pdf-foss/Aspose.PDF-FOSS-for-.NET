@@ -81,50 +81,64 @@ internal static class ImageCompressor
     /// </summary>
     public static int RemoveDuplicateImages(PdfReader reader)
     {
-        // Collect all XObject dicts and their image entries
+        // Collect all XObject dicts and their image entries, keeping each entry's
+        // stored value (normally an indirect ref) so a duplicate can be redirected
+        // to the canonical entry's ref rather than to the resolved stream object.
         var allXObjectDicts = new List<PdfDictionary>();
-        var allImages = new List<(PdfDictionary xobjectDict, string key, PdfStream stream)>();
+        var allImages = new List<(PdfDictionary xobjectDict, string key, PdfStream stream, PdfObject entry)>();
         CollectXObjectDictsFromPages(reader, allXObjectDicts);
 
         foreach (var xobjDict in allXObjectDicts)
         {
             foreach (var key in xobjDict.Keys.ToList())
             {
-                var val = reader.Resolve(xobjDict.Get(key));
-                if (val is PdfStream stream &&
+                var entry = xobjDict.Get(key);
+                var val = reader.Resolve(entry);
+                if (entry is not null && val is PdfStream stream &&
                     stream.Dict.GetName("Subtype") == "Image")
                 {
-                    allImages.Add((xobjDict, key, stream));
+                    allImages.Add((xobjDict, key, stream, entry));
                 }
             }
         }
 
         if (allImages.Count < 2) return 0;
 
-        // Hash all image streams
-        var hashToCanonical = new Dictionary<string, PdfStream>(StringComparer.Ordinal);
+        // Hash all image streams; the canonical value is the first entry's stored
+        // object (its indirect ref), reused verbatim for every duplicate.
+        var hashToCanonical = new Dictionary<string, PdfObject>(StringComparer.Ordinal);
         var duplicateCount = 0;
 
-        foreach (var (xobjDict, key, stream) in allImages)
+        // Identity is the DECODED pixel content, not the stored bytes — two flate
+        // compressions of the same pixels differ byte-wise and must still merge.
+        // The soft mask's decoded content joins the identity so images that differ
+        // only in transparency never coalesce.
+        string ContentHash(PdfStream s)
+        {
+            byte[] data;
+            try { data = reader.DecodeStream(s) ?? s.RawData; }
+            catch { data = s.RawData; }
+            return Convert.ToHexString(Security.ShaDigest.Sha256(data));
+        }
+
+        foreach (var (xobjDict, key, stream, entry) in allImages)
         {
             var width = stream.Dict.GetInt("Width");
             var height = stream.Dict.GetInt("Height");
             var cs = stream.Dict.GetName("ColorSpace") ?? "";
+            var bpc = stream.Dict.GetInt("BitsPerComponent");
+            var smaskHash = reader.Resolve(stream.Dict.Get("SMask")) is PdfStream sm ? ContentHash(sm) : "";
 
-            var hashInput = new byte[stream.RawData.Length + System.Text.Encoding.ASCII.GetByteCount($"|{width}|{height}|{cs}")];
-            stream.RawData.CopyTo(hashInput, 0);
-            System.Text.Encoding.ASCII.GetBytes($"|{width}|{height}|{cs}").CopyTo(hashInput, stream.RawData.Length);
-            var hash = Convert.ToHexString(Security.ShaDigest.Sha256(hashInput));
+            var hash = ContentHash(stream) + $"|{width}|{height}|{cs}|{bpc}|{smaskHash}";
 
             if (hashToCanonical.TryGetValue(hash, out var canonical))
             {
-                // Replace this entry with a reference to the canonical stream
                 xobjDict.Set(key, canonical);
                 duplicateCount++;
             }
             else
             {
-                hashToCanonical[hash] = stream;
+                hashToCanonical[hash] = entry;
             }
         }
 
@@ -686,10 +700,56 @@ internal static class ImageCompressor
         // Bilevel (1-bit) scans — typically high-resolution CCITT G4 fax images — are by
         // far the largest objects in scanned documents. Down-rezzing them to the target DPI
         // and re-encoding the result as a low-rate grayscale JPEG shrinks them dramatically
-        // (anti-aliasing the box-averaged greys keeps the text legible).
+        // (anti-aliasing the box-averaged greys keeps the text legible) — but only while the
+        // target resolution still holds legible text. Below a legibility floor, box-averaging
+        // a fax scan to grey destroys the very text it exists to carry for a negligible saving
+        // over its existing G4 compression, so such a scan is left at full resolution.
         if (bpc == 1 && !stream.Dict.GetBool("ImageMask") && IsGrayOrCcitt(stream, reader))
         {
+            const int BilevelLegibilityFloorDpi = 60;
+            if (maxDpi < BilevelLegibilityFloorDpi) return;
             TryDownsampleBilevel(stream, reader, width, height, newWidth, newHeight);
+            return;
+        }
+
+        // Sub-byte grayscale (2- or 4-bit DeviceGray, e.g. quantized scans): unpack to
+        // one byte per pixel, box-filter down, and re-store as 8-bit gray Flate. Fewer,
+        // wider samples more than offset the 2→8 bit growth, and the generic 8-bit path
+        // below cannot read the packed rows.
+        if ((bpc == 2 || bpc == 4) && components == 1
+            && !stream.Dict.GetBool("ImageMask")
+            && stream.Dict.GetName("ColorSpace") == "DeviceGray")
+        {
+            byte[] packed;
+            try { packed = reader.DecodeStream(stream); }
+            catch { return; }
+
+            var rowBytes = (width * bpc + 7) / 8;
+            if (packed.Length < rowBytes * height) return;
+            var maxVal = (1 << bpc) - 1;
+            var gray = new byte[width * height];
+            for (var y = 0; y < height; y++)
+            {
+                var rowOff = y * rowBytes;
+                for (var x = 0; x < width; x++)
+                {
+                    var bitPos = x * bpc;
+                    var b = packed[rowOff + (bitPos >> 3)];
+                    var shift = 8 - bpc - (bitPos & 7);
+                    var sample = (b >> shift) & maxVal;
+                    gray[y * width + x] = (byte)(sample * 255 / maxVal);
+                }
+            }
+
+            var down = BoxFilterDownsample(gray, width, height, 1, newWidth, newHeight);
+            var comp = Compress(down);
+            stream.ReplaceData(comp);
+            stream.Dict.Set("Filter", new PdfName("FlateDecode"));
+            stream.Dict.Set("Length", new PdfInteger(comp.Length));
+            stream.Dict.Set("Width", new PdfInteger(newWidth));
+            stream.Dict.Set("Height", new PdfInteger(newHeight));
+            stream.Dict.Set("BitsPerComponent", new PdfInteger(8));
+            stream.Dict.Remove("DecodeParms");
             return;
         }
 

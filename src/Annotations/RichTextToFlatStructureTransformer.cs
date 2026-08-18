@@ -9,7 +9,6 @@ namespace Aspose.Pdf.Annotations;
 /// Transforms rich text annotation content (XHTML with arbitrarily nested spans)
 /// into a flat structure where every leaf text node becomes a single
 /// &lt;span style="."&gt; with the fully-merged CSS from all ancestor elements.
-/// Mirrors <c>Aspose.Pdf.Annotations.RichTextToFlatStructureTransformer</c>.
 /// </summary>
 public static class RichTextToFlatStructureTransformer
 {

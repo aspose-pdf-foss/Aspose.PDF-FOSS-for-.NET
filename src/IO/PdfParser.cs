@@ -5,7 +5,7 @@ namespace Aspose.Pdf.IO;
 internal sealed class PdfParser
 {
     private readonly PdfLexer _lexer;
-    private readonly byte[] _data;
+    private byte[] _data;
 
     /// <summary>
     /// Optional callback to resolve an indirect object number to a long integer.
@@ -26,6 +26,13 @@ internal sealed class PdfParser
     }
 
     public PdfLexer Lexer => _lexer;
+
+    /// <summary>Drops the source buffer so it can be collected once the owning document is disposed.</summary>
+    internal void ReleaseBuffers()
+    {
+        _data = Array.Empty<byte>();
+        _lexer.ReleaseBuffer();
+    }
 
     /// <summary>
     /// Parse a direct object, with indirect-ref lookahead for "N G R" sequences.

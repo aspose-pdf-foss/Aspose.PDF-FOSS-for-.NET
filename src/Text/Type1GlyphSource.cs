@@ -109,6 +109,25 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
 
     public int GidForName(string name) => NameToGid.TryGetValue(name, out var gid) ? gid : 0;
 
+    /// <summary>Number of charstrings the font carries.</summary>
+    public int GlyphCount => _charStringsByGid.Length;
+
+    /// <summary>Advance width in font units, taken from the charstring's own
+    /// hsbw/sbw. 0 when the glyph is missing or unreadable.</summary>
+    public int GetAdvanceWidth(int glyphId)
+    {
+        if (glyphId < 0 || glyphId >= _charStringsByGid.Length) return 0;
+        var cs = _charStringsByGid[glyphId];
+        if (cs is null || cs.Length == 0) return 0;
+        var interp = new Type1Interpreter(this);
+        try
+        {
+            interp.Run(cs);
+            return (int)Math.Round(interp.Width);
+        }
+        catch { return 0; }
+    }
+
     internal byte[]? GetSubr(int idx) =>
         idx >= 0 && idx < _subrs.Length ? _subrs[idx] : null;
 
@@ -486,8 +505,12 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
         {
             var name = _namesByGid[gid];
             if (string.IsNullOrEmpty(name)) continue;
-            if (TextAbsorber.GlyphNameToUnicode.TryGetValue(name!, out var u) && u.Length > 0)
-                CMap.TryAdd(u[0], gid);
+            // ResolveGlyphName also handles uniXXXX/uXXXX forms and AGL
+            // underscore ligatures (/f_i → U+FB01); only a single-codepoint
+            // resolution can occupy a cmap slot.
+            var u = TextAbsorber.ResolveGlyphName(name!);
+            if (u is { Length: > 0 } && (u.Length == 1 || char.IsHighSurrogate(u[0])))
+                CMap.TryAdd(char.ConvertToUtf32(u, 0), gid);
         }
     }
 
@@ -507,6 +530,10 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
         private double _xMin = double.MaxValue, _yMin = double.MaxValue;
         private double _xMax = double.MinValue, _yMax = double.MinValue;
         private double _wx;
+
+        /// <summary>The advance width the charstring declared through hsbw/sbw,
+        /// in the font's own units.</summary>
+        public double Width => _wx;
         private double _sbX;
 
         // Flex state — collected between callothersubr 1 .. callothersubr 0.

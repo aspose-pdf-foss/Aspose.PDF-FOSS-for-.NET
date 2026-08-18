@@ -14,7 +14,7 @@ public sealed class Color
     /// <summary>Byte-typed alpha (0–255). FOSS-internal companion to <see cref="A"/>.</summary>
     public byte AByte { get; }
 
-    /// <summary>Alpha in 0..1 range (Aspose.Pdf public surface).</summary>
+    /// <summary>Alpha in 0..1 range (public surface).</summary>
     public double A => AByte / 255.0;
 
     /// <summary>Whether this color has been set (non-empty).</summary>

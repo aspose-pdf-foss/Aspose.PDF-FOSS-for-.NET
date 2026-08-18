@@ -35,7 +35,7 @@ internal static class FieldFormatScript
     /// a field with no format action — or one driven by custom JavaScript rather
     /// than a recognised built-in formatter — accepts any value. A recognised
     /// built-in formatter (AFDate/AFTime/AFNumber/AFPercent) rejects a value it
-    /// cannot parse, matching the Aspose.Pdf behaviour of leaving the prior value
+    /// cannot parse, leaving the prior value
     /// in place.</summary>
     internal static bool IsValueValid(PdfDictionary fieldDict, PdfReader? reader, string rawValue)
     {
@@ -160,7 +160,86 @@ internal static class FieldFormatScript
             formatted = dt.ToString(netPattern, CultureInfo.InvariantCulture);
             return true;
         }
+
+        // Acrobat's util.scand is lenient: it ignores the literal separators, reads the
+        // raw's numeric groups in order, and maps them positionally onto the picture's
+        // field order (so "31 . 10 . 2023" against dd/MM/yyyy, and "31.10.2023 15:05:52"
+        // against m/d/yy, both parse where a strict pattern match fails). This is the
+        // path AFDate_FormatEx takes on a programmatic Value set.
+        if (TryScanDate(acrobatPattern, raw, netPattern, out formatted))
+            return true;
         return false;
+    }
+
+    /// <summary>Lenient date parse mirroring Acrobat's <c>util.scand</c>: pull the raw's
+    /// numeric groups, assign them in order to the picture's day/month/year/hour/minute/second
+    /// slots, swap day↔month when the month slot exceeds 12 (Acrobat's ambiguity resolution),
+    /// then render with the .NET-equivalent pattern.</summary>
+    private static bool TryScanDate(string acrobatPattern, string raw, string netPattern, out string formatted)
+    {
+        formatted = raw;
+        // Ordered slot kinds from the picture's letter runs. 'm'(lower)=month; 'M'(upper)=
+        // minute when the picture carries an hour token, else month (some authors write MM
+        // for month in a pure date picture).
+        bool hasHour = acrobatPattern.IndexOfAny(new[] { 'H', 'h' }) >= 0;
+        var slots = new List<char>();
+        for (int i = 0; i < acrobatPattern.Length;)
+        {
+            char c = acrobatPattern[i];
+            if (!char.IsLetter(c)) { i++; continue; }
+            int j = i; while (j < acrobatPattern.Length && acrobatPattern[j] == c) j++;
+            char kind = c switch
+            {
+                'd' or 'D' => 'd',
+                'y' or 'Y' => 'y',
+                's' or 'S' => 's',
+                'H' or 'h' => 'H',
+                'm' => 'o',                       // month
+                'M' => hasHour ? 'i' : 'o',       // minute vs month
+                _ => '\0',
+            };
+            if (kind != '\0') slots.Add(kind);
+            i = j;
+        }
+
+        var nums = Regex.Matches(raw, @"\d+");
+        if (slots.Count == 0 || nums.Count == 0) return false;
+
+        int day = 1, month = 1, year = DateTime.MinValue.Year, hour = 0, min = 0, sec = 0;
+        bool haveDay = false, haveMonth = false, haveYear = false;
+        int n = Math.Min(slots.Count, nums.Count);
+        for (int k = 0; k < n; k++)
+        {
+            if (!int.TryParse(nums[k].Value, out var v)) continue;
+            switch (slots[k])
+            {
+                case 'd': day = v; haveDay = true; break;
+                case 'o': month = v; haveMonth = true; break;
+                case 'y': year = v; haveYear = true; break;
+                case 'H': hour = v; break;
+                case 'i': min = v; break;
+                case 's': sec = v; break;
+            }
+        }
+        if (!haveDay && !haveMonth && !haveYear) return false;
+
+        // Acrobat swaps day/month when the month slot is impossible (>12).
+        if (haveMonth && month > 12 && haveDay && day <= 12)
+            (day, month) = (month, day);
+
+        if (year < 100) year += 2000;   // 2-digit year → current century
+        if (month is < 1 or > 12 || day is < 1 or > 31 || year is < 1 or > 9999)
+            return false;
+        // Clamp day to the month's length so 31 in a 30-day month still yields a date.
+        int dim = DateTime.DaysInMonth(year, month);
+        if (day > dim) day = dim;
+        try
+        {
+            var dt2 = new DateTime(year, month, day, hour % 24, min % 60, sec % 60);
+            formatted = dt2.ToString(netPattern, CultureInfo.InvariantCulture);
+            return true;
+        }
+        catch { return false; }
     }
 
     private static string ConvertAcrobatDatePattern(string p)

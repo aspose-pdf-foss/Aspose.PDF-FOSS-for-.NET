@@ -17,11 +17,13 @@ internal static class FontSubsetter
     /// Standard 14 fonts (which are always available in PDF viewers).
     /// </summary>
     public static void SubsetFonts(PdfReader reader, bool subsetEmbedded = false,
-        Func<int, PdfStream?>? resolveNewStream = null)
+        Func<int, PdfStream?>? resolveNewStream = null, bool stripStandard14 = true)
     {
         // Collect all font dictionaries referenced by pages
         foreach (var entry in reader.XRefTable.Entries.Values)
         {
+            if (!stripStandard14) break; // PDF/A conversion: every used font must STAY embedded
+
             if (!entry.InUse || entry.ObjectNumber == 0) continue;
 
             var obj = reader.Resolve(new PdfIndirectRef(entry.ObjectNumber, entry.Generation));
@@ -34,8 +36,17 @@ internal static class FontSubsetter
             var baseFont = dict.GetName("BaseFont");
             if (baseFont is null) continue;
 
+            // A subset-prefixed name ("ABCDEF+Helvetica") is a REAL embedded subset whose
+            // encoding/widths need its own program, and a composite (CID) font merely
+            // NAMED like a standard face (a /Symbol CIDFontType2 under Identity-H) has
+            // glyph-id-addressed content no viewer built-in can honour — neither may
+            // lose its program to the standard-14 optimization.
+            var isSubsetPrefixed = baseFont.Length > 7 && baseFont[6] == '+';
+            var subtypeName = dict.GetName("Subtype");
+            var isComposite = subtypeName is "Type0" or "CIDFontType0" or "CIDFontType2";
+
             // Check if this is a Standard 14 font — we can remove embedded data
-            if (IsStandard14(baseFont))
+            if (IsStandard14(baseFont) && !isSubsetPrefixed && !isComposite)
             {
                 // Remove the font descriptor's embedded stream reference
                 var descriptorRef = dict.Get("FontDescriptor");
@@ -308,6 +319,8 @@ internal static class FontSubsetter
     {
         // FontFile2 stream → (union of used GIDs, participating font dicts)
         var byProgram = new Dictionary<PdfStream, (HashSet<int> gids, List<(PdfDictionary type0, PdfDictionary descriptor)> fonts)>();
+        // CIDToGIDMap stream → union of used CIDs across the fonts sharing it.
+        var byMap = new Dictionary<PdfStream, (HashSet<int> cids, byte[] data)>();
 
         foreach (var (fontObjNum, charCodes) in usedCodes)
         {
@@ -339,6 +352,12 @@ internal static class FontSubsetter
                     mapStream = resolveNewStream?.Invoke(mref.ObjectNumber);
                 if (mapStream is not null)
                     try { cid2gid = reader.DecodeStream(mapStream); } catch { }
+                if (cid2gid is not null && mapStream is not null)
+                {
+                    if (!byMap.TryGetValue(mapStream, out var me))
+                        byMap[mapStream] = me = (new HashSet<int>(), cid2gid);
+                    me.cids.UnionWith(charCodes);
+                }
             }
             foreach (var cid in charCodes)
             {
@@ -379,6 +398,29 @@ internal static class FontSubsetter
             stream.Dict.Remove("DecodeParms");
             stream.Dict.Set("Length", new PdfInteger(subsetData.Length));
             stream.Dict.Set("Length1", new PdfInteger(subsetData.Length));
+        }
+
+        // A dense CIDToGIDMap barely compresses (tens of KB of distinct GIDs). The
+        // sparse subset keeps outlines only for the used CIDs, so entries for every
+        // other CID can go to 0 (.notdef) — the long zero runs then deflate to
+        // almost nothing on save.
+        foreach (var (mapStream, (cids, data)) in byMap)
+        {
+            var sparse = new byte[data.Length];
+            var kept = 0;
+            foreach (var cid in cids)
+            {
+                var off = cid * 2;
+                if (off + 1 >= data.Length) continue;
+                sparse[off] = data[off];
+                sparse[off + 1] = data[off + 1];
+                kept++;
+            }
+            if (kept == 0) continue;
+            mapStream.ReplaceData(sparse);
+            mapStream.Dict.Remove("Filter");
+            mapStream.Dict.Remove("DecodeParms");
+            mapStream.Dict.Set("Length", new PdfInteger(sparse.Length));
         }
     }
 

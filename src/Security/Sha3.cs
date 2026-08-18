@@ -197,5 +197,45 @@ namespace Aspose.Pdf.Security
                     throw new ArgumentOutOfRangeException(nameof(algorithm), algorithm, null);
             }
         }
+
+        /// <summary>
+        /// The digest OID for a <see cref="DigestHashAlgorithm"/>. SHA-1 keeps its
+        /// legacy OIW OID; the SHA-2 and SHA-3 families live under the NIST arc
+        /// (2.16.840.1.101.3.4.2.x). <see cref="DigestHashAlgorithm.Auto"/> resolves
+        /// to SHA-256, the default digest everywhere else in the signer.
+        /// </summary>
+        public static string DigestHashAlgorithmToOid(DigestHashAlgorithm hashAlgorithm)
+        {
+            switch (hashAlgorithm)
+            {
+                case DigestHashAlgorithm.Sha1: return "1.3.14.3.2.26";
+                case DigestHashAlgorithm.Auto:
+                case DigestHashAlgorithm.Sha256: return "2.16.840.1.101.3.4.2.1";
+                case DigestHashAlgorithm.Sha384: return "2.16.840.1.101.3.4.2.2";
+                case DigestHashAlgorithm.Sha512: return "2.16.840.1.101.3.4.2.3";
+                case DigestHashAlgorithm.Sha3_256: return "2.16.840.1.101.3.4.2.8";
+                case DigestHashAlgorithm.Sha3_384: return "2.16.840.1.101.3.4.2.9";
+                case DigestHashAlgorithm.Sha3_512: return "2.16.840.1.101.3.4.2.10";
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(hashAlgorithm), hashAlgorithm, null);
+            }
+        }
+
+        /// <summary>The inverse of <see cref="DigestHashAlgorithmToOid"/>; an
+        /// unrecognised OID yields <see cref="DigestHashAlgorithm.Auto"/>.</summary>
+        public static DigestHashAlgorithm OidToDigestHashAlgorithm(string hashAlgorithmOid)
+        {
+            switch (hashAlgorithmOid)
+            {
+                case "1.3.14.3.2.26": return DigestHashAlgorithm.Sha1;
+                case "2.16.840.1.101.3.4.2.1": return DigestHashAlgorithm.Sha256;
+                case "2.16.840.1.101.3.4.2.2": return DigestHashAlgorithm.Sha384;
+                case "2.16.840.1.101.3.4.2.3": return DigestHashAlgorithm.Sha512;
+                case "2.16.840.1.101.3.4.2.8": return DigestHashAlgorithm.Sha3_256;
+                case "2.16.840.1.101.3.4.2.9": return DigestHashAlgorithm.Sha3_384;
+                case "2.16.840.1.101.3.4.2.10": return DigestHashAlgorithm.Sha3_512;
+                default: return DigestHashAlgorithm.Auto;
+            }
+        }
     }
 }

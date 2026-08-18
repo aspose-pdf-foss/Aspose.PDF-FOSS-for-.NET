@@ -45,6 +45,32 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
     /// <summary>CMap: character code → glyph ID.</summary>
     public Dictionary<int, int> CMap { get; } = new();
 
+    /// <summary>The nearest shape a text face is likely to carry for a symbol drawn from a
+    /// symbol font: an option's enclosing circle becomes a white circle, a ballot box a
+    /// white square. Text faces (Arial, Times) cover the geometric-shapes block but not the
+    /// enclosing marks or the ballot boxes, so without this an option mark and a checkbox
+    /// both come out as the SAME missing-glyph box and an option reads as a checkbox.</summary>
+    private static int LookAlikeFor(int cp) => cp switch
+    {
+        0x20DD => 0x25CB,   // COMBINING ENCLOSING CIRCLE  → WHITE CIRCLE
+        0x20DF => 0x25CB,   // COMBINING ENCLOSING CIRCLE BACKSLASH
+        0x20DE => 0x25A1,   // COMBINING ENCLOSING SQUARE  → WHITE SQUARE
+        0x2610 or 0x2611 or 0x2612 => 0x25A1,   // BALLOT BOX (and its marked forms)
+        0x2B24 or 0x2B58 => 0x25CF,             // BLACK LARGE CIRCLE / HEAVY CIRCLE
+        _ => 0,
+    };
+
+    /// <summary>Glyph id for a codepoint, falling back to the nearest shape this face DOES
+    /// carry before giving up on the missing-glyph box. Every consumer that resolves a glyph
+    /// — the measure, the kern pull-back and the embedded run — must use this, or the width
+    /// the layout reserves and the glyph the page draws come from different characters.</summary>
+    public int GlyphIdOrLookAlike(int cp)
+    {
+        if (CMap.TryGetValue(cp, out var gid) && gid != 0) return gid;
+        var alt = LookAlikeFor(cp);
+        return alt != 0 && CMap.TryGetValue(alt, out var altGid) ? altGid : 0;
+    }
+
     /// <summary>Per-glyph advance widths in font units, indexed by glyph id.
     /// Sourced from the TrueType hmtx table; empty when the font omits hmtx.</summary>
     private int[] _advanceWidths = [];
@@ -68,6 +94,33 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
     {
         if (glyphId < 0 || glyphId >= _advanceWidths.Length) return 0;
         return _advanceWidths[glyphId];
+    }
+
+    /// <summary>Resolve a PDF /Encoding /Differences glyph name against this
+    /// TrueType program: the "gNNN"/"glyphNNN"/"indexNNN" subset conventions carry
+    /// the glyph index directly (such fonts usually ship no post/name table at
+    /// all), while Adobe names (AGL, uniXXXX, uXXXX, GNN) resolve through the
+    /// font's cmap via their Unicode value. Returns 0 when nothing matches.</summary>
+    public int GidForName(string name)
+    {
+        if (string.IsNullOrEmpty(name) || name == ".notdef") return 0;
+
+        var digits = 0;
+        while (digits < name.Length - 1 && char.IsAsciiDigit(name[name.Length - 1 - digits])) digits++;
+        if (digits > 0)
+        {
+            var prefix = name[..^digits];
+            if ((prefix == "g" || prefix == "glyph" || prefix == "index")
+                && int.TryParse(name[^digits..], out var gidNum)
+                && gidNum > 0 && gidNum < _numGlyphs)
+                return gidNum;
+        }
+
+        var uni = TextAbsorber.ResolveGlyphName(name);
+        if (!string.IsNullOrEmpty(uni)
+            && CMap.TryGetValue(uni![0], out var gid) && gid > 0)
+            return gid;
+        return 0;
     }
 
     // hmtx is laid out as a sequence of `longHorMetric` entries (advanceWidth u16 + lsb i16)
@@ -94,6 +147,45 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
             }
             _advanceWidths[i] = lastWidth;
         }
+    }
+
+    // Legacy 'kern' pair kerning (format-0 horizontal subtables), parsed on first use.
+    // Key = (leftGid << 16) | rightGid; value in font units (negative pulls glyphs together).
+    private Dictionary<uint, short>? _kernPairs;
+
+    /// <summary>Pair-kerning adjustment between two glyph ids in font units (0 when the
+    /// font has no 'kern' table or the pair is unkerned).</summary>
+    public int GetKernAdjustment(int leftGid, int rightGid)
+    {
+        _kernPairs ??= ParseKern();
+        return _kernPairs.TryGetValue(((uint)(ushort)leftGid << 16) | (ushort)rightGid, out var v) ? v : 0;
+    }
+
+    private Dictionary<uint, short> ParseKern()
+    {
+        var pairs = new Dictionary<uint, short>();
+        if (!_tables.TryGetValue("kern", out var t) || t.offset + 4 > _data.Length) return pairs;
+        var nTables = ReadUInt16(t.offset + 2);
+        var pos = t.offset + 4;
+        var end = Math.Min(t.offset + t.length, _data.Length);
+        for (var i = 0; i < nTables && pos + 6 <= end; i++)
+        {
+            var subLength = ReadUInt16(pos + 2);
+            var coverage = ReadUInt16(pos + 4);
+            // format-0 horizontal, not cross-stream
+            if ((coverage >> 8) == 0 && (coverage & 1) != 0 && (coverage & 4) == 0 && pos + 14 <= end)
+            {
+                var nPairs = ReadUInt16(pos + 6);
+                var p = pos + 14;
+                for (var k = 0; k < nPairs && p + 6 <= end; k++, p += 6)
+                {
+                    var key = ((uint)ReadUInt16(p) << 16) | (uint)ReadUInt16(p + 2);
+                    pairs[key] = (short)ReadUInt16(p + 4);
+                }
+            }
+            pos += subLength >= 6 ? subLength : 6;
+        }
+        return pairs;
     }
 
     /// <summary>Get glyph outline by glyph ID, or null for empty/missing glyphs.</summary>

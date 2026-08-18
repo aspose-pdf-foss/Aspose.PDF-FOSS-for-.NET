@@ -160,7 +160,7 @@ public sealed partial class Page : IDisposable
         return new Rectangle(Math.Min(x1, x2), Math.Min(y1, y2), Math.Max(x1, x2), Math.Max(y1, y2));
     }
 
-    private void EmitHyperlinkAnnotation(Rectangle rect, Hyperlink hyperlink)
+    internal void EmitHyperlinkAnnotation(Rectangle rect, Hyperlink hyperlink)
     {
         if (hyperlink is LocalHyperlink lh && lh.TargetPageNumber > 0)
             Annotations.AddLinkAnnotation(rect,
@@ -181,10 +181,81 @@ public sealed partial class Page : IDisposable
     internal void FlushBgColorRectangles()
     {
         if (_bgColorFragments is null || _bgColorFragments.Count == 0) return;
-        var builder = new Content.ContentStreamBuilder();
+        var pageBuilder = new Content.ContentStreamBuilder();
+        // A fragment extracted from a Form XObject gets its highlight drawn INTO
+        // that form's stream (before its text), not onto the page: the rectangle
+        // must live where the text lives, both for the paint order under nested
+        // content and for consumers reading the form's own operator list.
+        var formBuilders = new Dictionary<PdfStream, Content.ContentStreamBuilder>();
         foreach (var frag in _bgColorFragments)
         {
+            Content.ContentStreamBuilder builder;
+            if (frag.SourceXObjStream is { } sourceForm)
+            {
+                if (!formBuilders.TryGetValue(sourceForm, out builder!))
+                    formBuilders[sourceForm] = builder = new Content.ContentStreamBuilder();
+            }
+            else
+                builder = pageBuilder;
+
             var fragBg = frag.TextState.BackgroundColor;
+
+            // The run's own transform context, shared by the fragment- and
+            // segment-level emitters below.
+            var ctm = frag.ExtractionCtm;
+            double ctmScaleX = ctm is not null ? Math.Sqrt(ctm.A * ctm.A + ctm.B * ctm.B) : 1.0;
+            bool hasCtm = ctmScaleX > 1.5; // significant scaling (>1.5x)
+            bool ctmNonIdentity = ctm is not null
+                && (Math.Abs(ctm.A - 1) + Math.Abs(ctm.B) + Math.Abs(ctm.C)
+                    + Math.Abs(ctm.D - 1) + Math.Abs(ctm.E) + Math.Abs(ctm.F)) > 1e-6;
+            // An axis-aligned translated/scaled frame — including a y-DOWN
+            // (flipped, D < 0) one, where the local rect anchors one height below
+            // the inverse-mapped page bottom edge and the flip renders it back.
+            Matrix? frame = !hasCtm && ctmNonIdentity && ctm is not null
+                && Math.Abs(ctm.B) < 1e-6 && Math.Abs(ctm.C) < 1e-6
+                && ctm.A > 1e-6 && Math.Abs(ctm.D) > 1e-6 ? ctm : null;
+            // A quarter-turn frame (axis-swapping, |B|,|C| carry the scale — the
+            // page-rotation composition for /Rotate content).
+            bool quarterTurn = !hasCtm && ctm is not null
+                && Math.Abs(ctm.A) < 1e-6 && Math.Abs(ctm.D) < 1e-6
+                && Math.Abs(ctm.B) > 1e-6 && Math.Abs(ctm.C) > 1e-6;
+
+            // Draw one highlight box. The caller supplies the PAGE-space anchor,
+            // width and box height plus the metric height (raw-Tf units, which is
+            // what a local frame measures in); the framing decides where the
+            // numbers actually land.
+            void EmitBg(Aspose.Pdf.Color color, double pageX, double pageY,
+                double pageW, double metricH, double pageH)
+            {
+                builder.SaveState();
+                if (quarterTurn)
+                {
+                    // The box in the CONTENT STREAM's own device space.
+                    var (qx1, qy1) = ctm!.InverseTransformPoint(pageX, pageY);
+                    var (qx2, qy2) = ctm.InverseTransformPoint(pageX + pageW, pageY + pageH);
+                    builder.SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
+                    builder.Rectangle(Math.Min(qx1, qx2), Math.Min(qy1, qy2),
+                        Math.Abs(qx2 - qx1), Math.Abs(qy2 - qy1));
+                }
+                else if (frame is not null)
+                {
+                    // Replay the run's frame around the rectangle and write the rect
+                    // in that local space. cm FIRST, colour second, so the cm stays
+                    // immediately before the rectangle operands.
+                    var (lx, ly) = frame.InverseTransformPoint(pageX, pageY);
+                    if (frame.D < 0) ly -= metricH;
+                    builder.SetMatrix(frame.A, frame.B, frame.C, frame.D, frame.E, frame.F);
+                    builder.SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
+                    builder.Rectangle(lx, ly, pageW / frame.A, metricH);
+                }
+                else
+                {
+                    builder.SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
+                    builder.Rectangle(pageX, pageY, pageW, metricH);
+                }
+                builder.Fill();
+                builder.RestoreState();
+            }
 
             // Fragment-level BackgroundColor: emit ONE rectangle.
             // Use fragment rectangle for X/width but compute height from font metrics
@@ -233,11 +304,6 @@ public sealed partial class Page : IDisposable
                     continue;
                 }
 
-                // Check if the fragment was extracted under a non-trivial CTM.
-                var ctm = frag.ExtractionCtm;
-                double ctmScaleX = ctm is not null ? Math.Sqrt(ctm.A * ctm.A + ctm.B * ctm.B) : 1.0;
-                bool hasCtm = ctmScaleX > 1.5; // significant scaling (>1.5x)
-
                 double fragW, fragH, fragX, fragY;
 
                 if (hasCtm)
@@ -257,11 +323,11 @@ public sealed partial class Page : IDisposable
                 }
                 else
                 {
-                    // Standard path (no significant CTM): use fragment rectangle
-                    // for position/width, compute height from rawFs/TmD metrics.
+                    // Standard path: use the fragment rectangle for position/width,
+                    // compute height from rawFs/TmD metrics.
                     fragW = (frag.Rectangle?.Width ?? 0) - frag.TrailingTcPageSpace;
-                    fragX = frag.Rectangle?.LLX ?? frag.PositionOrNull?.XIndent ?? 0;
-                    fragY = frag.Rectangle?.LLY ?? frag.PositionOrNull?.YIndent ?? 0;
+                    fragX = (frag.Rectangle?.LLX ?? frag.PositionOrNull?.XIndent ?? 0) + frag.PostAbsorbDx;
+                    fragY = (frag.Rectangle?.LLY ?? frag.PositionOrNull?.YIndent ?? 0) + frag.PostAbsorbDy;
 
                     double maxRawFs = 0;
                     double maxTmD = 1.0;
@@ -283,11 +349,8 @@ public sealed partial class Page : IDisposable
                     fragH = ComputeBgRectHeight(maxFontName, maxFont, maxRawFs, maxTmD);
                 }
 
-                builder.SaveState();
-                builder.SetFillColor(fragBg.R / 255.0, fragBg.G / 255.0, fragBg.B / 255.0);
-                builder.Rectangle(fragX, fragY, fragW, fragH);
-                builder.Fill();
-                builder.RestoreState();
+                EmitBg(fragBg, fragX, fragY, fragW, fragH,
+                    frag.Rectangle?.Height ?? fragH);
                 continue;
             }
 
@@ -338,7 +401,11 @@ public sealed partial class Page : IDisposable
                     bool isLastFragSeg = (segList.Count == frag.Segments.Count);
                     if (isLastFragSeg && frag.Rectangle is not null)
                     {
-                        w = frag.Rectangle.URX - startX;
+                        // A segment moved after absorption carries its box with it:
+                        // the fragment rectangle still describes the ORIGINAL span,
+                        // so shift its right edge by the segment's own displacement.
+                        var segDx = seg.Rectangle is { } segRect ? startX - segRect.LLX : 0;
+                        w = frag.Rectangle.URX + segDx - startX;
                     }
                     else
                     {
@@ -365,18 +432,29 @@ public sealed partial class Page : IDisposable
                 var font2 = seg.TextState.Font ?? frag.TextState.Font;
                 double h = ComputeBgRectHeight(fontName2, font2, rawFs, tmD);
 
-                builder.SaveState();
-                builder.SetFillColor(bg.R / 255.0, bg.G / 255.0, bg.B / 255.0);
-                builder.Rectangle(startX, startY, w, h);
-                builder.Fill();
-                builder.RestoreState();
+                EmitBg(bg, startX, startY, w, h, h);
                 si = lastMerged + 1;
             }
         }
-        var bytes = builder.Build();
+        var bytes = pageBuilder.Build();
         if (bytes.Length > 0)
         {
             PrependContentStream(bytes);
+        }
+        foreach (var (formStream, formBuilder) in formBuilders)
+        {
+            var formBytes = formBuilder.Build();
+            if (formBytes.Length == 0) continue;
+            var existing = _reader.DecodeStream(formStream);
+            var merged = new byte[formBytes.Length + 1 + existing.Length];
+            formBytes.CopyTo(merged, 0);
+            merged[formBytes.Length] = (byte)'\n';
+            existing.CopyTo(merged, formBytes.Length + 1);
+            formStream.Dict.Remove("Filter");
+            formStream.Dict.Remove("DecodeParms");
+            formStream.ReplaceData(merged);
+            if (formStream.ObjectNumber > 0)
+                _reader.OwnerDocument?.MarkDirty(formStream.ObjectNumber, formStream);
         }
         _bgColorFragments.Clear();
     }
@@ -388,9 +466,9 @@ public sealed partial class Page : IDisposable
     /// </summary>
     private static double ComputeBgRectHeight(string fontName, Text.FontInfo? font, double rawFs, double tmD)
     {
-        // Aspose.Pdf sizes a text-highlight background box at a flat 1.1×
-        // the font size, independent of the font's own line-height metrics (verified
-        // across fonts/sizes: a 72pt run yields 79.2, a 12pt run 13.2, an 8pt run 8.8).
+        // A text-highlight background box is sized at a flat 1.1×
+        // the font size, independent of the font's own line-height metrics
+        // (a 72pt run yields 79.2, a 12pt run 13.2, an 8pt run 8.8).
         _ = fontName; _ = font;
         return rawFs * tmD * 1.1;
     }
@@ -542,7 +620,7 @@ public sealed partial class Page : IDisposable
                 }
             }
 
-            // Underline geometry (reference-derived, verified on Arial and Calibri
+            // Underline geometry (verified on Arial and Calibri
             // sources): the line's top edge sits a tenth of the font's descent below
             // the fragment's rect bottom (Position.YIndent), and the thickness is 5%
             // of the font size — so the bottom offset is (0.05 + descent/10)·fs.
@@ -558,7 +636,7 @@ public sealed partial class Page : IDisposable
             // A fragment whose SOURCE underline was captured (ToAttemptGetUnderlineFromSource,
             // then text-replaced): the new line is anchored to the spliced-out source
             // rectangle — top edge at the source's bottom edge — at the standard thickness
-            // and the replacement's advance, matching the reference behaviour.
+            // and the replacement's advance.
             if (frag.CapturedUnderlineSources is { Count: > 0 } ulSources)
             {
                 var src = ulSources[0];
@@ -761,7 +839,7 @@ public sealed partial class Page : IDisposable
     /// Page rectangle (defaults to MediaBox). Forwarder for parity with the
     /// public API where Page exposes a top-level Rect property. Setting
     /// <c>Rect</c> updates MediaBox, CropBox, BleedBox, TrimBox and ArtBox in
-    /// one shot — matches how the Aspose.Pdf API treats the property as the
+    /// one shot — the property acts as the
     /// primary page-size accessor.
     /// </summary>
     public Rectangle Rect
@@ -791,15 +869,179 @@ public sealed partial class Page : IDisposable
 
     /// <summary>
     /// Page info container with width/height/margin properties. Forwarder
-    /// for parity with the public Aspose.Pdf API.
+    /// for parity with the public API.
     /// </summary>
     public PageInfo PageInfo
     {
         get => _pageInfoCache ??= new PageInfo(this);
-        set => _pageInfoCache = value;
+        // Assigning a free-standing descriptor SIZES THE PAGE: the bound instance
+        // stays bound and takes the assigned values, so `page.PageInfo = new PageInfo
+        // { … }` and setting the same properties one by one end in the same place.
+        // Swapping the cache for the detached object instead left the media box
+        // untouched and every later `page.PageInfo.Width = …` talking to nothing.
+        set
+        {
+            if (value is null) return;
+            var bound = _pageInfoCache ??= new PageInfo(this);
+            if (!ReferenceEquals(bound, value)) bound.CopyFrom(value);
+        }
     }
 
-    public Color? Background { get; set; }
+    /// <summary>Page background colour. When not explicitly set, reading it DETECTS
+    /// an existing background from the content stream — a full-page rectangle
+    /// filled right at the start of the page paints the page background (so the
+    /// getter reports Crimson etc. for such documents).</summary>
+    public Color? Background
+    {
+        get
+        {
+            if (_background is not null) return _background;
+            if (!_backgroundDetected)
+            {
+                _backgroundDetected = true;
+                _detectedBackground = DetectBackgroundColor();
+            }
+            return _detectedBackground;
+        }
+        set => _background = value;
+    }
+    /// <summary>The background the caller explicitly assigned; detection never
+    /// leaks into the generator's apply-background pass.</summary>
+    internal Color? ExplicitBackground => _background;
+    private Color? _background;
+    private Color? _detectedBackground;
+    private bool _backgroundDetected;
+
+    /// <summary>Scan the leading painting operators for a fill covering (almost)
+    /// the whole page and return its colour; null when the page has no painted
+    /// background. Only the stream prefix is examined — a background is by
+    /// definition painted before the content above it.</summary>
+    private Color? DetectBackgroundColor()
+    {
+        try
+        {
+            var mb = MediaBox;
+            double r = 0, g = 0, b = 0;
+            bool colorSet = false;
+            double reX = 0, reY = 0, reW = 0, reH = 0;
+            bool haveRect = false;
+            // Path points for m/l-drawn rectangles.
+            var pts = new System.Collections.Generic.List<(double x, double y)>();
+            var opsSeen = 0;
+            var nums = new System.Collections.Generic.List<double>();
+            // Peek, don't enumerate Contents: materialising here would freeze an
+            // empty snapshot on a not-yet-generated page and hide content written
+            // to it later (generator pages read as op-less after Save).
+            foreach (var s in Contents.PeekOps())
+            {
+                if (++opsSeen > 60) break; // background lives at the stream head
+                var parts = s.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0) continue;
+                var name = parts[^1];
+                nums.Clear();
+                for (var i = 0; i < parts.Length - 1; i++)
+                    if (double.TryParse(parts[i], System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out var v))
+                        nums.Add(v);
+                switch (name)
+                {
+                    case "rg" when nums.Count >= 3:
+                        r = nums[0]; g = nums[1]; b = nums[2]; colorSet = true; break;
+                    case "g" when nums.Count >= 1:
+                        r = g = b = nums[0]; colorSet = true; break;
+                    case "k" when nums.Count >= 4:
+                        r = (1 - nums[0]) * (1 - nums[3]);
+                        g = (1 - nums[1]) * (1 - nums[3]);
+                        b = (1 - nums[2]) * (1 - nums[3]);
+                        colorSet = true; break;
+                    case "scn" or "sc" when nums.Count >= 3:
+                        r = nums[0]; g = nums[1]; b = nums[2]; colorSet = true; break;
+                    case "re" when nums.Count >= 4:
+                        reX = nums[0]; reY = nums[1]; reW = nums[2]; reH = nums[3];
+                        haveRect = true; break;
+                    case "m" or "l" when nums.Count >= 2:
+                        pts.Add((nums[0], nums[1])); break;
+                    case "f" or "f*" or "b" or "B" or "b*" or "B*":
+                    {
+                        if (!colorSet) { pts.Clear(); haveRect = false; break; }
+                        if (!haveRect && pts.Count >= 4)
+                        {
+                            reX = pts.Min(p => p.x); reY = pts.Min(p => p.y);
+                            reW = pts.Max(p => p.x) - reX; reH = pts.Max(p => p.y) - reY;
+                            haveRect = true;
+                        }
+                        if (haveRect && reW >= mb.Width * 0.9 && reH >= mb.Height * 0.9)
+                            return Color.FromRgb(r, g, b);
+                        pts.Clear(); haveRect = false;
+                        break;
+                    }
+                    case "BT":
+                        return null; // real content started — no background fill found
+                    case "Do":
+                    {
+                        // An Acrobat-style background is a Form XObject (OCG
+                        // "Background") invoked at the stream head — look for the
+                        // full-page fill inside it.
+                        if (parts.Length >= 2 && parts[0].StartsWith('/'))
+                        {
+                            var xname = parts[0][1..];
+                            var res = _reader.ResolveDict(Dict.Get("Resources"));
+                            var xobjs = res is null ? null : _reader.ResolveDict(res.Get("XObject"));
+                            var xstr = xobjs is null ? null : _reader.ResolveStream(xobjs.Get(xname));
+                            if (xstr is not null && xstr.Dict.GetName("Subtype") == "Form")
+                            {
+                                var inner = ScanBytesForBackground(_reader.DecodeStream(xstr), mb);
+                                if (inner is not null) return inner;
+                            }
+                        }
+                        return null;
+                    }
+                }
+            }
+        }
+        catch { /* malformed content — report no background */ }
+        return null;
+    }
+
+    /// <summary>Scan a raw (form XObject) content stream for a full-page fill.</summary>
+    private static Color? ScanBytesForBackground(byte[] bytes, Rectangle mb)
+    {
+        var text = System.Text.Encoding.Latin1.GetString(bytes);
+        double r = 0, g = 0, b = 0;
+        var colorSet = false;
+        double reX = 0, reY = 0, reW = 0, reH = 0;
+        var haveRect = false;
+        var nums = new System.Collections.Generic.List<double>();
+        foreach (var tokRaw in text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var tok = tokRaw;
+            if (double.TryParse(tok, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var v))
+            {
+                nums.Add(v);
+                continue;
+            }
+            switch (tok)
+            {
+                case "rg" when nums.Count >= 3:
+                    r = nums[^3]; g = nums[^2]; b = nums[^1]; colorSet = true; break;
+                case "g" when nums.Count >= 1:
+                    r = g = b = nums[^1]; colorSet = true; break;
+                case "re" when nums.Count >= 4:
+                    reX = nums[^4]; reY = nums[^3]; reW = nums[^2]; reH = nums[^1];
+                    haveRect = true; break;
+                case "f" or "f*" or "B" or "b":
+                    if (colorSet && haveRect && reW >= mb.Width * 0.9 && reH >= mb.Height * 0.9)
+                        return Color.FromRgb(r, g, b);
+                    haveRect = false;
+                    break;
+                case "BT":
+                    return null;
+            }
+            nums.Clear();
+        }
+        return null;
+    }
 
     /// <summary>The media box for this page (required per spec).</summary>
     public Rectangle MediaBox
@@ -872,9 +1114,9 @@ public sealed partial class Page : IDisposable
             var h = rect?.Height ?? 0;
             return rotation switch
             {
-                90 => new Matrix(0, 1, -1, 0, h, 0),
+                90 => new Matrix(0, -1, 1, 0, 0, w),
                 180 => new Matrix(-1, 0, 0, -1, w, h),
-                270 => new Matrix(0, -1, 1, 0, 0, w),
+                270 => new Matrix(0, 1, -1, 0, h, 0),
                 _ => Matrix.Identity,
             };
         }
@@ -947,7 +1189,7 @@ public sealed partial class Page : IDisposable
 
     /// <summary>Image XObjects on this page.</summary>
     public XImageCollection Images =>
-        _images ??= new XImageCollection(_dict, _reader);
+        _images ??= new XImageCollection(_dict, _reader) { OwnerPage = this };
 
     /// <summary>Fonts referenced by this page.</summary>
     public FontCollection Fonts =>
@@ -958,7 +1200,7 @@ public sealed partial class Page : IDisposable
     /// </summary>
     public Resources Resources => _resources ??= new Resources(this);
 
-    /// <summary>Method-style accessor for <see cref="Resources"/> — Aspose.Pdf parity.</summary>
+    /// <summary>Method-style accessor for <see cref="Resources"/> — public-API parity.</summary>
     public Resources GetResources() => Resources;
 
     /// <summary>
@@ -1255,8 +1497,8 @@ public sealed partial class Page : IDisposable
             resources.Set("XObject", xobjects);
         }
 
-        // Stamp form XObjects are numbered from Fm0 (matching the reference
-        // implementation), so the first stamp added to a page is /Fm0.
+        // Stamp form XObjects are numbered from Fm0,
+        // so the first stamp added to a page is /Fm0.
         var name = "Fm0";
         var counter = 0;
         while (xobjects.ContainsKey(name)) name = $"Fm{++counter}";
@@ -1272,6 +1514,62 @@ public sealed partial class Page : IDisposable
     public void AddContentStream(byte[] contentBytes)
     {
         AddContent(contentBytes);
+        _trailingMarkedContent = null;
+    }
+
+    /// <summary>The trailing <c>BDC … EMC</c> block left at the end of the page
+    /// content by <see cref="AddMarkedContentStream"/>: its tag/MCID and the
+    /// stream segment holding it. Any other append clears the note, so a merge
+    /// only happens across DIRECTLY consecutive same-tag/-MCID runs.</summary>
+    private (string Tag, int Mcid, Core.PdfStream Segment)? _trailingMarkedContent;
+
+    /// <summary>Append content wrapped in a <c>/tag &lt;&lt;/MCID mcid&gt;&gt; BDC … EMC</c>
+    /// marked-content block. A run appended directly after another with the SAME
+    /// tag and MCID continues that block instead of opening a second one (the
+    /// previous segment's closing EMC moves to the end of the new segment).</summary>
+    internal void AddMarkedContentStream(byte[] contentBytes, string tag, int mcid)
+    {
+        var close = System.Text.Encoding.ASCII.GetBytes("EMC\n");
+        byte[] payload;
+        if (_trailingMarkedContent is { } prev && prev.Tag == tag && prev.Mcid == mcid
+            && ReferenceEquals(LastContentStreamSegment(), prev.Segment)
+            && EndsWith(prev.Segment.RawData, close))
+        {
+            prev.Segment.ReplaceData(prev.Segment.RawData[..^close.Length]);
+            payload = Concat(contentBytes, close);
+        }
+        else
+        {
+            var open = System.Text.Encoding.ASCII.GetBytes($"/{tag} <</MCID {mcid}>> BDC\n");
+            payload = Concat(Concat(open, contentBytes), close);
+        }
+        AddContent(payload);
+        _trailingMarkedContent = LastContentStreamSegment() is { } seg ? (tag, mcid, seg) : null;
+
+        static bool EndsWith(byte[] data, byte[] suffix)
+        {
+            if (data.Length < suffix.Length) return false;
+            for (var i = 0; i < suffix.Length; i++)
+                if (data[data.Length - suffix.Length + i] != suffix[i]) return false;
+            return true;
+        }
+        static byte[] Concat(byte[] a, byte[] b)
+        {
+            var r = new byte[a.Length + b.Length];
+            System.Buffer.BlockCopy(a, 0, r, 0, a.Length);
+            System.Buffer.BlockCopy(b, 0, r, a.Length, b.Length);
+            return r;
+        }
+    }
+
+    /// <summary>The last stream segment of /Contents (the one the most recent
+    /// append landed in), or null when the page has no direct stream content.</summary>
+    private Core.PdfStream? LastContentStreamSegment()
+    {
+        var resolved = _reader.Resolve(_dict.Get("Contents"));
+        if (resolved is Core.PdfArray arr)
+            return arr.Count > 0 ? _reader.Resolve(arr[arr.Count - 1]) as Core.PdfStream : null;
+        return resolved as Core.PdfStream;
     }
 
     /// <summary>
@@ -1397,6 +1695,44 @@ public sealed partial class Page : IDisposable
         }
 
         if (indirect) MarkDirty();
+    }
+
+    /// <summary>Number of streams currently making up /Contents (0, 1, or the
+    /// array length) — the insertion cursor for <see cref="InsertContentStreamAt"/>.</summary>
+    internal int ContentStreamCount
+    {
+        get
+        {
+            var resolved = _reader.Resolve(_dict.Get("Contents"));
+            return resolved is PdfArray arr ? arr.Count : resolved is PdfStream ? 1 : 0;
+        }
+    }
+
+    /// <summary>Insert a content stream at <paramref name="index"/> in /Contents —
+    /// an UNDERLAY that paints beneath every stream appended after that point
+    /// (a table wrapper's background band whose height is only known once its
+    /// children have laid out).</summary>
+    internal void InsertContentStreamAt(int index, byte[] contentStreamBytes)
+    {
+        var newStream = new PdfStream(new PdfDictionary(), contentStreamBytes);
+        var existing = _dict.Get("Contents");
+        var resolved = _reader.Resolve(existing);
+        if (resolved is PdfArray existingArray)
+        {
+            existingArray.Insert(Math.Clamp(index, 0, existingArray.Count), newStream);
+        }
+        else if (resolved is PdfStream)
+        {
+            var arr = new PdfArray();
+            if (index <= 0) { arr.Add(newStream); arr.Add(existing!); }
+            else { arr.Add(existing!); arr.Add(newStream); }
+            _dict.Set("Contents", arr);
+        }
+        else
+        {
+            _dict.Set("Contents", newStream);
+        }
+        _trailingMarkedContent = null;
     }
 
     /// <summary>Register this page — and any indirect /Resources (and /Resources/XObject)
@@ -1544,6 +1880,95 @@ public sealed partial class Page : IDisposable
         return name;
     }
 
+    /// <summary>Register an ExtGState under a lowercase sequential resource name
+    /// (<c>gs1, gs2, …</c>) — the naming used for per-paint transparency states
+    /// on drawable shapes, distinct from the uppercase <c>GS<i>n</i></c> series.</summary>
+    internal string AddExtGStateSequential(Content.ExtGState extGState)
+    {
+        var resources = _dict.Get("Resources") as PdfDictionary
+            ?? _reader.ResolveDict(_dict.Get("Resources"));
+        if (resources is null)
+        {
+            resources = new PdfDictionary();
+            _dict.Set("Resources", resources);
+        }
+        var gsDict = resources.Get("ExtGState") as PdfDictionary
+            ?? _reader.ResolveDict(resources.Get("ExtGState"));
+        if (gsDict is null)
+        {
+            gsDict = new PdfDictionary();
+            resources.Set("ExtGState", gsDict);
+        }
+        var counter = 1;
+        var name = "gs1";
+        while (gsDict.ContainsKey(name))
+            name = $"gs{++counter}";
+        gsDict.Set(name, extGState.ToPdfDictionary());
+        return name;
+    }
+
+    /// <summary>
+    /// Add a shading dictionary to this page's /Resources/Shading and return the
+    /// resource name (usable with the <c>sh</c> operator).
+    /// </summary>
+    internal string AddShading(PdfDictionary shadingDict)
+    {
+        var resources = _dict.Get("Resources") as PdfDictionary
+            ?? _reader.ResolveDict(_dict.Get("Resources"));
+        if (resources is null)
+        {
+            resources = new PdfDictionary();
+            _dict.Set("Resources", resources);
+        }
+
+        var shDict = resources.Get("Shading") as PdfDictionary
+            ?? _reader.ResolveDict(resources.Get("Shading"));
+        if (shDict is null)
+        {
+            shDict = new PdfDictionary();
+            resources.Set("Shading", shDict);
+        }
+
+        var name = "Sh0";
+        var counter = 0;
+        while (shDict.ContainsKey(name))
+            name = $"Sh{++counter}";
+
+        shDict.Set(name, shadingDict);
+        return name;
+    }
+
+    /// <summary>
+    /// Add a pattern dictionary to this page's /Resources/Pattern and return the
+    /// resource name (usable with <c>/Pattern cs /Name scn</c>).
+    /// </summary>
+    internal string AddPattern(PdfDictionary patternDict)
+    {
+        var resources = _dict.Get("Resources") as PdfDictionary
+            ?? _reader.ResolveDict(_dict.Get("Resources"));
+        if (resources is null)
+        {
+            resources = new PdfDictionary();
+            _dict.Set("Resources", resources);
+        }
+
+        var patDict = resources.Get("Pattern") as PdfDictionary
+            ?? _reader.ResolveDict(resources.Get("Pattern"));
+        if (patDict is null)
+        {
+            patDict = new PdfDictionary();
+            resources.Set("Pattern", patDict);
+        }
+
+        var name = "P0";
+        var counter = 0;
+        while (patDict.ContainsKey(name))
+            name = $"P{++counter}";
+
+        patDict.Set(name, patternDict);
+        return name;
+    }
+
     /// <summary>
     /// Add an image to this page at the specified position and size.
     /// Supports JPEG and raw RGB pixel data.
@@ -1554,6 +1979,13 @@ public sealed partial class Page : IDisposable
     /// XObject (<see cref="Image.IsBlackWhite"/>) for a much smaller stream; falls
     /// back to the normal colour embed when the source can't be decoded.</param>
     public void AddImage(byte[] imageData, Rectangle rect, bool blackWhite = false)
+        => AddImage(imageData, rect, blackWhite, aspectFit: false);
+
+    // aspectFit: the file-path overload treats the rectangle as a bounding box (the
+    // image keeps its own aspect ratio, centred); every other caller — the generator
+    // flow, the HTML converter, direct byte[]/stream users — fills the rectangle
+    // exactly as given.
+    private void AddImage(byte[] imageData, Rectangle rect, bool blackWhite, bool aspectFit)
     {
         if (blackWhite && ImageStamp.FromBlackWhite(imageData) is { } bwStamp)
         {
@@ -1630,10 +2062,23 @@ public sealed partial class Page : IDisposable
             }
         }
 
-        stamp.X = rect.LLX;
-        stamp.Y = rect.LLY;
-        stamp.DisplayWidth = rect.Width;
-        stamp.DisplayHeight = rect.Height;
+        // With aspectFit the rectangle is a bounding box, not a target frame: the image
+        // fits INSIDE it at its own aspect ratio, centred on both axes — a square image
+        // in a wide rect keeps its shape instead of stretching to fill.
+        double dx = rect.LLX, dy = rect.LLY, dw = rect.Width, dh = rect.Height;
+        if (aspectFit && stamp.PixelWidth > 0 && stamp.PixelHeight > 0 && dw > 0 && dh > 0)
+        {
+            var scale = System.Math.Min(dw / stamp.PixelWidth, dh / stamp.PixelHeight);
+            var fitW = stamp.PixelWidth * scale;
+            var fitH = stamp.PixelHeight * scale;
+            dx += (dw - fitW) / 2;
+            dy += (dh - fitH) / 2;
+            dw = fitW; dh = fitH;
+        }
+        stamp.X = dx;
+        stamp.Y = dy;
+        stamp.DisplayWidth = dw;
+        stamp.DisplayHeight = dh;
         stamp.CompensatePageRotation = true;
         stamp.ApplyTo(this);
     }
@@ -1755,11 +2200,12 @@ public sealed partial class Page : IDisposable
         AddImage(ms.ToArray(), rect);
     }
 
-    /// <summary>Add an image from a file path at the specified rectangle.</summary>
+    /// <summary>Add an image from a file path; the rectangle bounds the image, which
+    /// keeps its own aspect ratio centred inside it.</summary>
     public void AddImage(string imagePath, Rectangle rectangle)
     {
         if (imagePath is null) throw new ArgumentNullException(nameof(imagePath));
-        AddImage(File.ReadAllBytes(imagePath), rectangle);
+        AddImage(File.ReadAllBytes(imagePath), rectangle, blackWhite: false, aspectFit: true);
     }
 
     /// <summary>Add an image at <paramref name="imageRect"/> with an explicit bounding-box. Stored only — falls back to <see cref="AddImage(Stream, Rectangle)"/>.</summary>
@@ -1770,7 +2216,7 @@ public sealed partial class Page : IDisposable
     }
 
     /// <summary>Add an image with explicit pixel size + proportion flag (bbox defaults to
-    /// the image rectangle). Mirrors the Aspose.Pdf 5-argument overload used to control
+    /// the image rectangle). Mirrors the public 5-argument overload used to control
     /// image resolution.</summary>
     public void AddImage(Stream imageStream, Rectangle imageRect, int imageWidth, int imageHeight, bool saveImageProportions)
     {
@@ -1844,6 +2290,18 @@ public sealed partial class Page : IDisposable
     {
         var annotsObj = _reader.Resolve(_dict.Get("Annots")) as PdfArray;
         if (annotsObj is null || annotsObj.Count == 0) return;
+
+        // A page that belongs to a document with a form flattens through the form: each
+        // annotation becomes an XObject in the page's own resources (so the flattened
+        // widgets are reachable as Resources.Forms) and the fields that lived here leave
+        // the AcroForm. Without an owning document there is nothing to retire, and the
+        // inline path below still folds the appearances into the content stream.
+        if (_reader.OwnerDocument is { } ownerDoc
+            && _reader.ResolveDict(_reader.Catalog.Get("AcroForm")) is not null)
+        {
+            ownerDoc.Form.FlattenSinglePage(ownerDoc, this);
+            return;
+        }
 
         var appendContent = new MemoryStream();
 
@@ -1995,7 +2453,7 @@ public sealed partial class Page : IDisposable
 
         // Emit the resize matrix as the FIRST operator, then isolate the original
         // content in q…Q: {sx} 0 0 {sy} {tx} {ty} cm  q  … original content …  Q
-        // (Aspose.Pdf places the cm first, so it is page.Contents.Commands[1]).
+        // (the cm comes first, so it is page.Contents.Commands[1]).
         var prefix = System.Text.Encoding.ASCII.GetBytes(
             $"{Format(sx)} 0 0 {Format(sy)} {Format(tx)} {Format(ty)} cm\nq\n");
         var suffix = System.Text.Encoding.ASCII.GetBytes("\nQ\n");
@@ -2014,8 +2472,8 @@ public sealed partial class Page : IDisposable
     /// <summary>Like <see cref="ApplyContentResize"/>, but moves the original page
     /// content into a Form XObject and leaves only <c>q … cm /Fm Do Q</c> on the page.
     /// Keeps the page operator stream free of the content's own transforms (so the
-    /// applied resize matrix is the single top-level transform), matching the
-    /// Aspose.Pdf PdfFileEditor.ResizeContents behaviour.</summary>
+    /// applied resize matrix is the single top-level transform) — the
+    /// PdfFileEditor.ResizeContents behaviour.</summary>
     internal void ApplyContentResizeAsForm(double sx, double sy, double tx, double ty)
     {
         var originalContent = CollectContentBytes();
@@ -2043,8 +2501,10 @@ public sealed partial class Page : IDisposable
         endQ.CopyTo(bracketed, q.Length + originalContent.Length);
 
         var formName = WrapContentInForm(bracketed);
+        // q … Q around the invocation: the resulting page stream is
+        // q / cm / Do / Q, so cm sits at Contents[2] and Do at Contents[3].
         var bytes = System.Text.Encoding.ASCII.GetBytes(
-            $"{Format(sx)} 0 0 {Format(sy)} {Format(tx)} {Format(ty)} cm\n/{formName} Do\n");
+            $"q\n{Format(sx)} 0 0 {Format(sy)} {Format(tx)} {Format(ty)} cm\n/{formName} Do\nQ\n");
         SetContentStream(bytes);
 
         TransformAnnotationRects(sx, sy, tx, ty);
@@ -2080,9 +2540,10 @@ public sealed partial class Page : IDisposable
     {
         // Resolve the page /Resources — it is frequently an indirect reference, in which
         // case `as PdfDictionary` would yield null and the moved content would lose every
-        // font/image/XObject it references (e.g. a missing /Im1).
-        var resources = _reader.ResolveDict(_dict.Get("Resources")) ?? new PdfDictionary();
-        _dict.Set("Resources", resources);
+        // font/image/XObject it references (e.g. a missing /Im1). A page that INHERITS its
+        // resources (no /Resources of its own) is seeded from the inherited dict rather
+        // than an empty one, so the wrapped content keeps its fonts/images.
+        var resources = Forms.Form.EnsureOwnPageResources(_dict, _reader);
 
         var formResources = new PdfDictionary();
         foreach (var key in new[] { "Font", "ExtGState", "Pattern", "ColorSpace", "Shading", "ProcSet", "Properties" })
@@ -2127,8 +2588,10 @@ public sealed partial class Page : IDisposable
             resources.Set("XObject", xobjects);
         }
 
-        var name = "Fm1";
-        var counter = 1;
+        // Content wrapped into a form by resize/zoom is numbered from Fm0
+        // (PdfFileEditor.ResizeContents yields /Fm0).
+        var name = "Fm0";
+        var counter = 0;
         while (xobjects.ContainsKey(name)) name = $"Fm{++counter}";
         xobjects.Set(name, formStream);
         return name;
@@ -2185,8 +2648,8 @@ public sealed partial class Page : IDisposable
     /// annotation /Rect, /QuadPoints and appearance /Matrix into the rotated space, and clear
     /// the /Rotate viewing flag. Unlike the <see cref="Rotate"/> flag (which leaves the stored
     /// geometry untouched and only rotates the view), this stores the rotation as content
-    /// geometry so the annotation rectangles report their rotated positions — matching
-    /// Aspose.Pdf <c>PdfPageEditor.PageRotations</c>.
+    /// geometry so the annotation rectangles report their rotated positions — the
+    /// <c>PdfPageEditor.PageRotations</c> semantics.
     /// </summary>
     internal void BakeRotation(int degrees)
     {
@@ -2344,66 +2807,279 @@ public sealed partial class Page : IDisposable
 
     public bool IsBlank(double fillThresholdFactor = 0)
     {
-        // fillThresholdFactor is accepted for API parity; coverage-aware blankness is not
-        // implemented yet, so any visible content makes the page non-blank.
-        _ = fillThresholdFactor;
+        // Check if there are annotations (excluding Widget annotations for form fields)
+        var annots = _reader.Resolve(_dict.Get("Annots")) as PdfArray;
+        if (annots is not null)
         {
-            // Check if there are annotations (excluding Widget annotations for form fields)
-            var annots = _reader.Resolve(_dict.Get("Annots")) as PdfArray;
-            if (annots is not null)
+            foreach (var annotRef in annots)
             {
-                foreach (var annotRef in annots)
-                {
-                    var annotDict = _reader.ResolveDict(annotRef);
-                    if (annotDict is null) continue;
-                    var subtype = annotDict.GetName("Subtype");
-                    // Widget (form fields) and PrinterMark (pre-press marks) are not
-                    // page content, so they don't make the page non-blank.
-                    if (subtype != "Widget" && subtype != "PrinterMark") return false;
-                }
+                var annotDict = _reader.ResolveDict(annotRef);
+                if (annotDict is null) continue;
+                var subtype = annotDict.GetName("Subtype");
+                // Widget (form fields) and PrinterMark (pre-press marks) are not
+                // page content, so they don't make the page non-blank.
+                if (subtype != "Widget" && subtype != "PrinterMark") return false;
             }
+        }
 
-            // Check content stream
-            var contentsObj = _reader.Resolve(_dict.Get("Contents"));
-            if (contentsObj is PdfStream contentStream)
+        // Coverage model: the page's coverage is +infinity when any
+        // "hard mark" paints — a non-white vector fill/stroke intersecting the
+        // crop box, a visible non-space text op (any colour, including white),
+        // or a shading, recursing through form XObjects — otherwise the SUM over
+        // distinct drawn image resources of each image's non-white pixel
+        // fraction (computed on the image's own pixel grid; page placement and
+        // crop are ignored for images). IsBlank(tol) is coverage <= tol.
+        return ComputeBlankCoverage(fillThresholdFactor) <= fillThresholdFactor;
+    }
+
+    private double ComputeBlankCoverage(double tolerance)
+    {
+        var crop = Devices.SoftwarePageRenderer.EffectiveCropRect(this);
+        double sum = 0;
+        var hard = false;
+        var counted = new HashSet<string>(StringComparer.Ordinal);
+
+        void Walk(byte[] content, PdfDictionary? resources, int depth)
+        {
+            if (hard || depth > 16) return;
+            var xobjects = _reader.ResolveDict(resources?.Get("XObject"));
+            var parser = new Content.ContentStreamParser(_reader);
+
+            parser.OnShadingPainted += (_, _) => hard = true;
+
+            parser.OnTextShown += (text, _, state) =>
             {
-                var data = _reader.DecodeStream(contentStream);
-                if (HasVisibleContent(data)) return false;
-            }
-            else if (contentsObj is PdfArray contentArr)
+                if (hard || state.RenderingMode == 3) return;
+                foreach (var ch in text)
+                    if (!char.IsWhiteSpace(ch) && ch != '\0') { hard = true; return; }
+            };
+
+            parser.OnPathPainted += (op, state, segments) =>
             {
-                foreach (var item in contentArr)
+                if (hard || segments.Count == 0) return;
+                var fills = op is "f" or "F" or "f*" or "B" or "B*" or "b" or "b*";
+                var strokes = op is "S" or "s" or "B" or "B*" or "b" or "b*";
+                var nonWhiteFill = state.FillPatternName is not null
+                    || state.FillR < 0.995 || state.FillG < 0.995 || state.FillB < 0.995;
+                var nonWhiteStroke = state.StrokePatternName is not null
+                    || state.StrokeR < 0.995 || state.StrokeG < 0.995 || state.StrokeB < 0.995;
+                if (!(fills && nonWhiteFill) && !(strokes && nonWhiteStroke)) return;
+
+                // Device-space bbox of the path; a mark fully outside the crop box
+                // is invisible and doesn't count.
+                double minX = double.MaxValue, minY = double.MaxValue;
+                double maxX = double.MinValue, maxY = double.MinValue;
+                void Grow(double px, double py)
                 {
-                    var stream = _reader.ResolveStream(item);
-                    if (stream is not null)
+                    var (dx, dy) = state.TransformPoint(px, py);
+                    if (dx < minX) minX = dx;
+                    if (dy < minY) minY = dy;
+                    if (dx > maxX) maxX = dx;
+                    if (dy > maxY) maxY = dy;
+                }
+                foreach (var seg in segments)
+                {
+                    switch (seg.Op)
                     {
-                        var data = _reader.DecodeStream(stream);
-                        if (HasVisibleContent(data)) return false;
+                        case Content.PathOp.MoveTo:
+                        case Content.PathOp.LineTo:
+                            Grow(seg.X1, seg.Y1);
+                            break;
+                        case Content.PathOp.CurveTo:
+                            Grow(seg.X1, seg.Y1); Grow(seg.X2, seg.Y2); Grow(seg.X3, seg.Y3);
+                            break;
+                        case Content.PathOp.CurveToV:
+                        case Content.PathOp.CurveToY:
+                            Grow(seg.X1, seg.Y1); Grow(seg.X2, seg.Y2);
+                            break;
+                        case Content.PathOp.Rect:
+                            Grow(seg.X1, seg.Y1); Grow(seg.X1 + seg.X2, seg.Y1 + seg.Y2);
+                            break;
                     }
                 }
-            }
+                if (minX > maxX) return;
+                if (maxX < crop.LLX || minX > crop.URX || maxY < crop.LLY || minY > crop.URY) return;
+                hard = true;
+            };
 
-            // Check for image XObjects in resources
-            var resources = _reader.ResolveDict(_dict.Get("Resources"));
-            if (resources is not null)
+            parser.OnInlineImage += (dict, raw) =>
             {
-                var xobjects = _reader.ResolveDict(resources.Get("XObject"));
-                if (xobjects is not null && xobjects.Keys.Any())
-                    return false;
-            }
+                // Once the summed coverage exceeds the caller's tolerance the verdict
+                // can't change (coverage only grows) — skip further image decodes.
+                if (hard || sum > tolerance) return;
+                try { sum += NonWhiteImageFraction(dict, IO.Filters.StreamFilter.Decode(raw, dict), inline: true); }
+                catch { }
+            };
 
-            return true;
+            parser.OnImageDrawn += (name, _) =>
+            {
+                if (hard || sum > tolerance || xobjects is null) return;
+                var xobj = _reader.ResolveStream(xobjects.Get(name));
+                if (xobj is null) return;
+                if (xobj.Dict.GetName("Subtype") == "Form")
+                {
+                    byte[] formContent;
+                    try { formContent = _reader.DecodeStream(xobj); }
+                    catch { return; }
+                    var formRes = _reader.ResolveDict(xobj.Dict.Get("Resources")) ?? resources;
+                    Walk(formContent, formRes, depth + 1);
+                    return;
+                }
+                // Distinct image resources sum; the same name drawn twice counts once.
+                if (!counted.Add(depth + ":" + name)) return;
+                try
+                {
+                    byte[] decoded;
+                    try { decoded = _reader.DecodeStream(xobj); } catch { return; }
+                    sum += NonWhiteImageFraction(xobj.Dict, decoded, inline: false);
+                }
+                catch { }
+            };
+
+            parser.Parse(content, null, null, null, null, null, null);
         }
+
+        var resources0 = _reader.ResolveDict(_dict.Get("Resources"));
+        using var contentMs = new MemoryStream();
+        var contentsObj = _reader.Resolve(_dict.Get("Contents"));
+        if (contentsObj is PdfStream single)
+        {
+            try { var d = _reader.DecodeStream(single); contentMs.Write(d, 0, d.Length); } catch { }
+        }
+        else if (contentsObj is PdfArray contentArr)
+        {
+            foreach (var item in contentArr)
+            {
+                if (_reader.ResolveStream(item) is not { } cs) continue;
+                try { var d = _reader.DecodeStream(cs); contentMs.Write(d, 0, d.Length); contentMs.WriteByte((byte)'\n'); }
+                catch { }
+            }
+        }
+        var contents = contentMs.ToArray();
+        if (contents.Length > 0) Walk(contents, resources0, 0);
+        return hard ? double.PositiveInfinity : sum;
     }
 
-    private static bool HasVisibleContent(byte[] data)
+    /// <summary>Fraction of the image's pixels that are not pure white (any
+    /// channel below max), on the image's own pixel grid — the metric
+    /// <see cref="IsBlank"/> uses. An inverting /Decode flips the interpretation.</summary>
+    private double NonWhiteImageFraction(PdfDictionary dict, byte[] data, bool inline)
     {
-        if (data.Length == 0) return false;
-        // Check if content stream has any visible operators
-        // Whitespace/comments only → blank
-        var text = System.Text.Encoding.ASCII.GetString(data).Trim();
-        return text.Length > 0;
+        int W(string a, string b) => (int)(dict.Get(a) is not null ? dict.GetInt(a) : dict.GetInt(b));
+        var w = W("Width", "W");
+        var h = W("Height", "H");
+        if (w <= 0 || h <= 0) return 0;
+        var bpc = W("BitsPerComponent", "BPC");
+        if (bpc == 0) bpc = 8;
+        var filter = dict.GetName("Filter") ?? dict.GetName("F");
+        var decodeInverts = (_reader.Resolve(dict.Get("Decode") ?? dict.Get("D")) is PdfArray da)
+                            && da.Count >= 2 && CoverageNum(da[0]) > CoverageNum(da[1]);
+        long total = (long)w * h;
+        if (total <= 0) return 0;
+
+        // Image mask / bilevel: fraction of painting (1-after-Decode) bits.
+        var isMask = (dict.Get("ImageMask") ?? dict.Get("IM")) is PdfBoolean im && im.Value;
+
+        long nonWhite = 0;
+        switch (filter)
+        {
+            case "DCTDecode":
+            case "DCT":
+            {
+                var (px, jw, jh, comps) = IO.Filters.JpegDecoder.Decode(data,
+                    Devices.SoftwarePageRenderer.CmykDecodeInverts(dict));
+                total = (long)jw * jh;
+                var n = comps == 1 ? 1 : 3;
+                for (long i = 0; i < total; i++)
+                {
+                    var o = i * n;
+                    for (var c = 0; c < n; c++)
+                        if (px[o + c] < 255) { nonWhite++; break; }
+                }
+                break;
+            }
+            case "JPXDecode":
+            {
+                if (!IO.Filters.JpxDecoder.TryDecode(data, out var px, out var jw, out var jh, out var comps))
+                    return 0;
+                total = (long)jw * jh;
+                var n = comps >= 3 ? 3 : 1;
+                for (long i = 0; i < total; i++)
+                {
+                    var o = i * n;
+                    for (var c = 0; c < n; c++)
+                        if (px[o + c] < 255) { nonWhite++; break; }
+                }
+                break;
+            }
+            // CCITTFaxDecode and JBIG2Decode are applied by DecodeStream itself and
+            // arrive here as 1-bpc DeviceGray rasters (0 = black) — the raw default
+            // below counts their ink bits.
+            default:
+            {
+                // Raw samples (any stream-level filters already undone).
+                var csObj = _reader.Resolve(dict.Get("ColorSpace") ?? dict.Get("CS"));
+                var comps = csObj switch
+                {
+                    PdfName n2 when n2.Value is "DeviceRGB" or "RGB" or "CalRGB" => 3,
+                    PdfName n2 when n2.Value is "DeviceCMYK" or "CMYK" => 4,
+                    PdfArray => 1, // Indexed/ICC etc. — treat one component per sample
+                    _ => 1,
+                };
+                if (isMask) comps = 1;
+                if (bpc == 8)
+                {
+                    var rowLen = w * comps;
+                    if ((long)rowLen * h > data.Length) return 0;
+                    var whiteVal = decodeInverts ? 0 : 255;
+                    for (long i = 0; i < total; i++)
+                    {
+                        var o = i * comps;
+                        for (var c = 0; c < comps; c++)
+                            if (data[o + c] != whiteVal) { nonWhite++; break; }
+                    }
+                }
+                else if (bpc == 1 && comps == 1)
+                {
+                    // 1 = white for DeviceGray; an ImageMask's 1 = painted (per
+                    // Decode). Count the ink bits.
+                    var invert = isMask ? !decodeInverts : decodeInverts;
+                    nonWhite = CountBits(data, w, h, invert: !invert);
+                }
+                else
+                {
+                    return 0; // exotic depths: no contribution rather than a guess
+                }
+                break;
+            }
+        }
+        return total > 0 ? (double)nonWhite / total : 0;
     }
+
+    /// <summary>Count "ink" bits in a packed 1-bpp raster (rows padded to bytes).
+    /// With <paramref name="invert"/> true a 0 bit is ink, otherwise a 1 bit.</summary>
+    private static long CountBits(byte[] bits, int w, int h, bool invert)
+    {
+        var rowBytes = (w + 7) / 8;
+        if ((long)rowBytes * h > bits.Length) return 0;
+        long count = 0;
+        for (var y = 0; y < h; y++)
+        {
+            for (var x = 0; x < w; x++)
+            {
+                var bit = (bits[y * rowBytes + x / 8] >> (7 - x % 8)) & 1;
+                if (invert == (bit == 0)) count++;
+            }
+        }
+        return count;
+    }
+
+    private static double CoverageNum(PdfObject o) => o switch
+    {
+        PdfInteger i => i.Value,
+        PdfReal r => r.Value,
+        _ => 0,
+    };
 
     /// <summary>Header to render at the top of this page.</summary>
     public HeaderFooter? Header { get; set; }
@@ -2432,10 +3108,38 @@ public sealed partial class Page : IDisposable
     /// </summary>
     internal bool LayoutApplied { get; set; }
 
+    /// <summary>True when this page's media box was merely INHERITED from the
+    /// document (no-size Pages.Insert) rather than set explicitly. A landscape
+    /// request on such a page resolves to the A4-landscape default at layout,
+    /// replacing the inherited box.</summary>
+    internal bool SizeInherited { get; set; }
+
+    /// <summary>Y cursor left behind by the last paragraph-layout pass. Paragraphs
+    /// added AFTER a ProcessParagraphs/Save round continue below the earlier
+    /// content instead of restarting at the top margin (which overprinted the
+    /// first paragraph and read back as one merged line).</summary>
+    internal double? LayoutCursorY { get; set; }
+
     /// <summary>Tracks whether the page's <see cref="Header"/> / <see cref="Footer"/>
     /// have already been rendered, so a second layout pass (ProcessParagraphs then
     /// Save) does not emit them twice.</summary>
     internal bool HeaderFooterApplied { get; set; }
+
+    private bool _contentIsolated;
+
+    /// <summary>Bracket the page's existing content in q/Q before generated
+    /// content is appended. An imported page may leave a persistent CTM active
+    /// (e.g. a top-level y-flip `1 0 0 -1 0 H cm` outside any q/Q); without the
+    /// bracket, appended header/footer/stamp content inherits that matrix and
+    /// renders flipped or displaced. Idempotent.</summary>
+    internal void IsolateExistingContent()
+    {
+        if (_contentIsolated) return;
+        _contentIsolated = true;
+        if (_reader.Resolve(_dict.Get("Contents")) is null) return;
+        PrependContentStream(System.Text.Encoding.ASCII.GetBytes("q\n"));
+        AddContentStream(System.Text.Encoding.ASCII.GetBytes("Q\n"));
+    }
 
     /// <summary>Tracks whether the page's <see cref="Background"/> fill has already
     /// been prepended to the content, so a second layout pass (ProcessParagraphs
@@ -2451,7 +3155,7 @@ public sealed partial class Page : IDisposable
     /// <summary>
     /// Gets the layers (Optional Content Groups) referenced by this page.
     /// FOSS-extra accessor — exposes the underlying OCG-backed collection
-    /// for callers that need the typed OptionalContentGroup API. The Aspose.Pdf
+    /// for callers that need the typed OptionalContentGroup API. The public-API
     /// shape goes through <see cref="Layers"/> (List&lt;Layer&gt;) instead.
     /// </summary>
     public LayerCollection OcgLayers
@@ -2535,8 +3239,8 @@ public sealed partial class Page : IDisposable
     /// <summary>Convert <see cref="Rotation"/> to degrees as an int.</summary>
     public static int RotationToInt(Rotation rotation) => (int)rotation;
 
-    /// <summary>Per-page additional actions (open / close / etc.). Stored only.</summary>
-    public PageActionCollection Actions => _actions ??= new PageActionCollection();
+    /// <summary>Per-page additional actions (open / close / etc.), backed by /AA.</summary>
+    public PageActionCollection Actions => _actions ??= new PageActionCollection(this);
     private PageActionCollection? _actions;
 
     /// <summary>User-unit factor (PDF 32000 §14.8.4 /UserUnit entry). Stored only.</summary>
@@ -2685,1572 +3389,4 @@ public sealed partial class Page : IDisposable
 
     /// <summary>Frees up memory.</summary>
     public void Dispose() => FreeMemory();
-}
-
-/// <summary>
-/// Provides access to a page's resource collections (fonts, images).
-/// </summary>
-public class PageResources
-{
-    private readonly Page? _page;
-    private readonly XForm? _xform;
-    private readonly PdfDictionary? _resDict;
-    private readonly PdfReader? _resReader;
-
-    internal PageResources(Page page) => _page = page;
-
-    /// <summary>XForm-backed ctor: enumerates resources via the XForm's
-    /// stream dictionary (Font / XObject entries on the form, not the
-    /// page).</summary>
-    internal PageResources(XForm xform) { _xform = xform; }
-
-    /// <summary>Resource-dictionary-backed ctor: enumerates /Font, /XObject etc.
-    /// directly from a resource dict (e.g. the AcroForm /DR).</summary>
-    internal PageResources(PdfDictionary resourceDict, PdfReader reader)
-    {
-        _resDict = resourceDict;
-        _resReader = reader;
-    }
-
-    private Core.PdfDictionary? XFormResourcesDict()
-    {
-        if (_xform is null) return null;
-        return _xform.Reader.ResolveDict(_xform.StreamDict.Get("Resources"));
-    }
-
-    /// <summary>Font resources on this page (or the XForm's stream dict
-    /// when constructed via the XForm ctor).</summary>
-    public FontCollection Fonts
-    {
-        get
-        {
-            if (_resDict is not null) return FontCollection.ForResources(_resDict, _resReader!);
-            if (_page is not null) return _page.Fonts;
-            // An XForm's stream dict carries /Resources directly (a resource dict
-            // whose /Font maps names to font dicts), so read it via ForResources —
-            // the page-dict ctor would look for a nested /Resources and find none.
-            // A form whose resources carry NO /Font yields null (Aspose.Pdf
-            // shape — callers probe `GetResources().Fonts == null` for that layout).
-            var resDict = XFormResourcesDict();
-            if (resDict is null) return null!;
-            if (_xform!.Reader.ResolveDict(resDict.Get("Font")) is null
-                && resDict.Get("Font") is not Core.PdfDictionary) return null!;
-            return FontCollection.ForResources(resDict, _xform!.Reader);
-        }
-    }
-
-    /// <summary>Image resources on this page.</summary>
-    public XImageCollection Images
-    {
-        get
-        {
-            if (_page is not null) return _page.Images;
-            // The collection ctor discovers images via dict.Get("Resources")/XObject
-            // (recursing nested forms). An XForm's stream dict carries /Resources, so
-            // pass the stream dict — passing the already-resolved Resources dict would
-            // make the ctor look for a nested /Resources that isn't there and yield an
-            // empty collection.
-            if (_xform is not null) return new XImageCollection(_xform.StreamDict, _xform.Reader);
-            if (_resDict is not null)
-            {
-                var wrap = new Core.PdfDictionary();
-                wrap.Set("Resources", _resDict);
-                return new XImageCollection(wrap, _resReader!);
-            }
-            return new XImageCollection(new Core.PdfDictionary(), _resReader!);
-        }
-    }
-
-    /// <summary>XForm (Form XObject) resources on this page.</summary>
-    public XFormCollection Forms
-    {
-        get
-        {
-            var reader = _page?.Reader ?? _xform!.Reader;
-            var resources = _page is not null
-                ? reader.ResolveDict(_page.Dict.Get("Resources"))
-                : XFormResourcesDict();
-            if (resources is null) return new XFormCollection(new Core.PdfDictionary(), reader, _page);
-            var xobjects = reader.ResolveDict(resources.Get("XObject"));
-            if (xobjects is null) return new XFormCollection(new Core.PdfDictionary(), reader, _page);
-            return new XFormCollection(xobjects, reader, _page);
-        }
-    }
-}
-
-/// <summary>
-/// Type alias for PageResources, matching the Resources class name.
-/// </summary>
-public class Resources : PageResources
-{
-    internal Resources(Page page) : base(page) { }
-
-    /// <summary>XForm-backed resources accessor: resolves Font / Image /
-    /// XObject entries from an XForm's stream dictionary rather than a
-    /// page dictionary.</summary>
-    internal Resources(XForm xform) : base(xform) { }
-
-    /// <summary>Resource-dictionary-backed accessor (e.g. the AcroForm /DR),
-    /// which carries /Font etc. directly.</summary>
-    internal Resources(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
-
-    /// <summary>Font resources (re-declared so reflection sees the member on Resources).</summary>
-    public new FontCollection Fonts => base.Fonts;
-
-    /// <summary>Image resources (re-declared so reflection sees the member on Resources).</summary>
-    public new XImageCollection Images => base.Images;
-
-    /// <summary>XForm resources (re-declared so reflection sees the member on Resources).</summary>
-    public new XFormCollection Forms => base.Forms;
-
-    /// <summary>Font collection accessor — <paramref name="CreateIfAbsent"/> is honoured by
-    /// matching Aspose.Pdf-shape semantics; FOSS always returns a live collection.</summary>
-    public FontCollection GetFonts(bool CreateIfAbsent) { _ = CreateIfAbsent; return base.Fonts; }
-
-    /// <summary>Enumerate every /ExtGState entry on this page's resources as a name→value map.</summary>
-    public System.Collections.Generic.Dictionary<string, ExtGStateValue> GetExtGStates()
-        => new();
-
-    /// <summary>Free resource-cache memory. No-op in this build — the
-    /// FOSS resource readers don't cache decoded bytes.</summary>
-    public void FreeMemory() { }
-
-    /// <summary>One /ExtGState entry — name plus stroke/fill alpha factors.</summary>
-    public class ExtGStateValue
-    {
-        public ExtGStateValue(string name) { Name = name; }
-
-        /// <summary>Resource name (e.g. "GS1").</summary>
-        public string Name { get; }
-
-        /// <summary>Stroking alpha constant (CA).</summary>
-        public double CA { get; internal set; } = 1.0;
-
-        /// <summary>Non-stroking alpha constant (ca).</summary>
-        public double ca { get; internal set; } = 1.0;
-    }
-}
-
-/// <summary>
-/// Represents a Form XObject (reusable content stream with its own resources).
-/// </summary>
-public sealed class XForm
-{
-    private readonly Core.PdfStream _stream;
-    private readonly IO.PdfReader _reader;
-    private OperatorCollection? _contents;
-
-    internal XForm(Core.PdfStream stream, IO.PdfReader reader)
-    {
-        _stream = stream;
-        _reader = reader;
-    }
-
-    /// <summary>The name of this XForm in the page's XObject resources dict.</summary>
-    public string? Name { get; set; }
-
-    /// <summary>The Form XObject's content stream as a typed operator collection.
-    /// Lazy: parses on first access and caches.</summary>
-    public OperatorCollection Contents
-        => _contents ??= new OperatorCollection(() => _reader.DecodeStream(_stream));
-
-    /// <summary>The raw decoded content bytes of this XForm. Use
-    /// <see cref="Contents"/> for typed-operator iteration.</summary>
-    public byte[] DecodedBytes => _reader.DecodeStream(_stream);
-
-    /// <summary>Replace this form's content with raw (decoded) bytes, dropping the
-    /// existing filter so the writer re-compresses on save. Used by the text-edit
-    /// path when a fragment extracted from this form has its Text changed/removed.</summary>
-    internal void SetDecodedContent(byte[] data)
-    {
-        _stream.Dict.Remove("Filter");
-        _stream.Dict.Remove("DecodeParms");
-        _stream.ReplaceData(data);
-        _contents = null;
-    }
-
-    /// <summary>Internal reader for object resolution.</summary>
-    internal IO.PdfReader Reader => _reader;
-
-    /// <summary>The XForm's stream dictionary (contains Resources, BBox, etc.).</summary>
-    internal Core.PdfDictionary StreamDict => _stream.Dict;
-
-    /// <summary>The bounding box of this XForm. /BBox PDF entry.</summary>
-    public Rectangle? BBox
-    {
-        get
-        {
-            var arr = _reader.Resolve(_stream.Dict.Get("BBox")) as Core.PdfArray;
-            if (arr is null || arr.Count < 4) return null;
-            double getN(int i) => arr[i] switch
-            {
-                Core.PdfInteger pi => pi.Value,
-                Core.PdfReal pr => pr.Value,
-                _ => 0
-            };
-            return new Rectangle(getN(0), getN(1), getN(2), getN(3));
-        }
-        set
-        {
-            if (value is null) { _stream.Dict.Remove("BBox"); return; }
-            var arr = new Core.PdfArray();
-            arr.Add(new Core.PdfReal(value.LLX));
-            arr.Add(new Core.PdfReal(value.LLY));
-            arr.Add(new Core.PdfReal(value.URX));
-            arr.Add(new Core.PdfReal(value.URY));
-            _stream.Dict.Set("BBox", arr);
-        }
-    }
-
-    /// <summary>Alias for <see cref="BBox"/>; Aspose.Pdf exposes both names.</summary>
-    public Rectangle Rectangle => BBox ?? new Rectangle(0, 0, 0, 0);
-
-    /// <summary>The XObject Subtype (always "Form" for XForm instances).</summary>
-    public string Subtype => _stream.Dict.GetName("Subtype") ?? "Form";
-
-    /// <summary>The Form's /Matrix entry (the transformation applied
-    /// when the form is painted). Identity matrix when absent.</summary>
-    public Matrix Matrix
-    {
-        get
-        {
-            var arr = _reader.Resolve(_stream.Dict.Get("Matrix")) as Core.PdfArray;
-            if (arr is null || arr.Count < 6) return new Matrix(1, 0, 0, 1, 0, 0);
-            double getN(int i) => arr[i] switch
-            {
-                Core.PdfInteger pi => pi.Value,
-                Core.PdfReal pr => pr.Value,
-                _ => 0
-            };
-            return new Matrix(getN(0), getN(1), getN(2), getN(3), getN(4), getN(5));
-        }
-        set
-        {
-            if (value is null) { _stream.Dict.Remove("Matrix"); return; }
-            var arr = new Core.PdfArray();
-            arr.Add(new Core.PdfReal(value.A));
-            arr.Add(new Core.PdfReal(value.B));
-            arr.Add(new Core.PdfReal(value.C));
-            arr.Add(new Core.PdfReal(value.D));
-            arr.Add(new Core.PdfReal(value.E));
-            arr.Add(new Core.PdfReal(value.F));
-            _stream.Dict.Set("Matrix", arr);
-        }
-    }
-
-    /// <summary>The Form's /Intent (IT) entry; null when absent.</summary>
-    public string? IT => _stream.Dict.GetName("IT");
-
-    /// <summary>Open Prepress Interface (OPI) wrapper. Always non-null;
-    /// the underlying /OPI entry may be absent (in which case the wrapper
-    /// reports defaults).</summary>
-    public Opi Opi => new Opi(this);
-
-    /// <summary>Form XObject resources (fonts / images / nested XObjects)
-    /// declared on this XForm's stream dict. Aspose.Pdf.Resources-typed
-    /// to match Aspose.Pdf; backed by the XForm-aware
-    /// <see cref="PageResources(XForm)"/> ctor.</summary>
-    public Resources Resources => new Resources(this);
-
-    /// <summary>Method-style resources accessor, parity with the .NET API.</summary>
-    public Resources GetResources() => Resources;
-
-    /// <summary>Method-style resources accessor with create-on-demand.
-    /// The FOSS Resources are always materialisable, so the
-    /// <paramref name="allowCreate"/> flag is ignored.</summary>
-    public Resources GetResources(bool allowCreate) { _ = allowCreate; return Resources; }
-
-    /// <summary>Releases resources held by this XForm. Currently a no-op
-    /// — the FOSS XForm reader holds no unmanaged buffers.</summary>
-    public void Dispose() { _contents = null; }
-
-    /// <summary>Free decoded-content cache. The FOSS XForm decodes on
-    /// demand, so this clears the cached OperatorCollection only.</summary>
-    public void FreeMemory() { _contents = null; }
-
-    /// <summary>Construct a new XForm from a source page's content stream
-    /// and register it on <paramref name="document"/>. Stored only — the
-    /// FOSS XForm-from-page pipeline isn't fully wired; the returned
-    /// XForm wraps a freshly created stream with the source page's BBox
-    /// and the page's content bytes.</summary>
-    public static XForm CreateNewForm(Page source, Document document)
-    {
-        if (source is null) throw new ArgumentNullException(nameof(source));
-        if (document is null) throw new ArgumentNullException(nameof(document));
-        // Best-effort: build a /Form XObject stream from the source page's
-        // /MediaBox + content bytes. Mostly stored: this XForm does not
-        // currently get registered in document.Pages or any resource dict.
-        var dict = new Core.PdfDictionary();
-        dict.Set("Type", new Core.PdfName("XObject"));
-        dict.Set("Subtype", new Core.PdfName("Form"));
-        var rect = source.Rect ?? new Rectangle(0, 0, 612, 792);
-        var bbox = new Core.PdfArray();
-        bbox.Add(new Core.PdfReal(rect.LLX));
-        bbox.Add(new Core.PdfReal(rect.LLY));
-        bbox.Add(new Core.PdfReal(rect.URX));
-        bbox.Add(new Core.PdfReal(rect.URY));
-        dict.Set("BBox", bbox);
-        var stream = new Core.PdfStream(dict, Array.Empty<byte>());
-        return new XForm(stream, source.Reader);
-    }
-}
-
-/// <summary>Open Prepress Interface (OPI) metadata wrapper for an
-/// <see cref="XForm"/>. Stored only — the FOSS write path doesn't emit
-/// /OPI entries.</summary>
-public sealed class Opi
-{
-    private readonly XForm _xform;
-
-    /// <summary>Construct an OPI wrapper bound to <paramref name="xform"/>.</summary>
-    public Opi(XForm xform) { _xform = xform ?? throw new ArgumentNullException(nameof(xform)); }
-
-    /// <summary>OPI dictionary version (1.3 / 2.0 / …). Empty when absent.</summary>
-    public string Version => string.Empty;
-
-    /// <summary>External file specification referenced by the OPI entry.</summary>
-    public string FileSpecification => string.Empty;
-
-    /// <summary>OPI cropping/positioning rectangle as 4 PDF points.</summary>
-    public double[] Position => Array.Empty<double>();
-}
-
-/// <summary>Resources (fonts, xobjects) on an XForm's stream dict.</summary>
-public sealed class XFormResources
-{
-    private readonly Core.PdfDictionary _streamDict;
-    private readonly IO.PdfReader _reader;
-
-    internal XFormResources(Core.PdfDictionary streamDict, IO.PdfReader reader)
-    {
-        _streamDict = streamDict;
-        _reader = reader;
-    }
-
-    /// <summary>Fonts in this XForm's resources dict (null if none).</summary>
-    public FontCollection? Fonts
-    {
-        get
-        {
-            var resources = _reader.ResolveDict(_streamDict.Get("Resources"));
-            if (resources is null) return null;
-            var fontDict = _reader.ResolveDict(resources.Get("Font"));
-            if (fontDict is null) return null;
-            return new FontCollection(_streamDict, _reader);
-        }
-    }
-
-    /// <summary>XForm (Form XObject) resources on this XForm.</summary>
-    public XFormCollection Forms
-    {
-        get
-        {
-            var resources = _reader.ResolveDict(_streamDict.Get("Resources"));
-            if (resources is null) return new XFormCollection(new Core.PdfDictionary(), _reader);
-            var xobjects = _reader.ResolveDict(resources.Get("XObject"));
-            if (xobjects is null) return new XFormCollection(new Core.PdfDictionary(), _reader);
-            return new XFormCollection(xobjects, _reader);
-        }
-    }
-}
-
-/// <summary>
-/// Collection of XForm (Form XObject) resources on a page.
-/// Indexed by name (string key in the XObject resources dictionary).
-/// </summary>
-public sealed class XFormCollection : IEnumerable<XForm>
-{
-    private readonly Core.PdfDictionary _xobjects;
-    private readonly IO.PdfReader _reader;
-    private readonly Page? _ownerPage;
-    private List<XForm>? _forms;
-
-    internal XFormCollection(Core.PdfDictionary xobjects, IO.PdfReader reader)
-        : this(xobjects, reader, null) { }
-
-    internal XFormCollection(Core.PdfDictionary xobjects, IO.PdfReader reader, Page? ownerPage)
-    {
-        _xobjects = xobjects;
-        _reader = reader;
-        _ownerPage = ownerPage;
-    }
-
-    /// <summary>Number of Form XObjects.</summary>
-    public int Count
-    {
-        get
-        {
-            EnsureForms();
-            return _forms!.Count;
-        }
-    }
-
-    /// <summary>Get XForm by 1-based index.</summary>
-    public XForm this[int index]
-    {
-        get
-        {
-            EnsureForms();
-            if (index < 1 || index > _forms!.Count)
-                throw new ArgumentOutOfRangeException(nameof(index));
-            return _forms[index - 1];
-        }
-    }
-
-    /// <summary>Get XForm by name.</summary>
-    public XForm? this[string name]
-    {
-        get
-        {
-            var obj = _reader.ResolveStream(_xobjects.Get(name));
-            if (obj is null) return null;
-            if (obj.Dict.GetName("Subtype") != "Form") return null;
-            return new XForm(obj, _reader) { Name = name };
-        }
-    }
-
-    /// <summary>Remove an XForm by name from the collection and underlying XObject dict.</summary>
-    public void Delete(string name)
-    {
-        _xobjects.Remove(name);
-        if (_forms is not null)
-            _forms.RemoveAll(f => f.Name == name);
-        StripDoFromOwnerPage(name);
-    }
-
-    /// <summary>
-    /// Remove every <c>/name Do</c> invocation of a just-deleted Form XObject from the owning
-    /// page's content stream. Without this the page keeps drawing (or attempting to draw) a form
-    /// whose resource entry is gone, and a reader enumerating <c>page.Contents</c> still finds the
-    /// orphaned <c>Do</c> operator. The <c>Do</c> is the only operator removed; surrounding state
-    /// (q/Q, cm, gs) is left intact since it may bracket other content.
-    /// </summary>
-    private void StripDoFromOwnerPage(string name)
-    {
-        if (_ownerPage is null || string.IsNullOrEmpty(name)) return;
-        var bytes = LayerHelper.GetPageContentBytes(_ownerPage);
-        if (bytes.Length == 0) return;
-        var text = System.Text.Encoding.Latin1.GetString(bytes);
-        var pattern = $@"/{System.Text.RegularExpressions.Regex.Escape(name)}\s+Do\b";
-        if (!System.Text.RegularExpressions.Regex.IsMatch(text, pattern)) return;
-        var newText = System.Text.RegularExpressions.Regex.Replace(text, pattern, string.Empty);
-        _ownerPage.SetContentStream(System.Text.Encoding.Latin1.GetBytes(newText));
-    }
-
-    /// <summary>Remove an XForm by 1-based index. Resolves to the underlying name then defers to Delete(string).</summary>
-    public void Delete(int index)
-    {
-        EnsureForms();
-        if (index < 1 || index > _forms!.Count)
-            throw new ArgumentOutOfRangeException(nameof(index));
-        var name = _forms[index - 1].Name;
-        if (name is not null) Delete(name);
-    }
-
-    public IEnumerator<XForm> GetEnumerator()
-    {
-        EnsureForms();
-        // Enumerate a snapshot so callers can Delete a form inside a foreach
-        // over the collection (a common flatten/prune pattern) without a
-        // "collection was modified" exception.
-        return _forms!.ToList().GetEnumerator();
-    }
-
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
-
-    public bool IsReadOnly => false;
-    public bool IsSynchronized => false;
-    public object SyncRoot { get; } = new();
-
-    public void Add(XForm item)
-    {
-        if (item is null) throw new ArgumentNullException(nameof(item));
-        EnsureForms();
-        var name = item.Name ?? $"Fm{_forms!.Count + 1}";
-        item.Name = name;
-        _forms!.Add(item);
-    }
-
-    public void Clear()
-    {
-        EnsureForms();
-        foreach (var f in _forms!.ToList())
-            if (f.Name is { } n) _xobjects.Remove(n);
-        _forms!.Clear();
-    }
-
-    public bool Contains(XForm item)
-    {
-        EnsureForms();
-        return _forms!.Contains(item);
-    }
-
-    public void CopyTo(XForm[] array, int index)
-    {
-        EnsureForms();
-        _forms!.CopyTo(array, index);
-    }
-
-    public bool Remove(XForm item)
-    {
-        EnsureForms();
-        if (item?.Name is { } n) _xobjects.Remove(n);
-        return _forms!.Remove(item!);
-    }
-
-    /// <summary>Drop all entries (equivalent to <see cref="Clear"/>).</summary>
-    public void Delete() => Clear();
-
-    /// <summary>Discard cached form list so the next access re-reads from the XObject dict.</summary>
-    public void FreeMemory() => _forms = null;
-
-    /// <summary>Return the PDF resource name (e.g. "Fm1") under which a Form XObject lives.</summary>
-    public string GetFormName(XForm form) => form?.Name ?? string.Empty;
-
-    private void EnsureForms()
-    {
-        if (_forms is not null) return;
-        _forms = new List<XForm>();
-        foreach (var key in _xobjects.Keys)
-        {
-            var stream = _reader.ResolveStream(_xobjects.Get(key));
-            if (stream is null) continue;
-            if (stream.Dict.GetName("Subtype") != "Form") continue;
-            _forms.Add(new XForm(stream, _reader) { Name = key });
-        }
-    }
-}
-
-/// <summary>
-/// Standalone operator-list class — surface mirrors <see cref="OperatorCollection"/>
-/// but is detached from any page. Used by callers that want to construct operators
-/// outside the page-binding flow (e.g. TextBuilder before-page-binding).
-/// </summary>
-public class BaseOperatorCollection : System.Collections.Generic.IEnumerable<Operator>
-{
-    private readonly List<Operator> _ops = new();
-
-    public int Count => _ops.Count;
-
-    public bool IsReadOnly => false;
-
-    /// <summary>Whether the absorber is operating in fast-text-extraction mode (stored only).</summary>
-    public bool IsFastTextExtractionMode { get; internal set; }
-
-    // Operator access is 1-based: index 1 is the first operator. Matches the
-    // public collection convention used across the form/content APIs.
-    public Operator this[int index]
-    {
-        get => _ops[index - 1];
-        set => _ops[index - 1] = value;
-    }
-
-    public void Add(Operator op) => _ops.Add(op);
-    public void Clear() => _ops.Clear();
-    public bool Contains(Operator item) => _ops.Contains(item);
-    public void CopyTo(Operator[] array, int index) => _ops.CopyTo(array, index);
-    public void Insert(int index, Operator op) => _ops.Insert(index, op);
-    public bool Remove(Operator item) => _ops.Remove(item);
-
-    /// <summary>Suspend any deferred-update bookkeeping. No-op.</summary>
-    public void SuppressUpdate() { }
-    /// <summary>Resume deferred-update bookkeeping. No-op.</summary>
-    public void ResumeUpdate() { }
-    /// <summary>Cancel any pending deferred update. No-op.</summary>
-    public void CancelUpdate() { }
-
-    public System.Collections.Generic.IEnumerator<Operator> GetEnumerator() => _ops.GetEnumerator();
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
-}
-
-/// <summary>
-/// Collection of content stream operators for a page.
-/// Operators added here are appended to the page's content stream on save.
-/// </summary>
-public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
-{
-    private readonly Page? _page;
-    private readonly Func<byte[]>? _bytesProvider;
-    private readonly List<Operator> _operators = [];
-    private List<string>? _parsed;
-    private bool _suppressed;
-    private bool _materialized;
-
-    internal OperatorCollection(Page page) => _page = page;
-
-    /// <summary>Backed by an arbitrary content-bytes producer (e.g. a
-    /// Form XObject's decoded /Contents stream). Used when the operators
-    /// don't live on a <see cref="Page"/> — Field.NormalAppearance,
-    /// XForm.Operators, etc.</summary>
-    internal OperatorCollection(Func<byte[]> bytesProvider) => _bytesProvider = bytesProvider;
-
-    /// <summary>Aspose.Pdf alias that returns this collection itself
-    /// (callers do <c>page.Contents.Commands[i]</c>).</summary>
-    public OperatorCollection Commands => this;
-
-    /// <summary>Add an operator to the collection.</summary>
-    public void Add(Operator op) { Materialize(); _operators.Add(op); }
-
-    /// <summary>Add several operators in one call.</summary>
-    public void Add(Operator[] ops)
-    {
-        if (ops is null) return;
-        Materialize();
-        foreach (var op in ops) _operators.Add(op);
-    }
-
-    /// <summary>Add several operators from any collection in one call.</summary>
-    public void Add(System.Collections.Generic.ICollection<Operator> ops)
-    {
-        if (ops is null) return;
-        Materialize();
-        foreach (var op in ops) _operators.Add(op);
-    }
-
-    /// <summary>Visit every operator with the given selector. Materialises the
-    /// collection first so the operators handed to the visitor are the same
-    /// stable instances held by this collection — a selector that collects them
-    /// (e.g. <see cref="OperatorSelector.Selected"/>) can then be passed back to
-    /// <see cref="Delete(System.Collections.Generic.IList{Operator})"/> and the
-    /// reference-equality removal will find them. Each operator dispatches to the
-    /// matching typed <c>Visit</c> overload via its own <see cref="Operator.Accept"/>.</summary>
-    public void Accept(IOperatorSelector visitor)
-    {
-        if (visitor is null) return;
-        Materialize();
-        foreach (var op in _operators)
-            op.Accept(visitor);
-    }
-
-    /// <summary>Cancel a suppressed-update window (started by
-    /// <see cref="SuppressUpdate"/>) without flushing pending changes.
-    /// No-op in this build because mutations are already deferred to save.</summary>
-    public void CancelUpdate() { _suppressed = false; }
-
-    /// <summary>Remove every operator from the collection.</summary>
-    public void Clear()
-    {
-        _operators.Clear();
-        _parsed?.Clear();
-    }
-
-    /// <summary>True when <paramref name="op"/> is currently in the collection.</summary>
-    public bool Contains(Operator op)
-        => op is not null && _operators.Contains(op);
-
-    /// <summary>Copy the live operators (the in-memory mutable list, not the
-    /// parsed cache) into <paramref name="array"/> starting at <paramref name="index"/>.</summary>
-    public void CopyTo(Operator[] array, int index)
-    {
-        if (array is null) throw new ArgumentNullException(nameof(array));
-        _operators.CopyTo(array, index);
-    }
-
-    /// <summary>Remove every occurrence of each operator in <paramref name="ops"/>.</summary>
-    public void Delete(Operator[] ops)
-    {
-        if (ops is null) return;
-        Materialize();
-        foreach (var op in ops) _operators.Remove(op);
-    }
-
-    /// <summary>Remove every operator in <paramref name="list"/>.</summary>
-    public void Delete(System.Collections.Generic.IList<Operator> list)
-    {
-        if (list is null) return;
-        Materialize();
-        foreach (var op in list) _operators.Remove(op);
-    }
-
-    /// <summary>Releases resources held by the collection. Currently a no-op —
-    /// operators are pure value objects in this build.</summary>
-    public void Dispose() { _operators.Clear(); _parsed?.Clear(); _ = _suppressed; }
-
-    /// <summary>Insert one operator at the given 1-based index.</summary>
-    public void Insert(int index, Operator op)
-    {
-        if (op is null) return;
-        if (index < 1) throw new ArgumentOutOfRangeException(nameof(index));
-        Materialize();
-        _operators.Insert(Math.Min(index - 1, _operators.Count), op);
-    }
-
-    /// <summary>Insert several operators at <paramref name="at"/> (1-based).</summary>
-    public void Insert(int at, Operator[] ops)
-    {
-        if (ops is null) return;
-        if (at < 1) throw new ArgumentOutOfRangeException(nameof(at));
-        Materialize();
-        _operators.InsertRange(Math.Min(at - 1, _operators.Count), ops);
-    }
-
-    /// <summary>Insert several operators (any IList) at <paramref name="at"/> (1-based).</summary>
-    public void Insert(int at, System.Collections.Generic.IList<Operator> ops)
-    {
-        if (ops is null) return;
-        if (at < 1) throw new ArgumentOutOfRangeException(nameof(at));
-        Materialize();
-        _operators.InsertRange(Math.Min(at - 1, _operators.Count), ops);
-    }
-
-    /// <summary>Whether the absorber/parser is in fast-text-extraction mode
-    /// (no glyph-width metrics, character-position approximations only).
-    /// Always false in this build — we always parse precisely.</summary>
-    public bool IsFastTextExtractionMode => false;
-
-    /// <summary>Always false: callers may add and remove operators.</summary>
-    public bool IsReadOnly => false;
-
-    /// <summary>Remove the first occurrence of <paramref name="op"/>; returns
-    /// true when an operator was removed.</summary>
-    public bool Remove(Operator op)
-        => op is not null && _operators.Remove(op);
-
-    /// <summary>Replace operators in place: each operator in
-    /// <paramref name="operators"/> overwrites the existing operator at its
-    /// 1-based <see cref="Operator.Index"/>. Operators whose index falls
-    /// outside the current range are ignored.</summary>
-    public void Replace(System.Collections.Generic.IList<Operator> operators)
-    {
-        if (operators is null) return;
-        Materialize();
-        foreach (var op in operators)
-        {
-            if (op is null) continue;
-            if (op.Index >= 1 && op.Index <= _operators.Count)
-                _operators[op.Index - 1] = op;
-        }
-    }
-
-    /// <summary>
-    /// Suspend automatic content-stream re-serialization while a batch of
-    /// operator mutations is performed. Paired with <see cref="ResumeUpdate()"/>.
-    /// The implementation works in-memory and re-serializes lazily on save, so
-    /// this is a no-op kept for public API parity.
-    /// </summary>
-    public void SuppressUpdate() { _suppressed = true; }
-
-    /// <summary>Resume automatic content-stream re-serialization. See <see cref="SuppressUpdate"/>.</summary>
-    public void ResumeUpdate() { _suppressed = false; }
-
-    /// <summary>Resume automatic re-serialization with optional full-flush
-    /// semantics (the <paramref name="updateAll"/> flag is stored only).</summary>
-    public void ResumeUpdate(bool updateAll) { _suppressed = false; _ = updateAll; }
-
-    /// <summary>Persist pending operator mutations to the backing content stream.
-    /// In this build the collection re-serializes its operators lazily on save, so
-    /// this is a no-op kept for public API parity (mirrors <see cref="SuppressUpdate"/>
-    /// / <see cref="ResumeUpdate()"/> / <see cref="CancelUpdate"/>).</summary>
-    public void UpdateData() { }
-
-    /// <summary>
-    /// Number of operators in the page content stream.
-    /// Parses the content stream on first access.
-    /// </summary>
-    public int Count
-    {
-        get
-        {
-            if (_operators.Count > 0) return _operators.Count;
-            EnsureParsed();
-            return _parsed!.Count;
-        }
-    }
-
-    /// <summary>Access (or replace) operator at 1-based index. Returns a
-    /// typed <see cref="Operator"/> subclass (BT, ET, GSave, GRestore,
-    /// SelectFont, SetRGBColor, MoveTo, LineTo, …) when the operator name
-    /// is recognised; otherwise a <see cref="RawOperator"/> wrapping the
-    /// original token. The setter overwrites the in-memory operator at the
-    /// given position.</summary>
-    public Operator this[int index]
-    {
-        get
-        {
-            Materialize();
-            if (index < 1 || index > _operators.Count)
-                throw new ArgumentOutOfRangeException(nameof(index));
-            return _operators[index - 1];
-        }
-        set
-        {
-            Materialize();
-            if (index < 1 || index > _operators.Count)
-                throw new ArgumentOutOfRangeException(nameof(index));
-            _operators[index - 1] = value;
-        }
-    }
-
-    /// <summary>Promote the parsed content into the live <see cref="_operators"/>
-    /// list so callers receive stable operator instances whose mutations persist.
-    /// Marks the list as representing the full content, so <see cref="FlushToPage"/>
-    /// replaces (rather than appends to) the page stream on save. A no-op once the
-    /// list already holds operators — whether materialised here or added directly.</summary>
-    private void Materialize()
-    {
-        if (_materialized || _operators.Count > 0) return;
-        EnsureParsed();
-        foreach (var s in _parsed!)
-            _operators.Add(TypedOperatorParser.Parse(s));
-        _materialized = true;
-    }
-
-    /// <summary>Remove operator at the given 1-based index.</summary>
-    public void Delete(int index)
-    {
-        Materialize();
-        if (index < 1 || index > _operators.Count)
-            throw new ArgumentOutOfRangeException(nameof(index));
-        _operators.RemoveAt(index - 1);
-    }
-
-    /// <summary>Materialize the content and remove every operator matching the predicate.
-    /// Operating on the materialized list (rather than enumerator-yielded instances) keeps
-    /// the removal stable so a subsequent <see cref="FlushToPage"/> persists it.</summary>
-    internal int RemoveWhere(Predicate<Operator> match)
-    {
-        Materialize();
-        return _operators.RemoveAll(match);
-    }
-
-    /// <summary>Enumerate all operators in the content stream as typed
-    /// <see cref="Operator"/> instances (with <see cref="RawOperator"/>
-    /// fallback for unrecognised commands).</summary>
-    public IEnumerator<Operator> GetEnumerator()
-    {
-        if (_operators.Count > 0)
-        {
-            foreach (var op in _operators) yield return op;
-            yield break;
-        }
-        EnsureParsed();
-        for (int i = 0; i < _parsed!.Count; i++)
-            yield return TypedOperatorParser.Parse(_parsed[i]);
-    }
-
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
-
-    /// <summary>Returns all operators as a single string. Operators are joined
-    /// with "\r\n " (CRLF + space) — the exact layout Aspose.Pdf emits,
-    /// which tests match with multi-operator Contains() literals.</summary>
-    public override string ToString()
-    {
-        EnsureParsed();
-        return string.Join("\r\n ", _parsed!);
-    }
-
-    private void EnsureParsed()
-    {
-        if (_parsed is not null) return;
-        _parsed = [];
-        var bytes = GetContentBytes();
-        if (bytes.Length == 0) return;
-        _parsed = ContentStreamOperatorParser.ParseOperators(bytes);
-    }
-
-    private byte[] GetContentBytes()
-    {
-        if (_bytesProvider is not null) return _bytesProvider() ?? [];
-        if (_page is null) return [];
-        var contentsObj = _page.Reader.Resolve(_page.Dict.Get("Contents"));
-        if (contentsObj is Core.PdfStream stream)
-            return _page.Reader.DecodeStream(stream);
-        if (contentsObj is Core.PdfArray arr)
-        {
-            using var ms = new MemoryStream();
-            foreach (var item in arr)
-            {
-                var s = _page.Reader.ResolveStream(item);
-                if (s is not null)
-                {
-                    var data = _page.Reader.DecodeStream(s);
-                    ms.Write(data, 0, data.Length);
-                    ms.WriteByte((byte)'\n');
-                }
-            }
-            return ms.ToArray();
-        }
-        return [];
-    }
-
-    /// <summary>Serialize all operators and append to the page's content stream.
-    /// No-op for non-page-backed instances (Field.NormalAppearance etc.).</summary>
-    internal void FlushToPage()
-    {
-        if (_page is null) return;
-        // Materialised operators are the page's complete content (the caller read
-        // or edited existing operators), so the stream is replaced. Non-materialised
-        // operators were added on top of existing content, so they are appended.
-        if (!_materialized && _operators.Count == 0) return;
-        var sb = new StringBuilder();
-        foreach (var op in _operators)
-        {
-            sb.Append(op.ToPdf());
-            sb.Append('\n');
-        }
-        var bytes = Encoding.ASCII.GetBytes(sb.ToString());
-        if (_materialized)
-            _page.SetContentStream(bytes);
-        else
-            _page.AppendContentBytes(bytes);
-        _operators.Clear();
-        _parsed = null;
-        _materialized = false;
-    }
-
-    /// <summary>Invalidate cached parse results (after content stream modification).</summary>
-    internal void InvalidateCache() => _parsed = null;
-}
-
-/// <summary>
-/// Buffers operators to prepend to / append to a page's content stream. Operators added
-/// via <see cref="AppendToBegin"/> are inserted (in call order) before the existing
-/// content; those added via <see cref="AppendToEnd"/> are appended after it. Nothing is
-/// applied until <see cref="UpdateData"/> is called. Typical use is wrapping a page's
-/// content in a q…Q graphics-state save/restore pair before drawing extra overlay content.
-/// </summary>
-public sealed class ContentsAppender
-{
-    private readonly Page _page;
-    private readonly System.Collections.Generic.List<Aspose.Pdf.Operator> _begin = new();
-    private readonly System.Collections.Generic.List<Aspose.Pdf.Operator> _end = new();
-
-    internal ContentsAppender(Page page) => _page = page;
-
-    /// <summary>Queue an operator to be inserted before the existing page content.</summary>
-    public void AppendToBegin(Aspose.Pdf.Operator op)
-    {
-        if (op is not null) _begin.Add(op);
-    }
-
-    /// <summary>Queue an operator to be appended after the existing page content.</summary>
-    public void AppendToEnd(Aspose.Pdf.Operator op)
-    {
-        if (op is not null) _end.Add(op);
-    }
-
-    /// <summary>Apply the queued begin/end operators to the page's content stream.</summary>
-    public void UpdateData()
-    {
-        var contents = _page.Contents;
-        if (_begin.Count > 0)
-            contents.Insert(1, _begin); // 1-based insert at the front, preserving call order
-        foreach (var op in _end)
-            contents.Add(op);
-        _begin.Clear();
-        _end.Clear();
-    }
-}
-
-/// <summary>An unparsed operator token from a content stream — used as a fallback
-/// for operators not covered by the typed <see cref="Aspose.Pdf.Operators"/>
-/// hierarchy. Inherits <see cref="Aspose.Pdf.Operators.Operator"/> so that
-/// <see cref="OperatorCollection"/> can yield a uniform typed sequence.</summary>
-public sealed class RawOperator : Aspose.Pdf.Operators.Operator
-{
-    private readonly string _text;
-
-    internal RawOperator(string text) => _text = text;
-
-    /// <summary>The operator command name (last token).</summary>
-    public override string CommandName
-    {
-        get
-        {
-            var trimmed = _text.TrimEnd();
-            var lastSpace = trimmed.LastIndexOf(' ');
-            return lastSpace >= 0 ? trimmed[(lastSpace + 1)..] : trimmed;
-        }
-    }
-
-    /// <inheritdoc />
-    public override string ToPdf() => _text;
-}
-
-/// <summary>
-/// Dispatches a parsed operator token (e.g. <c>"BT"</c>, <c>"0.5 0.3 0.1 rg"</c>,
-/// <c>"/F1 12 Tf"</c>) to the matching typed <see cref="Operator"/> subclass,
-/// falling back to <see cref="RawOperator"/> for commands we don't yet model
-/// or whose operands fail to parse cleanly.
-/// </summary>
-internal static class TypedOperatorParser
-{
-    internal static Operator Parse(string text)
-    {
-        var trimmed = text.TrimEnd();
-        var lastSpace = trimmed.LastIndexOf(' ');
-        var op = lastSpace >= 0 ? trimmed[(lastSpace + 1)..] : trimmed;
-        var operandText = lastSpace >= 0 ? trimmed[..lastSpace] : "";
-
-        try
-        {
-            switch (op)
-            {
-                case "q":  return new Aspose.Pdf.Operators.GSave();
-                case "Q":  return new Aspose.Pdf.Operators.GRestore();
-                case "BT": return new Aspose.Pdf.Operators.BT();
-                case "ET": return new Aspose.Pdf.Operators.ET();
-                case "W":  return new Aspose.Pdf.Operators.Clip();
-                case "W*": return new Aspose.Pdf.Operators.EOClip();
-                case "EMC": return new Aspose.Pdf.Operators.EMC();
-                case "BMC": // /Tag BMC — begin marked content
-                    return new Aspose.Pdf.Operators.BMC(operandText.Trim().TrimStart('/'));
-                case "MP":  // /Tag MP — marked-content point
-                    return new Aspose.Pdf.Operators.MP(operandText.Trim().TrimStart('/'));
-                case "T*": return new Aspose.Pdf.Operators.MoveToNextLine();
-                case "Tf":
-                {
-                    // /Name size Tf
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 2 && ops[0].StartsWith('/')
-                        && double.TryParse(ops[1], System.Globalization.NumberStyles.Float,
-                            System.Globalization.CultureInfo.InvariantCulture, out var size))
-                        return new Aspose.Pdf.Operators.SelectFont(ops[0][1..], size);
-                    break;
-                }
-                case "rg":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 3
-                        && TryD(ops[0], out var r) && TryD(ops[1], out var g) && TryD(ops[2], out var b))
-                        return new Aspose.Pdf.Operators.SetRGBColor(r, g, b);
-                    break;
-                }
-                case "RG":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 3
-                        && TryD(ops[0], out var r) && TryD(ops[1], out var g) && TryD(ops[2], out var b))
-                        return new Aspose.Pdf.Operators.SetRGBColorStroke(r, g, b);
-                    break;
-                }
-                case "g":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 1 && TryD(ops[0], out var gray))
-                        return new Aspose.Pdf.Operators.SetGray(gray);
-                    break;
-                }
-                case "G":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 1 && TryD(ops[0], out var gray))
-                        return new Aspose.Pdf.Operators.SetGrayStroke(gray);
-                    break;
-                }
-                case "k":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 4 && TryD(ops[0], out var c) && TryD(ops[1], out var m)
-                        && TryD(ops[2], out var y) && TryD(ops[3], out var kk))
-                        return new Aspose.Pdf.Operators.SetCMYKColor(c, m, y, kk);
-                    break;
-                }
-                case "K":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 4 && TryD(ops[0], out var c) && TryD(ops[1], out var m)
-                        && TryD(ops[2], out var y) && TryD(ops[3], out var kk))
-                        return new Aspose.Pdf.Operators.SetCMYKColorStroke(c, m, y, kk);
-                    break;
-                }
-                case "Td":
-                case "TD":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 2 && TryD(ops[0], out var x) && TryD(ops[1], out var y))
-                        return op == "Td"
-                            ? new Aspose.Pdf.Operators.MoveTextPosition(x, y)
-                            : new Aspose.Pdf.Operators.MoveTextPositionSetLeading(x, y);
-                    break;
-                }
-                case "Tm":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 6
-                        && TryD(ops[0], out var a) && TryD(ops[1], out var b)
-                        && TryD(ops[2], out var c) && TryD(ops[3], out var d)
-                        && TryD(ops[4], out var e) && TryD(ops[5], out var f))
-                        return new Aspose.Pdf.Operators.SetTextMatrix(a, b, c, d, e, f);
-                    break;
-                }
-                case "cm":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 6
-                        && TryD(ops[0], out var a) && TryD(ops[1], out var b)
-                        && TryD(ops[2], out var c) && TryD(ops[3], out var d)
-                        && TryD(ops[4], out var e) && TryD(ops[5], out var f))
-                        return new Aspose.Pdf.Operators.ConcatenateMatrix(a, b, c, d, e, f);
-                    break;
-                }
-                case "Do":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 1 && ops[0].StartsWith('/'))
-                        return new Aspose.Pdf.Operators.Do(ops[0][1..]);
-                    break;
-                }
-                case "gs":
-                {
-                    // /Name gs — apply parameters from a named ExtGState resource.
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 1 && ops[0].StartsWith('/'))
-                        return new Aspose.Pdf.Operators.GS(ops[0][1..]);
-                    break;
-                }
-                case "Tj":
-                {
-                    // (text) Tj — operand is a single literal/hex string
-                    var s = ParseSingleStringOperand(operandText);
-                    if (s is not null) return new Aspose.Pdf.Operators.ShowText(s);
-                    break;
-                }
-                case "'":
-                {
-                    // (text) '
-                    var s = ParseSingleStringOperand(operandText);
-                    if (s is not null) return new Aspose.Pdf.Operators.MoveToNextLineShowText(s);
-                    break;
-                }
-                case "\"":
-                {
-                    // wordSpace charSpace (text) "
-                    var lastParenStart = operandText.LastIndexOf('(');
-                    var lastParenEnd = operandText.LastIndexOf(')');
-                    if (lastParenStart >= 0 && lastParenEnd > lastParenStart)
-                    {
-                        var nums = SplitOperands(operandText[..lastParenStart]);
-                        var s = ParseSingleStringOperand(operandText[lastParenStart..(lastParenEnd + 1)]);
-                        if (s is not null && nums.Length == 2
-                            && TryD(nums[0], out var ws) && TryD(nums[1], out var cs))
-                            return new Aspose.Pdf.Operators.SetSpacingMoveToNextLineShowText(ws, cs, s);
-                    }
-                    break;
-                }
-                case "TJ":
-                {
-                    // [ (str) num (str) num ... ] TJ — array of strings + numeric kerning
-                    var items = ParseTJArrayOperands(operandText);
-                    if (items is not null) return new Aspose.Pdf.Operators.SetGlyphsPositionShowText(items);
-                    break;
-                }
-                case "i":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 1 && TryD(ops[0], out var flat))
-                        return new Aspose.Pdf.Operators.SetFlat(flat);
-                    break;
-                }
-                case "m":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 2 && TryD(ops[0], out var x) && TryD(ops[1], out var y))
-                        return new Aspose.Pdf.Operators.MoveTo(x, y);
-                    break;
-                }
-                case "l":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 2 && TryD(ops[0], out var x) && TryD(ops[1], out var y))
-                        return new Aspose.Pdf.Operators.LineTo(x, y);
-                    break;
-                }
-                case "re":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 4 && TryD(ops[0], out var x) && TryD(ops[1], out var y)
-                        && TryD(ops[2], out var rw) && TryD(ops[3], out var rh))
-                        return new Aspose.Pdf.Operators.Re(x, y, rw, rh);
-                    break;
-                }
-                case "w":
-                {
-                    var ops = SplitOperands(operandText);
-                    if (ops.Length == 1 && TryD(ops[0], out var lw))
-                        return new Aspose.Pdf.Operators.SetLineWidth(lw);
-                    break;
-                }
-                // Path-painting and path-close operators (no operands).
-                case "h":  return new Aspose.Pdf.Operators.ClosePath();
-                case "S":  return new Aspose.Pdf.Operators.Stroke();
-                case "s":  return new Aspose.Pdf.Operators.ClosePathStroke();
-                case "f":
-                case "F":  return new Aspose.Pdf.Operators.Fill();
-                case "f*": return new Aspose.Pdf.Operators.EOFill();
-                case "B":  return new Aspose.Pdf.Operators.FillStroke();
-                case "B*": return new Aspose.Pdf.Operators.EOFillStroke();
-                case "b":  return new Aspose.Pdf.Operators.ClosePathFillStroke();
-                case "b*": return new Aspose.Pdf.Operators.ClosePathEOFillStroke();
-                case "n":  return new Aspose.Pdf.Operators.EndPath();
-            }
-        }
-        catch
-        {
-            // Operand parse failed — fall through to RawOperator.
-        }
-
-        return new RawOperator(text);
-    }
-
-    private static bool TryD(string s, out double v) =>
-        double.TryParse(s, System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture, out v);
-
-    /// <summary>Parse a single literal `(text)` or hex `&lt;...&gt;` operand.
-    /// Returns null on parse failure; PDF escape sequences inside literal
-    /// strings (\\, \(, \)) are unescaped.</summary>
-    private static string? ParseSingleStringOperand(string s)
-    {
-        s = s.Trim();
-        if (s.StartsWith('(') && s.EndsWith(')'))
-        {
-            var body = s.Substring(1, s.Length - 2);
-            var sb = new System.Text.StringBuilder(body.Length);
-            for (int i = 0; i < body.Length; i++)
-            {
-                if (body[i] == '\\' && i + 1 < body.Length)
-                {
-                    sb.Append(body[++i]);
-                }
-                else sb.Append(body[i]);
-            }
-            return sb.ToString();
-        }
-        if (s.StartsWith('<') && s.EndsWith('>'))
-        {
-            var hex = s.Substring(1, s.Length - 2).Replace(" ", "");
-            if (hex.Length % 2 != 0) hex += "0";
-            var bytes = new byte[hex.Length / 2];
-            for (int i = 0; i < bytes.Length; i++)
-                bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
-            return System.Text.Encoding.Latin1.GetString(bytes);
-        }
-        return null;
-    }
-
-    /// <summary>Parse a `[ (str) num (str) num ... ]` TJ-array operand into
-    /// the mixed object[] expected by SetGlyphsPositionShowText.Items.</summary>
-    private static object[]? ParseTJArrayOperands(string s)
-    {
-        s = s.Trim();
-        if (!s.StartsWith('[') || !s.EndsWith(']')) return null;
-        var inner = s.Substring(1, s.Length - 2);
-        var items = new List<object>();
-        int i = 0;
-        while (i < inner.Length)
-        {
-            while (i < inner.Length && char.IsWhiteSpace(inner[i])) i++;
-            if (i >= inner.Length) break;
-            if (inner[i] == '(')
-            {
-                int start = i;
-                i++;
-                while (i < inner.Length && inner[i] != ')')
-                {
-                    if (inner[i] == '\\' && i + 1 < inner.Length) i += 2;
-                    else i++;
-                }
-                if (i >= inner.Length) return null;
-                i++; // past ')'
-                var parsed = ParseSingleStringOperand(inner[start..i]);
-                if (parsed is null) return null;
-                items.Add(parsed);
-            }
-            else if (inner[i] == '<')
-            {
-                int start = i;
-                while (i < inner.Length && inner[i] != '>') i++;
-                if (i >= inner.Length) return null;
-                i++;
-                var parsed = ParseSingleStringOperand(inner[start..i]);
-                if (parsed is null) return null;
-                items.Add(parsed);
-            }
-            else
-            {
-                int start = i;
-                while (i < inner.Length && !char.IsWhiteSpace(inner[i]) && inner[i] != '(' && inner[i] != '<') i++;
-                var token = inner[start..i];
-                if (TryD(token, out var d)) items.Add(d);
-                else return null;
-            }
-        }
-        return items.ToArray();
-    }
-
-    private static string[] SplitOperands(string s)
-    {
-        var trimmed = s.Trim();
-        return trimmed.Length == 0
-            ? Array.Empty<string>()
-            : trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-    }
-}
-
-/// <summary>Parses PDF content stream bytes into individual operator strings.</summary>
-internal static class ContentStreamOperatorParser
-{
-    internal static List<string> ParseOperators(byte[] data)
-    {
-        var result = new List<string>();
-        var text = Encoding.Latin1.GetString(data);
-        int pos = 0;
-        int len = text.Length;
-        var operands = new List<string>();
-
-        while (pos < len)
-        {
-            SkipWhitespaceAndComments(text, ref pos, len);
-            if (pos >= len) break;
-
-            char c = text[pos];
-
-            if (c == '(')
-            {
-                operands.Add(ReadParenString(text, ref pos, len));
-            }
-            else if (c == '<' && pos + 1 < len && text[pos + 1] == '<')
-            {
-                operands.Add(ReadDictionary(text, ref pos, len));
-            }
-            else if (c == '<')
-            {
-                operands.Add(ReadHexString(text, ref pos, len));
-            }
-            else if (c == '[')
-            {
-                operands.Add(ReadArray(text, ref pos, len));
-            }
-            else if (c == '/')
-            {
-                operands.Add(ReadName(text, ref pos, len));
-            }
-            else if (c == '-' || c == '+' || c == '.' || (c >= '0' && c <= '9'))
-            {
-                operands.Add(ReadNumber(text, ref pos, len));
-            }
-            else if (c == 'B' && pos + 1 < len && text[pos + 1] == 'I' &&
-                     (pos + 2 >= len || IsDelimiter(text[pos + 2])))
-            {
-                // BI . ID . EI — inline image: count as 3 operators (BI, ID, EI)
-                // to match .NET Aspose.Pdf OperatorCollection behavior
-                var start = pos;
-                var eiPos = FindInlineImageEnd(text, ref pos, len);
-                var fullText = text[start..eiPos].TrimEnd();
-                // BI with its key-value pairs
-                var idIdx = fullText.IndexOf("\nID", StringComparison.Ordinal);
-                if (idIdx < 0) idIdx = fullText.IndexOf(" ID", StringComparison.Ordinal);
-                if (idIdx >= 0)
-                {
-                    result.Add(fullText[..idIdx].TrimEnd()); // BI + parameters
-                    result.Add("ID"); // ID operator
-                    result.Add("EI"); // EI operator
-                }
-                else
-                {
-                    result.Add(fullText);
-                }
-                operands.Clear();
-            }
-            else if (IsOperatorChar(c))
-            {
-                var opName = ReadOperatorName(text, ref pos, len);
-                // Check for true/false/null which are operands
-                if (opName == "true" || opName == "false" || opName == "null")
-                {
-                    operands.Add(opName);
-                }
-                else
-                {
-                    // Handle concatenated single-letter operators like "QQQQQ" (5× Q)
-                    // or "nq" / "QQ" (2-char glues occur too, e.g. "nq0.0 … re").
-                    // Some corrupt PDFs omit whitespace between operators.
-                    bool isConcatenated = opName.Length >= 2 && !IsKnownOperator(opName)
-                        && opName.All(ch => IsKnownSingleCharOp(ch));
-                    if (isConcatenated)
-                    {
-                        // First operator gets any pending operands
-                        if (operands.Count > 0)
-                        {
-                            result.Add(string.Join(" ", operands) + " " + opName[0]);
-                            operands.Clear();
-                        }
-                        else
-                        {
-                            result.Add(opName[0].ToString());
-                        }
-                        // Remaining characters are individual operators
-                        for (int ci = 1; ci < opName.Length; ci++)
-                            result.Add(opName[ci].ToString());
-                    }
-                    else
-                    {
-                        // This is an operator — emit with operands
-                        if (operands.Count > 0)
-                        {
-                            result.Add(string.Join(" ", operands) + " " + opName);
-                            operands.Clear();
-                        }
-                        else
-                        {
-                            result.Add(opName);
-                        }
-                    }
-                }
-            }
-            else
-            {
-                pos++; // skip unexpected chars
-            }
-        }
-
-        return result;
-    }
-
-    private static bool IsOperatorChar(char c) =>
-        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '\'' || c == '"' || c == '*';
-
-    private static bool IsKnownSingleCharOp(char c) =>
-        c == 'q' || c == 'Q' || c == 'n' || c == 'f' || c == 'h' || c == 'W' || c == 'S' ||
-        c == 'B' || c == 'b' || c == 's' || c == 'F';
-
-    private static readonly HashSet<string> _knownOps = new(StringComparer.Ordinal)
-    {
-        "q","Q","cm","m","l","c","v","y","h","re","S","s","f","F","B","b","n","W",
-        "BT","ET","Tf","Td","TD","Tm","TJ","Tj","TL","Tc","Tw","Tz","Tr","Ts",
-        "d0","d1","CS","cs","SC","SCN","sc","scn","G","g","RG","rg","K","k",
-        "gs","ri","i","Do","BI","ID","EI","sh","BX","EX","MP","DP","BMC","BDC","EMC",
-        "w","J","j","M","d","T*","'","\"","W*","f*","b*","B*",
-    };
-    private static bool IsKnownOperator(string op) => _knownOps.Contains(op);
-
-    private static bool IsDelimiter(char c) =>
-        c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '(' || c == ')' ||
-        c == '<' || c == '>' || c == '[' || c == ']' || c == '/' || c == '%';
-
-    private static void SkipWhitespaceAndComments(string text, ref int pos, int len)
-    {
-        while (pos < len)
-        {
-            char c = text[pos];
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\0')
-            {
-                pos++;
-            }
-            else if (c == '%')
-            {
-                while (pos < len && text[pos] != '\n' && text[pos] != '\r') pos++;
-            }
-            else break;
-        }
-    }
-
-    private static string ReadParenString(string text, ref int pos, int len)
-    {
-        int start = pos;
-        pos++; // skip (
-        int depth = 1;
-        while (pos < len && depth > 0)
-        {
-            if (text[pos] == '\\') { pos += 2; continue; }
-            if (text[pos] == '(') depth++;
-            else if (text[pos] == ')') depth--;
-            pos++;
-        }
-        return text[start..pos];
-    }
-
-    private static string ReadHexString(string text, ref int pos, int len)
-    {
-        int start = pos;
-        pos++; // skip <
-        while (pos < len && text[pos] != '>') pos++;
-        if (pos < len) pos++; // skip >
-        return text[start..pos];
-    }
-
-    private static string ReadDictionary(string text, ref int pos, int len)
-    {
-        int start = pos;
-        pos += 2; // skip <<
-        int depth = 1;
-        while (pos < len && depth > 0)
-        {
-            if (pos + 1 < len && text[pos] == '<' && text[pos + 1] == '<') { depth++; pos += 2; }
-            else if (pos + 1 < len && text[pos] == '>' && text[pos + 1] == '>') { depth--; pos += 2; }
-            else pos++;
-        }
-        return text[start..pos];
-    }
-
-    private static string ReadArray(string text, ref int pos, int len)
-    {
-        int start = pos;
-        pos++; // skip [
-        int depth = 1;
-        while (pos < len && depth > 0)
-        {
-            if (text[pos] == '[') depth++;
-            else if (text[pos] == ']') depth--;
-            pos++;
-        }
-        return text[start..pos];
-    }
-
-    private static string ReadName(string text, ref int pos, int len)
-    {
-        int start = pos;
-        pos++; // skip /
-        while (pos < len && !IsDelimiter(text[pos]) && text[pos] != '/' &&
-               text[pos] != '(' && text[pos] != '<' && text[pos] != '[') pos++;
-        return text[start..pos];
-    }
-
-    private static string ReadNumber(string text, ref int pos, int len)
-    {
-        int start = pos;
-        if (text[pos] == '+' || text[pos] == '-') pos++;
-        while (pos < len && ((text[pos] >= '0' && text[pos] <= '9') || text[pos] == '.')) pos++;
-        return text[start..pos];
-    }
-
-    private static string ReadOperatorName(string text, ref int pos, int len)
-    {
-        int start = pos;
-        while (pos < len && IsOperatorChar(text[pos])) pos++;
-        return text[start..pos];
-    }
-
-    private static int FindInlineImageEnd(string text, ref int pos, int len)
-    {
-        // Skip past BI, then find ID, then find EI
-        pos += 2; // skip BI
-        // Find ID
-        while (pos + 1 < len)
-        {
-            if (text[pos] == 'I' && text[pos + 1] == 'D' &&
-                (pos == 0 || text[pos - 1] == ' ' || text[pos - 1] == '\n' || text[pos - 1] == '\r'))
-            {
-                pos += 2;
-                if (pos < len && text[pos] == ' ') pos++; // skip single space after ID
-                break;
-            }
-            pos++;
-        }
-        // Find EI — must be preceded by whitespace
-        while (pos + 2 < len)
-        {
-            if ((text[pos] == '\n' || text[pos] == '\r' || text[pos] == ' ') &&
-                text[pos + 1] == 'E' && text[pos + 2] == 'I' &&
-                (pos + 3 >= len || IsDelimiter(text[pos + 3])))
-            {
-                pos += 3;
-                return pos;
-            }
-            pos++;
-        }
-        pos = len;
-        return pos;
-    }
 }

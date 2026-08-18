@@ -44,6 +44,10 @@ public class BaseParagraph
     /// <summary>Z-order index used by the DOM renderer.</summary>
     public int ZIndex { get; set; }
 
+    /// <summary>Identifier assigned via the XML template's <c>id</c> attribute;
+    /// resolvable through <see cref="Document.GetObjectById"/>.</summary>
+    internal string? Id { get; set; }
+
     /// <summary>Shallow clone — copies scalar/ref-shared state.</summary>
     public virtual object Clone() => MemberwiseClone();
 }

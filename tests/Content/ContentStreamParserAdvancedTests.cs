@@ -227,13 +227,16 @@ public class ContentStreamParserAdvancedTests
     public void ColorSpace_SCN_SetsStrokeColorCMYK()
     {
         var parser = CreateParser();
-        // CMYK: C=1, M=0, Y=0, K=0 => R=0, G=1, B=1
+        // CMYK: pure cyan. Four-component SCN converts through the ICC-based
+        // CmykToRgbLut (not the spec's algebraic formula), so expect exactly
+        // what the LUT gives for (1, 0, 0, 0).
         var content = Encoding.ASCII.GetBytes("1 0 0 0 SCN");
         parser.Parse(content);
 
-        Assert.Equal(0.0, parser.State.StrokeR, 3);
-        Assert.Equal(1.0, parser.State.StrokeG, 3);
-        Assert.Equal(1.0, parser.State.StrokeB, 3);
+        var (r, g, b) = Aspose.Pdf.Devices.CmykToRgbLut.Convert(1, 0, 0, 0);
+        Assert.Equal(r / 255.0, parser.State.StrokeR, 3);
+        Assert.Equal(g / 255.0, parser.State.StrokeG, 3);
+        Assert.Equal(b / 255.0, parser.State.StrokeB, 3);
     }
 
     [Fact]

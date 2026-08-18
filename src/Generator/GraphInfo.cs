@@ -42,7 +42,13 @@ public sealed class GraphInfo
     // An explicitly assigned opacity wins over the colour-derived value.
     private double? _fillOpacity;
     private double? _strokeOpacity;
-    internal double FillOpacity { get => _fillOpacity ?? FillColor?.A ?? 1.0; set => _fillOpacity = value; }
+    // A pattern-bearing colour (gradient fill) carries no meaningful RGB alpha —
+    // its unset colour bytes would read as fully transparent and blank the shading.
+    internal double FillOpacity
+    {
+        get => _fillOpacity ?? (FillColor?.PatternColorSpace is not null ? 1.0 : FillColor?.A ?? 1.0);
+        set => _fillOpacity = value;
+    }
     internal double StrokeOpacity { get => _strokeOpacity ?? Color?.A ?? 1.0; set => _strokeOpacity = value; }
 
     internal double[]? DashPattern

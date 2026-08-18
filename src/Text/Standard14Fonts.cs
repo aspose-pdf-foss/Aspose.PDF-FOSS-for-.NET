@@ -75,6 +75,63 @@ internal static class Standard14Fonts
     }
 
     /// <summary>
+    /// Descent for a face the writer substitutes by NAME rather than through the
+    /// Core-14 alias table. "Arial" means the system face, not the Helvetica AFM:
+    /// its hhea descender (-434 in a 2048 em) truncates to -211 in 1000-units.
+    /// Every other name keeps the Standard-14 AFM descent.
+    /// </summary>
+    internal static int GetWrittenFaceDescent(string baseFontName) =>
+        string.Equals(baseFontName, "Arial", StringComparison.OrdinalIgnoreCase)
+            ? -211
+            : GetDescent(baseFontName);
+
+    /// <summary>
+    /// Glyph-box ascent for a Standard-14 font (1/1000 units), from the Adobe
+    /// AFM Ascender values. Returns 0 when the name isn't Standard-14.
+    /// </summary>
+    internal static int GetAscent(string baseFontName)
+    {
+        var canonical = ResolveAlias(baseFontName);
+        if (canonical is null) return 0;
+        return canonical switch
+        {
+            "Courier" or "Courier-Bold" or "Courier-Oblique" or "Courier-BoldOblique" => 629,
+            "Helvetica" or "Helvetica-Oblique" => 718,
+            "Helvetica-Bold" or "Helvetica-BoldOblique" => 718,
+            "Times-Roman" or "Times-Italic" => 683,
+            "Times-Bold" or "Times-BoldItalic" => 683,
+            "Symbol" => 693,
+            "ZapfDingbats" => 693,
+            _ => 0,
+        };
+    }
+
+    /// <summary>
+    /// Ascent for a face the writer substitutes by NAME (see
+    /// <see cref="GetWrittenFaceDescent"/>): "Arial" means the system face,
+    /// whose hhea ascender (1854 in a 2048 em) truncates to 905 in 1000-units.
+    /// Every other name keeps the Standard-14 AFM ascent.
+    /// </summary>
+    internal static int GetWrittenFaceAscent(string baseFontName) =>
+        string.Equals(baseFontName, "Arial", StringComparison.OrdinalIgnoreCase)
+            ? 905
+            : GetAscent(baseFontName);
+
+    /// <summary>
+    /// Line-box ascent for a Standard-14 font (1/1000 units): a Standard-14
+    /// text line is modeled as a 1.1-em box standing on the
+    /// AFM descent (Helvetica: descent -207, ascent 893). Extraction rectangles
+    /// and baseline placement both use this box, so the two stay symmetric.
+    /// Returns 0 when the name isn't Standard-14.
+    /// </summary>
+    internal static int GetLineBoxAscent(string baseFontName)
+    {
+        var descent = GetDescent(baseFontName);
+        if (descent == 0 && !IsStandard14(baseFontName)) return 0;
+        return 1100 + descent; // descent is negative
+    }
+
+    /// <summary>
     /// Cap height for a Standard-14 font (1/1000 units), from Adobe AFM files.
     /// Approximates the ascent of the first text line so its glyph tops align
     /// with the top margin. Returns 0 when the name isn't a cap-bearing Standard-14 font.

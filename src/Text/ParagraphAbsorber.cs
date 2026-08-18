@@ -42,6 +42,9 @@ public sealed class ParagraphAbsorberOptions
 /// </summary>
 public sealed class ParagraphAbsorber
 {
+    private static readonly bool GridDebug =
+        Environment.GetEnvironmentVariable("ASPOSE_FOSS_GRIDDEBUG") == "1";
+
     private ParagraphAbsorberOptions _options;
     private readonly List<PageMarkup> _pageMarkups = [];
 
@@ -211,22 +214,10 @@ public sealed class ParagraphAbsorber
         if (validFragments.Count == 0)
             return new PageMarkup(page.Number, [], _options);
 
-        // Use standard section detection
+        // Use standard section detection. The raster model handles multi-column
+        // layouts natively (per-band 1-pt column coverage), so the legacy
+        // column split-and-merge post-processing is no longer applied.
         var sections = FindSections(validFragments, page);
-
-        // Post-process for multi-column layouts: split sections spanning multiple
-        // detected columns, then merge same-column adjacent sections.
-        var pageWidth = page.MediaBox?.Width ?? 612;
-        var avgFs = validFragments.Average(f => f.FontSize > 0 ? f.FontSize : 12);
-        var detectedColumns = DetectColumnsFromFragments(validFragments, avgFs, pageWidth);
-        // ALWAYS run split-and-merge when columns detected
-        if (detectedColumns is not null && detectedColumns.Count >= 2)
-        {
-            var before = sections.Count;
-            sections = SplitAndMergeByColumns(sections, detectedColumns, avgFs);
-            // Sanity: if split-merge made things worse, revert (safety net)
-            // This shouldn't happen in production.
-        }
 
         // Re-assemble paragraph text with the standalone space glyphs folded back in.
         if (spaceFragments.Count > 0)
@@ -595,14 +586,11 @@ public sealed class ParagraphAbsorber
             sections.AddRange(FindSectionsVertical(verticalFrags, page));
         }
 
-        // Sort sections: top-to-bottom, then left-to-right
-        var avgFs = fragments.Average(f => f.FontSize > 0 ? f.FontSize : 12);
+        // Bottom-edge ordering (see FindSectionsHorizontal).
         sections.Sort((a, b) =>
         {
-            var dy = b.Rectangle.URY.CompareTo(a.Rectangle.URY);
-            if (Math.Abs(a.Rectangle.URY - b.Rectangle.URY) > avgFs)
-                return dy;
-            return a.Rectangle.LLX.CompareTo(b.Rectangle.LLX);
+            var dy = b.Rectangle.LLY.CompareTo(a.Rectangle.LLY);
+            return dy != 0 ? dy : a.Rectangle.LLX.CompareTo(b.Rectangle.LLX);
         });
 
         return sections;
@@ -614,196 +602,146 @@ public sealed class ParagraphAbsorber
     private List<MarkupSection> FindSectionsHorizontal(List<TextFragment> fragments, Page page,
         List<(double left, double right)>? columnHints = null)
     {
-        // Use effective font size based on actual rendered height of fragments.
-        var avgRenderedHeight = fragments
-            .Where(f => f.Rectangle is not null && f.Rectangle.Height > 0)
-            .Select(f => f.Rectangle!.Height)
-            .DefaultIfEmpty(12)
-            .Average();
-        var avgFontSize = Math.Max(avgRenderedHeight, fragments.Average(f => f.FontSize > 0 ? f.FontSize : 12));
+        _ = columnHints;
+        // Section model: every fragment
+        // contributes a line box [baseline, baseline + 1.1·fontSize] rasterized on a
+        // 1-pt row grid anchored at integer user-space Y; sections split at any run
+        // of at least round(pageH·override) + 2 consecutive EMPTY rows (default
+        // override 0.005 — "unset" is not zero). Columns split analogously on 1-pt
+        // X columns with a font-size floor: max(round(pageW·hOverride) + 2,
+        // round(0.8·(F + 2))).
+        var pageH = page.MediaBox?.Height ?? 792;
+        var pageW = page.MediaBox?.Width ?? 612;
+        var vOv = _options.HasVerticalOverride ? _options.SectionUnbreakingVerticalOverride : 0.005;
+        var hOv = _options.HasHorizontalOverride ? _options.SectionUnbreakingHorizontalOverride : 0.005;
+        var vRun = (int)Math.Round(pageH * vOv, MidpointRounding.ToEven) + 2;
 
-        // Group fragments into lines, sort top-to-bottom
-        var lines = GroupIntoLines(fragments);
-        lines.Sort((a, b) => b.MidY.CompareTo(a.MidY));
+        var avgFontSize = fragments.Average(f => f.FontSize > 0 ? f.FontSize : 12);
+        var pageBodyRight = fragments.Max(f => f.Rectangle?.URX ?? 0);
 
-        if (lines.Count == 0) return [];
+        var sections = new List<MarkupSection>();
 
-        var pageWidth = page.MediaBox?.Width ?? 612;
-        var columns = columnHints;
-
-        // Compute vertical threshold for section breaks
-        double vThreshold;
-        if (_options.HasVerticalOverride)
+        // Recursive raster splitter: rows first, then columns per band; a region
+        // that split in either direction is re-examined (a 3-column page needs
+        // per-column row splits that page-wide rows can't see — text in the other
+        // columns masks the gaps).
+        void SplitRegion(List<TextFragment> frags, bool byRows, int depth)
         {
-            // Override controls how aggressively lines are merged vertically.
-            // Small values (e.g., 0.006) mean aggressive merging (large threshold).
-            var pageH = page.MediaBox?.Height ?? 792;
-            vThreshold = pageH * _options.SectionUnbreakingVerticalOverride * 5;
-            vThreshold = Math.Max(vThreshold, avgRenderedHeight * 3);
-        }
-        else
-        {
-            var allGaps = new List<double>();
-            for (var i = 1; i < lines.Count; i++)
+            if (frags.Count == 0) return;
+            List<double> cuts = new();
+            if (byRows)
             {
-                var hOverlap = Math.Min(lines[i - 1].MaxX, lines[i].MaxX) - Math.Max(lines[i - 1].MinX, lines[i].MinX);
-                if (hOverlap > 0)
+                var rows = new HashSet<int>();
+                int rowMin = int.MaxValue, rowMax = int.MinValue;
+                foreach (var f in frags)
                 {
-                    var gap = lines[i - 1].MinY - lines[i].MaxY;
-                    if (gap > 0) allGaps.Add(gap);
+                    var b = f.PositionOrNull?.YIndent ?? f.Rectangle?.LLY ?? 0;
+                    var fs = f.FontSize > 0 ? f.FontSize : 12;
+                    var top = b + 1.1 * fs;
+                    for (var r = (int)Math.Floor(b); r < top; r++)
+                    {
+                        if (r + 1 <= b) continue;
+                        rows.Add(r);
+                        if (r < rowMin) rowMin = r;
+                        if (r > rowMax) rowMax = r;
+                    }
                 }
-            }
-
-            if (allGaps.Count > 2)
-            {
-                allGaps.Sort();
-                var medianGap = allGaps[allGaps.Count / 2];
-                vThreshold = Math.Max(medianGap * 2.5, avgFontSize * 2.0);
+                if (rowMin <= rowMax)
+                {
+                    var emptyStart = -1;
+                    for (var r = rowMin; r <= rowMax + 1; r++)
+                    {
+                        var empty = r <= rowMax && !rows.Contains(r);
+                        if (empty && emptyStart < 0) emptyStart = r;
+                        else if (!empty && emptyStart >= 0)
+                        {
+                            if (r - emptyStart >= vRun)
+                                cuts.Add(emptyStart + (r - emptyStart) / 2.0);
+                            emptyStart = -1;
+                        }
+                    }
+                }
             }
             else
             {
-                vThreshold = avgFontSize * 2.0;
-            }
-        }
-
-        // Horizontal alignment threshold
-        var hAlignThreshold = _options.HasHorizontalOverride
-            ? pageWidth * _options.SectionUnbreakingHorizontalOverride
-            : avgFontSize * 1.5;
-
-        // Union-find for section clustering
-        var parent = new int[lines.Count];
-        for (var i = 0; i < parent.Length; i++) parent[i] = i;
-
-        int Find(int x)
-        {
-            while (parent[x] != x)
-            {
-                parent[x] = parent[parent[x]];
-                x = parent[x];
-            }
-            return x;
-        }
-
-        void Union(int a, int b)
-        {
-            var ra = Find(a);
-            var rb = Find(b);
-            if (ra != rb) parent[ra] = rb;
-        }
-
-        // Merge lines that are close along the primary axis and aligned along the secondary axis
-        for (var i = 0; i < lines.Count; i++)
-        {
-            for (var j = i + 1; j < lines.Count; j++)
-            {
-                var lineI = lines[i];
-                var lineJ = lines[j];
-
-                // Vertical gap (i is above j since sorted top-to-bottom)
-                var vGap = lineI.MinY - lineJ.MaxY;
-                if (vGap > vThreshold) break;
-
-                // Horizontal alignment check
-                var hOverlap = Math.Min(lineI.MaxX, lineJ.MaxX) - Math.Max(lineI.MinX, lineJ.MinX);
-                var widthI = lineI.MaxX - lineI.MinX;
-                var widthJ = lineJ.MaxX - lineJ.MinX;
-                var minWidth = Math.Min(widthI, widthJ);
-                var maxWidth = Math.Max(widthI, widthJ);
-                var widthRatio = minWidth > 0 ? maxWidth / minWidth : 1;
-                var leftMarginClose = Math.Abs(lineI.MinX - lineJ.MinX) < hAlignThreshold;
-                var rightMarginClose = Math.Abs(lineI.MaxX - lineJ.MaxX) < hAlignThreshold;
-
-                var isAligned = false;
-
-                if (hOverlap > 0)
+                var domF = frags.Average(f => f.FontSize > 0 ? f.FontSize : 12);
+                var hRun = Math.Max((int)Math.Round(pageW * hOv, MidpointRounding.ToEven) + 2,
+                                    (int)Math.Round(0.8 * (domF + 2), MidpointRounding.ToEven));
+                var cols = new HashSet<int>();
+                int colMin = int.MaxValue, colMax = int.MinValue;
+                foreach (var f in frags)
                 {
-                    var overlapRatioNarrow = minWidth > 0 ? hOverlap / minWidth : 0;
-
-                    if (overlapRatioNarrow > 0.5 && widthRatio < 2.5)
-                        isAligned = true;
-                    else if (leftMarginClose && overlapRatioNarrow > 0.3)
-                        isAligned = true;
-                    else if (rightMarginClose && overlapRatioNarrow > 0.3)
-                        isAligned = true;
-                    else if (leftMarginClose && rightMarginClose)
-                        isAligned = true;
+                    var r = f.Rectangle;
+                    if (r is null) continue;
+                    for (var c = (int)Math.Floor(r.LLX); c < r.URX; c++)
+                    {
+                        if (c + 1 <= r.LLX) continue;
+                        cols.Add(c);
+                        if (c < colMin) colMin = c;
+                        if (c > colMax) colMax = c;
+                    }
                 }
-                else
+                if (colMin <= colMax)
                 {
-                    if (Math.Abs(lineI.MinX - lineJ.MinX) < avgFontSize * 0.5)
-                        isAligned = true;
+                    var emptyStart = -1;
+                    for (var c = colMin; c <= colMax + 1; c++)
+                    {
+                        var empty = c <= colMax && !cols.Contains(c);
+                        if (empty && emptyStart < 0) emptyStart = c;
+                        else if (!empty && emptyStart >= 0)
+                        {
+                            if (c - emptyStart >= hRun)
+                                cuts.Add(emptyStart + (c - emptyStart) / 2.0);
+                            emptyStart = -1;
+                        }
+                    }
                 }
-
-                if (isAligned)
-                    Union(i, j);
             }
-        }
 
-        // Group lines by section
-        var sectionMap = new Dictionary<int, List<TextLine>>();
-        for (var i = 0; i < lines.Count; i++)
-        {
-            var root = Find(i);
-            if (!sectionMap.TryGetValue(root, out var list))
+            if (cuts.Count == 0)
             {
-                list = [];
-                sectionMap[root] = list;
+                if (depth > 0 || !byRows)
+                {
+                    // Try the other axis before emitting (rows→columns→rows…).
+                    if (byRows) { SplitRegion(frags, byRows: false, depth); return; }
+                    var lines = GroupIntoLines(frags);
+                    lines.Sort((a, b) => b.MidY.CompareTo(a.MidY));
+                    if (lines.Count > 0)
+                        sections.Add(BuildSection(lines, pageBodyRight));
+                    return;
+                }
+                var l0 = GroupIntoLines(frags);
+                l0.Sort((a, b) => b.MidY.CompareTo(a.MidY));
+                if (l0.Count > 0)
+                    sections.Add(BuildSection(l0, pageBodyRight));
+                return;
             }
-            list.Add(lines[i]);
+
+            var groups = new Dictionary<int, List<TextFragment>>();
+            foreach (var f in frags)
+            {
+                var key = byRows ? (f.PositionOrNull?.YIndent ?? f.Rectangle?.LLY ?? 0)
+                                 : (f.Rectangle?.LLX ?? 0);
+                var g = 0;
+                if (byRows) { foreach (var c in cuts) if (key < c) g++; }
+                else { foreach (var c in cuts) if (key >= c) g++; }
+                if (!groups.TryGetValue(g, out var list)) groups[g] = list = [];
+                list.Add(f);
+            }
+            foreach (var kv in groups)
+                SplitRegion(kv.Value, byRows: !byRows, depth + 1);
         }
 
-        // Convert grouped lines to MarkupSections
-        var sections = new List<MarkupSection>();
-        foreach (var kv in sectionMap)
-        {
-            var sectionLines = kv.Value;
-            sectionLines.Sort((a, b) => b.MidY.CompareTo(a.MidY)); // top-to-bottom
-            sections.Add(BuildSection(sectionLines));
-        }
+        SplitRegion(fragments, byRows: true, 0);
 
-        // Sort sections: top-to-bottom, then left-to-right within same vertical band
+        // Sections are ordered by their BOTTOM edge, top-to-bottom
+        // (LLY descending), ties
+        // left-to-right.
         sections.Sort((a, b) =>
         {
-            var dy = b.Rectangle.URY.CompareTo(a.Rectangle.URY);
-            if (Math.Abs(a.Rectangle.URY - b.Rectangle.URY) > avgFontSize)
-                return dy;
-            return a.Rectangle.LLX.CompareTo(b.Rectangle.LLX);
+            var dy = b.Rectangle.LLY.CompareTo(a.Rectangle.LLY);
+            return dy != 0 ? dy : a.Rectangle.LLX.CompareTo(b.Rectangle.LLX);
         });
-
-        // Single-pass merge of vertically-adjacent sections when one contains a very wide
-        // line (indicating text replacement created an oversized fragment). Only consecutive
-        // sections with matching left margins are merged. The page-width guard prevents
-        // this from affecting normal (non-replacement) section detection.
-        var llxTolerance = avgFontSize * 0.8;
-        for (var si = 0; si < sections.Count - 1; si++)
-        {
-            var above = sections[si];
-            var below = sections[si + 1];
-
-            // Only trigger when at least one section has a very wide line (replacement artifact)
-            var aboveWidth = above.Rectangle.URX - above.Rectangle.LLX;
-            var belowWidth = below.Rectangle.URX - below.Rectangle.LLX;
-            if (aboveWidth < pageWidth * 1.5 && belowWidth < pageWidth * 1.5) continue;
-
-            var vGap = above.Rectangle.LLY - below.Rectangle.URY;
-            if (vGap > vThreshold || vGap < -avgFontSize) continue;
-
-            if (Math.Abs(above.Rectangle.LLX - below.Rectangle.LLX) > llxTolerance) continue;
-
-            // Merge below into above
-            var allP = new List<MarkupParagraph>(above.Paragraphs);
-            allP.AddRange(below.Paragraphs);
-            allP.Sort((p1, p2) => p2.Points[0].Y.CompareTo(p1.Points[0].Y));
-            var newRect = new Rectangle(
-                Math.Min(above.Rectangle.LLX, below.Rectangle.LLX),
-                Math.Min(above.Rectangle.LLY, below.Rectangle.LLY),
-                Math.Max(above.Rectangle.URX, below.Rectangle.URX),
-                Math.Max(above.Rectangle.URY, below.Rectangle.URY));
-            sections[si] = new MarkupSection(newRect, allP);
-            sections.RemoveAt(si + 1);
-            si--; // re-check the merged section against the next one
-        }
 
         return sections;
     }
@@ -1220,7 +1158,7 @@ public sealed class ParagraphAbsorber
         return cols;
     }
 
-    private static MarkupSection BuildSection(List<TextLine> sectionLines)
+    private static MarkupSection BuildSection(List<TextLine> sectionLines, double pageBodyRight = double.NaN)
     {
         sectionLines.Sort((a, b) => b.MidY.CompareTo(a.MidY)); // top-to-bottom
         var llx = sectionLines.Min(l => l.MinX);
@@ -1228,7 +1166,7 @@ public sealed class ParagraphAbsorber
         var urx = sectionLines.Max(l => l.MaxX);
         var ury = sectionLines.Max(l => l.MaxY);
         var rect = new Rectangle(llx, lly, urx, ury);
-        var paragraphs = GroupIntoParagraphs(sectionLines);
+        var paragraphs = GroupIntoParagraphs(sectionLines, pageBodyRight);
         return new MarkupSection(rect, paragraphs);
     }
 
@@ -1338,139 +1276,140 @@ public sealed class ParagraphAbsorber
 
     /// <summary>
     /// Groups lines into paragraphs within a section.
-    /// Lines are already sorted top-to-bottom.
+    /// Rules: vertical gaps below the section threshold never
+    /// split a paragraph; a line starts a new one only on a content trigger, and
+    /// every trigger requires the line to lead with a capital letter:
+    ///  - T-indent : the line starts more than ~0.55·F right of the paragraph's
+    ///               left edge;
+    ///  - T-numeric: the first token is a pure number, the previous line ends with
+    ///               a period, and a capital follows the number;
+    ///  - T-space  : the text begins with literal whitespace before the capital and
+    ///               the previous line stops ≥ ~1.5 em short of the block's right edge.
     /// </summary>
-    private static List<MarkupParagraph> GroupIntoParagraphs(List<TextLine> lines)
+    private static List<MarkupParagraph> GroupIntoParagraphs(List<TextLine> lines, double pageBodyRight = double.NaN)
     {
         if (lines.Count == 0) return [];
 
+        static string LineText(TextLine l) => string.Concat(l.Fragments.Select(f => f.Text));
+
+        static bool LeadsWithCapital(string s, out int capIdx)
+        {
+            // Skip whitespace AND non-letter marks (bullets, dashes) — a bullet
+            // item "• ESRI shape…" leads with the capital E. Digits stop the scan
+            // (T-numeric owns numbered lines).
+            for (var k = 0; k < s.Length; k++)
+            {
+                var c = s[k];
+                if (char.IsUpper(c)) { capIdx = k; return true; }
+                if (char.IsLetter(c) || char.IsDigit(c)) { capIdx = k; return false; }
+            }
+            capIdx = -1; return false;
+        }
+
+        // A bullet-led line opens a hanging list item: its continuation lines sit
+        // at the text indent, so the usual first-line-indent trigger does not
+        // apply inside it, and leaving the item is itself a paragraph boundary.
+        static bool BulletLead(string s)
+        {
+            foreach (var c in s)
+            {
+                if (char.IsWhiteSpace(c)) continue;
+                return "■□▪▫●○•‣◦·★☆►▶".IndexOf(c) >= 0;
+            }
+            return false;
+        }
+
+        // First token is a pure number ("1", "12", "1.2", "1,2") and a capital
+        // letter follows it on the line.
+        static bool NumericLead(string s)
+        {
+            var t = s.TrimStart();
+            var k = 0;
+            while (k < t.Length && (char.IsDigit(t[k]) || ((t[k] == '.' || t[k] == ',')
+                   && k + 1 < t.Length && char.IsDigit(t[k + 1])))) k++;
+            if (k == 0 || (k < t.Length && !char.IsWhiteSpace(t[k]))) return false;
+            while (k < t.Length && char.IsWhiteSpace(t[k])) k++;
+            return k < t.Length && char.IsUpper(t[k]);
+        }
+
         var paragraphs = new List<MarkupParagraph>();
         var currentLines = new List<TextLine> { lines[0] };
-
-        // Compute normal line spacing for this section (using consecutive line gaps)
-        var lineSpacings = new List<double>();
-        for (var i = 1; i < lines.Count; i++)
-        {
-            var gap = lines[i - 1].MidY - lines[i].MidY;
-            if (gap > 0) lineSpacings.Add(gap);
-        }
-
-        var avgFontSize = lines.Average(l => l.AvgFontSize);
-        var normalSpacing = lineSpacings.Count > 0 ? Median(lineSpacings) : avgFontSize * 1.2;
-
-        // Right margin of this section's body: the furthest right any line reaches.
-        // A line ending well short of it (with room for the next line's first word)
-        // is a "ragged" paragraph end rather than a normal wrap.
-        var bodyRight = lines.Max(l => l.MaxX);
-        var bodyWidth = bodyRight - lines.Min(l => l.MinX);
-
-        // Paragraph break threshold: use bimodal gap detection when available.
-        // Find the largest jump in the sorted gap sequence — if significant,
-        // the threshold sits between normal line spacing and paragraph breaks.
-        double spacingThreshold;
-        if (lineSpacings.Count > 20)
-        {
-            var sortedGaps = lineSpacings.OrderBy(g => g).ToList();
-            // Use the lower quartile as "normal spacing" (robust against outliers)
-            var q1 = sortedGaps[sortedGaps.Count / 4];
-            // Find the largest gap jump
-            var bestJumpIdx = -1;
-            var bestJumpSize = 0.0;
-            for (var gi = 1; gi < sortedGaps.Count; gi++)
-            {
-                var jump = sortedGaps[gi] - sortedGaps[gi - 1];
-                if (jump > bestJumpSize) { bestJumpSize = jump; bestJumpIdx = gi; }
-            }
-            // The jump must be significant: the upper gap > 1.9× the lower gap,
-            // and there must be enough normal-spaced lines below the jump
-            if (bestJumpIdx >= sortedGaps.Count * 2 / 3 &&
-                bestJumpSize > q1 * 0.5 &&
-                sortedGaps[bestJumpIdx] > sortedGaps[bestJumpIdx - 1] * 1.7)
-            {
-                spacingThreshold = (sortedGaps[bestJumpIdx - 1] + sortedGaps[bestJumpIdx]) / 2;
-            }
-            else
-            {
-                spacingThreshold = normalSpacing * 2.0;
-            }
-        }
-        else
-        {
-            spacingThreshold = normalSpacing * 2.0;
-        }
+        var paraLeft = lines[0].MinX;
+        // The T-space right edge is the PAGE body's right margin (a section may be
+        // narrower than the column it sits in).
+        var bodyRight = double.IsNaN(pageBodyRight) ? lines.Max(l => l.MaxX) : pageBodyRight;
 
         for (var i = 1; i < lines.Count; i++)
         {
             var prev = lines[i - 1];
             var curr = lines[i];
+            var f = curr.AvgFontSize > 0 ? curr.AvgFontSize : 12;
+            var prevF = prev.AvgFontSize > 0 ? prev.AvgFontSize : 12;
+            var text = LineText(curr);
+            var prevRaw = LineText(prev);
+            var prevText = prevRaw.TrimEnd();
+            var capital = LeadsWithCapital(text, out var capIdx);
 
-            var vGap = prev.MidY - curr.MidY;
-
-            // Detect paragraph break: spacing significantly larger than normal
-            var isSpacingBreak = lineSpacings.Count > 0 && vGap > spacingThreshold;
-
-            // Also detect paragraph break on significant indentation change
-            // (e.g., left-aligned block followed by centered or right-aligned block)
-            var indentDelta = Math.Abs(curr.MinX - prev.MinX);
-            var rightDelta = Math.Abs(curr.MaxX - prev.MaxX);
-            var prevWidth = prev.MaxX - prev.MinX;
-            var currWidth = curr.MaxX - curr.MinX;
-
-            // Font size change combined with extra spacing indicates a new paragraph
-            // (e.g., heading vs body). Only trigger if there's also some extra vertical gap.
-            var fontSizeRatio = prev.AvgFontSize > 0 ? curr.AvgFontSize / prev.AvgFontSize : 1;
-            var hasFontSizeChange = fontSizeRatio < 0.85 || fontSizeRatio > 1.18;
-            var isFontSizeBreak = hasFontSizeChange && lineSpacings.Count > 0 && vGap > normalSpacing * 0.9;
-
-            // Bullet/marker character at the start of the current line triggers a new paragraph.
-            var isIndentBreak = false;
-            if (curr.Fragments.Count > 0 && curr.Fragments[0].Text.Length > 0)
+            // T-indent presumes left-aligned flow. A block that is NOT left-aligned
+            // but IS right- or centre-aligned (a right-ragged-left header)
+            // scatters its left edges by design, so an "indent" there carries no
+            // meaning. A single-line paragraph classifies as left-aligned.
+            // The paragraph's left-edge SCATTER separates flow text from
+            // right-/centre-placed header blocks: a first-line indent leaves a
+            // small (≤ ~4 em) scatter, while a right-anchored header
+            // block scatters most of its width.
+            double leftScatter = 0;
+            foreach (var pl in currentLines)
+                leftScatter = Math.Max(leftScatter, pl.MinX - paraLeft);
+            var suppressIndent = leftScatter > 4 * f;
+            // Inside a bullet item the continuation edge IS an indent relative to
+            // the bullet column, so T-indent stays quiet there ("■English…" item's
+            // capital-led "United Nations…" continuation).
+            var paraBullet = BulletLead(LineText(currentLines[0]));
+            var currBullet = BulletLead(text);
+            var tIndent = capital && !suppressIndent && !paraBullet && curr.MinX > paraLeft + 0.55 * f;
+            // T-outdent: a hanging-indent paragraph (first line outdented, continuation
+            // lines indented — bullet/definition lists) starts anew when a line begins
+            // LEFT of the continuation edge (consecutive "■ …" list items).
+            var tOutdent = false;
+            if (capital && currentLines.Count >= 2)
             {
-                var currChar = curr.Fragments[0].Text[0];
-                if ("■●•▪▸►‣".Contains(currChar))
-                    isIndentBreak = true;
+                var contLeft = double.MaxValue;
+                for (var li = 1; li < currentLines.Count; li++)
+                    contLeft = Math.Min(contLeft, currentLines[li].MinX);
+                tOutdent = curr.MinX < contLeft - 0.55 * f;
             }
+            var tNumeric = prevText.EndsWith(".") && NumericLead(text);
+            // T-font: a pronounced font-size change is a boundary of its own — a
+            // 13.3-pt heading line ("Officer") against the 8-pt list body below it.
+            var tFont = capital && Math.Max(f, prevF) > 1.25 * Math.Min(f, prevF);
+            // T-bullet: a bullet line always OPENS a list item, and a non-bullet
+            // line returning to the bullet column CLOSES one ("■Place: …" followed
+            // by "Closing Date: …" at the same left edge).
+            var tBullet = currBullet && !paraBullet
+                          || paraBullet && currBullet && curr.MinX < paraLeft + 0.55 * f
+                          || paraBullet && !currBullet && capital && curr.MinX < paraLeft + 0.55 * f;
+            // The literal whitespace that separates the paragraphs may sit at the
+            // START of this line or (with our line assembly) as the TRAILING space
+            // run of the previous one; the right-edge gap is measured to the
+            // previous line's ink (trailing spaces excluded).
+            var trailingSpaces = prevRaw.Length - prevText.Length;
+            var prevInkRight = prev.MaxX - trailingSpaces * 0.25 * prevF;
+            var tSpace = capital && capIdx > 0 && text.Length > 0 && char.IsWhiteSpace(text[0])
+                         && (bodyRight - prevInkRight) > 1.5 * prevF;
 
-            // Ragged short-line break: the previous line ended a full sentence well
-            // short of the body's right margin, and the current line's first word would
-            // have fit in that gap — so the previous line deliberately ended the
-            // paragraph instead of wrapping. Three guards keep this from firing on
-            // ordinary justified/wrapped prose (which was the false-positive risk):
-            //   1. the gap is substantial (> ~1.5 em), not a small ragged-right jitter;
-            //   2. the previous line ends with sentence-terminal punctuation (. ! ?),
-            //      so a line that wrapped mid-sentence on a long name/word never breaks;
-            //   3. the current line's first word would have fit on the previous line.
-            var isShortLineBreak = false;
-            var prevGap = bodyRight - prev.MaxX;
-            // Only a MODERATE short line (ends a bit early) is a within-block paragraph
-            // break. A line ending very short (> a quarter of the body width) is a
-            // section-level cue — a heading or standalone line — which section detection
-            // owns; treating it as a within-section paragraph split miscounts.
-            if (prevGap > prev.AvgFontSize * 1.5 && prevGap < bodyWidth * 0.25)
-            {
-                var prevText = string.Concat(prev.Fragments.Select(f => f.Text)).TrimEnd();
-                var endsSentence = prevText.Length > 0
-                    && (prevText[^1] == '.' || prevText[^1] == '!' || prevText[^1] == '?');
-                if (endsSentence)
-                {
-                    var prevChars = prev.Fragments.Sum(f => f.Text?.Length ?? 0);
-                    var avgCharW = prevChars > 0 ? (prev.MaxX - prev.MinX) / prevChars : prev.AvgFontSize * 0.5;
-                    var currText = string.Concat(curr.Fragments.Select(f => f.Text)).TrimStart();
-                    var sp = currText.IndexOf(' ');
-                    var firstWordLen = sp < 0 ? currText.Length : sp;
-                    if (prevGap > firstWordLen * avgCharW + avgCharW)
-                        isShortLineBreak = true;
-                }
-            }
-
-            if (isSpacingBreak || isFontSizeBreak || isIndentBreak || isShortLineBreak)
+            if (GridDebug)
+                Console.Error.WriteLine($"[para] minX={curr.MinX:F1} paraLeft={paraLeft:F1} f={f:F1} cap={capital} scat={leftScatter:F0} supp={suppressIndent} tI={tIndent} tN={tNumeric} tS={tSpace} tO={tOutdent} tF={tFont} tB={tBullet} '{text[..Math.Min(24, text.Length)]}'");
+            if (tIndent || tNumeric || tSpace || tOutdent || tFont || tBullet)
             {
                 paragraphs.Add(BuildParagraph(currentLines));
                 currentLines = [curr];
+                paraLeft = curr.MinX;
             }
             else
             {
                 currentLines.Add(curr);
+                paraLeft = Math.Min(paraLeft, curr.MinX);
             }
         }
 
@@ -1514,21 +1453,42 @@ public sealed class ParagraphAbsorber
                         var gap = f.Rectangle.LLX - prevFrag.Rectangle.URX;
                         var spaceGlyph = gap <= f.FontSize * 0.15
                             && SpaceGlyphAt(spaces, f.Rectangle, prevFrag.Rectangle.URX, f.Rectangle.LLX);
-                        if ((gap > f.FontSize * 0.15 || spaceGlyph)
-                            && !prevFrag.Text.EndsWith(" ") && !f.Text.StartsWith(" "))
+                        // A positive word-sized gap ALWAYS gets a boundary space —
+                        // even when the left fragment already ends with one
+                        // ("queries  or" is emitted there); the space-glyph
+                        // re-insertion keeps the duplicate guard.
+                        if (gap > f.FontSize * 0.15
+                            || (spaceGlyph && !prevFrag.Text.EndsWith(" ") && !f.Text.StartsWith(" ")))
                             sb.Append(' ');
                     }
                 }
                 sb.Append(f.Text);
             }
-            // Standalone space glyphs at the end of a line are dropped (the reference
-            // keeps a trailing space only when it is part of the last word's own run).
+            // Standalone space glyphs at the end of a line are dropped (a trailing
+            // space is kept only when it is part of the last word's own run).
             sb.Append("\r\n");
         }
         var text = sb.ToString();
         if (text.EndsWith("\r\n"))
             text = text[..^2];
         return text;
+    }
+
+    /// <summary>Punctuation that closes what precedes it and never takes a space
+    /// in front of it.</summary>
+    private static bool IsClosingPunctuation(char c) =>
+        c is ',' or '.' or ';' or ':' or '!' or '?' or ')' or ']' or '}'
+          or '%' or '’' or '”' or '»';
+
+    /// <summary>A one-space fragment covering the pen gap between two drawn runs,
+    /// seated on the gap itself and carrying the following run's text state.</summary>
+    private static TextFragment GapSpaceFragment(TextFragment left, TextFragment right)
+    {
+        var l = left.Rectangle!;
+        var r = right.Rectangle!;
+        var rect = new Rectangle(l.URX, System.Math.Min(l.LLY, r.LLY),
+                                 r.LLX, System.Math.Max(l.URY, r.URY));
+        return new TextFragment(" ", rect, right.TextState);
     }
 
     private static MarkupParagraph BuildParagraph(List<TextLine> lines)
@@ -1538,7 +1498,7 @@ public sealed class ParagraphAbsorber
 
         foreach (var line in lines)
         {
-            var frags = new List<TextFragment>(line.Fragments);
+            var frags = new List<TextFragment>(line.Fragments.Count);
             lineFragments.Add(frags);
 
             for (var fi = 0; fi < line.Fragments.Count; fi++)
@@ -1551,25 +1511,58 @@ public sealed class ParagraphAbsorber
                     if (prevFrag.Rectangle is not null)
                     {
                         var gap = f.Rectangle.LLX - prevFrag.Rectangle.URX;
-                        if (gap > f.FontSize * 0.15 && !prevFrag.Text.EndsWith(" ") && !f.Text.StartsWith(" "))
+                        if (gap > f.FontSize * 0.15)
+                        {
                             sb.Append(' ');
+                            // The word gap becomes a real fragment spanning it, so a caller
+                            // walking Lines and concatenating fragment text reads the same
+                            // string as the paragraph's own Text. A source that draws each
+                            // glyph as its own run (and leaves the inter-word spacing to the
+                            // pen) otherwise reads back as one unbroken word.
+                            //
+                            // Two gaps are NOT word spaces and get no fragment: one whose
+                            // boundary the source already spells with a space character of
+                            // its own (adding another would double it), and one between runs
+                            // set at DIFFERENT sizes — that is a tracked heading or a raised
+                            // initial being positioned, not a space between words.
+                            var alreadySpaced = prevFrag.Text.EndsWith(" ", StringComparison.Ordinal)
+                                || f.Text.StartsWith(" ", StringComparison.Ordinal);
+                            var sameSize = System.Math.Abs(prevFrag.FontSize - f.FontSize) < 0.01;
+                            // Nor does a gap in front of closing punctuation: a slanted or
+                            // swashed final glyph leaves room after its box that the comma
+                            // sits in, and no space belongs there.
+                            var leadsPunctuation = f.Text.Length > 0 && IsClosingPunctuation(f.Text[0]);
+                            if (!alreadySpaced && sameSize && !leadsPunctuation)
+                                frags.Add(GapSpaceFragment(prevFrag, f));
+                        }
                     }
                 }
+                frags.Add(f);
                 sb.Append(f.Text);
             }
 
             sb.Append("\r\n");
         }
 
-        // Compute bounding polygon points (4 corners: LL, LR, UR, UL)
+        // Compute bounding polygon points (4 corners: LL, LR, UR, UL). The
+        // lower-left corner follows the paragraph OUTLINE, not the bbox: it is
+        // the lower-left corner of the BOTTOM line's LEFTMOST fragment. In a
+        // hanging-indent item that is the continuation edge (right of the
+        // bullet column), and when the leftmost fragment is the bullet itself
+        // its own (shallower) descent sets the corner's Y.
         var llx = lines.Min(l => l.MinX);
         var lly = lines.Min(l => l.MinY);
         var urx = lines.Max(l => l.MaxX);
         var ury = lines.Max(l => l.MaxY);
 
+        var bottomLeft = lines[^1].Fragments
+            .OrderBy(f => f.Rectangle?.LLX ?? GetX(f))
+            .First();
+
         var points = new Point[]
         {
-            new(llx, lly), // lower-left
+            new(bottomLeft.Rectangle?.LLX ?? GetX(bottomLeft),
+                bottomLeft.Rectangle?.LLY ?? GetY(bottomLeft)), // lower-left
             new(urx, lly), // lower-right
             new(urx, ury), // upper-right
             new(llx, ury), // upper-left

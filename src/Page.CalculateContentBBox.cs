@@ -37,10 +37,10 @@ public sealed partial class Page
     /// <summary>
     /// Extend the content bbox below a flipped-text-matrix fragment (Tm.d &lt; 0).
     /// An absorbed fragment's Rectangle.LLY sits at its baseline; for flipped text
-    /// the reference content box drops a line-box below that baseline. The drop is
+    /// the content box drops a line-box below that baseline. The drop is
     /// an internal line-box heuristic proportional to the effective (page-space)
-    /// font size, NOT any font descent metric — a black-box probe of the reference
-    /// implementation showed the value maps to no hhea/descriptor/FontBBox descent.
+    /// font size, NOT any font descent metric — the value maps to no
+    /// hhea/descriptor/FontBBox descent.
     /// Gated to flipped text so upright text (the common case, and the other
     /// CalculateContentBBox callers) is left exactly as the fragment rectangle.
     /// </summary>
@@ -64,13 +64,14 @@ public sealed partial class Page
         if (tmD * ctm.D >= 0)
             return;
 
-        // Effective page-space font size = raw size × |Tm y-scale| × |CTM y-scale|.
-        double ctmScale = Math.Sqrt(ctm.C * ctm.C + ctm.D * ctm.D);
-        double effFs = frag.TextState.FontSize * Math.Abs(tmD) * ctmScale;
+        // The fragment's FontSize is already the effective page-space size (the
+        // absorber composes the Tm up-axis with the CTM) — applying |Tm d| and
+        // the CTM scale again would square the scale on flipped-CTM documents.
+        double effFs = frag.TextState.FontSize;
         if (effFs <= 0)
             return;
 
-        // Line-box factor matching the reference content-box drop below a flipped
+        // Line-box factor for the content-box drop below a flipped
         // baseline (empirical constant × effective font size).
         const double flippedLineBoxFactor = 0.60;
         acc.IncludePoint(rect.LLX, rect.LLY - flippedLineBoxFactor * effFs);

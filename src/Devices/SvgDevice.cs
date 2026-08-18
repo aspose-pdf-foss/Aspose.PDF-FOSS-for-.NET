@@ -8,6 +8,14 @@ namespace Aspose.Pdf.Devices;
 
 /// <summary>
 /// Converts a PDF page to SVG markup.
+///
+/// Output shape (SVG 1.1): all geometry is emitted flattened into top-down page
+/// coordinates (no transform groups). Horizontal text runs are emitted as
+/// <c>&lt;text x="x0 x1 …" y="y" style="fill:#rrggbb;…"&gt;</c> with one absolute x
+/// position per glyph computed from the font's width table. Rotated/sheared
+/// runs fall back to a
+/// <c>transform="matrix(…)"</c> placement whose y-column is negated so the glyphs
+/// render upright; SvgToPdfConverter negates it back on import.
 /// </summary>
 public sealed class SvgDevice
 {
@@ -17,24 +25,46 @@ public sealed class SvgDevice
     public string Process(Page page)
     {
         var mb = page.MediaBox;
-        var sb = new StringBuilder();
-        sb.AppendLine($"<svg xmlns=\"http://www.w3.org/2000/svg\" " +
-            $"width=\"{F(mb.Width)}\" height=\"{F(mb.Height)}\" " +
-            $"viewBox=\"{F(mb.LLX)} {F(mb.LLY)} {F(mb.Width)} {F(mb.Height)}\">");
-
-        // Flip Y axis (PDF origin is bottom-left, SVG is top-left)
-        sb.AppendLine($"<g transform=\"translate(0,{F(mb.Height)}) scale(1,-1)\">");
+        var body = new StringBuilder();
 
         var reader = page.Reader;
         var contentStreams = GetContentStreams(page.Dict, reader);
-        var resources = reader.ResolveDict(page.Dict.Get("Resources"));
+        var resources = SoftwarePageRenderer.ResolveInheritedPageResources(page.Dict, reader);
+
+        // Map PDF user space (origin bottom-left, y up) onto SVG page space
+        // (origin top-left, y down): x' = x - LLX, y' = URY - y.
+        var gs = new GState { Ctm = new[] { 1.0, 0, 0, -1, -mb.LLX, mb.URY } };
+        var usedBlendModes = new SortedSet<string>(StringComparer.Ordinal);
+        var links = ResolveLinkRects(page, mb);
 
         foreach (var stream in contentStreams)
         {
-            RenderToSvg(stream, resources, reader, sb, 0);
+            RenderToSvg(stream, resources, reader, body, 0, gs.Clone(), usedBlendModes, links);
         }
 
-        sb.AppendLine("</g>");
+        var sb = new StringBuilder();
+        sb.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>");
+        sb.AppendLine("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">");
+        // width/height are CSS pixels (1px = 0.75pt) so an importer applying the
+        // standard px→pt factor recovers the original page size; the viewBox keeps
+        // the content coordinates in points.
+        sb.AppendLine($"<svg version=\"1.1\" xmlns=\"http://www.w3.org/2000/svg\" " +
+            $"xmlns:xlink=\"http://www.w3.org/1999/xlink\" " +
+            $"width=\"{F(mb.Width / 0.75)}\" height=\"{F(mb.Height / 0.75)}\" " +
+            $"viewBox=\"0 0 {F(mb.Width)} {F(mb.Height)}\">");
+        if (usedBlendModes.Count > 0)
+        {
+            sb.Append("<style type=\"text/css\">");
+            foreach (var bm in usedBlendModes)
+            {
+                var css = MapBlendMode(bm);
+                if (css == "normal") continue;
+                var cls = css.Replace("-", "");
+                sb.Append($".{cls}{{ mix-blend-mode:{css}; }}");
+            }
+            sb.AppendLine("</style>");
+        }
+        sb.Append(body);
         sb.AppendLine("</svg>");
         return sb.ToString();
     }
@@ -74,14 +104,20 @@ public sealed class SvgDevice
         // Latin1 text) are decoded to real Unicode instead of garbage.
         public PdfDictionary? FontDict;
         public Dictionary<int, string>? ToUnicode;
+        public Text.FontMetrics? Metrics;
         public double LineWidth = 1.0;
         public int LineCap; // 0=butt, 1=round, 2=square
         public int LineJoin; // 0=miter, 1=round, 2=bevel
         public double[] DashArray = Array.Empty<double>();
         public double DashPhase;
         public double TextLeading;
+        public double CharSpacing;   // Tc
+        public double WordSpacing;   // Tw
+        public double HorizScale = 1.0; // Tz / 100
+        public double TextRise;      // Ts
+        public int RenderMode;       // Tr
 
-        // CTM as 6-element matrix [a b c d e f]
+        // CTM as 6-element matrix [a b c d e f]; includes the page's PDF→SVG flip.
         public double[] Ctm = { 1, 0, 0, 1, 0, 0 };
 
         public GState Clone()
@@ -93,44 +129,96 @@ public sealed class SvgDevice
                 FillAlpha = FillAlpha, StrokeAlpha = StrokeAlpha,
                 BlendMode = BlendMode,
                 FontSize = FontSize, FontName = FontName,
-                FontDict = FontDict, ToUnicode = ToUnicode,
+                FontDict = FontDict, ToUnicode = ToUnicode, Metrics = Metrics,
                 LineWidth = LineWidth,
                 LineCap = LineCap, LineJoin = LineJoin,
                 DashArray = (double[])DashArray.Clone(),
                 DashPhase = DashPhase,
                 TextLeading = TextLeading,
+                CharSpacing = CharSpacing, WordSpacing = WordSpacing,
+                HorizScale = HorizScale, TextRise = TextRise, RenderMode = RenderMode,
                 Ctm = (double[])Ctm.Clone(),
             };
+        }
+
+        /// <summary>Uniform scale factor of the CTM, for stroke widths and dashes.</summary>
+        public double CtmScale
+        {
+            get
+            {
+                var det = Math.Abs(Ctm[0] * Ctm[3] - Ctm[1] * Ctm[2]);
+                return det > 0 ? Math.Sqrt(det) : 1.0;
+            }
         }
     }
 
     /// <summary>Guard against pathological or self-referential Form XObject nesting.</summary>
     private const int MaxXObjectDepth = 12;
 
+    /// <summary>A URI-link annotation's active area in top-down page coordinates.
+    /// Content elements whose bounding-box centre falls inside the area are
+    /// emitted wrapped in an <c>&lt;a xlink:href&gt;</c> anchor.</summary>
+    private sealed record LinkRect(double X0, double Y0, double X1, double Y1, string Uri)
+    {
+        public bool Contains(double x, double y) => x >= X0 && x <= X1 && y >= Y0 && y <= Y1;
+    }
+
+    /// <summary>Collect the page's URI-link annotation rectangles, mapped into
+    /// top-down page coordinates.</summary>
+    private static List<LinkRect> ResolveLinkRects(Page page, Rectangle mb)
+    {
+        var links = new List<LinkRect>();
+        var reader = page.Reader;
+        var annots = reader.Resolve(page.Dict.Get("Annots")) as PdfArray;
+        if (annots is null) return links;
+        foreach (var item in annots)
+        {
+            var annot = reader.ResolveDict(item);
+            if (annot is null || annot.GetName("Subtype") != "Link") continue;
+            var action = reader.ResolveDict(annot.Get("A"));
+            if (action is null || action.GetName("S") != "URI") continue;
+            var uriObj = reader.Resolve(action.Get("URI"));
+            var uri = uriObj switch
+            {
+                PdfString us => us.ToText(),
+                PdfName un => un.Value,
+                _ => null,
+            };
+            if (string.IsNullOrEmpty(uri)) continue;
+            if (reader.Resolve(annot.Get("Rect")) is not PdfArray rect || rect.Count < 4) continue;
+            var x0 = Math.Min(Num(rect[0]), Num(rect[2])) - mb.LLX;
+            var x1 = Math.Max(Num(rect[0]), Num(rect[2])) - mb.LLX;
+            var y0 = mb.URY - Math.Max(Num(rect[1]), Num(rect[3]));
+            var y1 = mb.URY - Math.Min(Num(rect[1]), Num(rect[3]));
+            links.Add(new LinkRect(x0, y0, x1, y1, uri));
+        }
+        return links;
+    }
+
+    /// <summary>The link area covering the given device point, if any.</summary>
+    private static LinkRect? LinkAt(List<LinkRect>? links, double x, double y)
+    {
+        if (links is null) return null;
+        foreach (var l in links)
+            if (l.Contains(x, y)) return l;
+        return null;
+    }
+
     private static void RenderToSvg(byte[] streamBytes, PdfDictionary? resources,
-        PdfReader reader, StringBuilder sb, int depth)
+        PdfReader reader, StringBuilder sb, int depth, GState gs, ISet<string> usedBlendModes,
+        List<LinkRect>? links)
     {
         var fonts = ResolveFonts(resources, reader);
         var extGStates = ResolveExtGStates(resources, reader);
         var lexer = new PdfLexer(streamBytes);
         var operands = new List<PdfObject>();
-        // Text position + matrices. tx/ty mirror the text-matrix translation
-        // (tm[4],tm[5]); tm is the text matrix, tlm the text line matrix. The
-        // effective glyph size is the Tf size scaled by the text matrix, so a
-        // "1 Tf" with an "N 0 0 N .. Tm" renders at N, not 1.
-        double tx = 0, ty = 0;
+        // tm is the text matrix, tlm the text line matrix (PDF row-vector convention).
         double[] tm = { 1, 0, 0, 1, 0, 0 };
         double[] tlm = { 1, 0, 0, 1, 0, 0 };
-        var gs = new GState();
         var gsStack = new Stack<GState>();
         var pathData = new StringBuilder();
-        // Track open <g> elements from cm transforms so we can close them. qGroupStack
-        // records how many were open at each `q`, so the matching `Q` closes only the
-        // groups opened within that q/Q pair — otherwise a cm issued before/around a
-        // q/Q block (e.g. a page-level flip) gets closed early and later content is no
-        // longer nested under it.
-        int cmGroupDepth = 0;
-        var qGroupStack = new Stack<int>();
+        // Path current point in USER coordinates (needed by the v operator).
+        double curX = 0, curY = 0;
 
         while (true)
         {
@@ -155,41 +243,22 @@ public sealed class SvgDevice
                         // --- Graphics state stack ---
                         case "q":
                             gsStack.Push(gs.Clone());
-                            qGroupStack.Push(cmGroupDepth);
                             break;
                         case "Q":
                             if (gsStack.Count > 0)
                                 gs = gsStack.Pop();
-                            // Close only the cm groups opened since the matching q.
-                            var target = qGroupStack.Count > 0 ? qGroupStack.Pop() : 0;
-                            while (cmGroupDepth > target)
-                            {
-                                sb.AppendLine("</g>");
-                                cmGroupDepth--;
-                            }
                             break;
 
                         // --- CTM ---
                         case "cm":
                             if (operands.Count >= 6)
                             {
-                                var a = Num(operands[0]); var b2 = Num(operands[1]);
-                                var c = Num(operands[2]); var d = Num(operands[3]);
-                                var e = Num(operands[4]); var f = Num(operands[5]);
-                                sb.AppendLine($"<g transform=\"matrix({F(a)},{F(b2)},{F(c)},{F(d)},{F(e)},{F(f)})\">");
-                                cmGroupDepth++;
-
-                                // Update CTM (multiply current by new)
-                                var old = gs.Ctm;
-                                gs.Ctm = new[]
+                                var m = new[]
                                 {
-                                    a * old[0] + b2 * old[2],
-                                    a * old[1] + b2 * old[3],
-                                    c * old[0] + d * old[2],
-                                    c * old[1] + d * old[3],
-                                    e * old[0] + f * old[2] + old[4],
-                                    e * old[1] + f * old[3] + old[5],
+                                    Num(operands[0]), Num(operands[1]), Num(operands[2]),
+                                    Num(operands[3]), Num(operands[4]), Num(operands[5]),
                                 };
+                                gs.Ctm = MulAffine(m, gs.Ctm);
                             }
                             break;
 
@@ -208,7 +277,11 @@ public sealed class SvgDevice
                                     else if (scaObj is PdfInteger scaI) gs.StrokeAlpha = scaI.Value;
 
                                     var bmObj = gsDict.GetName("BM");
-                                    if (bmObj is not null) gs.BlendMode = bmObj;
+                                    if (bmObj is not null)
+                                    {
+                                        gs.BlendMode = bmObj;
+                                        if (bmObj != "Normal") usedBlendModes.Add(bmObj);
+                                    }
                                 }
                             }
                             break;
@@ -254,11 +327,14 @@ public sealed class SvgDevice
                                         gs.ToUnicode = Text.TextAbsorber.ParseToUnicodeFromDict(fd, reader);
                                         var baseFont = fd.GetName("BaseFont") ?? "sans-serif";
                                         gs.FontName = MapFontName(baseFont);
+                                        try { gs.Metrics = Text.FontMetrics.FromFontDict(fd, reader); }
+                                        catch { gs.Metrics = null; }
                                     }
                                     else
                                     {
                                         gs.FontDict = null;
                                         gs.ToUnicode = null;
+                                        gs.Metrics = null;
                                         gs.FontName = fn.Value;
                                     }
                                 }
@@ -266,11 +342,27 @@ public sealed class SvgDevice
                             }
                             break;
 
+                        // --- Text state ---
+                        case "Tc":
+                            if (operands.Count >= 1) gs.CharSpacing = Num(operands[0]);
+                            break;
+                        case "Tw":
+                            if (operands.Count >= 1) gs.WordSpacing = Num(operands[0]);
+                            break;
+                        case "Tz":
+                            if (operands.Count >= 1) gs.HorizScale = Num(operands[0]) / 100.0;
+                            break;
+                        case "Ts":
+                            if (operands.Count >= 1) gs.TextRise = Num(operands[0]);
+                            break;
+                        case "Tr":
+                            if (operands.Count >= 1) gs.RenderMode = (int)Num(operands[0]);
+                            break;
+
                         // --- Text object begin: reset text + line matrices ---
                         case "BT":
                             Array.Copy(Identity, tm, 6);
                             Array.Copy(Identity, tlm, 6);
-                            tx = 0; ty = 0;
                             break;
 
                         // --- Text positioning (operate on the text line matrix) ---
@@ -278,7 +370,7 @@ public sealed class SvgDevice
                             if (operands.Count >= 2)
                             {
                                 tlm = MulAffine(new[] { 1.0, 0, 0, 1, Num(operands[0]), Num(operands[1]) }, tlm);
-                                Array.Copy(tlm, tm, 6); tx = tm[4]; ty = tm[5];
+                                Array.Copy(tlm, tm, 6);
                             }
                             break;
                         case "TD":
@@ -286,7 +378,7 @@ public sealed class SvgDevice
                             {
                                 gs.TextLeading = -Num(operands[1]);
                                 tlm = MulAffine(new[] { 1.0, 0, 0, 1, Num(operands[0]), Num(operands[1]) }, tlm);
-                                Array.Copy(tlm, tm, 6); tx = tm[4]; ty = tm[5];
+                                Array.Copy(tlm, tm, 6);
                             }
                             break;
                         case "Tm":
@@ -294,7 +386,7 @@ public sealed class SvgDevice
                             {
                                 var m = new[] { Num(operands[0]), Num(operands[1]), Num(operands[2]),
                                     Num(operands[3]), Num(operands[4]), Num(operands[5]) };
-                                Array.Copy(m, tm, 6); Array.Copy(m, tlm, 6); tx = tm[4]; ty = tm[5];
+                                Array.Copy(m, tm, 6); Array.Copy(m, tlm, 6);
                             }
                             break;
                         case "TL":
@@ -303,7 +395,7 @@ public sealed class SvgDevice
                             break;
                         case "T*":
                             tlm = MulAffine(new[] { 1.0, 0, 0, 1, 0, -gs.TextLeading }, tlm);
-                            Array.Copy(tlm, tm, 6); tx = tm[4]; ty = tm[5];
+                            Array.Copy(tlm, tm, 6);
                             break;
 
                         // --- Fill color (RGB) ---
@@ -370,59 +462,79 @@ public sealed class SvgDevice
 
                         // --- Text show: ' (move to next line then show) ---
                         case "'":
-                            // Equivalent to T* then Tj
                             tlm = MulAffine(new[] { 1.0, 0, 0, 1, 0, -gs.TextLeading }, tlm);
-                            Array.Copy(tlm, tm, 6); tx = tm[4]; ty = tm[5];
+                            Array.Copy(tlm, tm, 6);
                             if (operands.Count >= 1 && operands[0] is PdfString qs)
+                                ShowText(sb, gs, tm, new PdfObject[] { qs }, reader, links);
+                            break;
+
+                        // --- Text show: " (set word+char spacing, next line, show) ---
+                        case "\"":
+                            if (operands.Count >= 3 && operands[2] is PdfString dqs)
                             {
-                                EmitTextRun(sb, gs, tm, EscapeXml(DecodeShow(qs.Value, gs, reader)));
+                                gs.WordSpacing = Num(operands[0]);
+                                gs.CharSpacing = Num(operands[1]);
+                                tlm = MulAffine(new[] { 1.0, 0, 0, 1, 0, -gs.TextLeading }, tlm);
+                                Array.Copy(tlm, tm, 6);
+                                ShowText(sb, gs, tm, new PdfObject[] { dqs }, reader, links);
                             }
                             break;
 
                         // --- Text show ---
                         case "Tj":
                             if (operands.Count >= 1 && operands[0] is PdfString s)
-                            {
-                                EmitTextRun(sb, gs, tm, EscapeXml(DecodeShow(s.Value, gs, reader)));
-                            }
+                                ShowText(sb, gs, tm, new PdfObject[] { s }, reader, links);
                             break;
                         case "TJ":
                             if (operands.Count >= 1 && operands[0] is PdfArray tja)
-                            {
-                                var tjText = new StringBuilder();
-                                foreach (var item in tja)
-                                {
-                                    if (item is PdfString ts)
-                                        tjText.Append(DecodeShow(ts.Value, gs, reader));
-                                    else if (item is PdfInteger ti && ti.Value < -200)
-                                        tjText.Append(' ');
-                                    else if (item is PdfReal tr2 && tr2.Value < -200)
-                                        tjText.Append(' ');
-                                }
-                                EmitTextRun(sb, gs, tm, EscapeXml(tjText.ToString()));
-                            }
+                                ShowText(sb, gs, tm, tja.ToArray(), reader, links);
                             break;
 
-                        // --- Path construction ---
+                        // --- Path construction (coordinates transformed by the CTM) ---
                         case "m": // moveto
                             if (operands.Count >= 2)
-                                pathData.Append($"M{F(Num(operands[0]))} {F(Num(operands[1]))} ");
+                            {
+                                curX = Num(operands[0]); curY = Num(operands[1]);
+                                var (px, py) = Apply(gs.Ctm, curX, curY);
+                                pathData.Append($"M{F(px)} {F(py)} ");
+                            }
                             break;
                         case "l": // lineto
                             if (operands.Count >= 2)
-                                pathData.Append($"L{F(Num(operands[0]))} {F(Num(operands[1]))} ");
+                            {
+                                curX = Num(operands[0]); curY = Num(operands[1]);
+                                var (px, py) = Apply(gs.Ctm, curX, curY);
+                                pathData.Append($"L{F(px)} {F(py)} ");
+                            }
                             break;
                         case "c": // curveto
                             if (operands.Count >= 6)
-                                pathData.Append($"C{F(Num(operands[0]))} {F(Num(operands[1]))} {F(Num(operands[2]))} {F(Num(operands[3]))} {F(Num(operands[4]))} {F(Num(operands[5]))} ");
+                            {
+                                var (x1, y1) = Apply(gs.Ctm, Num(operands[0]), Num(operands[1]));
+                                var (x2, y2) = Apply(gs.Ctm, Num(operands[2]), Num(operands[3]));
+                                curX = Num(operands[4]); curY = Num(operands[5]);
+                                var (x3, y3) = Apply(gs.Ctm, curX, curY);
+                                pathData.Append($"C{F(x1)} {F(y1)} {F(x2)} {F(y2)} {F(x3)} {F(y3)} ");
+                            }
                             break;
                         case "v": // curveto (initial point replicated)
                             if (operands.Count >= 4)
-                                pathData.Append($"C{F(tx)} {F(ty)} {F(Num(operands[0]))} {F(Num(operands[1]))} {F(Num(operands[2]))} {F(Num(operands[3]))} ");
+                            {
+                                var (x1, y1) = Apply(gs.Ctm, curX, curY);
+                                var (x2, y2) = Apply(gs.Ctm, Num(operands[0]), Num(operands[1]));
+                                curX = Num(operands[2]); curY = Num(operands[3]);
+                                var (x3, y3) = Apply(gs.Ctm, curX, curY);
+                                pathData.Append($"C{F(x1)} {F(y1)} {F(x2)} {F(y2)} {F(x3)} {F(y3)} ");
+                            }
                             break;
                         case "y": // curveto (final point replicated)
                             if (operands.Count >= 4)
-                                pathData.Append($"C{F(Num(operands[0]))} {F(Num(operands[1]))} {F(Num(operands[2]))} {F(Num(operands[3]))} {F(Num(operands[2]))} {F(Num(operands[3]))} ");
+                            {
+                                var (x1, y1) = Apply(gs.Ctm, Num(operands[0]), Num(operands[1]));
+                                curX = Num(operands[2]); curY = Num(operands[3]);
+                                var (x3, y3) = Apply(gs.Ctm, curX, curY);
+                                pathData.Append($"C{F(x1)} {F(y1)} {F(x3)} {F(y3)} {F(x3)} {F(y3)} ");
+                            }
                             break;
                         case "h": // closepath
                             pathData.Append("Z ");
@@ -432,7 +544,12 @@ public sealed class SvgDevice
                             {
                                 var rx = Num(operands[0]); var ry = Num(operands[1]);
                                 var rw = Num(operands[2]); var rh = Num(operands[3]);
-                                pathData.Append($"M{F(rx)} {F(ry)} L{F(rx + rw)} {F(ry)} L{F(rx + rw)} {F(ry + rh)} L{F(rx)} {F(ry + rh)} Z ");
+                                var (p1x, p1y) = Apply(gs.Ctm, rx, ry);
+                                var (p2x, p2y) = Apply(gs.Ctm, rx + rw, ry);
+                                var (p3x, p3y) = Apply(gs.Ctm, rx + rw, ry + rh);
+                                var (p4x, p4y) = Apply(gs.Ctm, rx, ry + rh);
+                                pathData.Append($"M{F(p1x)} {F(p1y)} L{F(p2x)} {F(p2y)} L{F(p3x)} {F(p3y)} L{F(p4x)} {F(p4y)} Z ");
+                                curX = rx; curY = ry;
                             }
                             break;
 
@@ -497,7 +614,7 @@ public sealed class SvgDevice
                         // --- XObject invocation (Form recursion) ---
                         case "Do":
                             if (operands.Count >= 1 && operands[0] is PdfName xn)
-                                RenderXObject(xn.Value, resources, reader, sb, depth);
+                                RenderXObject(xn.Value, resources, reader, sb, depth, gs, usedBlendModes, links);
                             break;
 
                         case "BI":
@@ -513,42 +630,155 @@ public sealed class SvgDevice
                     break;
             }
         }
-
-        // Close any remaining cm groups
-        while (cmGroupDepth > 0)
-        {
-            sb.AppendLine("</g>");
-            cmGroupDepth--;
-        }
     }
 
     /// <summary>
-    /// Emit one text run. The run is placed by its text matrix with the matrix's
-    /// y-column negated (<c>matrix(a,b,-c,-d,e,f)</c> == tm composed with a glyph
-    /// y-flip), which cancels the page's <c>scale(1,-1)</c> flip so the glyphs render
-    /// upright in a plain SVG viewer while still landing at the right place. Font size
-    /// stays the raw Tf size; the matrix carries the text-matrix scale/rotation/shear.
-    /// SvgToPdfConverter recovers the PDF text matrix by negating the y-column back.
+    /// Show one run of text (a Tj/'/"-string or a full TJ array). Decodes the bytes
+    /// glyph-by-glyph through the font, advances the text matrix per glyph (width,
+    /// char/word spacing, TJ adjustments), and emits a single &lt;text&gt; element.
+    /// Horizontal upright runs get per-glyph absolute x positions; rotated runs get a
+    /// matrix() transform (y-column negated so glyphs render upright; the importer
+    /// negates it back).
     /// </summary>
-    private static void EmitTextRun(StringBuilder sb, GState gs, double[] tm, string text)
+    private static void ShowText(StringBuilder sb, GState gs, double[] tm,
+        PdfObject[] items, PdfReader reader, List<LinkRect>? links)
     {
-        var fillColor = FormatRgb(gs.FillR, gs.FillG, gs.FillB);
+        var fs = gs.FontSize;
+        var th = gs.HorizScale;
+        var isCid = gs.Metrics?.IsCid ?? (gs.FontDict?.GetName("Subtype") == "Type0");
+        var step = isCid ? 2 : 1;
+
+        // One <text> element is emitted per TJ string segment — kerning
+        // adjustments between segments only move the pen.
+        foreach (var item in items)
+        {
+            if (item is PdfInteger or PdfReal)
+            {
+                var adj = -Num(item) / 1000.0 * fs * th;
+                ApplyPen(tm, adj);
+                continue;
+            }
+            if (item is not PdfString ps) continue;
+            var bytes = ps.Value;
+
+            var text = new StringBuilder();
+            var xs = new List<double>();
+            double[]? firstDevice = null;
+
+            for (var i = 0; i + step - 1 < bytes.Length; i += step)
+            {
+                var code = isCid ? ((bytes[i] << 8) | bytes[i + 1]) : bytes[i];
+                var seg = isCid ? new[] { bytes[i], bytes[i + 1] } : new[] { bytes[i] };
+                var glyph = gs.FontDict is not null
+                    ? Text.TextAbsorber.DecodeStringPublic(seg, gs.ToUnicode, gs.FontDict, reader)
+                    : Encoding.Latin1.GetString(seg);
+                // A glyph whose decode is empty or XML-invalid (unmapped codes often
+                // carry U+FFFF from a bfrange to FFFF) still occupies a slot on the
+                // line. Substitute the PUA char U+A880 — the "SVG space" — so the
+                // character count stays aligned with the x list.
+                glyph = EscapeXml(glyph);
+                if (glyph.Length == 0 && gs.FontDict is not null)
+                    glyph = "ꢀ";
+
+                // Device matrix for this glyph: [fs*th 0 0 fs 0 rise] × tm × ctm
+                var trm = MulAffine(new[] { fs * th, 0, 0, fs, 0, gs.TextRise },
+                    MulAffine(tm, gs.Ctm));
+                firstDevice ??= trm;
+                if (glyph.Length > 0)
+                {
+                    // Multi-char decodes (ligature expansions) get one position for the
+                    // first char; SVG flows the rest after it with natural advances.
+                    xs.Add(trm[4]);
+                    text.Append(glyph);
+                }
+
+                var w = gs.Metrics is not null
+                    ? gs.Metrics.GetWidth(code) / 1000.0 * fs
+                    : fs * 0.5;
+                var adv = (w + gs.CharSpacing + (step == 1 && code == 32 ? gs.WordSpacing : 0)) * th;
+                ApplyPen(tm, adv);
+            }
+
+            if (text.Length == 0 || firstDevice is null) continue;
+            if (gs.RenderMode == 3) continue; // invisible text: pen already advanced
+
+            EmitTextRun(sb, gs, tm, firstDevice, xs, text.ToString(), links);
+        }
+    }
+
+    /// <summary>Emit one decoded, positioned text run.</summary>
+    private static void EmitTextRun(StringBuilder sb, GState gs, double[] tm,
+        double[] firstDevice, List<double> xs, string text, List<LinkRect>? links)
+    {
+        var fs = gs.FontSize;
+        var th = gs.HorizScale;
+        var fill = FormatHex(gs.FillR, gs.FillG, gs.FillB);
         var style = new StringBuilder();
-        style.Append($"font-family=\"{gs.FontName}\" font-size=\"{F(gs.FontSize)}\" ");
-        style.Append($"fill=\"{fillColor}\"");
+        style.Append($"fill:{fill};font-family:{gs.FontName};");
         if (gs.FillAlpha < 1.0)
-            style.Append($" fill-opacity=\"{F(gs.FillAlpha)}\"");
+            style.Append($"fill-opacity:{F(gs.FillAlpha)};");
         if (gs.BlendMode != "Normal")
-            style.Append($" style=\"mix-blend-mode:{MapBlendMode(gs.BlendMode)}\"");
-        var transform = $"matrix({F(tm[0])},{F(tm[1])},{F(Neg(tm[2]))},{F(Neg(tm[3]))},{F(tm[4])},{F(tm[5])})";
-        sb.AppendLine($"<text transform=\"{transform}\" {style}>{text}</text>");
+            style.Append($"mix-blend-mode:{MapBlendMode(gs.BlendMode)};");
+
+        var d = firstDevice;
+        const double eps = 1e-6;
+        if (Math.Abs(d[1]) < eps && Math.Abs(d[2]) < eps && d[0] > 0 && d[3] < 0)
+        {
+            // Horizontal upright text: absolute per-glyph x positions, single y.
+            var size = Math.Abs(d[3]);
+            // The run's approximate centre (half a glyph beyond the last x, half a
+            // font-size above the baseline) decides link-anchor coverage.
+            // Whitespace-only runs draw nothing clickable and stay unwrapped.
+            var link = IsBlankRun(text) ? null : LinkAt(links,
+                (xs.Min() + xs.Max() + size * 0.5) / 2.0, d[5] - size / 2.0);
+            style.Append($"font-size:{FD(size)}px;");
+            var xList = string.Join(" ", xs.Select(FD));
+            if (link is not null) sb.AppendLine($"<a xlink:href=\"{EscapeXml(link.Uri)}\" target=\"_blank\" >");
+            sb.AppendLine($"<text x=\"{xList}\" y=\"{FD(d[5])}\" style=\"{style}\">{text}</text>");
+            if (link is not null) sb.AppendLine("</a>");
+        }
+        else
+        {
+            // Rotated/sheared: place by matrix (tm×ctm without the font-size factor),
+            // y-column negated so the glyphs render upright under the flipped page.
+            var t2 = MulAffine(new[] { th, 0, 0, 1.0, 0, gs.TextRise }, MulAffine(tm, gs.Ctm));
+            // Anchor the matrix at the start of the run: translation from firstDevice.
+            t2[4] = d[4]; t2[5] = d[5];
+            var link = IsBlankRun(text) ? null : LinkAt(links, t2[4], t2[5]);
+            style.Append($"font-size:{FD(fs)}px;");
+            var transform = $"matrix({F(t2[0])},{F(t2[1])},{F(Neg(t2[2]))},{F(Neg(t2[3]))},{F(t2[4])},{F(t2[5])})";
+            if (link is not null) sb.AppendLine($"<a xlink:href=\"{EscapeXml(link.Uri)}\" target=\"_blank\" >");
+            sb.AppendLine($"<text transform=\"{transform}\" style=\"{style}\">{text}</text>");
+            if (link is not null) sb.AppendLine("</a>");
+        }
+    }
+
+    /// <summary>True when a decoded run has no visible glyphs (whitespace and the
+    /// U+A880 blank-glyph placeholder only).</summary>
+    private static bool IsBlankRun(string text)
+    {
+        foreach (var ch in text)
+            if (!char.IsWhiteSpace(ch) && ch != 'ꢀ') return false;
+        return true;
+    }
+
+    /// <summary>Advance the text matrix pen: tm := [1 0 0 1 adv 0] × tm.</summary>
+    private static void ApplyPen(double[] tm, double adv)
+    {
+        tm[4] += adv * tm[0];
+        tm[5] += adv * tm[1];
     }
 
     /// <summary>Negate, flushing -0 to 0 for tidy output.</summary>
     private static double Neg(double v) => v == 0.0 ? 0.0 : -v;
 
+    /// <summary>Transform a point by an affine matrix.</summary>
+    private static (double x, double y) Apply(double[] m, double x, double y) =>
+        (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+
     /// <summary>
-    /// Emit a path element with current graphics state.
+    /// Emit a path element with current graphics state. Path data is already in
+    /// top-down page coordinates; stroke widths/dashes are scaled by the CTM.
     /// </summary>
     private static void EmitPath(StringBuilder sb, GState gs, string d, bool stroke, bool fill, bool evenOdd)
     {
@@ -557,10 +787,16 @@ public sealed class SvgDevice
 
         if (fill)
         {
-            var fillColor = FormatRgb(gs.FillR, gs.FillG, gs.FillB);
+            var fillColor = FormatHex(gs.FillR, gs.FillG, gs.FillB);
             attrs.Append($" fill=\"{fillColor}\"");
             if (gs.FillAlpha < 1.0)
+            {
                 attrs.Append($" fill-opacity=\"{F(gs.FillAlpha)}\"");
+                // A fully transparent fill is invisible content; keep it from
+                // intercepting clicks meant for link anchors beneath it.
+                if (gs.FillAlpha == 0.0)
+                    attrs.Append(" pointer-events=\"none\"");
+            }
             if (evenOdd)
                 attrs.Append(" fill-rule=\"evenodd\"");
         }
@@ -571,21 +807,23 @@ public sealed class SvgDevice
 
         if (stroke)
         {
-            var strokeColor = FormatRgb(gs.StrokeR, gs.StrokeG, gs.StrokeB);
+            var scale = gs.CtmScale;
+            var strokeColor = FormatHex(gs.StrokeR, gs.StrokeG, gs.StrokeB);
             attrs.Append($" stroke=\"{strokeColor}\"");
             if (gs.StrokeAlpha < 1.0)
                 attrs.Append($" stroke-opacity=\"{F(gs.StrokeAlpha)}\"");
-            if (gs.LineWidth != 1.0)
-                attrs.Append($" stroke-width=\"{F(gs.LineWidth)}\"");
+            var sw = gs.LineWidth * scale;
+            if (sw != 1.0)
+                attrs.Append($" stroke-width=\"{F(sw)}\"");
             if (gs.LineCap != 0)
                 attrs.Append($" stroke-linecap=\"{MapLineCap(gs.LineCap)}\"");
             if (gs.LineJoin != 0)
                 attrs.Append($" stroke-linejoin=\"{MapLineJoin(gs.LineJoin)}\"");
             if (gs.DashArray.Length > 0)
             {
-                attrs.Append($" stroke-dasharray=\"{string.Join(",", gs.DashArray.Select(v => F(v)))}\"");
+                attrs.Append($" stroke-dasharray=\"{string.Join(",", gs.DashArray.Select(v => F(v * scale)))}\"");
                 if (gs.DashPhase != 0)
-                    attrs.Append($" stroke-dashoffset=\"{F(gs.DashPhase)}\"");
+                    attrs.Append($" stroke-dashoffset=\"{F(gs.DashPhase * scale)}\"");
             }
         }
         else
@@ -612,8 +850,10 @@ public sealed class SvgDevice
         m1[4] * m2[1] + m1[5] * m2[3] + m2[5],
     };
 
-    private static string FormatRgb(double r, double g, double b) =>
-        $"rgb({(int)(r * 255)},{(int)(g * 255)},{(int)(b * 255)})";
+    private static string FormatHex(double r, double g, double b) =>
+        $"#{ClampByte(r):x2}{ClampByte(g):x2}{ClampByte(b):x2}";
+
+    private static int ClampByte(double v) => Math.Clamp((int)Math.Round(v * 255), 0, 255);
 
     /// <summary>
     /// Set an RGB colour from the numeric operands of an <c>sc</c>/<c>scn</c>
@@ -688,23 +928,13 @@ public sealed class SvgDevice
     };
 
     /// <summary>
-    /// Decode a show-text byte string through the current font. For embedded/subset
-    /// fonts the raw bytes are glyph codes, so <c>Latin1.GetString</c> yields invalid
-    /// XML; route through the font's ToUnicode/encoding instead. Only when no font
-    /// dictionary is bound do we fall back to Latin1.
-    /// </summary>
-    private static string DecodeShow(byte[] bytes, GState gs, PdfReader reader)
-        => gs.FontDict is not null
-            ? Text.TextAbsorber.DecodeStringPublic(bytes, gs.ToUnicode, gs.FontDict, reader)
-            : Encoding.Latin1.GetString(bytes);
-
-    /// <summary>
     /// Render a named XObject. Form XObjects are decoded and recursed into with their
-    /// own /Resources (falling back to the parent's) and optional /Matrix. Image
-    /// XObjects are not yet emitted.
+    /// own /Resources (falling back to the parent's) and optional /Matrix composed
+    /// into the CTM. Image XObjects are not yet emitted.
     /// </summary>
     private static void RenderXObject(string name, PdfDictionary? resources, PdfReader reader,
-        StringBuilder sb, int depth)
+        StringBuilder sb, int depth, GState gs, ISet<string> usedBlendModes,
+        List<LinkRect>? links)
     {
         if (depth >= MaxXObjectDepth || resources is null) return;
 
@@ -715,7 +945,12 @@ public sealed class SvgDevice
         if (xobj is null) return;
 
         var subtype = xobj.Dict.GetName("Subtype");
-        if (subtype != "Form") return; // Image XObjects unsupported for now
+        if (subtype == "Image")
+        {
+            EmitImage(name, xobj, reader, sb, gs, links);
+            return;
+        }
+        if (subtype != "Form") return;
 
         byte[] formBytes;
         try { formBytes = reader.DecodeStream(xobj); }
@@ -724,18 +959,64 @@ public sealed class SvgDevice
         var formResources = reader.ResolveDict(xobj.Dict.Get("Resources")) ?? resources;
 
         // Optional /Matrix maps form space into the current user space.
+        var formGs = gs.Clone();
         var matrix = reader.Resolve(xobj.Dict.Get("Matrix")) as PdfArray;
-        var wrapped = false;
         if (matrix is not null && matrix.Count >= 6)
         {
-            sb.AppendLine($"<g transform=\"matrix({F(Num(matrix[0]))},{F(Num(matrix[1]))}," +
-                $"{F(Num(matrix[2]))},{F(Num(matrix[3]))},{F(Num(matrix[4]))},{F(Num(matrix[5]))})\">");
-            wrapped = true;
+            var m = new[]
+            {
+                Num(matrix[0]), Num(matrix[1]), Num(matrix[2]),
+                Num(matrix[3]), Num(matrix[4]), Num(matrix[5]),
+            };
+            formGs.Ctm = MulAffine(m, formGs.Ctm);
         }
 
-        RenderToSvg(formBytes, formResources, reader, sb, depth + 1);
+        RenderToSvg(formBytes, formResources, reader, sb, depth + 1, formGs, usedBlendModes, links);
+    }
 
-        if (wrapped) sb.AppendLine("</g>");
+    /// <summary>Emit an image XObject as an inline data-URI PNG. The image's unit
+    /// square is mapped through the CTM; axis-aligned placements use x/y/width/height,
+    /// anything else keeps the full matrix.</summary>
+    private static void EmitImage(string name, PdfStream xobj, PdfReader reader,
+        StringBuilder sb, GState gs, List<LinkRect>? links)
+    {
+        byte[] png;
+        try
+        {
+            png = new ImageXObject(name, xobj, reader).ToPng();
+        }
+        catch
+        {
+            return; // undecodable image: skip rather than fail the page
+        }
+
+        // The image occupies the unit square (0,0)-(1,1) in user space.
+        var m = gs.Ctm;
+        var (x0, y0) = Apply(m, 0, 0);
+        var (x1, y1) = Apply(m, 1, 1);
+        var link = LinkAt(links, (x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        if (link is not null) sb.AppendLine($"<a xlink:href=\"{EscapeXml(link.Uri)}\" target=\"_blank\" >");
+
+        var href = $"data:image/png;base64,{Convert.ToBase64String(png)}";
+        const double eps = 1e-6;
+        if (Math.Abs(m[1]) < eps && Math.Abs(m[2]) < eps)
+        {
+            var lx = Math.Min(x0, x1);
+            var ly = Math.Min(y0, y1);
+            var w = Math.Abs(x1 - x0);
+            var h = Math.Abs(y1 - y0);
+            sb.AppendLine($"<image x=\"{F(lx)}\" y=\"{F(ly)}\" width=\"{F(w)}\" height=\"{F(h)}\" " +
+                $"preserveAspectRatio=\"none\" xlink:href=\"{href}\" />");
+        }
+        else
+        {
+            // General placement: the unit square flips vertically under the page
+            // transform, so fold the flip into the matrix and draw at (0,-1).
+            var transform = $"matrix({F(m[0])} {F(m[1])} {F(m[2])} {F(m[3])} {F(m[4])} {F(m[5])})";
+            sb.AppendLine($"<image x=\"0\" y=\"-1\" width=\"1\" height=\"1\" " +
+                $"preserveAspectRatio=\"none\" transform=\"{transform} scale(1,-1)\" xlink:href=\"{href}\" />");
+        }
+        if (link is not null) sb.AppendLine("</a>");
     }
 
     private static string EscapeXml(string text)
@@ -858,4 +1139,8 @@ public sealed class SvgDevice
     }
 
     private static string F(double v) => v.ToString("G", CultureInfo.InvariantCulture);
+
+    /// <summary>Format with a forced decimal part (e.g. <c>266.16667</c>, <c>173.0</c>),
+    /// the shape used for text positions.</summary>
+    private static string FD(double v) => v.ToString("0.0#####", CultureInfo.InvariantCulture);
 }

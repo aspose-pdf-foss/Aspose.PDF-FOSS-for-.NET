@@ -73,6 +73,7 @@ public sealed class PdfPageEditor : System.IDisposable
     public void BindPdf(Stream stream)
     {
         using var ms = new MemoryStream();
+        if (stream.CanSeek && stream.Position != 0) stream.Position = 0;
         stream.CopyTo(ms);
         _document = Document.Open(ms.ToArray());
     }

@@ -103,11 +103,21 @@ public sealed class FileSpecification : IDisposable
             _pendingData = File.ReadAllBytes(file);
             CaptureFileDates(file);
             fileName = Path.GetFileName(file);
+            // The embedded-file stream's /Subtype carries the attachment's MIME
+            // type; infer it from the extension so the value survives the
+            // save/reload round-trip without the caller setting MIMEType.
+            _pendingMimeType = MimeTypeFromExtension(Path.GetExtension(fileName));
         }
         else
         {
             fileName = file;
         }
+
+        // Refuse to embed a known attack payload (e.g. the .SettingContent-ms
+        // file abused by CVE-2018-8414). The read path neutralises such content
+        // on open; the embed path rejects it outright.
+        if (IsDangerousContent(fileName, _pendingData))
+            throw new PdfException(PdfExceptionMessages.DangerousFile);
 
         _dict = new PdfDictionary();
         _dict.Set("Type", new PdfName("Filespec"));
@@ -155,11 +165,16 @@ public sealed class FileSpecification : IDisposable
         if (stream is FileStream fileStream) CaptureFileDates(fileStream.Name);
 
         // The /F file name is a leaf name, not a path: callers (and the test inputs)
-        // pass a full path here, but the embedded entry — like the file-path ctor and
-        // Aspose.Pdf — stores just the file name. This also keeps the name-tree key
+        // pass a full path here, but the embedded entry — like the file-path
+        // ctor — stores just the file name. This also keeps the name-tree key
         // portable (an absolute "E:\..." key would mis-sort against plain file names).
         var leafName = Path.GetFileName(name);
         if (string.IsNullOrEmpty(leafName)) leafName = name;
+
+        // Refuse to embed a known attack payload (CVE-2018-8414 .SettingContent-ms),
+        // matching the file-path constructor.
+        if (IsDangerousContent(leafName, _pendingData))
+            throw new PdfException(PdfExceptionMessages.DangerousFile);
 
         _dict = new PdfDictionary();
         _dict.Set("Type", new PdfName("Filespec"));
@@ -284,6 +299,20 @@ public sealed class FileSpecification : IDisposable
     /// <summary>Pending MIME type for new specs (written during save).</summary>
     internal string? PendingMimeType => _pendingMimeType;
 
+    /// <summary>MIME type for a file extension (leading dot included), or null when
+    /// unknown — an unknown extension leaves /Subtype unwritten rather than guessing.</summary>
+    private static string? MimeTypeFromExtension(string? extension) =>
+        extension?.ToLowerInvariant() switch
+        {
+            ".pdf" => "application/pdf",
+            ".xml" => "text/xml",
+            ".txt" => "text/plain",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".png" => "image/png",
+            ".tif" or ".tiff" => "image/tiff",
+            _ => null,
+        };
+
     /// <summary>Get the embedded file data as a byte array.</summary>
     public byte[]? GetData()
     {
@@ -316,7 +345,7 @@ public sealed class FileSpecification : IDisposable
 
     /// <summary>The /Params dict on the embedded-file stream, wrapped as
     /// a <see cref="FileParams"/>. Null for a document-backed spec whose
-    /// embedded stream has no /Params entry (reference behaviour); lazy-
+    /// embedded stream has no /Params entry; lazy-
     /// constructed on an unbound spec so callers can set CreationDate /
     /// ModDate before the spec is saved.</summary>
     public FileParams? Params
@@ -487,7 +516,7 @@ public sealed class FileSpecification : IDisposable
 
 /// <summary>
 /// Wraps the /Params dict on an embedded-file stream (PDF §7.11.3 Table 46).
-/// Aspose.Pdf reflection signature uses DateTime get/set for CreationDate/
+/// public reflection signature uses DateTime get/set for CreationDate/
 /// ModDate; this version honours that.
 /// </summary>
 public sealed class FileParams
@@ -583,40 +612,20 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
         _files = new List<FileSpecification>();
     }
 
-    internal EmbeddedFileCollection(PdfDictionary? namesDict, PdfReader reader,
-        PageCollection? pages = null, PdfReader? pageReader = null)
+    internal EmbeddedFileCollection(PdfDictionary? namesDict, PdfReader reader)
     {
         _namesDict = namesDict;
         _files = new List<FileSpecification>();
 
-        // 1. /Names/EmbeddedFiles name tree
+        // The collection is the catalog /Names /EmbeddedFiles name tree, nothing else.
+        // FileAttachment annotations are page content: they are reachable through the
+        // annotation API (and PdfExtractor walks them itself) but do not appear here —
+        // a document whose attachments live only in annotations has Count == 0.
         if (namesDict is not null)
         {
             var efTree = reader.ResolveDict(namesDict.Get("EmbeddedFiles"));
             if (efTree is not null)
                 CollectFromNameTree(efTree, reader, _files);
-        }
-
-        // 2. FileAttachment annotations on pages
-        if (pages is not null && pageReader is not null)
-        {
-            for (var i = 1; i <= pages.Count; i++)
-            {
-                var page = pages.At(i);
-                var annotsObj = pageReader.Resolve(page.Dict.Get("Annots"));
-                if (annotsObj is not PdfArray annotsArr) continue;
-
-                foreach (var item in annotsArr)
-                {
-                    var annotDict = pageReader.ResolveDict(item);
-                    if (annotDict is null) continue;
-                    if (annotDict.GetName("Subtype") != "FileAttachment") continue;
-
-                    var fs = pageReader.ResolveDict(annotDict.Get("FS"));
-                    if (fs is not null)
-                        _files.Add(new FileSpecification(fs, pageReader));
-                }
-            }
         }
 
         // Strip known dangerous embedded payloads (e.g. CVE-2018-8414
@@ -667,9 +676,9 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
         if (doc is null)
             throw new InvalidOperationException("Cannot add files — collection is not associated with a document.");
 
+        // A null payload is valid: it registers a reference-only file specification
+        // (external /F reference, no embedded /EF stream) rather than throwing.
         var data = file.PendingData ?? file.GetData();
-        if (data is null)
-            throw new InvalidOperationException("FileSpecification has no data to embed.");
 
         doc.AddEmbeddedFile(file.Name, data, file.Description, file.PendingMimeType,
             compress: file.Encoding != FileEncoding.None,
@@ -707,7 +716,7 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
         return null;
     }
 
-    /// <summary>Sibling of <see cref="Delete(string)"/> matching Aspose.Pdf's by-key naming.</summary>
+    /// <summary>Sibling of <see cref="Delete(string)"/> under the established by-key naming.</summary>
     public void DeleteByKey(string key) => Delete(key);
 
     /// <summary>

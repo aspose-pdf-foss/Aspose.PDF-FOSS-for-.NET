@@ -3,26 +3,27 @@ namespace Aspose.Pdf.Text;
 /// <summary>
 /// Collects all fonts used in a PDF document or a single page.
 /// After calling <see cref="Visit(Document)"/> or <see cref="Visit(Page)"/>,
-/// the <see cref="Fonts"/> collection contains one <see cref="FontInfo"/> entry
-/// per unique base font name encountered.
+/// the <see cref="Fonts"/> collection contains one <see cref="Font"/> entry per
+/// distinct font OBJECT encountered — two page resources referencing the same
+/// indirect font dictionary yield one entry, while two separate objects with the
+/// same /BaseFont (a per-section duplicate embed) stay separate entries.
 /// </summary>
 public sealed class FontAbsorber
 {
-    private readonly List<FontInfo> _fonts = new();
-    private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
+    private readonly List<Font> _fonts = new();
+    private readonly HashSet<object> _seen = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>Gets the fonts collected after the last <c>Visit</c> call.</summary>
     public IReadOnlyList<FontInfo> FontInfos => _fonts;
 
-    /// <summary>Fonts collected — Aspose.Pdf-shape <see cref="FontCollection"/> surface.</summary>
+    /// <summary>Fonts collected — exposed through the <see cref="FontCollection"/> surface.</summary>
     public FontCollection Fonts
     {
         get
         {
             var col = new FontCollection();
-            // FontCollection enumerates Font objects but FOSS collects FontInfo; the
-            // accessor in this method position is shape-only — the renderer
-            // doesn't actually invoke it. Returning an empty collection is intentional.
+            foreach (var f in _fonts)
+                col.Add(f, out _);
             return col;
         }
     }
@@ -63,7 +64,10 @@ public sealed class FontAbsorber
     {
         foreach (var font in page.Fonts)
         {
-            if (_seen.Add(font.BaseFont))
+            // Dedupe by the underlying font DICTIONARY object: the reader resolves an
+            // indirect object to one instance, so a font shared across pages registers
+            // once while same-name duplicate objects register separately.
+            if (_seen.Add(font.FontDict))
                 _fonts.Add(font);
         }
     }

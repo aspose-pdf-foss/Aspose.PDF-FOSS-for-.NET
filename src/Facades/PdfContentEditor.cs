@@ -14,7 +14,7 @@ namespace Aspose.Pdf.Facades;
 public sealed class PdfContentEditor : System.IDisposable
 {
     // ── Document additional-action event-type constants ──
-    // Values match the Aspose facade contract — the documented event names that
+    // Values are the documented event names that
     // AddDocumentAdditionalAction accepts. They map to keys of the /AA dict in
     // the document catalog.
     public const string DocumentOpen       = "DO";
@@ -44,8 +44,15 @@ public sealed class PdfContentEditor : System.IDisposable
         _ownsDocument = false;
     }
 
+    private TextReplaceOptions _textReplaceOptions = new TextReplaceOptions();
+    private bool _textReplaceOptionsAssigned;
+
     /// <summary>Text-replacement options used by <see cref="ReplaceText(string,string)"/> family.</summary>
-    public TextReplaceOptions TextReplaceOptions { get; set; } = new TextReplaceOptions();
+    public TextReplaceOptions TextReplaceOptions
+    {
+        get => _textReplaceOptions;
+        set { _textReplaceOptions = value; _textReplaceOptionsAssigned = true; }
+    }
 
     /// <summary>Text-edit options forwarded to the underlying replacement engine.</summary>
     public TextEditOptions TextEditOptions { get; set; } = new TextEditOptions(true);
@@ -231,7 +238,7 @@ public sealed class PdfContentEditor : System.IDisposable
 
     /// <summary>
     /// Change the viewer preference. Sets the specified flags (replaces all previous settings).
-    /// Parameter is named <c>viewerAttribution</c> for parity with Aspose.Pdf.
+    /// Parameter is named <c>viewerAttribution</c> per the published signature.
     /// </summary>
     public void ChangeViewerPreference(int viewerAttribution)
     {
@@ -343,19 +350,30 @@ public sealed class PdfContentEditor : System.IDisposable
         var indicesToRemove = new HashSet<int>(stampIndices.Where(i => i >= 0 && i < stampBlocks.Count));
         if (indicesToRemove.Count == 0) return;
 
-        // Build new content by removing stamp blocks
-        var sb = new StringBuilder(contentText.Length);
-        int lastEnd = 0;
+        // Collect the byte ranges to cut. FindQBlocks emits nested q/Q blocks ordered
+        // by their closing Q, so a selected block can sit inside (or start before the
+        // end of) another selected block; sort by Start and coalesce overlapping or
+        // nested ranges so the cut never walks backwards.
         var removedXNames = new List<string>();
+        var ranges = new List<(int Start, int End)>();
         for (int i = 0; i < stampBlocks.Count; i++)
         {
-            if (indicesToRemove.Contains(i))
-            {
-                var b = stampBlocks[i];
-                sb.Append(contentText, lastEnd, b.Start - lastEnd);
-                lastEnd = b.End;
-                if (b.XName is not null) removedXNames.Add(b.XName);
-            }
+            if (!indicesToRemove.Contains(i)) continue;
+            var b = stampBlocks[i];
+            ranges.Add((b.Start, b.End));
+            if (b.XName is not null) removedXNames.Add(b.XName);
+        }
+        ranges.Sort((a, b) => a.Start != b.Start ? a.Start.CompareTo(b.Start) : a.End.CompareTo(b.End));
+
+        // Build new content by removing the coalesced stamp ranges.
+        var sb = new StringBuilder(contentText.Length);
+        int lastEnd = 0;
+        foreach (var (start, end) in ranges)
+        {
+            if (end <= lastEnd) continue;           // fully inside an already-cut range
+            var cutStart = Math.Max(start, lastEnd); // clip a partial overlap
+            sb.Append(contentText, lastEnd, cutStart - lastEnd);
+            lastEnd = end;
         }
         sb.Append(contentText, lastEnd, contentText.Length - lastEnd);
 
@@ -436,8 +454,8 @@ public sealed class PdfContentEditor : System.IDisposable
     /// Locate the managed-stamp blocks on a page. A q/Q block is a stamp when either
     /// (a) it is preceded by a <c>%StampId=NNN</c> comment (the convention written by
     /// this library's stamp facades), or (b) it draws an XObject (<c>/Name Do</c>) whose
-    /// dictionary carries a <c>/StampId</c> entry (the convention used by Aspose.Pdf
-    /// and present in externally-produced files).
+    /// dictionary carries a <c>/StampId</c> entry (a convention
+    /// present in externally-produced files).
     /// </summary>
     private static List<StampBlock> FindStampBlocks(string content, Page page, Document doc)
     {
@@ -519,7 +537,7 @@ public sealed class PdfContentEditor : System.IDisposable
             }
 
             // (c) Unmarked image stamp: a block whose only operators are q/Q/gs/cm and a
-            // single image Do is the canonical image-placement shape Aspose emits for an
+            // single image Do is the canonical image-placement shape emitted for an
             // image stamp. GetStamps must rediscover these even when the %StampId marker
             // was never written (or was stripped by an earlier re-serialisation), matching
             // the GetStamps contract, which reports such blocks with StampId 0.
@@ -560,7 +578,7 @@ public sealed class PdfContentEditor : System.IDisposable
 
             // A form-wrapped stamp draws its caption inside the referenced Form XObject
             // (BT…Tj…ET), not in the page-level block; report it as StampType.Form and pull
-            // the text from the form. Matches Aspose.Pdf's GetStamps.
+            // the text from the form.
             var isFormStamp = sb.XObject is not null && !sb.IsImage &&
                               sb.XObject.Dict.GetName("Subtype") == "Form";
 
@@ -718,10 +736,10 @@ public sealed class PdfContentEditor : System.IDisposable
     }
 
     /// <summary>
-    /// True when a q/Q block is the canonical image-stamp shape Aspose emits —
+    /// True when a q/Q block is the canonical image-stamp shape —
     /// <c>q /GSx gs cm /Imx Do Q</c>: its only operators are <c>q</c>/<c>Q</c>/<c>gs</c>/<c>cm</c>
     /// and a single image <c>Do</c>, AND it sets a graphics state (<c>gs</c>). The <c>gs</c> is
-    /// the distinguishing signature of an Aspose image stamp (it carries the stamp's
+    /// the distinguishing signature of an image stamp (it carries the stamp's
     /// opacity/blend ExtGState); ordinary page-content image placements (<c>q cm /Im Do Q</c>,
     /// no <c>gs</c>) are NOT stamps and must not be reported or deleted. Any other operator
     /// (text, paths, clipping, marked content) also disqualifies the block. The caller checks
@@ -979,6 +997,13 @@ public sealed class PdfContentEditor : System.IDisposable
             // Facade ReplaceText owns the whole replacement: font-switch a run whose glyphs
             // are absent from the source embedded subset to a fallback (Times), so they render.
             AllowSubsetGlyphFallback = true,
+            // Anchoring (keep trailing text at its absolute position when the
+            // replacement is narrower/wider than the match) is a request the caller
+            // makes by setting ReplaceAdjustment.None explicitly. The untouched facade
+            // default reflows the line, closing the gap instead.
+            AnchorTrailingOnReplace = _textReplaceOptionsAssigned
+                && TextReplaceOptions.ReplaceAdjustmentAction
+                == TextReplaceOptions.ReplaceAdjustment.None,
         };
         replacer.Replace(doc, srcString, destString, ReplaceTextStrategy.IsRegularExpressionUsed);
         return replacer.ReplacementCount > 0;
@@ -998,6 +1023,13 @@ public sealed class PdfContentEditor : System.IDisposable
             // Facade ReplaceText owns the whole replacement: font-switch a run whose glyphs
             // are absent from the source embedded subset to a fallback (Times), so they render.
             AllowSubsetGlyphFallback = true,
+            // Anchoring (keep trailing text at its absolute position when the
+            // replacement is narrower/wider than the match) is a request the caller
+            // makes by setting ReplaceAdjustment.None explicitly. The untouched facade
+            // default reflows the line, closing the gap instead.
+            AnchorTrailingOnReplace = _textReplaceOptionsAssigned
+                && TextReplaceOptions.ReplaceAdjustmentAction
+                == TextReplaceOptions.ReplaceAdjustment.None,
         };
         replacer.Replace(doc.Pages.At(thePage), srcString, destString, IsRegexSearch);
         return replacer.ReplacementCount > 0;
@@ -1123,12 +1155,15 @@ public sealed class PdfContentEditor : System.IDisposable
                 // (e.g. Times + Bold -> Times-Bold, Courier + Italic -> Courier-Oblique).
                 // Prefer a host TrueType so the swap carries a glyph program ModifyFont can
                 // embed; the metric-only Standard-14 stub has none and would no-op.
-                var font = Aspose.Pdf.Text.FontRepository.FindEmbeddableStyledFont(textState.FontName!, textState.FontStyle)
-                           ?? Aspose.Pdf.Text.FontRepository.FindFont(textState.FontName!, textState.FontStyle)
-                           ?? textState.Font;
+                var resolved = Aspose.Pdf.Text.FontRepository.FindEmbeddableStyledFont(textState.FontName!, textState.FontStyle)
+                           ?? Aspose.Pdf.Text.FontRepository.FindFont(textState.FontName!, textState.FontStyle);
+                var font = resolved ?? textState.Font;
                 if (font is not null)
                 {
-                    font.IsEmbedded = true;
+                    // Only a resolved repository face carries a program to embed. The
+                    // fallback is the run's own font, already in the document — asking to
+                    // embed it would pull in a system face the caller never named.
+                    if (resolved is not null) resolved.IsEmbedded = true;
                     modifier.ModifyFont(pg, destString, font);
                 }
             }
@@ -1746,8 +1781,8 @@ public sealed class PdfContentEditor : System.IDisposable
                 minX = System.Math.Min(minX, verts[i]); maxX = System.Math.Max(maxX, verts[i]);
                 minY = System.Math.Min(minY, verts[i + 1]); maxY = System.Math.Max(maxY, verts[i + 1]);
             }
-            // Aspose.Pdf pads the polygon/polyline /Rect beyond the vertex
-            // bounding box by (LineWidth + 3) on every side (verified against the
+            // The polygon/polyline /Rect is padded beyond the vertex
+            // bounding box by (LineWidth + 3) on every side (the
             // CreatePolygon padding: width 1/3/5 → pad 4/6/8), leaving room for the
             // stroke and end caps so the appearance is never clipped.
             double pad = width + 3.0;
@@ -2277,7 +2312,7 @@ public sealed class PdfContentEditor : System.IDisposable
         var (ne, nf) = DisplayedLowerLeftToContent(x, y, w, h, page.RotateDegrees, box.Width, box.Height);
         // Bake the new origin into the placement cm's translation in place (keeping
         // its scale/rotation), so the stamp draws as `… <sx 0 0 sy ne nf cm> /XObj Do …`
-        // — a single cm carrying the position, matching Aspose.Pdf. Emitting a
+        // — a single cm carrying the position. Emitting a
         // separate translation cm would push the placement matrix one operator further
         // from the end, past the /Artifact EMC that now closes an image stamp, so callers
         // reading the third-from-last operator would see the (zeroed) scale cm instead.

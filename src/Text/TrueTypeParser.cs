@@ -60,12 +60,21 @@ internal sealed class TrueTypeParser
     // ── name table ──────────────────────────────────────────────────
 
     public string FamilyName { get; private set; } = "Unknown";
+
+    /// <summary>Name-table subfamily (style) name — "Regular", "Bold Italic", ….</summary>
+    public string? SubfamilyName { get; private set; }
     public string PostScriptName { get; private set; } = "Unknown";
 
     // ── cmap + hmtx ─────────────────────────────────────────────────
 
     /// <summary>Character code → glyph ID mapping (from cmap).</summary>
     public Dictionary<int, int> CMap { get; } = new();
+
+    /// <summary>Glyph ID → PostScript glyph name (from a version-2.0 post table).
+    /// Empty when the font has no post names (version 1.0/3.0). Used to recover
+    /// Unicode for embedded subset fonts that carry neither /ToUnicode nor an
+    /// /Encoding — the name maps back to Unicode through the Adobe Glyph List.</summary>
+    public Dictionary<int, string> GlyphNames { get; } = new();
 
     /// <summary>Glyph widths in font units (from hmtx).</summary>
     public int[] GlyphWidths { get; private set; } = [];
@@ -110,10 +119,22 @@ internal sealed class TrueTypeParser
     {
         if (_data.Length < 12) return;
 
-        var numTables = ReadUInt16(4);
+        // TrueType Collection ('ttcf'): the file starts with a TTC header, not
+        // an sfnt table directory. The first embedded font's offset table lives
+        // at the first entry of the TTC offset array (byte 12); rebase there.
+        // Table offsets in the directory are absolute, so nothing else moves.
+        var baseOff = 0;
+        if (_data.Length >= 16 && _data[0] == (byte)'t' && _data[1] == (byte)'t'
+            && _data[2] == (byte)'c' && _data[3] == (byte)'f')
+        {
+            baseOff = (int)ReadUInt32(12);
+            if (baseOff < 0 || baseOff + 12 > _data.Length) return;
+        }
+
+        var numTables = ReadUInt16(baseOff + 4);
         for (var i = 0; i < numTables; i++)
         {
-            var entryOffset = 12 + i * 16;
+            var entryOffset = baseOff + 12 + i * 16;
             if (entryOffset + 16 > _data.Length) break;
 
             var tag = Encoding.ASCII.GetString(_data, entryOffset, 4);
@@ -122,6 +143,49 @@ internal sealed class TrueTypeParser
             _tables[tag] = (offset, length);
         }
     }
+
+    /// <summary>The 258 standard Macintosh glyph names (post table format 2.0,
+    /// OpenType §post). Glyph-name indices below 258 reference this set.</summary>
+    private static readonly string[] MacGlyphNames =
+    [
+        ".notdef", ".null", "nonmarkingreturn", "space", "exclam", "quotedbl",
+        "numbersign", "dollar", "percent", "ampersand", "quotesingle", "parenleft",
+        "parenright", "asterisk", "plus", "comma", "hyphen", "period", "slash",
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+        "nine", "colon", "semicolon", "less", "equal", "greater", "question", "at",
+        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
+        "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "bracketleft",
+        "backslash", "bracketright", "asciicircum", "underscore", "grave", "a", "b",
+        "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q",
+        "r", "s", "t", "u", "v", "w", "x", "y", "z", "braceleft", "bar",
+        "braceright", "asciitilde", "Adieresis", "Aring", "Ccedilla", "Eacute",
+        "Ntilde", "Odieresis", "Udieresis", "aacute", "agrave", "acircumflex",
+        "adieresis", "atilde", "aring", "ccedilla", "eacute", "egrave",
+        "ecircumflex", "edieresis", "iacute", "igrave", "icircumflex", "idieresis",
+        "ntilde", "oacute", "ograve", "ocircumflex", "odieresis", "otilde", "uacute",
+        "ugrave", "ucircumflex", "udieresis", "dagger", "degree", "cent", "sterling",
+        "section", "bullet", "paragraph", "germandbls", "registered", "copyright",
+        "trademark", "acute", "dieresis", "notequal", "AE", "Oslash", "infinity",
+        "plusminus", "lessequal", "greaterequal", "yen", "mu", "partialdiff",
+        "summation", "product", "pi", "integral", "ordfeminine", "ordmasculine",
+        "Omega", "ae", "oslash", "questiondown", "exclamdown", "logicalnot",
+        "radical", "florin", "approxequal", "Delta", "guillemotleft",
+        "guillemotright", "ellipsis", "nonbreakingspace", "Agrave", "Atilde",
+        "Otilde", "OE", "oe", "endash", "emdash", "quotedblleft", "quotedblright",
+        "quoteleft", "quoteright", "divide", "lozenge", "ydieresis", "Ydieresis",
+        "fraction", "currency", "guilsinglleft", "guilsinglright", "fi", "fl",
+        "daggerdbl", "periodcentered", "quotesinglbase", "quotedblbase",
+        "perthousand", "Acircumflex", "Ecircumflex", "Aacute", "Edieresis", "Egrave",
+        "Iacute", "Icircumflex", "Idieresis", "Igrave", "Oacute", "Ocircumflex",
+        "apple", "Ograve", "Uacute", "Ucircumflex", "Ugrave", "dotlessi",
+        "circumflex", "tilde", "macron", "breve", "dotaccent", "ring", "cedilla",
+        "hungarumlaut", "ogonek", "caron", "Lslash", "lslash", "Scaron", "scaron",
+        "Zcaron", "zcaron", "brokenbar", "Eth", "eth", "Yacute", "yacute", "Thorn",
+        "thorn", "minus", "multiply", "onesuperior", "twosuperior", "threesuperior",
+        "onehalf", "onequarter", "threequarters", "franc", "Gbreve", "gbreve",
+        "Idotaccent", "Scedilla", "scedilla", "Cacute", "cacute", "Ccaron", "ccaron",
+        "dcroat"
+    ];
 
     #endregion
 
@@ -194,6 +258,39 @@ internal sealed class TrueTypeParser
         IsFixedPitch = ReadUInt32(o + 12) != 0;
         UnderlinePosition = ReadInt16(o + 8);
         UnderlineThickness = ReadInt16(o + 10);
+
+        // Version 2.0 carries an explicit glyph-name table: numGlyphs(2) then a
+        // uint16 name-index per glyph, then Pascal strings for the non-standard
+        // (>= 258) indices. Indices < 258 name the Macintosh standard glyph set.
+        var version = ReadUInt32(o + 0);
+        if (version != 0x00020000) return;
+        if (o + 34 > _data.Length) return;
+        var numGlyphs = ReadUInt16(o + 32);
+        var idxOffset = o + 34;
+        if (idxOffset + numGlyphs * 2 > _data.Length) return;
+        var indices = new int[numGlyphs];
+        for (var i = 0; i < numGlyphs; i++)
+            indices[i] = ReadUInt16(idxOffset + i * 2);
+        // Read the Pascal-string pool that follows the index array.
+        var pool = new List<string>();
+        var p = idxOffset + numGlyphs * 2;
+        var tableEnd = o + t.length;
+        while (p < tableEnd && p < _data.Length)
+        {
+            int len = _data[p];
+            if (p + 1 + len > _data.Length) break;
+            pool.Add(Encoding.ASCII.GetString(_data, p + 1, len));
+            p += 1 + len;
+        }
+        for (var g = 0; g < numGlyphs; g++)
+        {
+            var idx = indices[g];
+            string? name = idx < 258
+                ? (idx < MacGlyphNames.Length ? MacGlyphNames[idx] : null)
+                : (idx - 258 < pool.Count ? pool[idx - 258] : null);
+            if (!string.IsNullOrEmpty(name) && name != ".notdef")
+                GlyphNames[g] = name!;
+        }
     }
 
     private void ParseName()
@@ -205,12 +302,17 @@ internal sealed class TrueTypeParser
         var count = ReadUInt16(o + 2);
         var stringOffset = ReadUInt16(o + 4) + o;
 
+        // Prefer the Windows English (lang 0x409) record per name id: localized
+        // installs carry every UI language ("Gras Italique", …) and iteration
+        // order must not decide which one wins.
+        int famScore = -1, subScore = -1, psScore = -1;
         for (var i = 0; i < count; i++)
         {
             var recordOffset = o + 6 + i * 12;
             if (recordOffset + 12 > _data.Length) break;
 
             var platformId = ReadUInt16(recordOffset);
+            var languageId = ReadUInt16(recordOffset + 4);
             var nameId = ReadUInt16(recordOffset + 6);
             var length = ReadUInt16(recordOffset + 8);
             var offset = ReadUInt16(recordOffset + 10) + stringOffset;
@@ -219,10 +321,17 @@ internal sealed class TrueTypeParser
 
             // Prefer platform 3 (Windows) or platform 1 (Mac)
             string value;
+            int score;
             if (platformId == 3) // Windows — UTF-16 BE
+            {
                 value = Encoding.BigEndianUnicode.GetString(_data, offset, length);
+                score = languageId == 0x409 ? 3 : 2;
+            }
             else if (platformId == 1) // Mac — ASCII/Latin
+            {
                 value = Encoding.ASCII.GetString(_data, offset, length);
+                score = 1;
+            }
             else
                 continue;
 
@@ -231,10 +340,13 @@ internal sealed class TrueTypeParser
             switch (nameId)
             {
                 case 1: // Family name
-                    FamilyName = value;
+                    if (score > famScore) { FamilyName = value; famScore = score; }
+                    break;
+                case 2: // Subfamily (style) name
+                    if (score > subScore) { SubfamilyName = value; subScore = score; }
                     break;
                 case 6: // PostScript name
-                    PostScriptName = value;
+                    if (score > psScore) { PostScriptName = value; psScore = score; }
                     break;
             }
         }

@@ -153,7 +153,11 @@ public sealed class FormEditor : IDisposable
     /// <summary>Bind a PDF from a stream.</summary>
     public void BindPdf(Stream stream)
     {
+        // Bind the WHOLE stream, not the tail past its current position: callers
+        // routinely hand over a MemoryStream they just saved a document into, which
+        // leaves the position at the end (a copy from there yields no bytes at all).
         using var ms = new MemoryStream();
+        if (stream.CanSeek) stream.Position = 0;
         stream.CopyTo(ms);
         _document = Document.Open(ms.ToArray());
     }
@@ -236,7 +240,7 @@ public sealed class FormEditor : IDisposable
     public bool SetField(string fieldName, string value)
     {
         if (_document?.Form is null) return false;
-        var field = _document.Form.FindByName(fieldName);
+        var field = _document.Form.FindFieldOrNull(fieldName);
         if (field is null) return false;
         field.Value = value;
         return true;
@@ -246,7 +250,7 @@ public sealed class FormEditor : IDisposable
     public bool CheckField(string fieldName)
     {
         if (_document?.Form is null) return false;
-        var field = _document.Form.FindByName(fieldName);
+        var field = _document.Form.FindFieldOrNull(fieldName);
         if (field is not CheckboxField cb) return false;
         cb.IsChecked = true;
         return true;
@@ -256,7 +260,7 @@ public sealed class FormEditor : IDisposable
     public bool UncheckField(string fieldName)
     {
         if (_document?.Form is null) return false;
-        var field = _document.Form.FindByName(fieldName);
+        var field = _document.Form.FindFieldOrNull(fieldName);
         if (field is not CheckboxField cb) return false;
         cb.IsChecked = false;
         return true;
@@ -313,6 +317,17 @@ public sealed class FormEditor : IDisposable
             case FieldType.CheckBox:
                 builder.AddCheckBox(page, fieldName, rect, isChecked: false);
                 _document.Form.SyncNewlyAddedFields();
+                // A facade with visible decoration applies to the checkbox at add time.
+                // Unlike DecorateField, the add-time face keys its glyph (and /MK /CA)
+                // by the standard caption character for the style ("4" check, "8" cross…).
+                if ((Facade.BackgroundColor.A != 0 || Facade.BorderColor.A != 0 || Facade.TextColor.A != 0
+                     || Facade.BorderWidth > 0 || Facade.ButtonStyle != FormFieldFacade.CheckBoxStyleUndefined)
+                    && _document.Form[fieldName] is Forms.Field newCb)
+                {
+                    if (Facade.BorderStyle != FormFieldFacade.BorderStyleUndefined || Facade.BorderWidth > 0)
+                        ApplyBorderStyle(newCb);
+                    DecorateCheckBox(newCb, useCaptionGlyph: true);
+                }
                 return true;
             case FieldType.ComboBox:
                 builder.AddComboBox(page, fieldName, rect, BuildOptionDisplay(), initValue);
@@ -369,7 +384,7 @@ public sealed class FormEditor : IDisposable
     private void ApplyExportItems(string fieldName)
     {
         if (ExportItems is null || _document?.Form is null) return;
-        if (_document.Form.FindByName(fieldName) is not ChoiceField cf) return;
+        if (_document.Form.FindFieldOrNull(fieldName) is not ChoiceField cf) return;
         cf.Options.Clear();
         foreach (var e in ExportItems)
         {
@@ -380,20 +395,29 @@ public sealed class FormEditor : IDisposable
 
     // ── List-item helpers ────────────────────────────────────────────────
 
-    /// <summary>Add a single item to a ListBox / ComboBox field.</summary>
+    /// <summary>Add a single item to a ListBox / ComboBox field. The item is its own
+    /// export value. For an XFA field the template's items lists are updated too.</summary>
     public void AddListItem(string fieldName, string itemName)
     {
         if (_document?.Form is null) return;
-        if (_document.Form.FindByName(fieldName) is ChoiceField cf)
+        if (_document.Form.FindFieldOrNull(fieldName) is ChoiceField cf)
             cf.AddOption(itemName);
+        if (_document.Form.IsXfa)
+            _document.Form.AddXfaListItem(fieldName, itemName, itemName);
     }
 
-    /// <summary>Add a single item with an export-value pair (display, export).</summary>
+    /// <summary>Add a single item with an export-value pair ([display, export]; a
+    /// single-element array is both). For an XFA field the template's items lists
+    /// are updated too.</summary>
     public void AddListItem(string fieldName, string[] exportName)
     {
         if (_document?.Form is null || exportName is null || exportName.Length == 0) return;
-        if (_document.Form.FindByName(fieldName) is ChoiceField cf)
-            cf.AddOption(exportName.Length > 1 ? exportName[1] : exportName[0], exportName[0]);
+        var display = exportName[0];
+        var export = exportName.Length > 1 ? exportName[1] : exportName[0];
+        if (_document.Form.FindFieldOrNull(fieldName) is ChoiceField cf)
+            cf.AddOption(export, display);
+        if (_document.Form.IsXfa)
+            _document.Form.AddXfaListItem(fieldName, display, export);
     }
 
     /// <summary>Remove a single item from a ListBox / ComboBox field. Item removal is not currently implemented; the call is a no-op kept for API parity.</summary>
@@ -415,8 +439,13 @@ public sealed class FormEditor : IDisposable
         var pageObj = _document.Pages[page];
         var btn = new ButtonField(pageObj, new Rectangle(llx, lly, urx, ury));
         btn.PartialName = fieldName;
+        // The caption draws at half the button height (a 25pt-high button captions
+        // at 12.5pt) — the size the appearance generator reads back from /DA, so the
+        // DA must be in place BEFORE the caption assignment regenerates the appearance.
+        var captionSize = (ury - lly) / 2;
+        btn.Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(
+            string.Format(System.Globalization.CultureInfo.InvariantCulture, "/Helv {0:0.##} Tf 0 g", captionSize))));
         btn.NormalCaption = label;
-        btn.Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes("/Helv 12 Tf 0 g")));
 
         // Wire the button's activation action to a SubmitForm action targeting the URL.
         var action = new SubmitFormAction();
@@ -457,7 +486,7 @@ public sealed class FormEditor : IDisposable
     public bool AddFieldScript(string fieldName, string script)
     {
         if (_document?.Form is null) return false;
-        var field = _document.Form.FindByName(fieldName);
+        var field = _document.Form.FindFieldOrNull(fieldName);
         if (field is null) return false;
         // Set the field's activation action (/A) to a JavaScript action so it round-trips
         // as OnActivated -> JavascriptAction. The JS
@@ -482,7 +511,7 @@ public sealed class FormEditor : IDisposable
     public void CopyInnerField(string fieldName, string newFieldName, int pageNum, float abscissa, float ordinate)
     {
         if (_document?.Form is null) return;
-        var src = _document.Form.FindByName(fieldName);
+        var src = _document.Form.FindFieldOrNull(fieldName);
         if (src is null) return;
         // Active implementation: a shallow copy that adds a new text field with the same
         // rectangle on the target page; richer per-field-type copying is future work.
@@ -508,7 +537,7 @@ public sealed class FormEditor : IDisposable
         if (_document is null) return;
         using var src = Document.Open(File.ReadAllBytes(srcFileName));
         if (src.Form is null) return;
-        var srcField = src.Form.FindByName(fieldName);
+        var srcField = src.Form.FindFieldOrNull(fieldName);
         if (srcField is null) return;
         var srcRect = srcField.Rect ?? new Rectangle(0, 0, 100, 20);
         var rect = float.IsNaN(abscissa) || float.IsNaN(ordinate)
@@ -573,7 +602,7 @@ public sealed class FormEditor : IDisposable
     public void DecorateField(string fieldName)
     {
         if (_document?.Form is null) return;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is not null) ApplyFacade(f);
     }
 
@@ -588,6 +617,27 @@ public sealed class FormEditor : IDisposable
     private static bool IsLoadableFormFont(string fontName)
         => StandardDaFontAbbreviations.Contains(fontName)
            || Aspose.Pdf.Text.FontRepository.FindFont(fontName) is not null;
+
+    /// <summary>Map the facade font enum to its standard /DA resource abbreviation,
+    /// /BaseFont name and font subtype for the AcroForm /DR registration.</summary>
+    private static (string abbr, string baseFont, string subtype) DaFontFor(FontStyle style) => style switch
+    {
+        FontStyle.Courier => ("Cour", "Courier", "Type1"),
+        FontStyle.CourierBold => ("CoBo", "Courier-Bold", "Type1"),
+        FontStyle.CourierOblique => ("CoOb", "Courier-Oblique", "Type1"),
+        FontStyle.CourierBoldOblique => ("CoBO", "Courier-BoldOblique", "Type1"),
+        FontStyle.HelveticaBold => ("HeBo", "Helvetica-Bold", "Type1"),
+        FontStyle.HelveticaOblique => ("HeOb", "Helvetica-Oblique", "Type1"),
+        FontStyle.HelveticaBoldOblique => ("HeBO", "Helvetica-BoldOblique", "Type1"),
+        FontStyle.TimesRoman => ("TiRo", "Times-Roman", "Type1"),
+        FontStyle.TimesBold => ("TiBo", "Times-Bold", "Type1"),
+        FontStyle.TimesItalic => ("TiIt", "Times-Italic", "Type1"),
+        FontStyle.TimesBoldItalic => ("TiBI", "Times-BoldItalic", "Type1"),
+        FontStyle.Symbol => ("Symb", "Symbol", "Type1"),
+        FontStyle.ZapfDingbats => ("ZaDb", "ZapfDingbats", "Type1"),
+        FontStyle.CjkFont => ("CJKF", "BitstreamCyberCJK-Roman", "TrueType"),
+        _ => ("Helv", "Helvetica", "Type1"),
+    };
 
     private void ApplyFacade(Field field)
     {
@@ -604,7 +654,8 @@ public sealed class FormEditor : IDisposable
         // Active implementation: rewrite the field's /DA when the facade sets a font or size.
         // Color/alignment changes are recorded on the field's /MK dict but not currently
         // re-emitted into the appearance stream.
-        if (Facade.FontSize > 0 || !string.IsNullOrEmpty(Facade.CustomFont))
+        if (Facade.FontSize > 0 || !string.IsNullOrEmpty(Facade.CustomFont)
+            || Facade.Font != FontStyle.Helvetica)
         {
             // A caller-specified CustomFont must be loadable: a standard PDF font
             // abbreviation, or a font name FontRepository can resolve (Standard-14,
@@ -612,10 +663,55 @@ public sealed class FormEditor : IDisposable
             // error rather than a silent fall-through to the default font.
             if (!string.IsNullOrEmpty(Facade.CustomFont) && !IsLoadableFormFont(Facade.CustomFont!))
                 throw new ArgumentException($"Could not load specified font : {Facade.CustomFont}");
-            var fontName = Facade.CustomFont ?? "Helv";
+            string fontName;
+            if (!string.IsNullOrEmpty(Facade.CustomFont))
+            {
+                fontName = Facade.CustomFont!;
+            }
+            else if (Facade.Font == FontStyle.CjkFont)
+            {
+                // The CJK facade font is a real embeddable face (Bitstream CyberCJK):
+                // route through the DefaultAppearance setter so the composite font is
+                // embedded into /DR and the /DA re-pointed at it.
+                var cjk = Aspose.Pdf.Text.FontRepository.FindFont("BitstreamCyberCJK");
+                if (cjk is null)
+                    throw new ArgumentException("Could not load specified font : BitstreamCyberCJK");
+                cjk.IsEmbedded = true; // composite face goes into the form's /DR
+                var tcCjk = Facade.TextColor;
+                var cjkColor = tcCjk.A != 0 ? tcCjk : System.Drawing.Color.Black;
+                field.DefaultAppearance = new Aspose.Pdf.Annotations.DefaultAppearance(
+                    cjk, Facade.FontSize > 0 ? Facade.FontSize : 12, cjkColor);
+                goto daDone;
+            }
+            else
+            {
+                // Facade.Font (the base-14 enum) maps to a standard /DA
+                // abbreviation registered in the AcroForm /DR so the /DA resolves.
+                var (abbr, baseFont, subtype) = DaFontFor(Facade.Font);
+                fontName = abbr;
+                _document?.Form?.RegisterDefaultResourceFont(abbr, baseFont, subtype);
+            }
             var fontSize = Facade.FontSize > 0 ? Facade.FontSize : 0f;
-            var da = $"/{fontName} {fontSize.ToString("G", System.Globalization.CultureInfo.InvariantCulture)} Tf 0 g";
+            // The facade text colour rides in the /DA operation (yellow → "1 1 0 rg").
+            var tc = Facade.TextColor;
+            var colorOp = tc.A != 0
+                ? string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    "{0:0.###} {1:0.###} {2:0.###} rg", tc.R / 255.0, tc.G / 255.0, tc.B / 255.0)
+                : "0 g";
+            var da = $"/{fontName} {fontSize.ToString("G", System.Globalization.CultureInfo.InvariantCulture)} Tf {colorOp}";
             field.Dict.Set("DA", new PdfString(System.Text.Encoding.UTF8.GetBytes(da)));
+            // A field that already carries a value keeps showing the OLD font until
+            // its appearance is rebuilt — regenerate it under the new /DA.
+            if (field.Type is Forms.FieldType.Text or Forms.FieldType.Choice
+                or Forms.FieldType.ComboBox or Forms.FieldType.ListBox)
+            {
+                field.ResetDefaultAppearanceCache();
+                field.Dict.Remove("AP");
+                foreach (var kid in field.AllKids())
+                    kid.Remove("AP");
+                field.GenerateAppearance();
+            }
+        daDone: ;
         }
 
         // Border style/width → /BS on each widget (WidgetAnnotation.Border resolves
@@ -639,6 +735,73 @@ public sealed class FormEditor : IDisposable
                  or Forms.FieldType.ComboBox or Forms.FieldType.ListBox
                  && (Facade.BorderColor.A != 0 || Facade.BorderWidth > 0))
             DecorateTextBorder(field);
+
+        // A decorated push button gets its face REBUILT: background fill (/MK /BG,
+        // default button grey) plus the facade border — the caption is dropped, as
+        // a decorated-button face carries no caption text.
+        else if (field.Type == Forms.FieldType.Button
+                 && (Facade.BorderColor.A != 0 || Facade.BorderWidth > 0))
+            DecorateButton(field);
+    }
+
+    /// <summary>Rebuild a push button's /AP /N as a caption-less decorated face:
+    /// the widget's /MK /BG background (default button grey) filled, then the facade
+    /// border stroked at the facade width. /MK /BC records the border colour.</summary>
+    private void DecorateButton(Field field)
+    {
+        if (_document is null) return;
+        var color = Facade.BorderColor.A != 0 ? Facade.BorderColor : System.Drawing.Color.Black;
+        int bw = Facade.BorderWidth > 0 ? (int)Facade.BorderWidth : 1;
+        var widgets = new System.Collections.Generic.List<PdfDictionary>(field.AllKids());
+        if (widgets.Count == 0) widgets.Add(field.Dict);
+
+        foreach (var widget in widgets)
+        {
+            if (_document.Reader.Resolve(widget.Get("Rect")) is not PdfArray ra || ra.Count < 4) continue;
+            var rect = Rectangle.FromPdfArray(ra);
+            double w = rect.Width, h = rect.Height;
+            if (w <= 0 || h <= 0) continue;
+            WriteMk(widget, "BC", color);
+
+            // Background: the widget's own /MK /BG, defaulting to the standard grey chrome.
+            double bgR = 0.75, bgG = 0.75, bgB = 0.75;
+            var mk = _document.Reader.ResolveDict(widget.Get("MK"));
+            if (mk is not null && _document.Reader.Resolve(mk.Get("BG")) is PdfArray bg && bg.Count >= 1)
+            {
+                double C(int i) => _document.Reader.Resolve(bg[i]) switch
+                {
+                    PdfReal r => r.Value,
+                    PdfInteger n => n.Value,
+                    _ => 0,
+                };
+                if (bg.Count >= 3) { bgR = C(0); bgG = C(1); bgB = C(2); }
+                else { bgR = bgG = bgB = C(0); }
+            }
+
+            double hbw = bw / 2.0;
+            var sb = new System.Text.StringBuilder();
+            sb.Append("q\n");
+            sb.Append($"{Num(bgR)} {Num(bgG)} {Num(bgB)} rg\n");
+            sb.Append($"0 0 {Num(w)} {Num(h)} re\nf\n");
+            sb.Append($"{Col(color.R)} {Col(color.G)} {Col(color.B)} RG\n");
+            sb.Append($"{Num(bw)} w\n");
+            sb.Append($"{Num(hbw)} {Num(hbw)} {Num(w - bw)} {Num(h - bw)} re\n");
+            sb.Append("S\n");
+            sb.Append("Q\n");
+            var faceBytes = System.Text.Encoding.Latin1.GetBytes(sb.ToString());
+
+            var apDict = new PdfDictionary();
+            apDict.Set("Type", new PdfName("XObject"));
+            apDict.Set("Subtype", new PdfName("Form"));
+            var bbox = new PdfArray();
+            bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(0));
+            bbox.Add(new PdfReal(w)); bbox.Add(new PdfReal(h));
+            apDict.Set("BBox", bbox);
+            apDict.Set("Length", new PdfInteger(faceBytes.Length));
+            var newAp = new PdfDictionary();
+            newAp.Set("N", new PdfStream(apDict, faceBytes));
+            widget.Set("AP", newAp);
+        }
     }
 
     /// <summary>Record the facade border colour on each of a non-button field's widgets
@@ -703,14 +866,14 @@ public sealed class FormEditor : IDisposable
     /// a filled background, a stroked border at the facade width, and the on-state glyph
     /// (ZapfDingbats) in the facade text colour. The operator order matches the standard
     /// decorated-checkbox face.</summary>
-    private void DecorateCheckBox(Field field)
+    private void DecorateCheckBox(Field field, bool useCaptionGlyph = false)
     {
         if (_document is null) return;
         var widgets = new System.Collections.Generic.List<PdfDictionary>(field.AllKids());
         if (widgets.Count == 0) widgets.Add(field.Dict);
 
-        // The "Cross" style and the undefined default both draw the stroked-X mark
-        // (matching Aspose.Pdf); the other styles draw a ZapfDingbats glyph.
+        // The "Cross" style and the undefined default both draw the stroked-X mark;
+        // the other styles draw a ZapfDingbats glyph.
         int style = Facade.ButtonStyle == FormFieldFacade.CheckBoxStyleUndefined
             ? FormFieldFacade.CheckBoxStyleCross : Facade.ButtonStyle;
         int bw = Facade.BorderWidth > 0 ? (int)Facade.BorderWidth : 1;
@@ -741,16 +904,28 @@ public sealed class FormEditor : IDisposable
                 : (ReadMkColor(widget, "BC") ?? System.Drawing.Color.Black);
             var text = Facade.TextColor.A != 0 ? Facade.TextColor : System.Drawing.Color.Black;
 
+            char glyph = useCaptionGlyph ? CaptionCharFor(style) : (char)style;
             var n = new PdfDictionary();
-            n.Set(onName, BuildCheckBoxFace(w, h, bw, style, bg, border, text, withMark: true));
-            n.Set("Off", BuildCheckBoxFace(w, h, bw, style, bg, border, text, withMark: false));
+            n.Set(onName, BuildCheckBoxFace(w, h, bw, style, glyph, bg, border, text, withMark: true));
+            n.Set("Off", BuildCheckBoxFace(w, h, bw, style, glyph, bg, border, text, withMark: false));
             var d = new PdfDictionary();
-            d.Set(onName, BuildCheckBoxFace(w, h, bw, style, bg, border, text, withMark: true));
-            d.Set("Off", BuildCheckBoxFace(w, h, bw, style, bg, border, text, withMark: false));
+            d.Set(onName, BuildCheckBoxFace(w, h, bw, style, glyph, bg, border, text, withMark: true));
+            d.Set("Off", BuildCheckBoxFace(w, h, bw, style, glyph, bg, border, text, withMark: false));
             var ap = new PdfDictionary();
             ap.Set("N", n);
             ap.Set("D", d);
             widget.Set("AP", ap);
+            if (useCaptionGlyph)
+            {
+                // The add-time face records its caption on /MK /CA so the loaded field
+                // reports NormalCaption and derives its BoxStyle from it.
+                if (_document.Reader.ResolveDict(widget.Get("MK")) is not { } mkCa)
+                {
+                    mkCa = new PdfDictionary();
+                    widget.Set("MK", mkCa);
+                }
+                mkCa.Set("CA", new PdfString(new[] { (byte)glyph }));
+            }
 
             // Record the decoration on /MK (/BG background, /BC border) and the widget
             // /C (the glyph/text colour) so the loaded field surfaces them via
@@ -764,8 +939,21 @@ public sealed class FormEditor : IDisposable
     /// <summary>Build a decorated-checkbox appearance face: a filled background, a
     /// stroked border at the facade width, and (for the on state) the mark — a stroked
     /// diagonal "X" for the Cross style, otherwise a ZapfDingbats glyph. The operator
-    /// order matches Aspose.Pdf's decorated-checkbox face.</summary>
-    private PdfStream BuildCheckBoxFace(double w, double h, int bw, int style,
+    /// order is fixed: background, border, then mark.</summary>
+    /// <summary>The standard checkbox caption character for a facade button style —
+    /// the ZapfDingbats code every viewer maps to the mark ("4" check, "8" cross, …).</summary>
+    private static char CaptionCharFor(int style) => style switch
+    {
+        FormFieldFacade.CheckBoxStyleCheck => '4',
+        FormFieldFacade.CheckBoxStyleCircle => 'l',
+        FormFieldFacade.CheckBoxStyleCross => '8',
+        FormFieldFacade.CheckBoxStyleDiamond => 'u',
+        FormFieldFacade.CheckBoxStyleSquare => 'n',
+        FormFieldFacade.CheckBoxStyleStar => 'H',
+        _ => '4',
+    };
+
+    private PdfStream BuildCheckBoxFace(double w, double h, int bw, int style, char glyph,
         System.Drawing.Color bg, System.Drawing.Color border, System.Drawing.Color text, bool withMark)
     {
         double hbw = bw / 2.0;
@@ -812,9 +1000,10 @@ public sealed class FormEditor : IDisposable
                 sb.Append("BT\n");
                 sb.Append($"{Num(td)} {Num(td)} Td\n");
                 sb.Append($"/ZaDb {Num(fontSize)} Tf\n");
-                // Glyph keyed by the style value (the /Encoding /Differences maps it to the
-                // dingbat). Emit the raw byte so the round-tripped text length is 1.
-                sb.Append($"({(char)style}) Tj\n");
+                // Glyph keyed by the caller's character (the /Encoding /Differences maps a
+                // style-value key to the dingbat; a caption char resolves via the base
+                // encoding). Emit the raw byte so the round-tripped text length is 1.
+                sb.Append($"({glyph}) Tj\n");
                 sb.Append("ET\n");
             }
             sb.Append("Q\n");
@@ -962,7 +1151,7 @@ public sealed class FormEditor : IDisposable
     public bool MoveField(string fieldName, float llx, float lly, float urx, float ury)
     {
         if (_document?.Form is null) return false;
-        var field = _document.Form.FindByName(fieldName);
+        var field = _document.Form.FindFieldOrNull(fieldName);
         if (field is null) return false;
         // Active: rewrite /Rect on the field dict.
         var rectArr = new PdfArray();
@@ -978,7 +1167,7 @@ public sealed class FormEditor : IDisposable
     public void RenameField(string fieldName, string newFieldName)
     {
         if (_document?.Form is null) return;
-        _document.Form.FindByName(fieldName)?.SetPartialName(newFieldName);
+        _document.Form.FindFieldOrNull(fieldName)?.SetPartialName(newFieldName);
     }
 
     /// <summary>Remove a field by name.</summary>
@@ -992,7 +1181,7 @@ public sealed class FormEditor : IDisposable
     public void RemoveFieldAction(string fieldName)
     {
         if (_document?.Form is null) return;
-        _document.Form.FindByName(fieldName)?.Dict.Remove("A");
+        _document.Form.FindFieldOrNull(fieldName)?.Dict.Remove("A");
     }
 
     // ── Setters that return success ──────────────────────────────────────
@@ -1001,7 +1190,7 @@ public sealed class FormEditor : IDisposable
     public bool SetFieldAlignment(string fieldName, int alignment)
     {
         if (_document?.Form is null) return false;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is null) return false;
         f.Dict.Set("Q", new PdfInteger(alignment));
         return true;
@@ -1011,7 +1200,7 @@ public sealed class FormEditor : IDisposable
     public bool SetFieldAlignmentV(string fieldName, int alignment)
     {
         if (_document?.Form is null) return false;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is null) return false;
         // Vertical alignment is recorded on /MK; not honoured by the appearance writer here.
         f.Dict.Set("MK_TV", new PdfInteger(alignment));
@@ -1022,7 +1211,7 @@ public sealed class FormEditor : IDisposable
     public bool SetFieldAppearance(string fieldName, AnnotationFlags flags)
     {
         if (_document?.Form is null) return false;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is null) return false;
         f.Dict.Set("F", new PdfInteger((int)flags));
         return true;
@@ -1032,7 +1221,7 @@ public sealed class FormEditor : IDisposable
     public AnnotationFlags GetFieldAppearance(string fieldName)
     {
         if (_document?.Form is null) return AnnotationFlags.None;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is null) return AnnotationFlags.None;
         return (AnnotationFlags)f.Dict.GetInt("F");
     }
@@ -1041,7 +1230,7 @@ public sealed class FormEditor : IDisposable
     public bool SetFieldAttribute(string fieldName, PropertyFlag flag)
     {
         if (_document?.Form is null) return false;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is null) return false;
         int ff = (int)f.Dict.GetInt("Ff");
         switch (flag)
@@ -1059,7 +1248,7 @@ public sealed class FormEditor : IDisposable
     public bool SetFieldCombNumber(string fieldName, int combNumber)
     {
         if (_document?.Form is null) return false;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is null) return false;
         f.Dict.Set("MaxLen", new PdfInteger(combNumber));
         int ff = (int)f.Dict.GetInt("Ff");
@@ -1072,7 +1261,7 @@ public sealed class FormEditor : IDisposable
     public bool SetFieldLimit(string fieldName, int fieldLimit)
     {
         if (_document?.Form is null) return false;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is TextBoxField tb) { tb.MaxLen = fieldLimit; return true; }
         return false;
     }
@@ -1081,7 +1270,7 @@ public sealed class FormEditor : IDisposable
     public bool SetSubmitFlag(string fieldName, SubmitFormFlag submitFormFlag)
     {
         if (_document?.Form is null) return false;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is null) return false;
         var action = EnsureSubmitAction(f);
         if (action is null) return false;
@@ -1100,7 +1289,7 @@ public sealed class FormEditor : IDisposable
         bool xfaOk = _document.Form.SetXfaSubmitUrl(fieldName, url);
 
         bool acroOk = false;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is not null)
         {
             var action = EnsureSubmitAction(f);
@@ -1117,7 +1306,7 @@ public sealed class FormEditor : IDisposable
     public bool Single2Multiple(string fieldName)
     {
         if (_document?.Form is null) return false;
-        var f = _document.Form.FindByName(fieldName);
+        var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is null) return false;
         int ff = (int)f.Dict.GetInt("Ff");
         ff |= 1 << 12; // Multiline flag (bit 13)
@@ -1144,7 +1333,7 @@ public sealed class FormEditor : IDisposable
 
         foreach (var (name, value) in fieldValues)
         {
-            var field = doc.Form.FindByName(name);
+            var field = doc.Form.FindFieldOrNull(name);
             if (field is not null)
                 field.Value = value;
         }
@@ -1185,14 +1374,14 @@ public sealed class FormEditor : IDisposable
     public string? GetFieldValue(byte[] input, string fieldName)
     {
         using var doc = Document.Open(input);
-        return doc.Form?.FindByName(fieldName)?.Value;
+        return doc.Form?.FindFieldOrNull(fieldName)?.Value;
     }
 
     /// <summary>Get the type of a specific field.</summary>
     public Forms.FieldType? GetFieldType(byte[] input, string fieldName)
     {
         using var doc = Document.Open(input);
-        return doc.Form?.FindByName(fieldName)?.Type;
+        return doc.Form?.FindFieldOrNull(fieldName)?.Type;
     }
 
     /// <summary>Check if the document has a form.</summary>
@@ -1237,7 +1426,7 @@ public sealed class FormEditor : IDisposable
         using var doc = Document.Open(input);
         if (doc.Form is null) return (input, false);
 
-        var field = doc.Form.FindByName(oldName);
+        var field = doc.Form.FindFieldOrNull(oldName);
         if (field is null) return (input, false);
 
         field.SetPartialName(newPartialName);

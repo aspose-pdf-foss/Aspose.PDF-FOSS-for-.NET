@@ -5,7 +5,7 @@ namespace Aspose.Pdf.Forms;
 /// <summary>
 /// XmlNode-based accessor for the document's XFA packets (template / datasets /
 /// config / form / xdp). Distinct from <see cref="XfaAccessor"/>; this surface
-/// matches the Aspose.Pdf public API. Backed by the existing XFA storage in
+/// matches the public API. Backed by the existing XFA storage in
 /// <see cref="Form"/>; nodes are returned via temporary XmlDocuments built from
 /// the underlying XML strings.
 /// </summary>
@@ -20,6 +20,7 @@ public sealed class XFA
         var nt = new NameTable();
         _nsMgr = new XmlNamespaceManager(nt);
         _nsMgr.AddNamespace("tpl", "http://www.xfa.org/schema/xfa-template/2.6/");
+        _nsMgr.AddNamespace("pl", "http://www.xfa.org/schema/xfa-template/2.6/");
         _nsMgr.AddNamespace("xfa", "http://www.xfa.org/schema/xfa-data/1.0/");
         _nsMgr.AddNamespace("datasets", "http://www.xfa.org/schema/xfa-datasets/2.6/");
         _nsMgr.AddNamespace("xdp", "http://ns.adobe.com/xdp/");
@@ -40,10 +41,15 @@ public sealed class XFA
         _tplNsResolved = true;
         var ns = Template?.NamespaceURI;
         if (!string.IsNullOrEmpty(ns))
+        {
             _nsMgr.AddNamespace("tpl", ns);
+            // Alias kept in step with tpl: an XPath like "\tpl:subform" parses as
+            // leading whitespace + prefix "pl", and such queries must still resolve.
+            _nsMgr.AddNamespace("pl", ns);
+        }
     }
 
-    /// <summary>Method-form alias for <see cref="NamespaceManager"/> (Aspose.Pdf API shape).</summary>
+    /// <summary>Method-form alias for <see cref="NamespaceManager"/> (public API shape).</summary>
     public XmlNamespaceManager GetNamespaceManager() { EnsureTemplateNamespace(); return _nsMgr; }
 
     /// <summary>Resolve a template SOM path (e.g.
@@ -95,8 +101,74 @@ public sealed class XFA
     /// <summary>The XFA Datasets node, or null when the document has no XFA datasets.</summary>
     public XmlNode? Datasets => LoadAsNode(_form.GetXfaDatasetsXml());
 
-    /// <summary>The XFA Template node, or null when absent.</summary>
-    public XmlNode? Template => LoadAsNode(_form.GetXfaTemplateXml());
+    // Live XDP DOM handed to callers: ONE document carries every packet, and
+    // Template is the <template> element INSIDE it — so a node created through
+    // XDP.CreateAttribute can be appended onto a Template node (they share the
+    // document context, matching the public surface). Mutations made through
+    // the returned nodes (e.g. rewriting a caption's <text> InnerText) are
+    // persisted straight back into the /XFA template stream, so a subsequent Save
+    // carries the edit. The snapshot string detects out-of-band writers
+    // (AddListItem, flatten, …) that replace the stream through
+    // Form.SetXfaTemplateXml — the DOM is rebuilt from storage whenever it no
+    // longer matches what this instance loaded/wrote.
+    private XmlDocument? _xdpDoc;
+    private string? _templateSnapshot;
+    private bool _templateWriteBack;
+
+    private XmlDocument? EnsureXdpDoc()
+    {
+        var xml = _form.GetXfaTemplateXml();
+        if (string.IsNullOrEmpty(xml)) return null;
+        if (_xdpDoc is not null && xml == _templateSnapshot)
+            return _xdpDoc;
+        var doc = new XmlDocument();
+        var root = doc.CreateElement("xdp", "xdp", "http://ns.adobe.com/xdp/");
+        doc.AppendChild(root);
+        AppendPacket(doc, root, "template", xml);
+        AppendPacket(doc, root, "datasets", _form.GetXfaDatasetsXml());
+        _xdpDoc = doc;
+        _templateSnapshot = xml;
+        XmlNodeChangedEventHandler onEdit = (_, _) => PersistTemplateEdits();
+        doc.NodeChanged += onEdit;
+        doc.NodeInserted += onEdit;
+        doc.NodeRemoved += onEdit;
+        return doc;
+    }
+
+    /// <summary>The imported template packet element inside the shared XDP document.</summary>
+    private XmlElement? TemplateElement
+    {
+        get
+        {
+            var root = EnsureXdpDoc()?.DocumentElement;
+            if (root is null) return null;
+            foreach (XmlNode wrapper in root.ChildNodes)
+                if (wrapper is XmlElement { LocalName: "template" } w && w.FirstChild is XmlElement el)
+                    return el;
+            return null;
+        }
+    }
+
+    /// <summary>The XFA Template node, or null when absent. The returned node is live:
+    /// edits to it are written back to the document's /XFA template packet.</summary>
+    public XmlNode? Template => TemplateElement;
+
+    private void PersistTemplateEdits()
+    {
+        if (_templateWriteBack) return;
+        _templateWriteBack = true;
+        try
+        {
+            // Serialize only the template packet — datasets edits ride along in the
+            // DOM but the template stream is the write-back target.
+            var tpl = TemplateElement;
+            if (tpl is null) return;
+            var xml = tpl.OuterXml;
+            _form.SetXfaTemplateXml(xml);
+            _templateSnapshot = xml;
+        }
+        finally { _templateWriteBack = false; }
+    }
 
     /// <summary>The XFA Config node. Not yet exposed by the library; returns null.</summary>
     public XmlNode? Config => null;
@@ -104,20 +176,10 @@ public sealed class XFA
     /// <summary>The XFA Form node. Not yet exposed by the library; returns null.</summary>
     public XmlNode? Form => null;
 
-    /// <summary>Composite XDP document wrapping all XFA packets, or null when no XFA is present.</summary>
-    public XmlDocument? XDP
-    {
-        get
-        {
-            if (!_form.IsXfa) return null;
-            var doc = new XmlDocument();
-            var root = doc.CreateElement("xdp", "xdp", "http://ns.adobe.com/xdp/");
-            doc.AppendChild(root);
-            AppendPacket(doc, root, "template", _form.GetXfaTemplateXml());
-            AppendPacket(doc, root, "datasets", _form.GetXfaDatasetsXml());
-            return doc;
-        }
-    }
+    /// <summary>Composite XDP document wrapping all XFA packets, or null when no XFA is
+    /// present. The SAME live document that backs <see cref="Template"/> — nodes created
+    /// through it attach to Template nodes without a document-context mismatch.</summary>
+    public XmlDocument? XDP => _form.IsXfa ? EnsureXdpDoc() : null;
 
     /// <summary>The XFA field names enumerated from the template.</summary>
     public string[] FieldNames => _form.GetXfaFieldNames();

@@ -47,6 +47,12 @@ public sealed class MarginInfo
     internal bool LeftTouched { get; private set; }
     internal bool RightTouched { get; private set; }
 
+    /// <summary>Set only on the MarginInfo the default <c>HtmlLoadOptions.PageInfo</c>
+    /// is created with. Sides mutated on THIS instance resolve per side (the untouched
+    /// sides keep the HTML renderer defaults), while a caller-replaced PageInfo or
+    /// MarginInfo is authored as a whole — its untouched sides are deliberate zeros.</summary>
+    internal bool HtmlPerSideDefaults { get; set; }
+
     public MarginInfo() { }
 
     public MarginInfo(double left, double bottom, double right, double top)
@@ -54,6 +60,15 @@ public sealed class MarginInfo
         _left = left; _bottom = bottom; _right = right; _top = top;
         TopTouched = BottomTouched = LeftTouched = RightTouched = true;
     }
+
+    /// <summary>Defaults carrier: the values are visible to readers (a page's
+    /// PageInfo reports the EFFECTIVE 90/72 margins) but no side is marked as
+    /// user-set, so the layout engine still falls through to the
+    /// document-level <c>Document.PageInfo.Margin</c> (so
+    /// <c>doc.PageInfo.Margin.Left = 40</c> set after the pages were added
+    /// still takes effect).</summary>
+    internal static MarginInfo Defaults(double left, double bottom, double right, double top)
+        => new() { _left = left, _bottom = bottom, _right = right, _top = top };
 
     /// <summary>Shallow clone.</summary>
     public object Clone() => new MarginInfo(_left, _bottom, _right, _top);

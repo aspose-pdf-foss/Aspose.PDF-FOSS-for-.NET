@@ -115,7 +115,14 @@ public sealed class HtmlLoadOptions : LoadOptions
     public HtmlLoadOptions(string basePath) { BasePath = basePath; }
 
     /// <summary>Base path for resolving relative resource URLs.</summary>
-    public string? BasePath { get; private set; }
+    public string? BasePath { get; internal set; }
+
+    /// <summary>True when <see cref="BasePath"/> was derived from the loaded file's own
+    /// directory rather than supplied by the caller. Resources resolve against an
+    /// auto base, but the converter-HTML re-import routing (fixed layout vs plain
+    /// reflow) depends on whether the stylesheet is reachable from CALLER-supplied
+    /// context only.</summary>
+    internal bool BasePathAutoDerived { get; set; }
 
     /// <summary>Whether to embed fonts used in the HTML.</summary>
     public bool IsEmbedFonts { get; set; }
@@ -154,7 +161,18 @@ public sealed class HtmlLoadOptions : LoadOptions
     /// Page descriptor (size, margins) applied to the generated PDF. Tests use
     /// this to set margins or page size before loading HTML.
     /// </summary>
-    public PageInfo PageInfo { get; set; } = new PageInfo();
+    public PageInfo PageInfo { get; set; } = CreateDefaultPageInfo();
+
+    // The default descriptor's EXISTING margin is marked for per-side resolution
+    // (see MarginInfo.HtmlPerSideDefaults). Assigning a new MarginInfo instead
+    // would flag PageInfo.MarginAssigned — the "authored as a whole" signal — and
+    // turn every default conversion's margins into explicit zeros.
+    private static PageInfo CreateDefaultPageInfo()
+    {
+        var pi = new PageInfo();
+        pi.Margin.HtmlPerSideDefaults = true;
+        return pi;
+    }
 
     /// <summary>Path to an APS intermediate file (debug artifact). Stored only.</summary>
     public string? ApsIntermediateFileIfAny { get; set; }

@@ -14,6 +14,9 @@ internal sealed class XfaFlatField
     /// <summary>Bound datasets value for this field, if any (drives the generated /V so a
     /// flattened dynamic-XFA form keeps its data values on the flat AcroForm fields).</summary>
     public string? Value;
+    /// <summary>True for an XFA image field (&lt;ui&gt;&lt;imageEdit&gt;): <see cref="Value"/>
+    /// then holds the base64 picture payload from the datasets node.</summary>
+    public bool IsImage;
 }
 
 /// <summary>
@@ -59,7 +62,7 @@ internal sealed class XfaFormEngine
         // flow onto — emit each visible one.
         foreach (var n in model.All)
             if (n.IsField && !n.EffectiveHidden && n.PageAreaAncestor is null)
-                fields.Add(new XfaFlatField { Path = n.SomPath, Ft = n.Ft, Ff = n.Ff, Value = n.RawValue });
+                fields.Add(new XfaFlatField { Path = n.SomPath, Ft = n.Ft, Ff = n.Ff, Value = n.RawValue, IsImage = n.IsImage });
 
         // Master page(s): the active master (the pageArea the rendered body breaks onto) is emitted
         // once per physical page. The page count comes from flowing the body through the content
@@ -97,7 +100,7 @@ internal sealed class XfaFormEngine
             {
                 if (!n.IsField || n.EffectiveHidden || !ReferenceEquals(n.PageAreaAncestor, master)) continue;
                 var suffix = n.SomPath.Substring(suffixStart);  // ".Footer[0]…"
-                fields.Add(new XfaFlatField { Path = $"{baseSom}[{i}]{suffix}", Ft = n.Ft, Ff = n.Ff, Value = n.RawValue });
+                fields.Add(new XfaFlatField { Path = $"{baseSom}[{i}]{suffix}", Ft = n.Ft, Ff = n.Ff, Value = n.RawValue, IsImage = n.IsImage });
             }
         }
     }
@@ -177,6 +180,7 @@ internal sealed class XfaFormEngine
             "choiceList" => ("Ch", 1L << 17),   // combo box
             "checkButton" => ("Btn", 0),         // checkbox
             "button" => ("Btn", 1L << 16),        // pushbutton
+            "imageEdit" => ("Btn", 1L << 16),     // image field → pushbutton with icon
             "signature" => ("Sig", 0),
             _ => ("Tx", 0),                        // textEdit / numericEdit / dateTimeEdit
         };

@@ -16,8 +16,18 @@ public sealed class XmpValue
 {
     private readonly object _value;
 
+    /// <summary>The text this value was READ from, when it came from a packet.
+    /// An XMP simple property is text on the wire; typing it as a number is a
+    /// reading convenience, so the original spelling is kept and returned by
+    /// <see cref="ToStringValue"/> — otherwise a version like "1.0" round-trips
+    /// back as "1" once it has been sniffed into a double.</summary>
+    private readonly string? _rawText;
+
     /// <summary>Create an XmpValue from an integer.</summary>
     public XmpValue(int value) { _value = value; }
+
+    /// <summary>Create a typed XmpValue that remembers the text it was parsed from.</summary>
+    internal XmpValue(object value, string rawText) { _value = value; _rawText = rawText; }
 
     /// <summary>Create an XmpValue from a double.</summary>
     public XmpValue(double value) { _value = value; }
@@ -33,7 +43,7 @@ public sealed class XmpValue
     public static implicit operator XmpValue(string value) => new XmpValue(value);
 
     /// <summary>Implicit promotions from the other scalar value types, matching
-    /// the Aspose.Pdf XmpValue surface (<c>doc.Metadata[key] = DateTime.Now</c>).</summary>
+    /// the XmpValue surface (<c>doc.Metadata[key] = DateTime.Now</c>).</summary>
     public static implicit operator XmpValue(DateTime value) => new XmpValue(value);
     public static implicit operator XmpValue(int value) => new XmpValue(value);
     public static implicit operator XmpValue(double value) => new XmpValue(value);
@@ -179,7 +189,7 @@ public sealed class XmpValue
     };
 
     /// <summary>Convert to string representation suitable for XMP serialization.</summary>
-    public string ToStringValue() => _value switch
+    public string ToStringValue() => _rawText ?? _value switch
     {
         int i => i.ToString(CultureInfo.InvariantCulture),
         double d => d.ToString("R", CultureInfo.InvariantCulture),

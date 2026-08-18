@@ -21,27 +21,44 @@ internal sealed class TextStateModifier
     /// per-fragment colour changes since each fragment's text-showing op is
     /// what we're targeting).
     /// </summary>
-    public void ModifyForegroundColor(Page page, string text, Color color, double? targetY = null)
+    /// <summary>Whether the last <see cref="ModifyForegroundColor"/> call found a
+    /// matching show operator and injected the colour (callers use it to retry
+    /// with a wider positional scope).</summary>
+    public bool LastForegroundColorApplied { get; private set; }
+
+    public void ModifyForegroundColor(Page page, string text, Color color, double? targetY = null,
+        double? targetX = null)
     {
+        LastForegroundColorApplied = false;
         var reader = page.Reader;
         if (reader is null) return;
 
-        if (ModifyForegroundColorInFormXObjects(page.Dict, reader, text, color, targetY,
+        if (ModifyForegroundColorInFormXObjects(page.Dict, reader, text, color, targetY, targetX,
                 1, 0, 0, 1, 0, 0))
+        {
+            LastForegroundColorApplied = true;
             return;
+        }
 
         var contentStreams = GetContentStreams(page, reader);
         if (contentStreams.Count == 0) return;
 
         var combined = CombineStreams(contentStreams);
-        var modified = ModifyForegroundColorInStream(combined, text, color, targetY,
+        var modified = ModifyForegroundColorInStream(combined, text, color, targetY, targetX,
             page.Dict, reader, 1, 0, 0, 1, 0, 0);
         if (modified is not null)
-            page.SetContentStream(modified);
+        {
+            // The whole rewritten page content is bracketed in a single q…Q pair
+            // (idempotent — content already opening with q is left alone); the
+            // recolor wraps the page once and keeps every
+            // original operator in place.
+            page.SetContentStream(TextReplacer.WrapInGraphicsState(modified));
+            LastForegroundColorApplied = true;
+        }
     }
 
     private bool ModifyForegroundColorInFormXObjects(PdfDictionary dict, PdfReader reader,
-        string text, Color color, double? targetY,
+        string text, Color color, double? targetY, double? targetX,
         double ctmA, double ctmB, double ctmC, double ctmD, double ctmTx, double ctmTy)
     {
         var resources = reader.ResolveDict(dict.Get("Resources"));
@@ -56,7 +73,7 @@ internal sealed class TextStateModifier
             if (xobjStream.Dict.GetName("Subtype") != "Form") continue;
 
             var streamData = reader.DecodeStream(xobjStream);
-            var modified = ModifyForegroundColorInStream(streamData, text, color, targetY,
+            var modified = ModifyForegroundColorInStream(streamData, text, color, targetY, targetX,
                 xobjStream.Dict, reader, ctmA, ctmB, ctmC, ctmD, ctmTx, ctmTy);
             if (modified is not null)
             {
@@ -68,14 +85,14 @@ internal sealed class TextStateModifier
             }
 
             if (ModifyForegroundColorInFormXObjects(xobjStream.Dict, reader, text, color, targetY,
-                    ctmA, ctmB, ctmC, ctmD, ctmTx, ctmTy))
+                    targetX, ctmA, ctmB, ctmC, ctmD, ctmTx, ctmTy))
                 return true;
         }
         return false;
     }
 
     private byte[]? ModifyForegroundColorInStream(byte[] streamBytes, string text, Color color,
-        double? targetY, PdfDictionary pageDict, PdfReader reader,
+        double? targetY, double? targetX, PdfDictionary pageDict, PdfReader reader,
         double initCtmA, double initCtmB, double initCtmC, double initCtmD,
         double initCtmTx, double initCtmTy)
     {
@@ -84,6 +101,11 @@ internal sealed class TextStateModifier
         var operands = new List<(TokenKind kind, PdfObject obj, int startPos, int endPos)>();
         Dictionary<int, string>? currentToUnicode = null;
         string? currentFontName = null;
+        FontMetrics? currentMetrics = null;
+        double fontSize = 0, charSpacing = 0, wordSpacing = 0, hScaling = 1.0;
+        // Raw components of the pending TJ array (strings + kern adjustments), kept
+        // for the pen-advance computation below.
+        List<object>? tjItems = null;
 
         // CTM/TM tracking — same approach as TextReplacer.ReplaceInContentStream so
         // targetY scopes the color injection to the right text-showing op when the
@@ -94,6 +116,11 @@ internal sealed class TextStateModifier
         double tmA = 1, tmB = 0, tmC = 0, tmD = 1, tmTx = 0, tmTy = 0;
         double tlLeading = 0;
         const double yTolerance = 6.0;
+        // Pen X in text space: the line matrix origin (tmTx) plus the glyph advances
+        // of the show operators already drawn on the line. tmTx itself stays the LINE
+        // matrix (Td/TD/Tm/T* semantics unchanged); penTx is what a show operator's
+        // real start X is, so X-scoping can tell apart same-text runs on one line.
+        double penTx = 0;
 
         // Track the active fill colour so a substring recolour can restore the surrounding
         // glyphs to whatever colour was in effect (default black) when splitting a run.
@@ -101,6 +128,49 @@ internal sealed class TextStateModifier
 
         bool MatchesY() => !targetY.HasValue
             || Math.Abs(ctmD * tmTy + ctmTy - targetY.Value) <= yTolerance;
+
+        // X scoping (same formula/tolerance as TextReplacer.IsAtTargetX): lets a
+        // short segment (e.g. a lone space) recolour ITS OWN show operator instead
+        // of the first operator on the line whose decoded text merely contains it.
+        const double xTolerance = 4.0;
+        bool MatchesX() => !targetX.HasValue
+            || Math.Abs(ctmA * penTx + ctmC * tmTy + ctmTx - targetX.Value) <= xTolerance;
+        // A show operator whose start X coincides with the target segment's X to
+        // half a point IS that segment's operator — the segment position was
+        // measured from it. Trusted over the decoded-text containment check,
+        // whose ToUnicode interpretation can disagree with the absorber's for
+        // exotic CID maps (observed: a space run decoding as '=').
+        bool GeometricallyExact() => targetX.HasValue
+            && Math.Abs(ctmA * penTx + ctmC * tmTy + ctmTx - targetX.Value) <= 0.5;
+
+        // Advance of one shown string in text-space units (mirrors
+        // ContentStreamParser's cursor math: per-code width + Tc, + Tw on the
+        // single-byte space code, scaled by Tz). CID (2-byte) fonts consume the
+        // bytes pairwise through the /W-keyed metrics.
+        double StringAdvance(byte[] bytes)
+        {
+            if (bytes.Length == 0 || fontSize <= 0) return 0;
+            double total = 0;
+            if (currentMetrics is { IsCid: true })
+            {
+                for (var i = 0; i + 1 < bytes.Length; i += 2)
+                {
+                    var cid = (bytes[i] << 8) | bytes[i + 1];
+                    total += (currentMetrics.GetWidth(cid) / 1000.0 * fontSize + charSpacing) * hScaling;
+                }
+            }
+            else
+            {
+                foreach (var b in bytes)
+                {
+                    var w = currentMetrics?.GetWidth(b) ?? 500;
+                    total += (w / 1000.0 * fontSize + charSpacing
+                        + (b == 0x20 ? wordSpacing : 0)) * hScaling;
+                }
+            }
+            return total;
+        }
+
 
         while (true)
         {
@@ -132,7 +202,9 @@ internal sealed class TextStateModifier
                     // TJ branch below can match it (mirrors ModifyFontSizeInStream /
                     // FindTfNameRange). Without this, `[ (hi world) -180 ... ] TJ` runs
                     // would never be seen by the colour matcher and no `rg` is injected.
+                    // The raw components are kept for the pen-advance computation.
                     var arrTexts = new StringBuilder();
+                    tjItems = new List<object>();
                     while (true)
                     {
                         var t = lexer.NextToken();
@@ -142,8 +214,13 @@ internal sealed class TextStateModifier
                         {
                             var strBytes = t.BytesValue;
                             if (strBytes is not null)
+                            {
                                 arrTexts.Append(DecodeTextString(strBytes, currentToUnicode));
+                                tjItems.Add(strBytes);
+                            }
                         }
+                        else if (t.Kind == TokenKind.Integer) tjItems.Add((double)t.IntValue);
+                        else if (t.Kind == TokenKind.Real) tjItems.Add(t.RealValue);
                     }
                     operands.Add((TokenKind.ArrayStart, new PdfString(
                         Cp1252.GetBytes(arrTexts.ToString())), startPos, (int)lexer.Position));
@@ -156,6 +233,7 @@ internal sealed class TextStateModifier
                         case "BT":
                             tmA = 1; tmB = 0; tmC = 0; tmD = 1; tmTx = 0; tmTy = 0;
                             tlLeading = 0;
+                            penTx = 0;
                             break;
                         case "Td":
                         case "TD":
@@ -166,6 +244,7 @@ internal sealed class TextStateModifier
                                 tmTx = dx * tmA + dy * tmC + tmTx;
                                 tmTy = dx * tmB + dy * tmD + tmTy;
                                 if (op == "TD") tlLeading = -dy;
+                                penTx = tmTx;
                             }
                             break;
                         case "Tm":
@@ -177,6 +256,7 @@ internal sealed class TextStateModifier
                                 tmD = ToDouble(operands[3].obj);
                                 tmTx = ToDouble(operands[4].obj);
                                 tmTy = ToDouble(operands[5].obj);
+                                penTx = tmTx;
                             }
                             break;
                         case "TL":
@@ -185,6 +265,16 @@ internal sealed class TextStateModifier
                         case "T*":
                             tmTx = -tlLeading * tmC + tmTx;
                             tmTy = -tlLeading * tmD + tmTy;
+                            penTx = tmTx;
+                            break;
+                        case "Tc":
+                            if (operands.Count >= 1) charSpacing = ToDouble(operands[^1].obj);
+                            break;
+                        case "Tw":
+                            if (operands.Count >= 1) wordSpacing = ToDouble(operands[^1].obj);
+                            break;
+                        case "Tz":
+                            if (operands.Count >= 1) hScaling = ToDouble(operands[^1].obj) / 100.0;
                             break;
                         case "q":
                             ctmStack.Push((ctmA, ctmB, ctmC, ctmD, ctmTx, ctmTy));
@@ -228,7 +318,7 @@ internal sealed class TextStateModifier
                                     {
                                         var xobjBytes = reader.DecodeStream(xobjStream);
                                         var modified = ModifyForegroundColorInStream(xobjBytes,
-                                            text, color, targetY,
+                                            text, color, targetY, targetX,
                                             xobjStream.Dict, reader,
                                             ctmA, ctmB, ctmC, ctmD, ctmTx, ctmTy);
                                         if (modified is not null)
@@ -247,10 +337,18 @@ internal sealed class TextStateModifier
                             if (operands.Count >= 2 && operands[0].obj is PdfName fn)
                             {
                                 currentFontName = fn.Value;
+                                fontSize = ToDouble(operands[^1].obj);
                                 if (fonts.TryGetValue(currentFontName, out var fontDict))
+                                {
                                     currentToUnicode = TextAbsorber.ParseToUnicodeFromDict(fontDict, reader);
+                                    try { currentMetrics = FontMetrics.FromFontDict(fontDict, reader); }
+                                    catch { currentMetrics = null; }
+                                }
                                 else
+                                {
                                     currentToUnicode = null;
+                                    currentMetrics = null;
+                                }
                             }
                             break;
                         case "rg":
@@ -278,41 +376,64 @@ internal sealed class TextStateModifier
                         case "Tj":
                         case "'":
                         case "\"":
-                            if (operands.Count >= 1 && operands[^1].obj is PdfString s
-                                && MatchesY())
+                            // ' and " move to the next line before showing.
+                            if (op is "'" or "\"")
                             {
-                                var decoded = DecodeTextString(s.Value, currentToUnicode);
-                                if (decoded.Contains(text))
+                                tmTx = -tlLeading * tmC + tmTx;
+                                tmTy = -tlLeading * tmD + tmTy;
+                                penTx = tmTx;
+                            }
+                            if (operands.Count >= 1 && operands[^1].obj is PdfString s)
+                            {
+                                if (MatchesY() && MatchesX())
                                 {
-                                    // When the match is only part of the run, split the show
-                                    // operator so the new colour applies to the matched glyphs
-                                    // alone and the surrounding glyphs keep the active fill
-                                    // colour (consecutive Tj operators advance the text matrix
-                                    // automatically, so the split preserves positioning).
-                                    var split = SplitColorRun(streamBytes,
-                                        operands[^1].startPos, operands[^1].endPos,
-                                        text, color, (fillR, fillG, fillB));
-                                    if (split is not null) return split;
-                                    // Whole-run recolour: wrap the show operator with the new
-                                    // fill colour AND a trailing restore to the colour that was
-                                    // active before it, so the recolour doesn't leak onto the
-                                    // subsequent text (endPos is just past the show keyword).
-                                    return InjectColorAround(streamBytes, operands[^1].startPos,
-                                        endPos, color, (fillR, fillG, fillB));
+                                    var decoded = DecodeTextString(s.Value, currentToUnicode);
+                                    if (decoded.Contains(text) || GeometricallyExact())
+                                    {
+                                        // When the match is only part of the run, split the show
+                                        // operator so the new colour applies to the matched glyphs
+                                        // alone and the surrounding glyphs keep the active fill
+                                        // colour (consecutive Tj operators advance the text matrix
+                                        // automatically, so the split preserves positioning).
+                                        var split = SplitColorRun(streamBytes,
+                                            operands[^1].startPos, operands[^1].endPos,
+                                            text, color, (fillR, fillG, fillB));
+                                        if (split is not null) return split;
+                                        // Whole-run recolour: wrap the show operator with the new
+                                        // fill colour AND a trailing restore to the colour that was
+                                        // active before it, so the recolour doesn't leak onto the
+                                        // subsequent text (endPos is just past the show keyword).
+                                        return InjectColorAround(streamBytes, operands[^1].startPos,
+                                            endPos, color, (fillR, fillG, fillB));
+                                    }
                                 }
+                                // Advances live in Tm-space; the tracked tm coordinates are
+                                // Tm-applied (Td folds tmA in), so scale the advance the same way.
+                                penTx += StringAdvance(s.Value) * tmA;
                             }
                             break;
                         case "TJ":
                             // The TJ array's text was concatenated into a single PdfString
                             // operand by the ArrayStart handler above.
-                            if (operands.Count >= 1 && operands[^1].obj is PdfString tjText
-                                && MatchesY())
+                            if (operands.Count >= 1 && operands[^1].obj is PdfString tjText)
                             {
-                                var decoded = DecodeTextString(tjText.Value, currentToUnicode);
-                                if (decoded.Contains(text))
-                                    return InjectColorAround(streamBytes, operands[^1].startPos,
-                                        endPos, color, (fillR, fillG, fillB));
+                                if (MatchesY() && MatchesX())
+                                {
+                                    var decoded = DecodeTextString(tjText.Value, currentToUnicode);
+                                    if (decoded.Contains(text) || GeometricallyExact())
+                                        return InjectColorAround(streamBytes, operands[^1].startPos,
+                                            endPos, color, (fillR, fillG, fillB));
+                                }
+                                if (tjItems is not null)
+                                    foreach (var item in tjItems)
+                                    {
+                                        if (item is byte[] strBytes)
+                                            penTx += StringAdvance(strBytes) * tmA;
+                                        else if (item is double kern)
+                                            penTx -= kern / 1000.0 * fontSize * hScaling * tmA;
+                                    }
                             }
+                            tjItems = null;
                             break;
                     }
                     operands.Clear();
@@ -411,13 +532,16 @@ internal sealed class TextStateModifier
         // Leading space separates the injected rg from the preceding token
         // (e.g. "Tc" runs straight into "1.000" without it, which the lexer
         // mis-parses as one keyword "Tc1.000"); trailing space separates the
-        // rg from the following PdfString '(' delimiter.
-        var before = string.Format(CultureInfo.InvariantCulture, " {0:F3} {1:F3} {2:F3} rg ",
-            color.R / 255.0, color.G / 255.0, color.B / 255.0);
+        // rg from the following PdfString '(' delimiter. Components are written
+        // minimally ("1 0 0 rg", not "1.000 0.000 0.000 rg") — the exact
+        // form asserted verbatim by operator-comparing consumers.
+        static string N(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
+        var before = string.Format(CultureInfo.InvariantCulture, " {0} {1} {2} rg ",
+            N(color.R / 255.0), N(color.G / 255.0), N(color.B / 255.0));
         string after = (restore.r == restore.g && restore.g == restore.b)
-            ? string.Format(CultureInfo.InvariantCulture, " {0:F3} g ", restore.r)
-            : string.Format(CultureInfo.InvariantCulture, " {0:F3} {1:F3} {2:F3} rg ",
-                restore.r, restore.g, restore.b);
+            ? string.Format(CultureInfo.InvariantCulture, " {0} g ", N(restore.r))
+            : string.Format(CultureInfo.InvariantCulture, " {0} {1} {2} rg ",
+                N(restore.r), N(restore.g), N(restore.b));
         var beforeBytes = Encoding.ASCII.GetBytes(before);
         var afterBytes = Encoding.ASCII.GetBytes(after);
 
@@ -733,7 +857,12 @@ internal sealed class TextStateModifier
     /// operator is repointed at the freshly registered resource. Mirrors the
     /// match-by-decoded-text approach used by ModifyFontSize / ModifyForegroundColor.
     /// </summary>
-    public void ModifyFont(Page page, string text, Font newFont, double? targetY = null)
+    /// <param name="segmentScoped">The caller is restyling ONE SEGMENT of a run, so
+    /// only those glyphs change font and the run is split around them. A
+    /// fragment-scoped change restyles the whole matched run by repointing its Tf,
+    /// which leaves the show operators intact for a text replacement that follows.</param>
+    public void ModifyFont(Page page, string text, Font newFont, double? targetY = null,
+        bool segmentScoped = false)
     {
         var reader = page.Reader;
         if (reader is null) return;
@@ -755,7 +884,7 @@ internal sealed class TextStateModifier
             : (newFont.FontName ?? "Font").Replace(" ", "").Replace("-", "");
 
         // Text frequently lives inside a Form XObject (e.g. `q /Fm0 Do Q`).
-        if (ModifyFontInFormXObjects(page.Dict, reader, doc, text, isCore, ttf, baseName))
+        if (ModifyFontInFormXObjects(page.Dict, reader, doc, text, isCore, ttf, baseName, newFont, segmentScoped))
             return;
 
         var contentStreams = GetContentStreams(page, reader);
@@ -764,16 +893,25 @@ internal sealed class TextStateModifier
         var range = FindTfNameRange(combined, text, page.Dict, reader);
         if (range is null) return;
 
-        var origName = ExtractResName(combined, range.Value.start, range.Value.end);
-        var resName = RegisterFontResource(page.Dict, reader, doc, isCore, ttf, baseName);
-        var modified = PatchName(combined, range.Value.start, range.Value.end, resName);
+        var site = range.Value;
+        var origName = ExtractResName(combined, site.NameStart, site.NameEnd);
+        var resName = RegisterFontResource(page.Dict, reader, doc, isCore, ttf, baseName, newFont);
+        // A match inside a longer run switches font for those glyphs only.
+        if (segmentScoped && site.LitStart >= 0 && origName is not null
+            && SplitFontRun(combined, site.LitStart, site.LitEnd, text, origName, resName, site.Size) is { } split)
+        {
+            page.SetContentStream(split);
+            return;
+        }
+        var modified = PatchName(combined, site.NameStart, site.NameEnd, resName);
         if (origName is not null)
             modified = RepointRedundantTfs(modified, origName, resName);
         page.SetContentStream(modified);
     }
 
     private bool ModifyFontInFormXObjects(PdfDictionary dict, PdfReader reader,
-        Document doc, string text, bool isCore, byte[]? ttf, string baseFontName)
+        Document doc, string text, bool isCore, byte[]? ttf, string baseFontName,
+        Font? newFont = null, bool segmentScoped = false)
     {
         var resources = reader.ResolveDict(dict.Get("Resources"));
         if (resources is null) return false;
@@ -790,14 +928,18 @@ internal sealed class TextStateModifier
             var range = FindTfNameRange(streamData, text, xobjStream.Dict, reader);
             if (range is not null)
             {
-                var origName = ExtractResName(streamData, range.Value.start, range.Value.end);
-                var resName = RegisterFontResource(xobjStream.Dict, reader, doc, isCore, ttf, baseFontName);
-                var modified = PatchName(streamData, range.Value.start, range.Value.end, resName);
+                var site = range.Value;
+                var origName = ExtractResName(streamData, site.NameStart, site.NameEnd);
+                var resName = RegisterFontResource(xobjStream.Dict, reader, doc, isCore, ttf, baseFontName, newFont);
+                var modified = segmentScoped && site.LitStart >= 0 && origName is not null
+                    && SplitFontRun(streamData, site.LitStart, site.LitEnd, text, origName, resName, site.Size) is { } xsplit
+                    ? xsplit
+                    : PatchName(streamData, site.NameStart, site.NameEnd, resName);
                 // A run's font is often re-selected by a redundant `/F Tf` that shows no
                 // text (immediately overridden). Repoint those to the replacement too, so
                 // the original font is left fully unreferenced and prunes cleanly instead
                 // of surviving as a dangling /Tf.
-                if (origName is not null)
+                if (origName is not null && (!segmentScoped || site.LitStart < 0))
                     modified = RepointRedundantTfs(modified, origName, resName);
                 xobjStream.Dict.Remove("Filter");
                 xobjStream.Dict.Remove("DecodeParms");
@@ -806,7 +948,7 @@ internal sealed class TextStateModifier
                 return true;
             }
 
-            if (ModifyFontInFormXObjects(xobjStream.Dict, reader, doc, text, isCore, ttf, baseFontName))
+            if (ModifyFontInFormXObjects(xobjStream.Dict, reader, doc, text, isCore, ttf, baseFontName, newFont, segmentScoped))
                 return true;
         }
         return false;
@@ -817,7 +959,7 @@ internal sealed class TextStateModifier
     /// becomes a plain Type1 dictionary (no descriptor / font file); any other font is
     /// embedded as a WinAnsi TrueType via <see cref="FontEmbedder"/>.</summary>
     private string RegisterFontResource(PdfDictionary container, Aspose.Pdf.IO.PdfReader reader,
-        Document doc, bool isCore, byte[]? ttf, string baseName)
+        Document doc, bool isCore, byte[]? ttf, string baseName, Font? newFont = null)
     {
         // Consolidate: use a deterministic resource key per replacement font so that
         // replacing every run of a page with the same font reuses ONE /Font entry
@@ -839,7 +981,13 @@ internal sealed class TextStateModifier
         }
         else
         {
-            FontEmbedder.Embed(doc, ttf!, resName, baseName).AddToResources(container, reader);
+            var embedder = FontEmbedder.Embed(doc, ttf!, resName, baseName);
+            embedder.AddToResources(container, reader);
+            // The caller may still clear IsEmbedded/IsSubset on the font after this
+            // assignment; record what was written so that choice can be applied to it.
+            if (newFont is not null && embedder.FontDict is not null)
+                newFont.TrackMaterialised(doc, embedder.FontDict, baseName,
+                    embedder.DescriptorObjNum, embedder.FontFileObjNum);
         }
         return resName;
     }
@@ -870,13 +1018,83 @@ internal sealed class TextStateModifier
     /// <summary>Walk a content stream and return the byte range of the font-name
     /// operand of the Tf that is active when the first text-showing operator whose
     /// decoded string contains <paramref name="text"/> is reached.</summary>
-    private (int start, int end)? FindTfNameRange(byte[] streamBytes, string text,
+    /// <summary>Rewrite a literal show operator so only the matched substring is shown
+    /// in <paramref name="newRes"/>: the prefix keeps the original font, the match switches
+    /// font, and the suffix switches back. The pen advances through the new glyphs, so
+    /// trailing text moves by the width difference alone — the surrounding text keeps its
+    /// own metrics. Returns null when the operand isn't a plain 1:1 literal or the match
+    /// covers the whole run (the caller then repoints the Tf wholesale).</summary>
+    private static byte[]? SplitFontRun(byte[] original, int litStart, int litEnd,
+        string text, string origRes, string newRes, double size)
+    {
+        // The operand span starts where the lexer resumed, so it can carry leading
+        // whitespace ahead of the literal's '('.
+        while (litStart < litEnd && (original[litStart] == (byte)' ' || original[litStart] == (byte)'\t'
+            || original[litStart] == (byte)'\r' || original[litStart] == (byte)'\n'))
+            litStart++;
+        if (litEnd - litStart < 2 || string.IsNullOrEmpty(origRes)
+            || original[litStart] != (byte)'(' || original[litEnd - 1] != (byte)')')
+            return null;
+
+        int innerStart = litStart + 1;
+        int innerLen = litEnd - 1 - innerStart;
+        if (innerLen <= 0) return null;
+        for (int i = innerStart; i < innerStart + innerLen; i++)
+        {
+            byte b = original[i];
+            if (b == (byte)'\\' || b == (byte)'(' || b == (byte)')') return null;
+        }
+
+        var innerBytes = new byte[innerLen];
+        Array.Copy(original, innerStart, innerBytes, 0, innerLen);
+        var inner = Cp1252.GetString(innerBytes);
+        int idx = inner.IndexOf(text, StringComparison.Ordinal);
+        if (idx < 0) return null;
+        // Whole-run match → the caller's Tf repoint is both correct and cheaper.
+        if (idx == 0 && text.Length == inner.Length) return null;
+
+        var prefix = inner.Substring(0, idx);
+        var suffix = inner.Substring(idx + text.Length);
+        string Tf(string res) => string.Format(CultureInfo.InvariantCulture,
+            "/{0} {1} Tf ", res, size.ToString("0.####", CultureInfo.InvariantCulture));
+
+        // Lead with a space so the first token never abuts the preceding operator.
+        var sb = new StringBuilder(" ");
+        if (prefix.Length > 0) sb.Append('(').Append(prefix).Append(") Tj ");
+        sb.Append(Tf(newRes)).Append('(').Append(text).Append(')');
+        if (suffix.Length > 0)
+        {
+            // The original Tj keyword after this operand shows the suffix.
+            sb.Append(" Tj ").Append(Tf(origRes)).Append('(').Append(suffix).Append(')');
+        }
+        else
+        {
+            sb.Append(" Tj ").Append(Tf(origRes)).Append("()");
+        }
+
+        var replacement = Encoding.ASCII.GetBytes(sb.ToString());
+        var result = new byte[original.Length - (litEnd - litStart) + replacement.Length];
+        Array.Copy(original, 0, result, 0, litStart);
+        Array.Copy(replacement, 0, result, litStart, replacement.Length);
+        Array.Copy(original, litEnd, result, litStart + replacement.Length, original.Length - litEnd);
+        return result;
+    }
+
+    /// <summary>Where a font swap can be applied: the `/Name` operand span of the
+    /// governing Tf, plus — when the match sits inside a plain single-byte literal
+    /// show operand — that operand's span and the active Tf size, which let the
+    /// caller split the run instead of repointing the whole Tf.</summary>
+    private readonly record struct FontSwapSite(int NameStart, int NameEnd,
+        int LitStart, int LitEnd, double Size, string Decoded);
+
+    private FontSwapSite? FindTfNameRange(byte[] streamBytes, string text,
         PdfDictionary pageDict, PdfReader reader)
     {
         var fonts = TextAbsorber.ResolveFonts(pageDict, reader);
         var lexer = new PdfLexer(streamBytes);
         var operands = new List<(TokenKind kind, PdfObject obj, int startPos, int endPos)>();
         int lastTfNameStart = -1, lastTfNameEnd = -1;
+        double lastTfSize = 0;
         Dictionary<int, string>? currentToUnicode = null;
         // Only a simple (single-byte) font can be swapped for our simple WinAnsi
         // embedded font by repointing Tf: the shown bytes are reinterpreted under
@@ -960,6 +1178,8 @@ internal sealed class TextStateModifier
                                 }
                                 lastTfNameStart = operands[0].startPos;
                                 lastTfNameEnd = operands[0].endPos;
+                                lastTfSize = operands[1].obj is PdfInteger ti ? ti.Value
+                                    : operands[1].obj is PdfReal tr ? tr.Value : 0;
                             }
                             break;
                         case "Tj":
@@ -970,7 +1190,13 @@ internal sealed class TextStateModifier
                             {
                                 var decoded = DecodeTextString(showStr.Value, currentToUnicode);
                                 if (decoded.Contains(text) && lastTfNameStart >= 0 && currentFontIsSimple)
-                                    return (lastTfNameStart, lastTfNameEnd);
+                                {
+                                    var litOk = op == "Tj" && operands[^1].kind == TokenKind.LiteralString;
+                                    return new FontSwapSite(lastTfNameStart, lastTfNameEnd,
+                                        litOk ? operands[^1].startPos : -1,
+                                        litOk ? operands[^1].endPos : -1,
+                                        lastTfSize, decoded);
+                                }
                             }
                             break;
                     }

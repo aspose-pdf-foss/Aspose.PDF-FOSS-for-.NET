@@ -73,6 +73,21 @@ public sealed class SignatureOptions
     /// catalog /Perms /DocMDP entry points at it. Null = an ordinary approval
     /// signature.</summary>
     public int? DocMdpPermissions { get; set; }
+
+    /// <summary>RFC 3161 Time-Stamp Authority URL. Consumed by
+    /// <see cref="PdfSigner.SignDocumentTimestamp"/> to produce a document
+    /// timestamp (/SubFilter <c>ETSI.RFC3161</c>).</summary>
+    public string? TimestampUrl { get; set; }
+
+    /// <summary>Optional Base64 BasicAuth value sent to the TSA.</summary>
+    public string? TimestampBasicAuth { get; set; }
+
+    /// <summary>Digest algorithm for the document-timestamp message imprint.</summary>
+    public DigestHashAlgorithm TimestampDigest { get; set; } = DigestHashAlgorithm.Sha256;
+
+    /// <summary>Message digest for the signature itself. <see cref="DigestHashAlgorithm.Auto"/>
+    /// defers to the /SubFilter default (SHA-1 for the legacy handlers, SHA-256 otherwise).</summary>
+    public DigestHashAlgorithm Digest { get; set; } = DigestHashAlgorithm.Auto;
 }
 
 /// <summary>
@@ -209,9 +224,11 @@ public sealed class PdfSigner
         // Find and replace the placeholder ByteRange
         PatchByteRange(fileBytes, byteRange);
 
-        // Step 5: Compute the hash over the two byte ranges (SHA-256, or SHA-1 for
-        // the adbe.pkcs7.sha1 / adbe.x509.rsa_sha1 handlers).
-        var digest = DigestForSubFilter(options.SubFilter);
+        // Step 5: Compute the hash over the two byte ranges. Which digest applies
+        // depends on the caller's request, the /SubFilter default (SHA-1 for the
+        // adbe.pkcs7.sha1 / adbe.x509.rsa_sha1 handlers) and the signing key.
+        var digest = CmsBuilder.ResolveDigest(
+            certificate.KeyKind, options.Digest, DigestForSubFilter(options.SubFilter));
         var hashInput = new byte[(int)byteRange[1] + (int)byteRange[3]];
         Array.Copy(fileBytes, 0, hashInput, 0, (int)byteRange[1]);
         Array.Copy(fileBytes, (int)byteRange[2], hashInput, (int)byteRange[1], (int)byteRange[3]);
@@ -234,6 +251,110 @@ public sealed class PdfSigner
 
         // Write hex string into the placeholder (skip the leading '<' at contentsOffset)
         var hexBytes = Encoding.ASCII.GetBytes(hexSignature);
+        Array.Copy(hexBytes, 0, fileBytes, (int)contentsOffset + 1, hexBytes.Length);
+
+        return fileBytes;
+    }
+
+    /// <summary>
+    /// Add an RFC 3161 document timestamp (PAdES DocTimeStamp, /SubFilter
+    /// <c>ETSI.RFC3161</c>) via an incremental update. Hashes the ByteRange,
+    /// requests a timestamp token from the TSA in
+    /// <see cref="SignatureOptions.TimestampUrl"/>, and writes the token into
+    /// the signature /Contents. No signing certificate is involved — the token
+    /// is produced by the TSA.
+    /// </summary>
+    public static byte[] SignDocumentTimestamp(byte[] pdfData, SignatureOptions options)
+    {
+        // A TSA token embeds the TSA certificate chain, so reserve generously.
+        const int contentsSize = 16384;
+
+        using var doc = OpenDoc(pdfData, options.Password);
+        var reader = doc.Reader;
+        var trailer = reader.Trailer;
+        var xref = reader.XRefTable;
+
+        var fieldName = ResolveSignatureFieldName(doc, options.FieldName);
+
+        var maxObj = 0;
+        foreach (var entry in xref.Entries.Values)
+            if (entry.ObjectNumber > maxObj) maxObj = entry.ObjectNumber;
+        var nextObj = maxObj + 1;
+
+        var existingFieldRef = FindTopLevelFieldRef(doc, fieldName);
+        var existingFieldDict = existingFieldRef is not null
+            ? doc.Reader.ResolveDict(existingFieldRef)
+            : null;
+
+        var sigValObjNum = nextObj++;
+        var sigFieldObjNum = existingFieldDict is not null
+            ? existingFieldRef!.ObjectNumber
+            : nextObj++;
+        var acroFormObjNum = nextObj++;
+
+        using var ms = new MemoryStream();
+        ms.Write(pdfData);
+
+        var sigValDict = BuildTimestampValueDict(contentsSize);
+        var sigFieldDict = existingFieldDict is not null
+            ? BuildUpdatedSignatureFieldDict(existingFieldDict, sigValObjNum)
+            : BuildSignatureFieldDict(fieldName, sigValObjNum, doc);
+        var acroFormDict = BuildAcroFormDict(doc, sigFieldObjNum,
+            appendField: existingFieldDict is null);
+
+        var offsets = new Dictionary<int, long>();
+
+        offsets[sigValObjNum] = ms.Position;
+        var sigValBytes = SerializeObject(sigValObjNum, sigValDict, contentsSize,
+            out var contentsOffset, out var contentsLength);
+        ms.Write(sigValBytes);
+        contentsOffset += offsets[sigValObjNum];
+
+        offsets[sigFieldObjNum] = ms.Position;
+        WriteIndirectObject(ms, sigFieldObjNum, sigFieldDict);
+
+        offsets[acroFormObjNum] = ms.Position;
+        WriteIndirectObject(ms, acroFormObjNum, acroFormDict);
+
+        var catalogRef = trailer.Get("Root") as PdfIndirectRef;
+        var catalogObjNum = catalogRef?.ObjectNumber ?? 1;
+        var catalogDict = CloneDict(reader.Catalog);
+        catalogDict.Set("AcroForm", new PdfIndirectRef(acroFormObjNum, 0));
+
+        offsets[catalogObjNum] = ms.Position;
+        WriteIndirectObject(ms, catalogObjNum, catalogDict);
+
+        var originalStartXref = XRefTable.FindStartXref(pdfData);
+        WriteXRefAndTrailer(ms, offsets, trailer, nextObj, originalStartXref);
+
+        var fileBytes = ms.ToArray();
+
+        var byteRange = new long[]
+        {
+            0,
+            contentsOffset,
+            contentsOffset + contentsLength,
+            fileBytes.Length - (contentsOffset + contentsLength)
+        };
+        PatchByteRange(fileBytes, byteRange);
+
+        var digest = options.TimestampDigest == DigestHashAlgorithm.Auto
+            ? DigestHashAlgorithm.Sha256
+            : options.TimestampDigest;
+        var hashInput = new byte[(int)byteRange[1] + (int)byteRange[3]];
+        Array.Copy(fileBytes, 0, hashInput, 0, (int)byteRange[1]);
+        Array.Copy(fileBytes, (int)byteRange[2], hashInput, (int)byteRange[1], (int)byteRange[3]);
+        var imprint = HashData(hashInput, digest);
+
+        var token = Rfc3161.RequestTimestampToken(
+            options.TimestampUrl ?? string.Empty, options.TimestampBasicAuth, digest, imprint);
+
+        if (token.Length > contentsSize)
+            throw new InvalidOperationException(
+                $"Timestamp token ({token.Length} bytes) exceeds reserved space ({contentsSize} bytes).");
+
+        var hexToken = Convert.ToHexString(token).PadRight(contentsSize * 2, '0');
+        var hexBytes = Encoding.ASCII.GetBytes(hexToken);
         Array.Copy(hexBytes, 0, fileBytes, (int)contentsOffset + 1, hexBytes.Length);
 
         return fileBytes;
@@ -275,9 +396,24 @@ public sealed class PdfSigner
             off1 + len1 > pdfData.Length || off2 + len2 > pdfData.Length)
             return false;
 
+        // The /ByteRange gap is exempt from the digest, so the signature can
+        // only vouch for the whole file if the gap holds exactly the /Contents
+        // hex string (optionally wrapped in whitespace). Any other byte in the
+        // gap — e.g. text overwriting the hex padding — is a post-signing
+        // modification the digest cannot see: treat it as tampering.
+        if (!GapIsSingleHexString(pdfData, (int)len1, (int)off2))
+            return false;
+
         var signedData = new byte[len1 + len2];
         Array.Copy(pdfData, off1, signedData, 0, len1);
         Array.Copy(pdfData, off2, signedData, len1, len2);
+
+        // ETSI.RFC3161 document timestamp: /Contents is an RFC 3161 TimeStampToken
+        // (an enveloping CMS whose eContent is a TSTInfo), not a detached signature.
+        // Verify the TSA's signature and that the token's message imprint matches
+        // the digest of the covered ByteRange bytes.
+        if (sig.SubFilter == "ETSI.RFC3161")
+            return Rfc3161.VerifyToken(contents, signedData);
 
         // Raw adbe.x509.rsa_sha1 (PKCS#1): /Contents is a bare RSA signature over
         // SHA-1 of the ByteRange, and the certificate lives in the signature dict's
@@ -305,6 +441,30 @@ public sealed class PdfSigner
         if (TryVerifyCms(HmacSha.Sha1Hash(signedData), contents))
             return true;
         return false;
+    }
+
+    /// <summary>True when the bytes between <paramref name="gapStart"/> and
+    /// <paramref name="gapEnd"/> are exactly one PDF hex string —
+    /// <c>&lt;hex-digits&gt;</c> with PDF whitespace allowed inside and around it.</summary>
+    private static bool GapIsSingleHexString(byte[] data, int gapStart, int gapEnd)
+    {
+        if (gapStart < 0 || gapEnd > data.Length || gapStart >= gapEnd) return false;
+        static bool IsWs(byte c) => c is 0x00 or 0x09 or 0x0A or 0x0C or 0x0D or 0x20;
+        static bool IsHex(byte c) => (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+
+        var i = gapStart;
+        while (i < gapEnd && IsWs(data[i])) i++;
+        if (i >= gapEnd || data[i] != (byte)'<') return false;
+        i++;
+        while (i < gapEnd && data[i] != (byte)'>')
+        {
+            if (!IsHex(data[i]) && !IsWs(data[i])) return false;
+            i++;
+        }
+        if (i >= gapEnd) return false; // no closing '>'
+        i++;
+        while (i < gapEnd && IsWs(data[i])) i++;
+        return i >= gapEnd;
     }
 
     /// <summary>If <paramref name="data"/> is a single DER OCTET STRING, return its
@@ -478,7 +638,8 @@ public sealed class PdfSigner
         PatchByteRange(fileBytes, byteRange);
 
         // Hash the two byte ranges (SHA-256, or SHA-1 for adbe.pkcs7.sha1 / adbe.x509.rsa_sha1).
-        var digest = DigestForSubFilter(options.SubFilter);
+        var digest = CmsBuilder.ResolveDigest(
+            certificate.KeyKind, options.Digest, DigestForSubFilter(options.SubFilter));
         var hashInput = new byte[(int)byteRange[1] + (int)byteRange[3]];
         Array.Copy(fileBytes, 0, hashInput, 0, (int)byteRange[1]);
         Array.Copy(fileBytes, (int)byteRange[2], hashInput, (int)byteRange[1], (int)byteRange[3]);
@@ -557,6 +718,30 @@ public sealed class PdfSigner
         }
 
         // /Contents placeholder — hex string of zeros
+        var contentsPlaceholder = new byte[contentsSize];
+        dict.Set("Contents", new PdfString(contentsPlaceholder, isHex: true));
+
+        return dict;
+    }
+
+    /// <summary>Build the value dictionary of an RFC 3161 document timestamp
+    /// (PAdES DocTimeStamp): /Type /DocTimeStamp, /SubFilter /ETSI.RFC3161, plus
+    /// ByteRange and /Contents placeholders. No /Name/Reason/date — the trusted
+    /// time comes from the TSA token written into /Contents.</summary>
+    private static PdfDictionary BuildTimestampValueDict(int contentsSize)
+    {
+        var dict = new PdfDictionary();
+        dict.Set("Type", new PdfName("DocTimeStamp"));
+        dict.Set("Filter", new PdfName("Adobe.PPKLite"));
+        dict.Set("SubFilter", new PdfName("ETSI.RFC3161"));
+
+        var byteRangeArray = new PdfArray();
+        byteRangeArray.Add(new PdfInteger(0));
+        byteRangeArray.Add(new PdfInteger(9999999999)); // placeholder
+        byteRangeArray.Add(new PdfInteger(9999999999)); // placeholder
+        byteRangeArray.Add(new PdfInteger(9999999999)); // placeholder
+        dict.Set("ByteRange", byteRangeArray);
+
         var contentsPlaceholder = new byte[contentsSize];
         dict.Set("Contents", new PdfString(contentsPlaceholder, isHex: true));
 
@@ -723,7 +908,20 @@ public sealed class PdfSigner
 
     /// <summary>Hash the concatenated ByteRange input with the given digest.</summary>
     private static byte[] HashByteRange(byte[] input, DigestHashAlgorithm digest)
-        => digest == DigestHashAlgorithm.Sha1 ? HmacSha.Sha1Hash(input) : ShaDigest.Sha256(input);
+        => HashData(input, digest);
+
+    /// <summary>Hash arbitrary data with the named digest — the document
+    /// timestamp path supports SHA-1/256/384/512 message imprints.</summary>
+    private static byte[] HashData(byte[] data, DigestHashAlgorithm digest) => digest switch
+    {
+        DigestHashAlgorithm.Sha1 => HmacSha.Sha1Hash(data),
+        DigestHashAlgorithm.Sha384 => ShaDigest.Sha384(data),
+        DigestHashAlgorithm.Sha512 => ShaDigest.Sha512(data),
+        DigestHashAlgorithm.Sha3_256 => new Sha3_256().ComputeHash(data),
+        DigestHashAlgorithm.Sha3_384 => new Sha3_384().ComputeHash(data),
+        DigestHashAlgorithm.Sha3_512 => new Sha3_512().ComputeHash(data),
+        _ => ShaDigest.Sha256(data),
+    };
 
     /// <summary>
     /// Serialize an indirect object, tracking the position and length of the /Contents hex string.
@@ -1056,7 +1254,7 @@ public sealed class PdfSigner
 
         // Resources with the appearance font (a custom appearance may request a
         // specific family, e.g. "Times New Roman" → "TimesNewRoman"). The default is
-        // Arial — the reference signer names the concrete host face rather than the
+        // Arial — the signer names the concrete host face rather than the
         // abstract Helvetica (a signed PDF/A must embed a concrete font, e.g. Arial).
         var baseFont = string.IsNullOrEmpty(appearance.FontFamily)
             ? "Arial"

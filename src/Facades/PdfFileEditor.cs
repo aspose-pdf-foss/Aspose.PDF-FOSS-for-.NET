@@ -109,7 +109,7 @@ public sealed partial class PdfFileEditor
             using (var output = File.Create(tempPath))
             {
                 var writer = new PdfWriter(output);
-                // Aspose.Pdf writes concatenated output as PDF 1.7 regardless
+                // Concatenated output is written as PDF 1.7 regardless
                 // of the input versions.
                 writer.WriteHeader("1.7");
 
@@ -123,31 +123,39 @@ public sealed partial class PdfFileEditor
                 var inputReaders = new List<PdfReader>();
                 var inputPageCounts = new List<int>();
                 // Retain the first input's reader + object map so its catalog-level
-                // /OpenAction can be preserved (Aspose.Pdf behaviour) and remapped through
+                // /OpenAction can be preserved and remapped through
                 // the same map — the open-action destination then still points at its
                 // (already-written) page rather than a duplicate.
                 PdfReader? firstReader = null;
                 Dictionary<int, int>? firstObjRemap = null;
+                // Per-input seed maps for MergeOutlines: the input's object map PLUS the
+                // source-page-object → output-page-object pairs, so an outline /Dest that
+                // references a page remaps onto the page ALREADY written into the tree
+                // instead of cloning an orphan copy of it.
+                var inputOutlineSeeds = new List<Dictionary<int, int>>();
                 foreach (var inputData in inputFiles)
                 {
                     var reader = PdfReader.FromBytes(inputData);
                     inputReaders.Add(reader);
                     var catalog = reader.Catalog;
                     var pagesDict = reader.ResolveDict(catalog.Get("Pages"));
-                    if (pagesDict is null) { inputPageCounts.Add(0); continue; }
+                    if (pagesDict is null) { inputPageCounts.Add(0); inputOutlineSeeds.Add(new Dictionary<int, int>()); continue; }
 
                     var pages = new List<PdfDictionary>();
-                    CollectPages(pagesDict, reader, pages);
+                    var pageSrcNums = new List<int>();
+                    CollectPages(pagesDict, reader, pages, pageSrcNums);
                     inputPageCounts.Add(pages.Count);
 
                     // Per-input object remapping: sourceObjNum → outputObjNum.
                     // Objects referenced by multiple pages in the same input are written once
                     // and shared via indirect refs — preventing resource duplication bloat.
                     var objRemap = new Dictionary<int, int>();
+                    var pageSrcToOut = new Dictionary<int, int>();
                     if (firstReader is null) { firstReader = reader; firstObjRemap = objRemap; }
 
-                    foreach (var pageDict in pages)
+                    for (var pi = 0; pi < pages.Count; pi++)
                     {
+                        var pageDict = pages[pi];
                         // Remap the page dict: each source indirect ref is assigned a new
                         // output obj num and the referenced object is written once.
                         // RemapObject uses writer.AllocateObjectNumber() so it stays in sync
@@ -158,7 +166,14 @@ public sealed partial class PdfFileEditor
                         var pageObjNum = writer.AllocateObjectNumber();
                         writer.WriteIndirectObject(pageObjNum, cloned);
                         allPageObjNums.Add(pageObjNum);
+                        // Remember where this SOURCE page landed (for the outline seed
+                        // below) without touching objRemap itself — the main pass keeps
+                        // its allocation order.
+                        if (pageSrcNums[pi] >= 0) pageSrcToOut[pageSrcNums[pi]] = pageObjNum;
                     }
+                    var outlineSeed = new Dictionary<int, int>(objRemap);
+                    foreach (var kv in pageSrcToOut) outlineSeed[kv.Key] = kv.Value;
+                    inputOutlineSeeds.Add(outlineSeed);
                 }
 
                 // Write Pages object
@@ -305,7 +320,14 @@ public sealed partial class PdfFileEditor
                     if (rootKids.Count > 0)
                     {
                         var rootDict = new PdfDictionary();
-                        rootDict.Set("T", new PdfString(System.Text.Encoding.UTF8.GetBytes("root[0]")));
+                        // The synthetic root's /T is written as UTF-16BE with BOM — the
+                        // standard PDF text-string form for names introduced by a merge
+                        // (ToText decodes it back to "root[0]" for name lookups).
+                        var rootT = "root[0]";
+                        var rootTBytes = new byte[2 + rootT.Length * 2];
+                        rootTBytes[0] = 0xFE; rootTBytes[1] = 0xFF;
+                        System.Text.Encoding.BigEndianUnicode.GetBytes(rootT, 0, rootT.Length, rootTBytes, 2);
+                        rootDict.Set("T", new PdfString(rootTBytes));
                         rootDict.Set("Kids", rootKids);
                         writer.WriteIndirectObject(rootNum, rootDict);
                         acroFormDict = new PdfDictionary();
@@ -366,14 +388,19 @@ public sealed partial class PdfFileEditor
                             }
 
                             // Merge mode (legacy): pre-allocate, flat-clone, merge colliding widgets.
+                            // Top-level fields that resolve to the same fully-qualified name are the
+                            // same field and fold their widgets together — including nameless entries
+                            // (e.g. bare Link annotations mistakenly listed in /Fields), which all share
+                            // the empty name and collapse into a single field rather than each counting.
                             int outNum = writer.AllocateObjectNumber();
                             if (fieldRef is PdfIndirectRef fr) acroRemap[fr.ObjectNumber] = outNum;
                             var cloned = (PdfDictionary)RemapObject(srcDict, reader, acroRemap, writer);
-                            if (name is not null && byName.TryGetValue(name, out var existingIdx))
+                            var mergeKey = name ?? "";
+                            if (byName.TryGetValue(mergeKey, out var existingIdx))
                                 MergeFieldWidgets(outFields[existingIdx].dict, cloned);
                             else
                             {
-                                if (name is not null) byName[name] = outFields.Count;
+                                byName[mergeKey] = outFields.Count;
                                 outFields.Add((cloned, outNum));
                             }
                         }
@@ -413,7 +440,7 @@ public sealed partial class PdfFileEditor
                 }
 
                 // Merge outlines (bookmarks) from all input documents
-                MergeOutlines(inputReaders, inputPageCounts, catalogDict, writer);
+                MergeOutlines(inputReaders, inputPageCounts, inputOutlineSeeds, catalogDict, writer);
                 if (CopyLogicalStructure)
                     MergeStructTrees(inputReaders, catalogDict, writer);
 
@@ -515,6 +542,28 @@ public sealed partial class PdfFileEditor
         // Drop the removed pages' now-orphaned objects (their images can be the bulk of the
         // file) instead of carrying the whole source into the extracted output.
         doc.CompactAfterPageRemoval();
+        return ApplySizeOptimization(doc.ToArray());
+    }
+
+    // CompactAfterPageRemoval only detaches the deleted pages; objects the source reached by
+    // other routes still travel with the extract, so a one-page cut of a large document keeps
+    // paying for the whole original. Under OptimizeSize the extract is additionally reduced to
+    // what the surviving pages actually reach. Streams are left alone — this is a pure
+    // reachability prune, not a re-encode.
+    //
+    // The prune runs on the serialized extract rather than on the still-open document: page
+    // deletions live in the in-memory page tree, while the reachability walk starts from the
+    // trailer as parsed, which still names every original page. Walking that would mark the
+    // whole source reachable and prune nothing. Writing first collapses the two views into one.
+    private byte[] ApplySizeOptimization(byte[] extracted)
+    {
+        if (!OptimizeSize) return extracted;
+        using var doc = Document.Open(extracted);
+        doc.OptimizeResources(new Aspose.Pdf.Optimization.OptimizationOptions
+        {
+            RemoveUnusedObjects = true,
+            RemoveUnusedStreams = false,
+        });
         return doc.ToArray();
     }
 
@@ -571,7 +620,7 @@ public sealed partial class PdfFileEditor
             if (!keep.Contains(i)) doc.Pages.Delete(i);
 
         doc.CompactAfterPageRemoval();
-        return doc.ToArray();
+        return ApplySizeOptimization(doc.ToArray());
     }
 
     /// <summary>
@@ -771,6 +820,15 @@ public sealed partial class PdfFileEditor
     /// </summary>
     public byte[] Append(byte[] inputPdf, byte[][] portPdfs, int startPage, int endPage)
     {
+        // When the destination and at least one appended source both carry an XFA
+        // template, go through Concatenate: the page-import path below keeps the
+        // destination's AcroForm untouched, so the sources' /XFA packets would be
+        // dropped instead of merged (top template subforms re-parented under a
+        // synthetic "root", colliding names disambiguated per UniqueSuffix /
+        // KeepFieldsUnique, datasets merged in parallel, AcroForm tree re-rooted).
+        var xfaPieces = BuildXfaAppendInputs(inputPdf, portPdfs, startPage, endPage);
+        if (xfaPieces is not null) return Concatenate(xfaPieces);
+
         // Open the destination document and import the requested source pages onto it via
         // the cross-doc Pages.Add path, then save. Unlike the byte-level Concatenate this
         // keeps the destination's own catalog (AcroForm/outlines) intact, remaps the added
@@ -919,7 +977,7 @@ public sealed partial class PdfFileEditor
         // geometry so ink strokes / rects / quadpoints track the resized content.
         TransformAnnotationGeometry(page, sx, sy, tx, ty);
 
-        // Normalize degenerate shape-annotation appearances (mirrors Aspose.PDF's
+        // Normalize degenerate shape-annotation appearances (part of
         // resize-with-normalization): a Square/Circle that ships a missing or empty /N
         // appearance stream gets a freshly regenerated /AP /N.
         NormalizeDegenerateShapeAppearances(page);
@@ -1134,7 +1192,7 @@ public sealed partial class PdfFileEditor
         }
         catch (IOException ex)
         {
-            // Aspose.Pdf surfaces missing/unreadable inputs as a PdfException
+            // Missing/unreadable inputs surface as a PdfException
             // WRAPPING the IO error — callers (and TryConcatenate's LastException)
             // pattern-match on InnerException being e.g. FileNotFoundException.
             throw new PdfException(ex.Message, ex);
@@ -1259,7 +1317,7 @@ public sealed partial class PdfFileEditor
         var inputs = inputStream.Select(ReadStream).ToArray();
         var result = Concatenate(inputs);
         outputStream.Write(result, 0, result.Length);
-        // Aspose.Pdf leaves a seekable output rewound so callers can read
+        // A seekable output is left rewound so callers can read
         // the concatenated bytes back without seeking.
         if (outputStream.CanSeek) outputStream.Position = 0;
         if (CloseConcatenatedStreams)
@@ -1275,7 +1333,7 @@ public sealed partial class PdfFileEditor
     {
         var result = Concatenate(ReadStream(firstInputStream), ReadStream(secInputStream));
         outputStream.Write(result, 0, result.Length);
-        // Aspose.Pdf leaves a seekable output rewound so callers can read
+        // A seekable output is left rewound so callers can read
         // the concatenated bytes back without seeking.
         if (outputStream.CanSeek) outputStream.Position = 0;
         if (CloseConcatenatedStreams)
@@ -1297,7 +1355,7 @@ public sealed partial class PdfFileEditor
             ReadStream(secInputStream),
         });
         outputStream.Write(result, 0, result.Length);
-        // Aspose.Pdf leaves a seekable output rewound so callers can read
+        // A seekable output is left rewound so callers can read
         // the concatenated bytes back without seeking.
         if (outputStream.CanSeek) outputStream.Position = 0;
         if (CloseConcatenatedStreams)
@@ -1361,7 +1419,7 @@ public sealed partial class PdfFileEditor
     /// break are deep-cloned unchanged.
     /// </summary>
     /// <remarks>
-    /// PDF readers (Adobe / Aspose / our renderer) treat each page's MediaBox
+    /// PDF readers (Adobe, our renderer) treat each page's MediaBox
     /// as the physical paper size and clip drawing operators outside it. So a
     /// source page with MediaBox [0,0,612,792] and a PageBreak at y=450 becomes:
     ///   - destination page with MediaBox [0,450,612,792] (top half)
@@ -1507,6 +1565,18 @@ public sealed partial class PdfFileEditor
                 }
                 annot.Set("InkList", newInk);
             }
+
+            // /Vertices: a flat [x1 y1 x2 y2 …] coordinate list (Polygon / PolyLine).
+            if (reader.Resolve(annot.Get("Vertices")) is PdfArray vertices)
+            {
+                var nv = new PdfArray();
+                for (var i = 0; i + 1 < vertices.Count; i += 2)
+                {
+                    nv.Add(new PdfReal(NumberFrom(vertices[i]) * sx + tx));
+                    nv.Add(new PdfReal(NumberFrom(vertices[i + 1]) * sy + ty));
+                }
+                annot.Set("Vertices", nv);
+            }
         }
     }
 
@@ -1519,8 +1589,8 @@ public sealed partial class PdfFileEditor
 
     /// <summary>Regenerate the normal appearance of Square/Circle annotations whose
     /// existing /AP /N is missing or carries no drawing operators (a degenerate stream,
-    /// e.g. an empty body with a NaN BBox). Aspose.PDF's resize-with-normalization rebuilds
-    /// such appearances; FOSS otherwise leaves the figure with a degenerate/absent /N.
+    /// e.g. an empty body with a NaN BBox). Resize-with-normalization rebuilds
+    /// such appearances, which would otherwise be left degenerate/absent.
     /// Scoped to <see cref="Annotations.CommonFigureAnnotation"/> with an already-degenerate
     /// appearance so valid appearances and other annotation types are left untouched.</summary>
     private static void NormalizeDegenerateShapeAppearances(Page page)
@@ -1759,11 +1829,47 @@ public sealed partial class PdfFileEditor
         => suffix.Contains("%NUM%") ? suffix.Replace("%NUM%", n.ToString(System.Globalization.CultureInfo.InvariantCulture))
                                     : suffix + n.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
+    /// <summary>Route an Append through Concatenate when the destination and at least
+    /// one port carry an XFA template (the /XFA packets then merge instead of the
+    /// ports' being dropped). Returns the concatenation inputs — the destination plus
+    /// each port trimmed to the requested page range — or null when no XFA merge
+    /// applies. A port is passed whole when the range spans it entirely, so its /XFA +
+    /// AcroForm survive verbatim (Extract rebuilds a plain page document and would
+    /// shed them).</summary>
+    private byte[][]? BuildXfaAppendInputs(byte[] inputPdf, byte[][] portPdfs, int startPage, int endPage)
+    {
+        if (!HasXfaTemplate(inputPdf)) return null;
+        var pieces = new List<byte[]>(portPdfs.Length + 1) { inputPdf };
+        int withTemplate = 1;
+        foreach (var portData in portPdfs)
+        {
+            var piece = portData;
+            int pageCount;
+            using (var portDoc = Document.Open(portData)) pageCount = portDoc.PageCount;
+            if (startPage > 1 || endPage < pageCount)
+                piece = Extract(portData, startPage, endPage);
+            if (HasXfaTemplate(piece)) withTemplate++;
+            pieces.Add(piece);
+        }
+        return withTemplate >= 2 ? pieces.ToArray() : null;
+    }
+
+    /// <summary>True when the PDF's AcroForm carries an XFA template packet.</summary>
+    private static bool HasXfaTemplate(byte[] pdf)
+    {
+        try
+        {
+            TryGetXfaPackets(PdfReader.FromBytes(pdf), out var tplXml, out _);
+            return tplXml is not null;
+        }
+        catch { return false; }
+    }
+
     // ── XFA form merge ──────────────────────────────────────────────────────
     // When a Concatenate combines two or more XFA forms, each input's top-level
     // template subform(s) are re-parented under one synthetic "root" subform (with
     // the datasets data nodes wrapped in a matching <root> element), disambiguating
-    // colliding names. This mirrors Aspose.Pdf's XFA merge:
+    // colliding names. The XFA merge rules:
     //   • KeepFieldsUnique explicitly false      → keep duplicate names as occurrences
     //   • UniqueSuffix explicitly set             → rename duplicates with that suffix
     //   • otherwise (default)                     → identical subtree kept as an
@@ -2163,7 +2269,14 @@ public sealed partial class PdfFileEditor
                 parent.Remove(k);
             parent.Set("Kids", kids);
         }
-        kids.Add(ExtractWidget(second));
+        // A second that is itself a non-terminal field node contributes its widget
+        // kids directly — the merged field stays one level deep with every visual
+        // widget as a direct kid. A merged field+widget node demotes to one kid.
+        if (second.Get("Kids") is PdfArray secondKids)
+            foreach (var kid in secondKids)
+                kids.Add(kid);
+        else
+            kids.Add(ExtractWidget(second));
     }
 
     private static PdfObject RemapObject(PdfObject obj, PdfReader reader,
@@ -2382,7 +2495,7 @@ public sealed partial class PdfFileEditor
     }
 
     private static void MergeOutlines(List<PdfReader> readers, List<int> inputPageCounts,
-        PdfDictionary catalogDict, PdfWriter writer)
+        List<Dictionary<int, int>> inputOutlineSeeds, PdfDictionary catalogDict, PdfWriter writer)
     {
         // Phase 1: collect all top-level outline items with pre-allocated object numbers
         var items = new List<(int objNum, PdfDictionary dict)>();
@@ -2402,7 +2515,12 @@ public sealed partial class PdfFileEditor
 
             var firstRef = outlinesDict.Get("First");
             var current = reader.ResolveDict(firstRef);
-            var outlineRemap = new Dictionary<int, int>();
+            // Seeded with the input's already-written objects (pages included), so an
+            // outline /Dest referencing a page remaps onto the page in the output tree
+            // rather than cloning an orphan copy the destination would dangle on.
+            var outlineRemap = ri < inputOutlineSeeds.Count
+                ? new Dictionary<int, int>(inputOutlineSeeds[ri])
+                : new Dictionary<int, int>();
             while (current is not null)
             {
                 var cloned = (PdfDictionary)RemapObject(current, reader, outlineRemap, writer);
@@ -2488,11 +2606,16 @@ public sealed partial class PdfFileEditor
     // Page attributes that are inheritable down the /Pages tree (PDF spec §7.7.3.4).
     private static readonly string[] InheritablePageKeys = { "Resources", "MediaBox", "CropBox", "Rotate" };
 
-    private static void CollectPages(PdfDictionary node, PdfReader reader, List<PdfDictionary> result)
-        => CollectPages(node, reader, result, null);
+    private static void CollectPages(PdfDictionary node, PdfReader reader, List<PdfDictionary> result,
+        List<int>? sourceObjNums = null)
+        => CollectPages(node, reader, result, null, sourceObjNums, -1);
 
     private static void CollectPages(PdfDictionary node, PdfReader reader, List<PdfDictionary> result,
         Dictionary<string, PdfObject>? inherited)
+        => CollectPages(node, reader, result, inherited, null, -1);
+
+    private static void CollectPages(PdfDictionary node, PdfReader reader, List<PdfDictionary> result,
+        Dictionary<string, PdfObject>? inherited, List<int>? sourceObjNums, int selfObjNum)
     {
         // Accumulate the inheritable attributes declared at this node so descendant pages
         // that omit them (a page whose /Resources lives on an ancestor /Pages node) carry
@@ -2516,6 +2639,10 @@ public sealed partial class PdfFileEditor
         if (isPage)
         {
             result.Add(MaterializeInherited(node, effective));
+            // Record the page's SOURCE object number alongside — callers that
+            // rewrite references to pages (outline destinations) need to map the
+            // source ref onto the page's output object.
+            sourceObjNums?.Add(selfObjNum);
             return;
         }
 
@@ -2525,7 +2652,8 @@ public sealed partial class PdfFileEditor
         {
             var kidDict = reader.ResolveDict(kid);
             if (kidDict is not null)
-                CollectPages(kidDict, reader, result, effective);
+                CollectPages(kidDict, reader, result, effective, sourceObjNums,
+                    kid is PdfIndirectRef kidRef ? kidRef.ObjectNumber : -1);
         }
     }
 

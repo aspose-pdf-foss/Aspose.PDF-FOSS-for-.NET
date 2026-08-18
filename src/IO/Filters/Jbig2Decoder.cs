@@ -227,8 +227,16 @@ internal static class Jbig2Decoder
                     case 48:
                         DecodePageInfo(hdr);
                         break;
-                    // 36/40 (refinement), 4 (intermediate text region), 16/22/23/24
-                    // (pattern dict + halftone), 50/51 (end of page/file): no-op for us.
+                    case 16:
+                        DecodePatternDictionary(hdr);
+                        break;
+                    case 20:
+                    case 22:
+                    case 23:
+                        DecodeHalftoneRegion(hdr);
+                        break;
+                    // 36/40 (refinement), 4 (intermediate text region), 50/51
+                    // (end of page/file): no-op for us.
                 }
             }
             catch
@@ -314,7 +322,7 @@ internal static class Jbig2Decoder
             Jbig2Bitmap regionBitmap;
             if (mmr)
             {
-                regionBitmap = DecodeMmrBitmap(regionW, regionH, p, dataAvail);
+                regionBitmap = DecodeMmrG4(regionW, regionH, p, dataAvail);
             }
             else
             {
@@ -338,6 +346,204 @@ internal static class Jbig2Decoder
         }
 
         // ────────────────────────────────────────────────────────────────────
+        // Pattern dictionary (16) — T.88 §7.4.4 + §6.7
+        // ────────────────────────────────────────────────────────────────────
+
+        // Decoded pattern dictionaries, keyed by segment number; halftone regions
+        // reference these via their ReferredTo list.
+        private readonly Dictionary<int, Jbig2Bitmap[]> _patternDicts = new();
+
+        private void DecodePatternDictionary(SegmentHeader hdr)
+        {
+            var p = hdr.DataStart;
+            if (p + 7 > _data.Length) return;
+            var flags = _data[p];
+            var hdmmr = (flags & 0x01) != 0;
+            var hdTemplate = (flags >> 1) & 0x03;
+            int hdpw = _data[p + 1];
+            int hdph = _data[p + 2];
+            var grayMax = ReadInt32BE(_data, p + 3);
+            p += 7;
+            if (hdpw <= 0 || hdph <= 0 || grayMax < 0 || grayMax > 1 << 20) return;
+
+            var numPatterns = grayMax + 1;
+            var collectiveW = numPatterns * hdpw;
+            var dataAvail = hdr.DataStart + hdr.DataLength - p;
+            if (dataAvail <= 0) return;
+
+            // The collective bitmap holds all patterns side by side; slice it up.
+            Jbig2Bitmap collective;
+            if (hdmmr)
+            {
+                collective = DecodeMmrG4(collectiveW, hdph, p, dataAvail);
+            }
+            else
+            {
+                // Pattern-dict AT1 is non-nominal: (-HDPW, 0); the rest are nominal.
+                var at = hdTemplate == 0
+                    ? new (int, int)[] { (-hdpw, 0), (-3, -1), (2, -2), (-2, -2) }
+                    : new (int, int)[] { (-hdpw, 0) };
+                var ad = new ArithmeticDecoder(_data, p);
+                collective = new GenericRegionDecoder(ad, hdTemplate, at).Decode(collectiveW, hdph);
+            }
+
+            var patterns = new Jbig2Bitmap[numPatterns];
+            for (var m = 0; m < numPatterns; m++)
+            {
+                var pat = new Jbig2Bitmap(hdpw, hdph);
+                for (var y = 0; y < hdph; y++)
+                    for (var x = 0; x < hdpw; x++)
+                        pat.SetPixel(x, y, collective.GetPixel(m * hdpw + x, y));
+                patterns[m] = pat;
+            }
+            _patternDicts[hdr.Number] = patterns;
+        }
+
+        // ────────────────────────────────────────────────────────────────────
+        // Halftone region (20/22/23) — T.88 §7.4.5 + §6.6 (gray-scale image §C.5)
+        // ────────────────────────────────────────────────────────────────────
+
+        private void DecodeHalftoneRegion(SegmentHeader hdr)
+        {
+            var p = hdr.DataStart;
+            if (p + 18 > _data.Length) return;
+
+            var regionW = ReadInt32BE(_data, p);
+            var regionH = ReadInt32BE(_data, p + 4);
+            var regionX = ReadInt32BE(_data, p + 8);
+            var regionY = ReadInt32BE(_data, p + 12);
+            var combOp = _data[p + 16] & 0x07;
+            p += 17;
+
+            var hFlags = _data[p++];
+            var hmmr = (hFlags & 0x01) != 0;
+            var hTemplate = (hFlags >> 1) & 0x03;
+            var hEnableSkip = (hFlags & 0x08) != 0;
+            var hCombOp = (hFlags >> 4) & 0x07;
+            var hDefPixel = (hFlags >> 7) & 0x01;
+
+            if (p + 20 > _data.Length) return;
+            var hgw = ReadInt32BE(_data, p);
+            var hgh = ReadInt32BE(_data, p + 4);
+            var hgx = ReadInt32BE(_data, p + 8);
+            var hgy = ReadInt32BE(_data, p + 12);
+            var hrx = (_data[p + 16] << 8) | _data[p + 17];
+            var hry = (_data[p + 18] << 8) | _data[p + 19];
+            p += 20;
+
+            // The referenced pattern dictionary (from a referred-to segment).
+            Jbig2Bitmap[]? patterns = null;
+            foreach (var refSeg in hdr.ReferredTo)
+                if (_patternDicts.TryGetValue(refSeg, out var pd)) { patterns = pd; break; }
+            if (patterns is null || patterns.Length == 0
+                || regionW <= 0 || regionH <= 0 || hgw <= 0 || hgh <= 0) return;
+
+            var hpw = patterns[0].Width;
+            var hph = patterns[0].Height;
+            var numPatterns = patterns.Length;
+            var bpp = 0;
+            while ((1 << bpp) < numPatterns) bpp++;
+
+            var region = new Jbig2Bitmap(regionW, regionH, hDefPixel != 0);
+
+            // Optional skip bitmap: grid cells whose pattern lands fully outside the region.
+            Jbig2Bitmap? skip = null;
+            if (hEnableSkip)
+            {
+                skip = new Jbig2Bitmap(hgw, hgh);
+                for (var mg = 0; mg < hgh; mg++)
+                    for (var ng = 0; ng < hgw; ng++)
+                    {
+                        var xs = (hgx + mg * hry + ng * hrx) >> 8;
+                        var ys = (hgy + mg * hrx - ng * hry) >> 8;
+                        if (xs + hpw <= 0 || xs >= regionW || ys + hph <= 0 || ys >= regionH)
+                            skip.SetPixel(ng, mg, 1);
+                    }
+            }
+
+            // Gray-scale image (§C.5): bpp bitplanes decoded MSB-first from one shared
+            // generic-region context, then Gray-code combined into per-cell values.
+            var gray = new int[hgh, hgw];
+            if (bpp > 0 && !hmmr)
+            {
+                var ad = new ArithmeticDecoder(_data, p);
+                var grd = new GenericRegionDecoder(ad, hTemplate, System.Array.Empty<(int, int)>()); // nominal AT pixels
+                int[,]? prev = null;
+                for (var j = bpp - 1; j >= 0; j--)
+                {
+                    var plane = grd.Decode(hgw, hgh);
+                    var cur = new int[hgh, hgw];
+                    for (var mg = 0; mg < hgh; mg++)
+                        for (var ng = 0; ng < hgw; ng++)
+                        {
+                            var b = plane.GetPixel(ng, mg);
+                            if (prev is not null) b ^= prev[mg, ng]; // Gray decode
+                            cur[mg, ng] = b;
+                            gray[mg, ng] |= b << j;
+                        }
+                    prev = cur;
+                }
+            }
+            else if (bpp > 0 && hmmr)
+            {
+                // MMR-coded gray-scale image (§C.5): the bpp bitplanes are consecutive
+                // strict-T.6 (Group 4) bitmaps chained on one reader, decoded MSB-first,
+                // then Gray-code combined into per-cell values.
+                var segEnd = hdr.DataStart + hdr.DataLength;
+                var avail = Math.Max(0, Math.Min(segEnd - p, _data.Length - p));
+                var seg = new byte[avail];
+                Array.Copy(_data, p, seg, 0, avail);
+                var reader = new CcittFaxDecodeFilter.CcittBitReader(seg);
+                var rowBytes = (hgw + 7) / 8;
+                // Each of the GSBPP planes (MSB first) is an INDEPENDENT T.6 image: a fresh
+                // all-white reference line, terminated by an EOFB and byte-aligned to the next
+                // plane. Decode per plane, consume the EOFB + align, then Gray-code combine.
+                int[,]? prev = null;
+                for (var j = bpp - 1; j >= 0; j--)
+                {
+                    var bytes = CcittFaxDecodeFilter.DecodeGroup4Region(reader, hgw, hgh);
+                    var cur = new int[hgh, hgw];
+                    for (var mg = 0; mg < hgh; mg++)
+                        for (var ng = 0; ng < hgw; ng++)
+                        {
+                            var idx = mg * rowBytes + (ng >> 3);
+                            var b = idx < bytes.Length ? (bytes[idx] >> (7 - (ng & 7))) & 1 : 0;
+                            if (prev is not null) b ^= prev[mg, ng]; // Gray decode
+                            cur[mg, ng] = b;
+                            gray[mg, ng] |= b << j;
+                        }
+                    prev = cur;
+                    reader.ConsumeEofbAndByteAlign();
+                }
+            }
+
+            // Render each grid cell's pattern at its rotated/scaled position.
+            for (var mg = 0; mg < hgh; mg++)
+                for (var ng = 0; ng < hgw; ng++)
+                {
+                    if (skip is not null && skip.GetPixel(ng, mg) != 0) continue;
+                    var gv = gray[mg, ng];
+                    if (gv < 0) gv = 0;
+                    else if (gv >= numPatterns) gv = numPatterns - 1;
+                    var x = (hgx + mg * hry + ng * hrx) >> 8;
+                    var y = (hgy + mg * hrx - ng * hry) >> 8;
+                    region.CompositeAt(patterns[gv], x, y, hCombOp);
+                }
+
+            if (_pageBitmap is not null)
+            {
+                CompositeRegionOntoPage(region, regionX, regionY, combOp);
+            }
+            else
+            {
+                _pageWidth = regionW;
+                _pageHeight = regionH;
+                _pageRowBytes = region.RowBytes;
+                _pageBitmap = (byte[])region.Data.Clone();
+            }
+        }
+
+        // ────────────────────────────────────────────────────────────────────
         // Symbol dictionary segment (0) — T.88 §7.4.2 + §6.5
         // ────────────────────────────────────────────────────────────────────
 
@@ -357,8 +563,7 @@ internal static class Jbig2Decoder
 
             if (sdHuff)
             {
-                // Out of scope: the Huffman-coded symbol-dictionary variant. Text regions
-                // referring to it will paint blanks but the rest of the stream still decodes.
+                DecodeSymbolDictionaryHuffman(hdr, p, sdFlags);
                 return;
             }
 
@@ -420,6 +625,17 @@ internal static class Jbig2Decoder
             var grCtxSd = new ArithmeticContext[8192];
             if (sdRefAgg) for (var i = 0; i < grCtxSd.Length; i++) grCtxSd[i] = new ArithmeticContext();
 
+            // Extra integer decoders used only by aggregate (REFAGGNINST>1) symbols,
+            // which are coded as an embedded text region (§6.5.8.2.2). Created once so
+            // their contexts persist across all aggregate symbols in this dictionary.
+            var iaDt = new IntegerDecoder(ad);
+            var iaFs = new IntegerDecoder(ad);
+            var iaDs = new IntegerDecoder(ad);
+            var iaIt = new IntegerDecoder(ad);
+            var iaRi = new IntegerDecoder(ad);
+            var iaRdw = new IntegerDecoder(ad);
+            var iaRdh = new IntegerDecoder(ad);
+
             var hcHeight = 0;
             var newIdx = 0;
 
@@ -458,9 +674,15 @@ internal static class Jbig2Decoder
                         }
                         else
                         {
-                            // Aggregate of >1 instances: decode as a small text region over the
-                            // symbols available so far. Rare; bail to avoid desync if unsupported.
-                            goto endDict;
+                            // Aggregate of >1 instances (§6.5.8.2.2): the symbol bitmap is a
+                            // text region placing nInst of the symbols decoded so far, sharing
+                            // this dictionary's arithmetic decoder and contexts.
+                            var avail = new System.ArraySegment<Jbig2Bitmap>(allSyms, 0, imported.Count + newIdx);
+                            bitmap = DecodeTextRegionBitmap(ad, avail,
+                                iaDt, iaFs, iaDs, iaIt, iaRi, iaIdSd, iaRdw, iaRdh, iaRdx, iaRdy, grCtxSd,
+                                symWidth, hcHeight, nInst, sbStrips: 1, refCorner: 1, transposed: false,
+                                sbCombOp: 0, sbDefPixel: false, sbDsOffset: 0, sbRefine: true,
+                                sbrTemplate: sdrTemplate, sbrAt: sdrAt);
                         }
                     }
                     else
@@ -482,6 +704,252 @@ internal static class Jbig2Decoder
             while (i2 < totalSyms)
             {
                 if (!iaEx.Decode(out var run)) break;
+                if (run < 0 || run > totalSyms - i2) run = totalSyms - i2;
+                if (exporting)
+                {
+                    for (var k = 0; k < run; k++)
+                    {
+                        var sym = allSyms[i2 + k];
+                        if (sym is not null) exported.Add(sym);
+                    }
+                }
+                i2 += run;
+                exporting = !exporting;
+            }
+
+            _symbolDicts[hdr.Number] = exported.ToArray();
+        }
+
+        /// <summary>
+        /// Core arithmetic text-region strip walk (T.88 §6.4.5): place symbol
+        /// instances into an SBW×SBH bitmap. Shared by aggregate-symbol decoding
+        /// (§6.5.8.2.2). All arithmetic/integer decoders and contexts are supplied by
+        /// the caller so state persists across invocations.
+        /// </summary>
+        private Jbig2Bitmap DecodeTextRegionBitmap(
+            ArithmeticDecoder ad, IReadOnlyList<Jbig2Bitmap> symbols,
+            IntegerDecoder iaDt, IntegerDecoder iaFs, IntegerDecoder iaDs, IntegerDecoder iaIt,
+            IntegerDecoder iaRi, IaidDecoder iaId, IntegerDecoder iaRdw, IntegerDecoder iaRdh,
+            IntegerDecoder iaRdx, IntegerDecoder iaRdy, ArithmeticContext[] grCtx,
+            int sbw, int sbh, int sbNumInstances, int sbStrips, int refCorner, bool transposed,
+            int sbCombOp, bool sbDefPixel, int sbDsOffset, bool sbRefine, int sbrTemplate, (int, int)[] sbrAt)
+        {
+            var region = new Jbig2Bitmap(sbw, sbh, sbDefPixel);
+            if (!iaDt.Decode(out var firstDt)) return region;
+            int stripT = -firstDt, firstS = 0, decoded = 0;
+
+            while (decoded < sbNumInstances)
+            {
+                var beforeStrip = decoded;
+                if (!iaDt.Decode(out var dt)) break;
+                stripT += dt;
+                if (!iaFs.Decode(out var dfs)) break;   // IAFS: once per strip
+                firstS += dfs;
+                var curS = firstS;
+
+                // Instances within a strip are terminated by an OOB IADS — NOT by the
+                // instance count. That terminating OOB must always be consumed (even after
+                // the final instance) so an embedded aggregate text region (§6.5.8.2.2)
+                // leaves the shared arithmetic stream aligned for the rest of the dictionary.
+                while (true)
+                {
+                    var curT = 0;
+                    if (sbStrips > 1)
+                    {
+                        if (!iaIt.Decode(out var ct)) break;
+                        curT = ct;
+                    }
+
+                    var idVal = iaId.Decode();
+                    if (idVal < 0 || idVal >= symbols.Count) idVal = 0;
+                    var symBitmap = symbols[idVal];
+
+                    if (sbRefine)
+                    {
+                        if (!iaRi.Decode(out var riVal)) break;
+                        if (riVal != 0 && symBitmap is not null)
+                        {
+                            if (!iaRdw.Decode(out var rdw)) break;
+                            if (!iaRdh.Decode(out var rdh)) break;
+                            if (!iaRdx.Decode(out var rdx)) break;
+                            if (!iaRdy.Decode(out var rdy)) break;
+                            var rw = symBitmap.Width + rdw;
+                            var rh = symBitmap.Height + rdh;
+                            if (rw > 0 && rh > 0 && rw <= 65535 && rh <= 65535)
+                                symBitmap = DecodeRefinement(ad, grCtx, rw, rh, sbrTemplate, sbrAt,
+                                    symBitmap, (rdw >> 1) + rdx, (rdh >> 1) + rdy);
+                        }
+                    }
+
+                    if (symBitmap is not null)
+                    {
+                        var symW = symBitmap.Width;
+                        var symH = symBitmap.Height;
+                        int placeS = curS, placeT = stripT * sbStrips + curT;
+
+                        int x, y;
+                        if (!transposed)
+                            switch (refCorner)
+                            {
+                                case 0: x = placeS; y = placeT - symH + 1; break;
+                                case 1: x = placeS; y = placeT; break;
+                                case 2: x = placeS - symW + 1; y = placeT - symH + 1; break;
+                                default: x = placeS - symW + 1; y = placeT; break;
+                            }
+                        else
+                            switch (refCorner)
+                            {
+                                case 0: x = placeT - symH + 1; y = placeS; break;
+                                case 1: x = placeT; y = placeS; break;
+                                case 2: x = placeT - symH + 1; y = placeS - symW + 1; break;
+                                default: x = placeT; y = placeS - symW + 1; break;
+                            }
+
+                        region.CompositeAt(symBitmap, x, y, sbCombOp);
+                        curS += (transposed ? symH : symW) - 1;
+                    }
+
+                    decoded++;
+                    if (!iaDs.Decode(out var dsVal)) break;   // OOB → end of strip (consumed)
+                    curS += dsVal + sbDsOffset;
+                    if (decoded >= sbNumInstances) break;     // overrun guard (malformed stream)
+                }
+
+                if (decoded == beforeStrip) break;
+            }
+            return region;
+        }
+
+        /// <summary>Huffman-coded symbol dictionary (T.88 §6.5, SDHUFF=1). Symbols
+        /// arrive in height classes: per class a height delta, then per symbol a
+        /// width delta (OOB ends the class); the class's glyphs are carried in one
+        /// COLLECTIVE bitmap — raw rows when BMSIZE=0, MMR-coded otherwise — that
+        /// is sliced up by the recorded widths. Refinement/aggregation (SDREFAGG)
+        /// is not handled in the Huffman path.</summary>
+        private void DecodeSymbolDictionaryHuffman(SegmentHeader hdr, int p, int sdFlags)
+        {
+            var sdRefAgg = (sdFlags & 0x0002) != 0;
+            if (sdRefAgg) return; // Huffman + refinement/aggregation: out of scope
+
+            var dhSel = (sdFlags >> 2) & 0x03;   // 0→B.4, 1→B.5
+            var dwSel = (sdFlags >> 4) & 0x03;   // 0→B.2, 1→B.3
+            var bmSel = (sdFlags >> 6) & 0x01;   // 0→B.1
+            // Custom tables (selector 3 / 1 for BMSIZE) come from referred table
+            // segments, which this decoder does not parse yet.
+            if (dhSel > 1 || dwSel > 1 || bmSel != 0) return;
+            var tDh = StdTable(dhSel == 0 ? 4 : 5);
+            var tDw = StdTable(dwSel == 0 ? 2 : 3);
+            var tBm = StdTable(1);
+            var tEx = StdTable(1);
+
+            if (p + 8 > _data.Length) return;
+            var sdNumExSyms = ReadInt32BE(_data, p);
+            var sdNumNewSyms = ReadInt32BE(_data, p + 4);
+            p += 8;
+            if (sdNumNewSyms < 0 || sdNumNewSyms > 1_000_000) return;
+            if (sdNumExSyms < 0 || sdNumExSyms > 1_000_000) return;
+
+            var imported = new List<Jbig2Bitmap>();
+            foreach (var refSeg in hdr.ReferredTo)
+            {
+                if (_symbolDicts.TryGetValue(refSeg, out var importedSyms))
+                    imported.AddRange(importedSyms);
+            }
+
+            var totalSyms = imported.Count + sdNumNewSyms;
+            var allSyms = new Jbig2Bitmap[totalSyms];
+            for (var i = 0; i < imported.Count; i++) allSyms[i] = imported[i];
+
+            var reader = new HuffBitReader(_data, p, hdr.DataStart + hdr.DataLength);
+            var hcHeight = 0;
+            var newIdx = 0;
+
+            while (newIdx < sdNumNewSyms)
+            {
+                if (!tDh.Decode(reader, out var hcDelta)) break;
+                hcHeight += hcDelta;
+                if (hcHeight <= 0 || hcHeight > 65535) break;
+
+                var symWidth = 0;
+                var totWidth = 0;
+                var classStart = newIdx;
+                var widths = new List<int>();
+                while (true)
+                {
+                    // The OOB code terminates every height class and must always be
+                    // consumed — even when the class supplies the last symbol — or
+                    // the bit stream desyncs before the class's BMSIZE field.
+                    if (!tDw.Decode(reader, out var dw)) break;
+                    symWidth += dw;
+                    if (symWidth <= 0 || symWidth > 65535) return;
+                    if (newIdx >= sdNumNewSyms) return; // more widths than declared symbols
+                    widths.Add(symWidth);
+                    totWidth += symWidth;
+                    newIdx++;
+                }
+                if (widths.Count == 0) break; // no progress — malformed stream
+
+                // Height-class collective bitmap (§6.5.9): BMSIZE=0 → uncompressed
+                // rows (each row padded to a byte); otherwise BMSIZE bytes of MMR.
+                if (!tBm.Decode(reader, out var bmSize) || bmSize < 0) return;
+                reader.Align();
+                Jbig2Bitmap collective;
+                if (bmSize == 0)
+                {
+                    collective = new Jbig2Bitmap(totWidth, hcHeight);
+                    var rowBytes = (totWidth + 7) / 8;
+                    var src = reader.BytePos;
+                    if (src + (long)rowBytes * hcHeight > _data.Length) return;
+                    for (var y = 0; y < hcHeight; y++)
+                        for (var x = 0; x < totWidth; x++)
+                            collective.SetPixel(x, y, (_data[src + y * rowBytes + x / 8] >> (7 - x % 8)) & 1);
+                    reader.SkipBytes(rowBytes * hcHeight);
+                }
+                else
+                {
+                    // The class's MMR payload is T.6 (Group 4) — decode with the
+                    // shared CCITT filter (the JBIG2-local MMR line decoder predates
+                    // it and mishandles real G4 streams).
+                    var avail = Math.Max(0, Math.Min(bmSize, _data.Length - reader.BytePos));
+                    var seg = new byte[avail];
+                    Array.Copy(_data, reader.BytePos, seg, 0, avail);
+                    var parms = new PdfDictionary();
+                    parms.Set("K", new PdfInteger(-1));
+                    parms.Set("Columns", new PdfInteger(totWidth));
+                    parms.Set("Rows", new PdfInteger(hcHeight));
+                    parms.Set("BlackIs1", PdfBoolean.True);
+                    byte[] rows;
+                    // JBIG2 MMR is strict T.6 — opt out of the CCITT image-producer column shift.
+                    try { rows = CcittFaxDecodeFilter.Decode(seg, parms, group4ColumnShift: false); }
+                    catch { return; }
+                    var cRowBytes = (totWidth + 7) / 8;
+                    if (rows.Length < cRowBytes * hcHeight) return;
+                    collective = new Jbig2Bitmap(totWidth, hcHeight, cRowBytes, rows);
+                    reader.SkipBytes(bmSize);
+                }
+
+                // Slice the collective bitmap into the class's symbols.
+                var xOff = 0;
+                for (var s = 0; s < widths.Count; s++)
+                {
+                    var w = widths[s];
+                    var sym = new Jbig2Bitmap(w, hcHeight);
+                    for (var y = 0; y < hcHeight; y++)
+                        for (var x = 0; x < w; x++)
+                            sym.SetPixel(x, y, collective.GetPixel(xOff + x, y));
+                    allSyms[imported.Count + classStart + s] = sym;
+                    xOff += w;
+                }
+            }
+
+            // Export flags: runlengths over Table B.1, alternating starting at
+            // "don't export" — same shape as the arithmetic variant.
+            var exported = new List<Jbig2Bitmap>(sdNumExSyms);
+            var exporting = false;
+            var i2 = 0;
+            while (i2 < totalSyms)
+            {
+                if (!tEx.Decode(reader, out var run)) break;
                 if (run < 0 || run > totalSyms - i2) run = totalSyms - i2;
                 if (exporting)
                 {
@@ -532,10 +1000,16 @@ internal static class Jbig2Decoder
             var sbDsOffset = (sbDsOffsetRaw & 0x10) != 0 ? sbDsOffsetRaw - 32 : sbDsOffsetRaw;
             var sbrTemplate = (trFlags >> 15) & 0x01;
 
+            // SBHUFFFLAGS (16-bit, §7.4.3.1.2) follows SBFLAGS in the Huffman variant.
+            var sbHuffFlags = 0;
             if (sbHuff)
             {
-                // Out of scope: Huffman variant.
-                return;
+                if (p + 2 > _data.Length) return;
+                sbHuffFlags = (_data[p] << 8) | _data[p + 1];
+                p += 2;
+                // Huffman + per-instance refinement needs the RDW/RDH/RDX/RDY/RSIZE
+                // table plumbing — not in scope (this corpus has SBREFINE=0).
+                if (sbRefine) return;
             }
 
             // SBRAT (refinement AT pixels) — only if SBREFINE and SBRTEMPLATE=0.
@@ -567,6 +1041,14 @@ internal static class Jbig2Decoder
 
             var sbSymCodeLen = SymCodeLength(symbols.Count);
             var sbStrips = 1 << log2Strips;
+
+            if (sbHuff)
+            {
+                DecodeTextRegionHuffman(hdr, p, sbHuffFlags, symbols, sbStrips, log2Strips,
+                    refCorner, transposed, sbCombOp, sbDefPixel, sbDsOffset, sbNumInstances,
+                    regionW, regionH, regionX, regionY, regCombOp);
+                return;
+            }
 
             // Decode instances with arithmetic IA decoders.
             var ad = new ArithmeticDecoder(_data, p);
@@ -726,6 +1208,160 @@ internal static class Jbig2Decoder
             }
         }
 
+        /// <summary>Huffman-coded text region (T.88 §6.4, SBHUFF=1). Reads the
+        /// runcode-compressed symbol-ID code table (§7.4.3.1.7), then places the
+        /// symbol instances with the same strip walk as the arithmetic variant,
+        /// with FS/DS/DT decoded through the selected standard tables and CURT
+        /// read as raw bits. Per-instance refinement is not handled (callers gate
+        /// on SBREFINE=0).</summary>
+        private void DecodeTextRegionHuffman(SegmentHeader hdr, int p, int sbHuffFlags,
+            List<Jbig2Bitmap> symbols, int sbStrips, int log2Strips, int refCorner,
+            bool transposed, int sbCombOp, bool sbDefPixel, int sbDsOffset, int sbNumInstances,
+            int regionW, int regionH, int regionX, int regionY, int regCombOp)
+        {
+            var fsSel = sbHuffFlags & 0x03;         // 0→B.6, 1→B.7
+            var dsSel = (sbHuffFlags >> 2) & 0x03;  // 0→B.8, 1→B.9, 2→B.10
+            var dtSel = (sbHuffFlags >> 4) & 0x03;  // 0→B.11, 1→B.12, 2→B.13
+            // Selector 3 = custom table from referred table segments — unsupported.
+            if (fsSel > 1 || dsSel > 2 || dtSel > 2) return;
+            var tFs = StdTable(fsSel == 0 ? 6 : 7);
+            var tDs = StdTable(8 + dsSel);
+            var tDt = StdTable(11 + dtSel);
+
+            var reader = new HuffBitReader(_data, p, hdr.DataStart + hdr.DataLength);
+
+            // Symbol ID code table (§7.4.3.1.7): 35 runcode lengths (5 bits each),
+            // a canonical runcode table over them, then one code length per symbol
+            // (runcode 0..31 = the length itself; 32 = repeat previous 3–6 times;
+            // 33 = 3–10 zeroes; 34 = 11–138 zeroes), then byte alignment.
+            var runLens = new HuffLine[35];
+            for (var i = 0; i < 35; i++)
+                runLens[i] = new HuffLine(reader.ReadBits(4), 0, i);
+            var runTable = new HuffTable(runLens);
+
+            var symLens = new int[symbols.Count];
+            var prevLen = 0;
+            for (var i = 0; i < symbols.Count;)
+            {
+                if (!runTable.Decode(reader, out var code)) return;
+                if (code < 32)
+                {
+                    symLens[i++] = code;
+                    prevLen = code;
+                }
+                else if (code == 32)
+                {
+                    var rep = 3 + reader.ReadBits(2);
+                    while (rep-- > 0 && i < symbols.Count) symLens[i++] = prevLen;
+                }
+                else if (code == 33)
+                {
+                    var rep = 3 + reader.ReadBits(3);
+                    while (rep-- > 0 && i < symbols.Count) symLens[i++] = 0;
+                }
+                else // 34
+                {
+                    var rep = 11 + reader.ReadBits(7);
+                    while (rep-- > 0 && i < symbols.Count) symLens[i++] = 0;
+                }
+            }
+            var idLines = new HuffLine[symbols.Count];
+            for (var i = 0; i < symbols.Count; i++)
+                idLines[i] = new HuffLine(symLens[i], 0, i);
+            var tId = new HuffTable(idLines);
+            reader.Align();
+
+            var region = new Jbig2Bitmap(regionW, regionH, sbDefPixel);
+
+            if (!tDt.Decode(reader, out var firstDt)) return;
+            var stripT = -firstDt;
+            var firstS = 0;
+            var decoded = 0;
+
+            while (decoded < sbNumInstances)
+            {
+                var beforeStrip = decoded;
+                if (!tDt.Decode(reader, out var dt)) break;
+                stripT += dt;
+
+                var curS = 0;
+                var first = true;
+
+                while (decoded < sbNumInstances)
+                {
+                    if (first)
+                    {
+                        if (!tFs.Decode(reader, out var dfs)) goto endStrip;
+                        firstS += dfs;
+                        curS = firstS;
+                        first = false;
+                    }
+                    else
+                    {
+                        if (!tDs.Decode(reader, out var dsVal)) goto endStrip; // OOB → end of strip
+                        curS += dsVal + sbDsOffset;
+                    }
+
+                    // CURT is raw bits (⌈log2 SBSTRIPS⌉) in the Huffman variant.
+                    var curT = sbStrips > 1 ? reader.ReadBits(log2Strips) : 0;
+
+                    if (!tId.Decode(reader, out var idVal)) goto endStrip;
+                    if (idVal < 0 || idVal >= symbols.Count) idVal = 0;
+                    var symBitmap = symbols[idVal];
+                    if (symBitmap is null) { decoded++; continue; }
+
+                    var symW = symBitmap.Width;
+                    var symH = symBitmap.Height;
+
+                    var placeS = curS;
+                    var placeT = stripT * sbStrips + curT;
+
+                    int x, y;
+                    if (!transposed)
+                    {
+                        switch (refCorner)
+                        {
+                            case 0: x = placeS; y = placeT - symH + 1; break;              // BL
+                            case 1: x = placeS; y = placeT; break;                         // TL
+                            case 2: x = placeS - symW + 1; y = placeT - symH + 1; break;   // BR
+                            default: x = placeS - symW + 1; y = placeT; break;             // TR
+                        }
+                    }
+                    else
+                    {
+                        switch (refCorner)
+                        {
+                            case 0: x = placeT - symH + 1; y = placeS; break;
+                            case 1: x = placeT; y = placeS; break;
+                            case 2: x = placeT - symH + 1; y = placeS - symW + 1; break;
+                            default: x = placeT; y = placeS - symW + 1; break;
+                        }
+                    }
+
+                    region.CompositeAt(symBitmap, x, y, sbCombOp);
+
+                    if (!transposed) curS += symW - 1;
+                    else curS += symH - 1;
+
+                    decoded++;
+                }
+            endStrip:
+                if (decoded == beforeStrip) break; // strip made no progress — bail out
+            }
+
+            if (_pageBitmap is null)
+            {
+                _pageWidth = regionW;
+                _pageHeight = regionH;
+                _pageRowBytes = region.RowBytes;
+                _pageBitmap = (byte[])region.Data.Clone();
+            }
+            else
+            {
+                CompositeRegionOntoPage(region, regionX, regionY, regCombOp);
+            }
+        }
+
         // ────────────────────────────────────────────────────────────────────
         // Generic refinement region decoder (arithmetic) — T.88 §6.3
         // ────────────────────────────────────────────────────────────────────
@@ -810,30 +1446,18 @@ internal static class Jbig2Decoder
             }
         }
 
-        private Jbig2Bitmap DecodeMmrBitmap(int width, int height, int p, int dataLen)
+        /// <summary>Decode a strict-T.6 (Group 4) MMR bitmap of the given size from
+        /// <c>_data[p..p+len]</c> using the shared CCITT decoder (black = 1, no column shift).</summary>
+        private Jbig2Bitmap DecodeMmrG4(int width, int height, int p, int len)
         {
+            var avail = Math.Max(0, Math.Min(len, _data.Length - p));
+            var seg = new byte[avail];
+            Array.Copy(_data, p, seg, 0, avail);
+            var reader = new CcittFaxDecodeFilter.CcittBitReader(seg);
             var rowBytes = (width + 7) / 8;
-            var result = new byte[rowBytes * height];
-            var endPos = Math.Min(p + dataLen, _data.Length);
-
-            var bitReader = new MmrBitReader(_data, p, endPos);
-            var refLine = new bool[width];
-
-            for (var row = 0; row < height; row++)
-            {
-                var curLine = new bool[width];
-                DecodeMmrLine(bitReader, refLine, curLine, width);
-
-                for (var x = 0; x < width; x++)
-                {
-                    if (curLine[x])
-                        result[row * rowBytes + x / 8] |= (byte)(0x80 >> (x % 8));
-                }
-
-                Array.Copy(curLine, refLine, width);
-            }
-
-            return new Jbig2Bitmap(width, height, rowBytes, result);
+            var bytes = CcittFaxDecodeFilter.DecodeGroup4Region(reader, width, height);
+            if (bytes.Length < rowBytes * height) Array.Resize(ref bytes, rowBytes * height);
+            return new Jbig2Bitmap(width, height, rowBytes, bytes);
         }
 
         // ────────────────────────────────────────────────────────────────────
@@ -851,183 +1475,6 @@ internal static class Jbig2Decoder
             _ => ReadInt32BE(data, p),
         };
 
-        // ────────────────────────────────────────────────────────────────────
-        // MMR (Group 4) line decoder — retained from the prior implementation
-        // ────────────────────────────────────────────────────────────────────
-
-        private static void DecodeMmrLine(MmrBitReader bits, bool[] ref_, bool[] cur, int width)
-        {
-            var a0 = 0;
-            var a0Color = false;
-
-            while (a0 < width)
-            {
-                var b1 = FindChangingElement(ref_, a0, !a0Color, width);
-                var b2 = FindChangingElement(ref_, b1, a0Color, width);
-
-                var mode = ReadMmrMode(bits);
-                switch (mode)
-                {
-                    case 0:
-                        a0 = b2;
-                        break;
-                    case 1:
-                        var run1 = ReadMmrRunLength(bits, a0Color);
-                        FillRun(cur, a0, a0 + run1, a0Color);
-                        a0 += run1;
-                        a0Color = !a0Color;
-                        var run2 = ReadMmrRunLength(bits, a0Color);
-                        FillRun(cur, a0, a0 + run2, a0Color);
-                        a0 += run2;
-                        a0Color = !a0Color;
-                        break;
-                    default:
-                        var offset = mode - 5;
-                        var a1 = b1 + offset;
-                        if (a1 < a0) a1 = a0;
-                        if (a1 > width) a1 = width;
-                        FillRun(cur, a0, a1, a0Color);
-                        a0 = a1;
-                        a0Color = !a0Color;
-                        break;
-                }
-            }
-        }
-
-        private static int FindChangingElement(bool[] line, int start, bool color, int width)
-        {
-            for (var i = Math.Max(start, 0); i < width; i++)
-                if (line[i] == color) return i;
-            return width;
-        }
-
-        private static void FillRun(bool[] line, int from, int to, bool color)
-        {
-            if (!color) return;
-            for (var i = Math.Max(from, 0); i < Math.Min(to, line.Length); i++)
-                line[i] = true;
-        }
-
-        private static int ReadMmrMode(MmrBitReader bits)
-        {
-            if (bits.ReadBit() == 1) return 5;
-            if (bits.ReadBit() == 1)
-            {
-                if (bits.ReadBit() == 1) return 1;
-                return 0;
-            }
-            if (bits.ReadBit() == 1)
-                return bits.ReadBit() == 0 ? 0 : 5;
-            if (bits.ReadBit() == 1)
-                return bits.ReadBit() == 0 ? 6 : 4;
-            if (bits.ReadBit() == 1)
-                return bits.ReadBit() == 0 ? 7 : 3;
-            if (bits.ReadBit() == 1)
-                return bits.ReadBit() == 0 ? 8 : 2;
-            return 5;
-        }
-
-        private static int ReadMmrRunLength(MmrBitReader bits, bool isBlack)
-        {
-            var runLen = 0;
-            while (true)
-            {
-                var code = ReadHuffmanCode(bits, isBlack);
-                runLen += code;
-                if (code < 64) break;
-            }
-            return runLen;
-        }
-
-        private static int ReadHuffmanCode(MmrBitReader bits, bool isBlack)
-        {
-            var code = 0;
-            for (var len = 1; len <= 13; len++)
-            {
-                code = (code << 1) | bits.ReadBit();
-                var rl = LookupHuffman(code, len, isBlack);
-                if (rl >= 0) return rl;
-            }
-            return 0;
-        }
-
-        private static int LookupHuffman(int code, int bits, bool isBlack)
-        {
-            if (!isBlack)
-            {
-                return (bits, code) switch
-                {
-                    (4, 0x7) => 2, (4, 0x8) => 3, (4, 0xB) => 4, (4, 0xC) => 5, (4, 0xE) => 6, (4, 0xF) => 7,
-                    (5, 0x13) => 8, (5, 0x14) => 9, (5, 0x07) => 10, (5, 0x08) => 11,
-                    (6, 0x08) => 12, (6, 0x03) => 13, (6, 0x34) => 14, (6, 0x35) => 15,
-                    (6, 0x2A) => 16, (6, 0x2B) => 17,
-                    (7, 0x27) => 18, (7, 0x0C) => 19, (7, 0x08) => 20, (7, 0x17) => 21,
-                    (7, 0x03) => 22, (7, 0x04) => 23, (7, 0x28) => 24, (7, 0x2B) => 25,
-                    (7, 0x13) => 26, (7, 0x24) => 27, (7, 0x18) => 28,
-                    (8, 0x02) => 0, (8, 0x03) => 1, (8, 0x1A) => 29, (8, 0x1B) => 30,
-                    (8, 0x12) => 31, (8, 0x13) => 32, (8, 0x14) => 33, (8, 0x15) => 34,
-                    (8, 0x16) => 35, (8, 0x17) => 36, (8, 0x28) => 37, (8, 0x29) => 38,
-                    (8, 0x2A) => 39, (8, 0x2B) => 40, (8, 0x2C) => 41, (8, 0x2D) => 42,
-                    (8, 0x04) => 43, (8, 0x05) => 44, (8, 0x0A) => 45, (8, 0x0B) => 46,
-                    (8, 0x52) => 47, (8, 0x53) => 48, (8, 0x54) => 49, (8, 0x55) => 50,
-                    (8, 0x24) => 51, (8, 0x25) => 52, (8, 0x58) => 53, (8, 0x59) => 54,
-                    (8, 0x5A) => 55, (8, 0x5B) => 56, (8, 0x4A) => 57, (8, 0x4B) => 58,
-                    (8, 0x32) => 59, (8, 0x33) => 60, (8, 0x34) => 61, (8, 0x35) => 62,
-                    (8, 0x36) => 63,
-                    (5, 0x1B) => 64, (5, 0x12) => 128,
-                    (6, 0x17) => 192, (7, 0x37) => 256,
-                    (9, 0x66) => 320, (9, 0x67) => 384, (8, 0x64) => 448, (8, 0x65) => 512,
-                    (8, 0x68) => 576, (8, 0x67) => 640,
-                    (9, 0xCC) => 704, (9, 0xCD) => 768, (9, 0xD2) => 832, (9, 0xD3) => 896,
-                    (9, 0xD4) => 960, (9, 0xD5) => 1024, (9, 0xD6) => 1088, (9, 0xD7) => 1152,
-                    (9, 0xD8) => 1216, (9, 0xD9) => 1280, (9, 0xDA) => 1344, (9, 0xDB) => 1408,
-                    (9, 0x98) => 1472, (9, 0x99) => 1536, (9, 0x9A) => 1600,
-                    (6, 0x18) => 1664, (9, 0x9B) => 1728,
-                    _ => -1,
-                };
-            }
-            else
-            {
-                return (bits, code) switch
-                {
-                    (2, 0x3) => 2, (3, 0x2) => 3, (3, 0x3) => 4,
-                    (4, 0x2) => 5, (4, 0x3) => 6,
-                    (5, 0x3) => 7,
-                    (6, 0x5) => 8, (6, 0x4) => 9,
-                    (7, 0x4) => 10, (7, 0x5) => 11, (7, 0x7) => 12,
-                    (8, 0x04) => 13, (8, 0x07) => 14,
-                    (9, 0x18) => 15,
-                    (10, 0x17) => 0, (10, 0x18) => 1, (10, 0x08) => 16,
-                    (10, 0x37) => 17, (10, 0x33) => 18, (10, 0x34) => 19,
-                    (11, 0x6C) => 20, (11, 0x37) => 21, (11, 0x28) => 22,
-                    (11, 0x17) => 23, (11, 0x18) => 24,
-                    (12, 0xCA) => 25, (12, 0xCB) => 26, (12, 0xCC) => 27,
-                    (12, 0xCD) => 28, (12, 0x68) => 29, (12, 0x69) => 30,
-                    (12, 0x6A) => 31, (12, 0x6B) => 32, (12, 0xD2) => 33,
-                    (12, 0xD3) => 34, (12, 0xD4) => 35, (12, 0xD5) => 36,
-                    (12, 0xD6) => 37, (12, 0xD7) => 38, (12, 0x6C) => 39,
-                    (12, 0x6D) => 40, (12, 0xDA) => 41, (12, 0xDB) => 42,
-                    (12, 0x54) => 43, (12, 0x55) => 44, (12, 0x56) => 45,
-                    (12, 0x57) => 46, (12, 0x64) => 47, (12, 0x65) => 48,
-                    (12, 0x52) => 49, (12, 0x53) => 50, (12, 0x24) => 51,
-                    (12, 0x37) => 52, (12, 0x38) => 53, (12, 0x27) => 54,
-                    (12, 0x28) => 55, (12, 0x58) => 56, (12, 0x59) => 57,
-                    (12, 0x2B) => 58, (12, 0x2C) => 59, (12, 0x5A) => 60,
-                    (12, 0x66) => 61, (12, 0x67) => 62, (13, 0x0F) => 63,
-                    (10, 0x0F) => 64, (12, 0xC8) => 128,
-                    (12, 0xC9) => 192, (12, 0x5B) => 256, (12, 0x33) => 320,
-                    (12, 0x34) => 384, (12, 0x35) => 448,
-                    (13, 0x6C) => 512, (13, 0x6D) => 576, (13, 0x4A) => 640,
-                    (13, 0x4B) => 704, (13, 0x4C) => 768, (13, 0x4D) => 832,
-                    (13, 0x72) => 896, (13, 0x73) => 960, (13, 0x74) => 1024,
-                    (13, 0x75) => 1088, (13, 0x76) => 1152, (13, 0x77) => 1216,
-                    (13, 0x52) => 1280, (13, 0x53) => 1344, (13, 0x54) => 1408,
-                    (13, 0x55) => 1472, (13, 0x5A) => 1536, (13, 0x5B) => 1600,
-                    (13, 0x64) => 1664, (13, 0x65) => 1728,
-                    _ => -1,
-                };
-            }
-        }
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -1336,36 +1783,175 @@ internal static class Jbig2Decoder
     }
 
     // ────────────────────────────────────────────────────────────────────────
-    // MMR / arithmetic primitives — retained from the prior implementation
+    // Huffman-coded variant primitives (T.88 Annex B + §6.5/§6.4 SDHUFF/SBHUFF)
     // ────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Bit-level reader for MMR data.</summary>
-    private sealed class MmrBitReader
+    /// <summary>MSB-first bit reader with byte-position tracking (Huffman paths
+    /// interleave bit-coded fields with byte-aligned MMR / raw bitmap payloads).</summary>
+    private sealed class HuffBitReader
     {
         private readonly byte[] _data;
-        private int _pos;
         private readonly int _end;
-        private int _bits;
-        private int _bitsLeft;
+        private int _pos;
+        private int _bitPos; // 0..7 within _data[_pos]
 
-        public MmrBitReader(byte[] data, int start, int end)
+        public HuffBitReader(byte[] data, int start, int end)
         {
             _data = data;
             _pos = start;
             _end = end;
         }
 
+        /// <summary>Byte offset of the next unread byte after aligning.</summary>
+        public int BytePos => _bitPos == 0 ? _pos : _pos + 1;
+
+        public bool AtEnd => _pos >= _end && _bitPos == 0;
+
         public int ReadBit()
         {
-            if (_bitsLeft == 0)
-            {
-                _bits = _pos < _end ? _data[_pos++] : 0;
-                _bitsLeft = 8;
-            }
-            _bitsLeft--;
-            return (_bits >> _bitsLeft) & 1;
+            if (_pos >= _end) return 0;
+            var bit = (_data[_pos] >> (7 - _bitPos)) & 1;
+            if (++_bitPos == 8) { _bitPos = 0; _pos++; }
+            return bit;
+        }
+
+        public int ReadBits(int count)
+        {
+            var v = 0;
+            for (var i = 0; i < count; i++) v = (v << 1) | ReadBit();
+            return v;
+        }
+
+        public void Align()
+        {
+            if (_bitPos != 0) { _bitPos = 0; _pos++; }
+        }
+
+        /// <summary>Skip <paramref name="count"/> bytes from the aligned position.</summary>
+        public void SkipBytes(int count)
+        {
+            Align();
+            _pos = Math.Min(_end, _pos + count);
         }
     }
+
+    /// <summary>One line of a JBIG2 Huffman table (T.88 Annex B): a prefix code of
+    /// <see cref="PrefLen"/> bits selects a range of 2^<see cref="RangeLen"/> values
+    /// starting at <see cref="RangeLow"/> (or ending at it, for the lower-range line).</summary>
+    private readonly struct HuffLine
+    {
+        public readonly int PrefLen, RangeLen, RangeLow;
+        public readonly bool IsLower, IsOob;
+        public HuffLine(int prefLen, int rangeLen, int rangeLow, bool isLower = false)
+        { PrefLen = prefLen; RangeLen = rangeLen; RangeLow = rangeLow; IsLower = isLower; IsOob = false; }
+        public HuffLine(int oobPrefLen)
+        { PrefLen = oobPrefLen; RangeLen = 0; RangeLow = 0; IsLower = false; IsOob = true; }
+    }
+
+    /// <summary>A JBIG2 Huffman table: assigns canonical prefix codes to its lines
+    /// (T.88 §B.3) and decodes values from a bit stream.</summary>
+    private sealed class HuffTable
+    {
+        private readonly HuffLine[] _lines;
+        private readonly int[] _codes;
+
+        public HuffTable(HuffLine[] lines)
+        {
+            _lines = lines;
+            _codes = new int[lines.Length];
+            // Canonical assignment: count codes per length, derive each length's
+            // first code, then hand codes out in line order.
+            var maxLen = 0;
+            foreach (var l in lines) if (l.PrefLen > maxLen) maxLen = l.PrefLen;
+            var lenCount = new int[maxLen + 1];
+            foreach (var l in lines) if (l.PrefLen > 0) lenCount[l.PrefLen]++;
+            var firstCode = new int[maxLen + 2];
+            lenCount[0] = 0;
+            for (var len = 1; len <= maxLen; len++)
+                firstCode[len] = (firstCode[len - 1] + lenCount[len - 1]) << 1;
+            var nextCode = (int[])firstCode.Clone();
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (lines[i].PrefLen == 0) { _codes[i] = -1; continue; }
+                _codes[i] = nextCode[lines[i].PrefLen]++;
+            }
+        }
+
+        /// <summary>Decode one value. Returns false for the OOB symbol (or on a
+        /// code that matches no line — treated as end-of-data).</summary>
+        public bool Decode(HuffBitReader r, out int value)
+        {
+            value = 0;
+            var code = 0;
+            for (var len = 1; len <= 32; len++)
+            {
+                code = (code << 1) | r.ReadBit();
+                for (var i = 0; i < _lines.Length; i++)
+                {
+                    if (_lines[i].PrefLen != len || _codes[i] != code) continue;
+                    var line = _lines[i];
+                    if (line.IsOob) return false;
+                    if (line.IsLower)
+                    {
+                        value = line.RangeLow - r.ReadBits(line.RangeLen);
+                        return true;
+                    }
+                    value = line.RangeLow + r.ReadBits(line.RangeLen);
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    // Standard tables B.1–B.15 (T.88 Annex B).
+    private static readonly HuffTable[] StandardHuffTables =
+    {
+        new(new HuffLine[] { new(1,4,0), new(2,8,16), new(3,16,272), new(3,32,65808) }),                       // B.1
+        new(new HuffLine[] { new(1,0,0), new(2,0,1), new(3,0,2), new(4,3,3), new(5,6,11), new(6,32,75), new(6) }), // B.2
+        new(new HuffLine[] { new(8,8,-256), new(1,0,0), new(2,0,1), new(3,0,2), new(4,3,3), new(5,6,11),
+                             new(8,32,-257,true), new(7,32,75), new(6) }),                                     // B.3
+        new(new HuffLine[] { new(1,0,1), new(2,0,2), new(3,0,3), new(4,3,4), new(5,6,12), new(5,32,76) }),      // B.4
+        new(new HuffLine[] { new(7,8,-255), new(1,0,1), new(2,0,2), new(3,0,3), new(4,3,4), new(5,6,12),
+                             new(7,32,-256,true), new(6,32,76) }),                                             // B.5
+        new(new HuffLine[] { new(5,10,-2048), new(4,9,-1024), new(4,8,-512), new(4,7,-256), new(5,6,-128),
+                             new(5,5,-64), new(4,5,-32), new(2,7,0), new(3,7,128), new(3,8,256), new(4,9,512),
+                             new(4,10,1024), new(6,32,-2049,true), new(6,32,2048) }),                          // B.6
+        new(new HuffLine[] { new(4,9,-1024), new(3,8,-512), new(4,7,-256), new(5,6,-128), new(5,5,-64),
+                             new(4,5,-32), new(4,5,0), new(5,5,32), new(5,6,64), new(4,7,128), new(3,8,256),
+                             new(3,9,512), new(3,10,1024), new(5,32,-1025,true), new(5,32,2048) }),            // B.7
+        new(new HuffLine[] { new(8,3,-15), new(9,1,-7), new(8,1,-5), new(9,0,-3), new(7,0,-2), new(4,0,-1),
+                             new(2,1,0), new(5,0,2), new(6,0,3), new(3,4,4), new(6,1,20), new(4,4,22),
+                             new(4,5,38), new(5,6,70), new(5,7,134), new(6,7,262), new(7,8,390), new(6,10,646),
+                             new(9,32,-16,true), new(9,32,1670), new(2) }),                                    // B.8
+        new(new HuffLine[] { new(8,4,-31), new(9,2,-15), new(8,2,-11), new(9,1,-7), new(7,1,-5), new(4,1,-3),
+                             new(3,1,-1), new(3,1,1), new(5,1,3), new(6,1,5), new(3,5,7), new(6,2,39),
+                             new(4,5,43), new(4,6,75), new(5,7,139), new(5,8,267), new(6,8,523), new(7,9,779),
+                             new(6,11,1291), new(9,32,-32,true), new(9,32,3339), new(2) }),                    // B.9
+        new(new HuffLine[] { new(7,4,-21), new(8,0,-5), new(7,0,-4), new(5,0,-3), new(2,2,-2), new(5,0,2),
+                             new(6,0,3), new(7,0,4), new(8,0,5), new(2,6,6), new(5,5,70), new(6,5,102),
+                             new(6,6,134), new(6,7,198), new(6,8,326), new(6,9,582), new(6,10,1094),
+                             new(7,11,2118), new(8,32,-22,true), new(8,32,4166), new(2) }),                    // B.10
+        new(new HuffLine[] { new(1,0,1), new(2,1,2), new(4,0,4), new(4,1,5), new(5,1,7), new(5,2,9),
+                             new(6,2,13), new(7,2,17), new(7,3,21), new(7,4,29), new(7,5,45), new(7,6,77),
+                             new(7,32,141) }),                                                                 // B.11
+        new(new HuffLine[] { new(1,0,1), new(2,0,2), new(3,1,3), new(5,0,5), new(5,1,6), new(6,1,8),
+                             new(7,0,10), new(7,1,11), new(7,2,13), new(7,3,17), new(7,4,25), new(8,5,41),
+                             new(8,32,73) }),                                                                  // B.12
+        new(new HuffLine[] { new(1,0,1), new(3,0,2), new(4,0,3), new(5,0,4), new(4,1,5), new(3,3,7),
+                             new(6,1,15), new(6,2,17), new(6,3,21), new(6,4,29), new(6,5,45), new(7,6,77),
+                             new(7,32,141) }),                                                                 // B.13
+        new(new HuffLine[] { new(3,0,-2), new(3,0,-1), new(1,0,0), new(3,0,1), new(3,0,2) }),                  // B.14
+        new(new HuffLine[] { new(7,4,-24), new(6,2,-8), new(5,1,-4), new(4,0,-2), new(3,0,-1), new(1,0,0),
+                             new(3,0,1), new(4,0,2), new(5,1,3), new(6,2,5), new(7,4,9),
+                             new(7,32,-25,true), new(7,32,25) }),                                              // B.15
+    };
+
+    private static HuffTable StdTable(int number) => StandardHuffTables[number - 1];
+
+    // ────────────────────────────────────────────────────────────────────────
+    // MMR / arithmetic primitives — retained from the prior implementation
+    // ────────────────────────────────────────────────────────────────────────
 
     /// <summary>QM arithmetic decoder context cell — state index + MPS bit.</summary>
     private sealed class ArithmeticContext

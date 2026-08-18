@@ -72,23 +72,27 @@ public sealed class TextReplaceOptions
     }
 
     /// <summary>
-    /// Specifies how text replacement adjustments are handled.
+    /// Specifies how text replacement adjustments are handled. Combinable:
+    /// callers OR adjustments together (e.g.
+    /// <c>WholeWordsHyphenation | AdjustSpaceWidth</c> re-wraps the paragraph
+    /// AND justifies the wrapped lines).
     /// </summary>
+    [System.Flags]
     public enum ReplaceAdjustment
     {
         /// <summary>No adjustment.</summary>
-        None,
+        None = 0,
         /// <summary>Adjust spacing between words only.</summary>
-        AdjustSpaceWidth,
+        AdjustSpaceWidth = 1,
         /// <summary>Whole words hyphenation — split long replacement text across lines.</summary>
-        WholeWordsHyphenation,
+        WholeWordsHyphenation = 2,
         /// <summary>Shift following rows (the rest of the page).</summary>
-        ShiftRestOfContents,
+        ShiftRestOfContents = 4,
         /// <summary>Shift the rest of the same line only — narrower than
         /// <see cref="ShiftRestOfContents"/>; value-distinct so callers can
         /// branch on it later.</summary>
-        ShiftRestOfLine,
+        ShiftRestOfLine = 8,
         /// <summary>Form-filling mode — replacement respects the surrounding field constraints.</summary>
-        IsFormFillingMode,
+        IsFormFillingMode = 16,
     }
 }

@@ -385,8 +385,8 @@ public sealed partial class PdfFileEditor
     /// Each source page becomes a Form XObject; output sheets place the
     /// XObjects at row+column positions, scaled to fit the cell. Each sheet keeps
     /// the source page size (unless an explicit <paramref name="pageSize"/> is given),
-    /// so the x*y pages are scaled DOWN to 1/x × 1/y and tiled — matching Aspose.PDF
-    /// for .NET, whose N-up sheets are the same size as the input pages. Page-level
+    /// so the x*y pages are scaled DOWN to 1/x × 1/y and tiled —
+    /// N-up sheets are the same size as the input pages. Page-level
     /// annotations (markup, shapes, etc.) are carried onto the sheet with the same
     /// scale+translate as their page, since annotations live in page space and are
     /// not affected by the XObject's content-stream matrix.</summary>
@@ -498,7 +498,13 @@ public sealed partial class PdfFileEditor
 
     private static byte[] MakeNUpTwoFiles(byte[] left, byte[] right, bool isSidewise)
     {
-        // 2-up: each output sheet pairs page-i of left with page-i of right.
+        // 2-up: each output sheet pairs page-i of left with page-i of right. The
+        // imposition is keyed off each source page's CROP box: the page is wrapped
+        // whole into a Form XObject whose /BBox is the crop box (the BBox is what
+        // clips off printer marks living outside the crop) and placed by a pure
+        // translation moving the crop lower-left corner to its slot origin. The
+        // sheet is exactly the union of the crop boxes — side-by-side: widths sum,
+        // height = tallest (bottom-aligned); stacked: heights sum, width = widest.
         using var l = Document.Open(left);
         using var r = Document.Open(right);
         var n = System.Math.Max(l.PageCount, r.PageCount);
@@ -507,24 +513,82 @@ public sealed partial class PdfFileEditor
         {
             var lp = i <= l.PageCount ? l.Pages[i] : null;
             var rp = i <= r.PageCount ? r.Pages[i] : null;
-            var sample = lp ?? rp!;
-            var w = sample.MediaBox.Width;
-            var h = sample.MediaBox.Height;
+            var lc = lp?.CropBox;
+            var rc = rp?.CropBox;
+            var lw = lc?.Width ?? 0;
+            var lh = lc?.Height ?? 0;
+            var rw = rc?.Width ?? 0;
+            var rh = rc?.Height ?? 0;
             var sheet = target.Pages.Add();
             if (isSidewise)
             {
-                sheet.SetMediaBox(new Rectangle(0, 0, w * 2, h));
-                if (lp is not null) StampPageAsXObject(target, sheet, l, lp, 0, 0, scale: 1.0);
-                if (rp is not null) StampPageAsXObject(target, sheet, r, rp, w, 0, scale: 1.0);
+                sheet.SetMediaBox(new Rectangle(0, 0, lw + rw, System.Math.Max(lh, rh)));
+                if (lp is not null) PlaceCroppedPageForm(target, sheet, lp, 0, 0);
+                if (rp is not null) PlaceCroppedPageForm(target, sheet, rp, lw, 0);
             }
             else
             {
-                sheet.SetMediaBox(new Rectangle(0, 0, w, h * 2));
-                if (lp is not null) StampPageAsXObject(target, sheet, l, lp, 0, h, scale: 1.0);
-                if (rp is not null) StampPageAsXObject(target, sheet, r, rp, 0, 0, scale: 1.0);
+                sheet.SetMediaBox(new Rectangle(0, 0, System.Math.Max(lw, rw), lh + rh));
+                if (lp is not null) PlaceCroppedPageForm(target, sheet, lp, 0, rh);
+                if (rp is not null) PlaceCroppedPageForm(target, sheet, rp, 0, 0);
             }
         }
         return target.ToArray();
+    }
+
+    /// <summary>Wrap <paramref name="srcPage"/> whole into a Form XObject whose /BBox is
+    /// the page's crop box and draw it on <paramref name="sheet"/> translated so the crop
+    /// lower-left corner lands at (<paramref name="slotX"/>, <paramref name="slotY"/>).
+    /// The form carries the source page's full content and effective resources; the BBox
+    /// clips everything outside the crop box.</summary>
+    private static void PlaceCroppedPageForm(Document target, Page sheet, Page srcPage,
+        double slotX, double slotY)
+    {
+        var srcReader = srcPage.Reader;
+        var crop = srcPage.CropBox;
+
+        var formDict = new PdfDictionary();
+        formDict.Set("Type", new PdfName("XObject"));
+        formDict.Set("Subtype", new PdfName("Form"));
+        formDict.Set("FormType", new PdfInteger(1));
+        var bbox = new PdfArray();
+        bbox.Add(new PdfReal(crop.LLX));
+        bbox.Add(new PdfReal(crop.LLY));
+        bbox.Add(new PdfReal(crop.URX));
+        bbox.Add(new PdfReal(crop.URY));
+        formDict.Set("BBox", bbox);
+
+        var srcResources = PdfPageStamp.ResolveEffectiveResources(srcPage.Dict, srcReader);
+        if (srcResources is not null)
+            formDict.Set("Resources", target.ImportDict(srcResources, srcReader,
+                target.GetSharedImportCloneMap(srcReader)));
+
+        var formStream = new PdfStream(formDict,
+            PdfPageStamp.GetPageContent(srcPage.Dict, srcReader));
+        var objNum = target.AllocateObjectNumber();
+        target.AddNewObject(objNum, formStream, registerOverlay: true);
+
+        var reader = sheet.Reader;
+        var resources = reader.ResolveDict(sheet.Dict.Get("Resources"));
+        if (resources is null)
+        {
+            resources = new PdfDictionary();
+            sheet.Dict.Set("Resources", resources);
+        }
+        var xobjects = reader.ResolveDict(resources.Get("XObject"));
+        if (xobjects is null)
+        {
+            xobjects = new PdfDictionary();
+            resources.Set("XObject", xobjects);
+        }
+        var name = "Fm0";
+        var counter = 0;
+        while (xobjects.ContainsKey(name)) name = $"Fm{++counter}";
+        xobjects.Set(name, new PdfIndirectRef(objNum, 0));
+
+        static string F(double v) => v.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
+        sheet.AppendContentBytes(System.Text.Encoding.ASCII.GetBytes(
+            $"q\n1 0 0 1 {F(slotX - crop.LLX)} {F(slotY - crop.LLY)} cm\n/{name} Do\nQ\n"));
     }
 
     private static byte[] MakeNUpMany(byte[][] inputs, bool isSidewise)
@@ -586,11 +650,15 @@ public sealed partial class PdfFileEditor
     {
         for (var i = 0; i < pages.Length; i++)
         {
-            var path = fileNameTemplate.Contains("{0}", System.StringComparison.Ordinal)
-                ? string.Format(fileNameTemplate, i + 1)
-                : System.IO.Path.Combine(
-                    System.IO.Path.GetDirectoryName(fileNameTemplate) ?? "",
-                    $"{System.IO.Path.GetFileNameWithoutExtension(fileNameTemplate)}_{i + 1}{System.IO.Path.GetExtension(fileNameTemplate)}");
+            // %NUM% is the placeholder the split-to-file API documents; {0} stays supported,
+            // and a template carrying neither gets the index appended before the extension.
+            var path = fileNameTemplate.Contains("%NUM%", System.StringComparison.Ordinal)
+                ? fileNameTemplate.Replace("%NUM%", (i + 1).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                : fileNameTemplate.Contains("{0}", System.StringComparison.Ordinal)
+                    ? string.Format(fileNameTemplate, i + 1)
+                    : System.IO.Path.Combine(
+                        System.IO.Path.GetDirectoryName(fileNameTemplate) ?? "",
+                        $"{System.IO.Path.GetFileNameWithoutExtension(fileNameTemplate)}_{i + 1}{System.IO.Path.GetExtension(fileNameTemplate)}");
             File.WriteAllBytes(path, pages[i]);
         }
     }

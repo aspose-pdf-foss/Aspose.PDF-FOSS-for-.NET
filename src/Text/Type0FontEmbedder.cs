@@ -35,6 +35,52 @@ internal static class Type0FontEmbedder
         public readonly Dictionary<int, int> UsedGlyphs = new(); // charCode → glyphId
         public PdfDictionary CidFont = null!;
         public PdfDictionary Type0Font = null!;
+        public PdfStream FontFile = null!;   // the embedded /FontFile2 stream
+        public byte[] Ttf = null!;           // the ORIGINAL font program (subset source)
+        public bool SubsetDirty;             // new glyphs since the last sparse subset
+    }
+
+    // Live embedded fonts across all documents — walked at save time so the
+    // multi-MB system font program shrinks to a GID-preserving sparse subset
+    // of the glyphs actually shown (the full font program is never shipped).
+    private static readonly List<WeakReference<FontState>> _liveFonts = new();
+
+    /// <summary>
+    /// Sparse-subset every embedded Type0 font program that gained glyphs since
+    /// its last subset: unused glyphs lose their outlines while the glyph
+    /// numbering stays intact (CIDToGIDMap=Identity content bytes remain valid).
+    /// Called from the document save funnel; idempotent between growths, and
+    /// safe to run repeatedly — the subset is always cut from the ORIGINAL
+    /// program, so glyphs added after an earlier save reappear correctly.
+    /// </summary>
+    internal static void SparseSubsetEmbeddedFontsForSave()
+    {
+        lock (_liveFonts)
+        {
+            for (var i = _liveFonts.Count - 1; i >= 0; i--)
+            {
+                if (!_liveFonts[i].TryGetTarget(out var st)) { _liveFonts.RemoveAt(i); continue; }
+                if (!st.SubsetDirty || st.UsedGlyphs.Count == 0) continue;
+                try
+                {
+                    var gids = new HashSet<int> { 0 }; // keep .notdef
+                    foreach (var (_, gid) in st.UsedGlyphs) gids.Add(gid);
+                    var parser = new TrueTypeParser(st.Ttf);
+                    parser.Parse();
+                    var subset = new TrueTypeSubsetter(st.Ttf, parser).SubsetSparse(gids);
+                    if (subset.Length > 0 && subset.Length < st.Ttf.Length)
+                    {
+                        st.FontFile.ReplaceData(subset);
+                        st.FontFile.Dict.Set("Length1", new PdfInteger(subset.Length));
+                    }
+                    st.SubsetDirty = false;
+                }
+                catch
+                {
+                    // A malformed program keeps its full embed — correctness over size.
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -69,12 +115,12 @@ internal static class Type0FontEmbedder
                 cp = char.ConvertToUtf32(text[i], text[i + 1]);
                 i++;
             }
-            var gid = st.Parser.CMap.TryGetValue(cp, out var mapped) ? mapped : 0;
+            var gid = st.Parser.GlyphIdOrLookAlike(cp);
             if (st.UsedGlyphs.TryAdd(cp, gid)) added = true;
             hex.Add((byte)(gid >> 8));
             hex.Add((byte)(gid & 0xFF));
         }
-        if (added) RefreshWidthsAndToUnicode(st);
+        if (added) { RefreshWidthsAndToUnicode(st); st.SubsetDirty = true; }
         return (st.ResName, hex.ToArray());
     }
 
@@ -93,9 +139,16 @@ internal static class Type0FontEmbedder
             pageFonts.ByTtf[ttfData] = st;
         }
         double total = 0;
-        foreach (var ch in text)
+        // Same codepoint walk as Embed: a surrogate pair is ONE glyph.
+        for (var i = 0; i < text.Length; i++)
         {
-            var gid = st.Parser.CMap.TryGetValue(ch, out var mapped) ? mapped : 0;
+            int cp = text[i];
+            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+            {
+                cp = char.ConvertToUtf32(text[i], text[i + 1]);
+                i++;
+            }
+            var gid = st.Parser.GlyphIdOrLookAlike(cp);
             total += Math.Round(st.Parser.GetAdvanceWidth(gid) * 1000.0 / st.Upm);
         }
         return total * fontSize / 1000.0;
@@ -116,6 +169,18 @@ internal static class Type0FontEmbedder
 
         var glyphParser = new GlyphOutlineParser(ttfData);
         var (ascent, descent, flags, _) = FontRepository.ReadTtfMetrics(ttfData);
+        // Prefer the hhea ascender/descender (like the simple-TrueType
+        // embedder): OS/2 typographic values under-report the descent for
+        // common UI fonts, shifting absorbed line boxes read back from this embed.
+        try
+        {
+            var hheaParser = new TrueTypeParser(ttfData);
+            hheaParser.Parse();
+            var hheaScale = 1000.0 / (hheaParser.UnitsPerEm > 0 ? hheaParser.UnitsPerEm : 1000);
+            if (hheaParser.Ascent != 0) ascent = (int)(hheaParser.Ascent * hheaScale);
+            if (hheaParser.Descent != 0) descent = (int)(hheaParser.Descent * hheaScale);
+        }
+        catch { }
 
         var descriptorDict = new PdfDictionary();
         descriptorDict.Set("Type", new PdfName("FontDescriptor"));
@@ -158,14 +223,18 @@ internal static class Type0FontEmbedder
         type0Font.Set("DescendantFonts", descendantFonts);
 
         fontDict.Set(name, type0Font);
-        return new FontState
+        var state = new FontState
         {
             ResName = name,
             Parser = glyphParser,
             Upm = glyphParser.UnitsPerEm > 0 ? glyphParser.UnitsPerEm : 1000,
             CidFont = cidFont,
             Type0Font = type0Font,
+            FontFile = fontFileStream,
+            Ttf = ttfData,
         };
+        lock (_liveFonts) _liveFonts.Add(new WeakReference<FontState>(state));
+        return state;
     }
 
     // Rebuild /W (per-glyph advances) and /ToUnicode from the accumulated glyph set. Cheap

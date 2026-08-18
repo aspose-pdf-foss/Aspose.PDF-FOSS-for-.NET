@@ -203,18 +203,44 @@ public sealed class PdfFileInfo : IDisposable
         }
     }
 
-    /// <summary>Open from a stream with a password and a custom security handler. The handler is stored only.</summary>
+    /// <summary>Open from a stream with a password, decrypting through a custom
+    /// security handler.</summary>
     public PdfFileInfo(Stream inputStream, string password, Aspose.Pdf.Security.ICustomSecurityHandler customSecurityHandler)
-        : this(inputStream, password)
     {
-        _ = customSecurityHandler;
+        using var ms = new MemoryStream();
+        if (inputStream.CanSeek) inputStream.Position = 0;
+        inputStream.CopyTo(ms);
+        OpenWithCustomHandler(ms.ToArray(), password, customSecurityHandler);
     }
 
-    /// <summary>Open from a file path with a password and a custom security handler. The handler is stored only.</summary>
+    /// <summary>Open from a file path with a password, decrypting through a custom
+    /// security handler.</summary>
     public PdfFileInfo(string inputFile, string password, Aspose.Pdf.Security.ICustomSecurityHandler customSecurityHandler)
-        : this(inputFile, password)
     {
-        _ = customSecurityHandler;
+        OpenWithCustomHandler(File.ReadAllBytes(inputFile), password, customSecurityHandler);
+        _inputFilePath = inputFile;
+    }
+
+    /// <summary>The handler owns both password questions, so the open/edit flags come
+    /// from asking it directly rather than from the Standard handler's empty-password
+    /// probe, which cannot read an alternative /Filter's /O and /U at all.</summary>
+    private void OpenWithCustomHandler(byte[] bytes, string password,
+        Aspose.Pdf.Security.ICustomSecurityHandler customSecurityHandler)
+    {
+        _headerLooksLikePdf = DetectPdfHeader(bytes);
+        try
+        {
+            _doc = new Document(new MemoryStream(bytes), password, customSecurityHandler);
+            _hasOpenPassword = customSecurityHandler.GetUserKey(string.Empty).Length > 0
+                || !customSecurityHandler.IsUserPassword(string.Empty);
+            DetectEditPassword(out _hasEditPassword);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
+        {
+            _doc = null;
+            _hasOpenPassword = true;
+            _hasEditPassword = false;
+        }
     }
 
     private string? _inputFilePath;
@@ -490,7 +516,7 @@ public sealed class PdfFileInfo : IDisposable
     public string? PdfVersion => _doc?.PdfVersion;
 
     /// <summary>Method-form alias of <see cref="PdfVersion"/> matching the
-    /// Aspose.Pdf PdfFileInfo.GetPdfVersion() public surface.</summary>
+    /// PdfFileInfo.GetPdfVersion() public surface.</summary>
     public string? GetPdfVersion() => PdfVersion;
 
     /// <summary>Whether the document is encrypted.</summary>
@@ -671,7 +697,7 @@ public sealed class PdfFileInfo : IDisposable
 
     /// <summary>
     /// Whether the bound document is a valid PDF file (instance property).
-    /// Property form mirrors the Aspose.Pdf PdfFileInfo.IsPdfFile public surface.
+    /// Property form mirrors the PdfFileInfo.IsPdfFile public surface.
     /// </summary>
     public bool IsPdfFile => _doc != null
         && (!UseStrictValidation || _headerLooksLikePdf)

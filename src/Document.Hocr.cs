@@ -79,24 +79,40 @@ public sealed partial class Document
                     continue;
                 }
 
-                byte[] imageBytes;
-                using (var ms = new MemoryStream())
+                // The image handed to the OCR callback is the page's own scan
+                // (its dominant raster image) when one exists; a page render is
+                // only the fallback for pages without images. A clean JPEG is
+                // handed stream-backed so its Save round-trips the original
+                // bytes; one carrying EXIF metadata is normalised first (the
+                // metadata does not describe the overlay geometry), which hands a
+                // decoded bitmap whose Save re-encodes the pixels.
+                var handImg = TryGetDominantImage(page);
+
+                byte[]? imageBytes = null;
+                if (flattenImages || handImg is null)
                 {
+                    using var ms = new MemoryStream();
                     var device = new PngDevice();
                     device.Process(page, ms);
                     imageBytes = ms.ToArray();
                 }
 
                 System.Drawing.Image img;
-                try
+                if (handImg is not null)
                 {
-                    using var imgMs = new MemoryStream(imageBytes);
-                    img = System.Drawing.Image.FromStream(imgMs);
+                    img = handImg;
                 }
-                catch
+                else
                 {
-                    ok = false;
-                    continue;
+                    try
+                    {
+                        img = System.Drawing.Image.FromStream(new MemoryStream(imageBytes!));
+                    }
+                    catch
+                    {
+                        ok = false;
+                        continue;
+                    }
                 }
 
                 string hocr;
@@ -105,7 +121,7 @@ public sealed partial class Document
                     hocr = invoke(img, page) ?? string.Empty;
                 }
 
-                if (flattenImages)
+                if (flattenImages && imageBytes is not null)
                 {
                     ReplacePageWithImage(page, imageBytes);
                 }
@@ -119,6 +135,90 @@ public sealed partial class Document
             }
         }
         return ok && appliedAny;
+    }
+
+    /// <summary>Find the page's dominant (largest-area) raster-image placement.
+    /// The hOCR overlay anchors to it — the recognised raster IS the page's scan
+    /// image, so word boxes map into the image's placement rectangle on the page
+    /// rather than the page box. Null for pages without images.</summary>
+    private static ImagePlacement? FindDominantImagePlacement(Page page)
+    {
+        try
+        {
+            var absorber = new ImagePlacementAbsorber();
+            absorber.Visit(page);
+            ImagePlacement? best = null;
+            double bestArea = 0;
+            foreach (var p in absorber.ImagePlacements)
+            {
+                var area = p.Rectangle.Width * p.Rectangle.Height;
+                if (area > bestArea)
+                {
+                    bestArea = area;
+                    best = p;
+                }
+            }
+            return best;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Build the System.Drawing image handed to the OCR callback from
+    /// the page's dominant embedded image. A DCTDecode stream is loaded from its
+    /// original bytes (undecoded — GDI+ then round-trips them on re-save); other
+    /// formats decode through the image's Save path. Null when the page has no
+    /// usable image.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static System.Drawing.Image? TryGetDominantImage(Page page)
+    {
+        var placement = FindDominantImagePlacement(page);
+        if (placement?.Image is null) return null;
+        try
+        {
+            var stream = placement.Image.Stream;
+            if (stream.Dict.GetName("Filter") == "DCTDecode")
+            {
+                var raw = stream.RawData;
+                // EXIF-carrying JPEG: normalise by decoding to a plain bitmap
+                // (drops the APP1 metadata; a later Save re-encodes the pixels).
+                // A metadata-free JPEG stays stream-backed and round-trips.
+                if (HasExifApp1(raw))
+                {
+                    using var encoded = System.Drawing.Image.FromStream(new MemoryStream(raw));
+                    return new System.Drawing.Bitmap(encoded);
+                }
+                return System.Drawing.Image.FromStream(new MemoryStream(raw));
+            }
+            var ms = new MemoryStream();
+            placement.Image.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+            ms.Position = 0;
+            return System.Drawing.Image.FromStream(ms);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>True when the JPEG carries an EXIF APP1 (0xFFE1) segment in its
+    /// pre-scan marker run.</summary>
+    private static bool HasExifApp1(byte[] jpg)
+    {
+        var i = 2;
+        while (i < jpg.Length - 4)
+        {
+            if (jpg[i] != 0xFF) return false;
+            var marker = jpg[i + 1];
+            if (marker == 0xE1) return true;
+            if (marker == 0xDA) return false;   // start of scan — no more metadata
+            var segLen = (jpg[i + 2] << 8) | jpg[i + 3];
+            if (segLen < 2) return false;
+            i += 2 + segLen;
+        }
+        return false;
     }
 
     // The word content is captured lazily as (.*?) rather than [^<]* so a word
@@ -168,6 +268,46 @@ public sealed partial class Document
         var pageHeight = rect.Height;
         if (pageWidth <= 0 || pageHeight <= 0) return 0;
 
+        // The OCR raster the callback saw is the page image normalised UPRIGHT —
+        // its word boxes live in the page's VISUAL (rotated) space. Map the anchor
+        // into visual space, place each word there, then convert the point back to
+        // raw page coordinates and carry the page rotation in the text matrix.
+        var rotation = page.Rotate switch
+        {
+            Rotation.on90 => 90,
+            Rotation.on180 => 180,
+            Rotation.on270 => 270,
+            _ => 0,
+        };
+        double xSum = rect.LLX + rect.URX, ySum = rect.LLY + rect.URY;
+        (double x, double y) RawToVisual(double x, double y) => rotation switch
+        {
+            90 => (y, xSum - x),
+            180 => (xSum - x, ySum - y),
+            270 => (ySum - y, x),
+            _ => (x, y),
+        };
+        (double x, double y) VisualToRaw(double x, double y) => rotation switch
+        {
+            90 => (xSum - y, x),
+            180 => (xSum - x, ySum - y),
+            270 => (y, ySum - x),
+            _ => (x, y),
+        };
+
+        // Anchor the overlay to the scan image's placement rectangle: the OCR
+        // raster is the page's image, so hOCR pixel coordinates map into where
+        // that image is drawn (which may cover only part of the page — e.g. a
+        // photo at natural size). Pages without images map to the page box.
+        var anchorRaw = rect;
+        var dominant = FindDominantImagePlacement(page);
+        if (dominant is not null && dominant.Rectangle.Width > 1 && dominant.Rectangle.Height > 1)
+            anchorRaw = dominant.Rectangle;
+        var (ax0, ay0) = RawToVisual(anchorRaw.LLX, anchorRaw.LLY);
+        var (ax1, ay1) = RawToVisual(anchorRaw.URX, anchorRaw.URY);
+        double anchorX = Math.Min(ax0, ax1), anchorY = Math.Min(ay0, ay1);
+        double anchorW = Math.Abs(ax1 - ax0), anchorH = Math.Abs(ay1 - ay0);
+
         // Prefer the OCR raster's true pixel dimensions from the ocr_page bbox.
         // Fall back to the extent of the recognised words only when the page
         // element is absent or malformed.
@@ -191,17 +331,17 @@ public sealed partial class Document
             imgH = maxY > 0 ? maxY : 1;
         }
 
-        var sx = pageWidth / imgW;
-        var sy = pageHeight / imgH;
+        var sx = anchorW / imgW;
+        var sy = anchorH / imgH;
 
-        var tb = new TextBuilder(page);
-        var overlaid = 0;
-        // Emit each word at its OWN baseline (bbox bottom) and font. The extractor groups
-        // words into lines and derives each line's baseline (median) and bottom (deepest
-        // glyph) — the vertical-gap rule needs both, so the per-word bottoms must survive.
+        // First pass: collect the words with their fitted font sizes. Word bottoms
+        // stay per-word (the extractor's vertical-gap rule needs the deepest-glyph
+        // bottoms to survive); the descent lift below is computed once for the page.
+        var words = new List<(double x, double bottom, int fontSize, string display, int line)>();
+        var lineId = 0;
         foreach (Match m in HocrLineOrWordRegex.Matches(hocr))
         {
-            if (m.Groups[1].Success) continue; // ocr_line marker — grouping is geometric
+            if (m.Groups[1].Success) { lineId++; continue; } // ocr_line marker — geometric grouping
 
             if (!int.TryParse(m.Groups[6].Value, out var bx0) ||
                 !int.TryParse(m.Groups[7].Value, out var by0) ||
@@ -219,13 +359,49 @@ public sealed partial class Document
             // fold changes glyph widths); otherwise a folded word overshoots into the next.
             var display = FoldLigatures(word!);
             var fontSize = WidthFitFontSize(display, (bx1 - bx0) * sx);
-            tb.AppendText(new TextFragment(display, textState: new TextState
+            words.Add((anchorX + bx0 * sx, anchorY + anchorH - by1 * sy, fontSize, display, lineId));
+        }
+
+        // Per-LINE descent lift: every word of an OCR line shares its line's lift
+        // (the line's modal fitted size), so baselines inside a row stay level —
+        // the extractor's line grouping survives — while each row's glyph rect
+        // lands on the row's bbox bottom.
+        var lineLift = new Dictionary<int, double>();
+        foreach (var lineGroup in System.Linq.Enumerable.GroupBy(words, w => w.line))
+        {
+            var counts = new Dictionary<int, int>();
+            foreach (var w in lineGroup)
+                counts[w.fontSize] = counts.TryGetValue(w.fontSize, out var c) ? c + 1 : 1;
+            var modal = 0; var best = 0;
+            foreach (var kv in counts)
+                if (kv.Value > best || (kv.Value == best && kv.Key > modal)) { modal = kv.Key; best = kv.Value; }
+            lineLift[lineGroup.Key] = -Text.Standard14Fonts.GetDescent("Helvetica") * modal / 1000.0;
+        }
+
+        // Per-word descent lift: the drawn baseline sits one descent ABOVE the
+        // word's bbox bottom, so the glyph rect (baseline minus descent) lands
+        // exactly ON the box bottom — the row position the OCR reported.
+        var tb = new TextBuilder(page);
+        var overlaid = 0;
+        foreach (var w in words)
+        {
+            // The word's visual-space anchor point (bbox bottom-left, y top-down in
+            // hOCR pixels). The baseline is stood ON the bbox bottom, lifted by the
+            // page's dominant Helvetica descent. The
+            // point is then converted back to raw page coordinates; the rotation is
+            // carried by the text matrix (TextState.Rotation) so the overlay reads
+            // upright on rotated pages.
+            var (wx, wy) = VisualToRaw(w.x, w.bottom + lineLift[w.line]);
+            tb.AppendText(new TextFragment(w.display, textState: new TextState
             {
-                FontSize = (float)fontSize,
+                FontName = "Helvetica",
+                FontSize = (float)w.fontSize,
                 RenderingMode = TextRenderingMode.Invisible,
+                Rotation = rotation,
+                EmitStandard14Descriptor = true,
             })
             {
-                Position = new Position(bx0 * sx, pageHeight - by1 * sy),
+                Position = new Position(wx, wy),
             });
             overlaid++;
         }
@@ -245,8 +421,8 @@ public sealed partial class Document
         return Math.Max(1, (int)Math.Round(targetWidthPts / em, MidpointRounding.AwayFromZero));
     }
 
-    /// <summary>The reference overlay font cannot encode the fi/fl ligatures, so the
-    /// extracted text carries a NUL where they occur; mirror that so extraction is
+    /// <summary>The overlay font cannot encode the fi/fl ligatures, so the
+    /// extracted text carries a NUL where they occur, keeping extraction
     /// byte-faithful.</summary>
     private static string FoldLigatures(string s) =>
         (s.IndexOf('ﬁ') < 0 && s.IndexOf('ﬂ') < 0)

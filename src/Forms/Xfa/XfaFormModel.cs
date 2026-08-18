@@ -30,6 +30,7 @@ internal sealed class XfaNode
     public bool IsField;                               // field-with-ui or exclGroup — an emittable widget
     public string Ft = "Tx";
     public long Ff;
+    public bool IsImage;                               // <ui><imageEdit>: RawValue is base64 picture data
 
     /// <summary>True when this node or any ancestor has a non-rendering presence.</summary>
     public bool EffectiveHidden
@@ -132,6 +133,7 @@ internal sealed class XfaFormModel
                 {
                     var (ft, ff) = XfaFormEngine.XfaUiToFieldType(child, local);
                     n.Ft = ft; n.Ff = ff;
+                    n.IsImage = ui?.LocalName == "imageEdit";
                     n.RawValue = Nullify(resolve?.Invoke(n.SomPath));
                 }
                 // exclGroup / field: do not descend (the group is itself the field).

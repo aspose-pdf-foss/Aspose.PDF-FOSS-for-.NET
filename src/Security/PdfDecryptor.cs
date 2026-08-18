@@ -30,11 +30,17 @@ internal sealed class PdfDecryptor
     private readonly bool _isOwnerAuthentication;
     private readonly bool _ownerPasswordEqualsUserPassword;
 
+    // When set, every per-object transform is delegated to this handler instead of
+    // the Standard handler's per-object key derivation and RC4/AES ciphers.
+    private readonly ICustomSecurityHandler? _custom;
+
     private PdfDecryptor(byte[] encryptionKey, int version, int revision,
         bool encryptMetadata, string defaultStreamFilter, string defaultStringFilter,
         bool isOwnerAuthentication = false,
-        bool ownerPasswordEqualsUserPassword = false)
+        bool ownerPasswordEqualsUserPassword = false,
+        ICustomSecurityHandler? custom = null)
     {
+        _custom = custom;
         _encryptionKey = encryptionKey;
         _version = version;
         _revision = revision;
@@ -43,6 +49,48 @@ internal sealed class PdfDecryptor
         _defaultStringFilter = defaultStringFilter;
         _isOwnerAuthentication = isOwnerAuthentication;
         _ownerPasswordEqualsUserPassword = ownerPasswordEqualsUserPassword;
+    }
+
+    /// <summary>Create a decryptor around a pre-derived file key and a resolved crypt
+    /// filter method (V2 / AESV2 / AESV3) — used by the public-key (certificate)
+    /// security handler, whose key is recovered from CMS recipients rather than a
+    /// password. Per-object key derivation reuses the Standard handler path.</summary>
+    public static PdfDecryptor CreateWithFileKey(byte[] fileKey, int version, int revision,
+        string cfm, bool encryptMetadata = true)
+        => new(fileKey, version, revision, encryptMetadata, cfm, cfm);
+
+    /// <summary>Create a decryptor driven by a custom security handler. The handler
+    /// is initialised from the document's /Encrypt entries, then asked whether the
+    /// password authenticates as user or owner; neither yields null, exactly as a
+    /// wrong Standard-handler password does.</summary>
+    public static PdfDecryptor? CreateWithCustomHandler(
+        ICustomSecurityHandler handler, PdfDictionary encryptDict, string password)
+    {
+        var permissionsInt = (int)encryptDict.GetInt("P");
+        handler.Initialize(new EncryptionParameters(
+            encryptDict.GetName("Filter") ?? handler.Filter,
+            encryptDict.GetName("SubFilter") ?? handler.SubFilter,
+            (int)encryptDict.GetInt("V"),
+            (int)encryptDict.GetInt("R"),
+            (int)encryptDict.GetInt("Length"),
+            GetStringBytes(encryptDict, "O"),
+            GetStringBytes(encryptDict, "U"),
+            GetStringBytes(encryptDict, "Perms"),
+            (Aspose.Pdf.Permissions)permissionsInt,
+            permissionsInt,
+            password));
+
+        var isUser = handler.IsUserPassword(password);
+        var isOwner = handler.IsOwnerPassword(password);
+        if (!isUser && !isOwner) return null;
+
+        return new PdfDecryptor(
+            handler.CalculateEncryptionKey(password),
+            (int)encryptDict.GetInt("V"), (int)encryptDict.GetInt("R"),
+            encryptMetadata: true, "Custom", "Custom",
+            isOwnerAuthentication: isOwner && !isUser,
+            ownerPasswordEqualsUserPassword: isOwner && isUser,
+            custom: handler);
     }
 
     public bool EncryptMetadata => _encryptMetadata;
@@ -145,6 +193,7 @@ internal sealed class PdfDecryptor
     /// </summary>
     public byte[] DecryptString(byte[] data, int objectNumber, int generation)
     {
+        if (_custom is not null) return _custom.Decrypt(data, objectNumber, generation, _encryptionKey);
         var filterName = _defaultStringFilter;
         if (filterName == "Identity") return data;
 
@@ -157,6 +206,7 @@ internal sealed class PdfDecryptor
     /// </summary>
     public byte[] DecryptStream(byte[] data, int objectNumber, int generation, string? cryptFilterName = null)
     {
+        if (_custom is not null) return _custom.Decrypt(data, objectNumber, generation, _encryptionKey);
         var filterName = cryptFilterName ?? _defaultStreamFilter;
         if (filterName == "Identity") return data;
 
@@ -171,6 +221,7 @@ internal sealed class PdfDecryptor
     /// encrypted with the per-object key.</summary>
     public byte[] EncryptString(byte[] data, int objectNumber, int generation)
     {
+        if (_custom is not null) return _custom.Encrypt(data, objectNumber, generation, _encryptionKey);
         var filterName = _defaultStringFilter;
         if (filterName == "Identity") return data;
         var objectKey = DeriveObjectKey(objectNumber, generation, filterName == "AESV2" || filterName == "AESV3");
@@ -181,6 +232,7 @@ internal sealed class PdfDecryptor
     /// inverse of <see cref="DecryptStream"/>.</summary>
     public byte[] EncryptStream(byte[] data, int objectNumber, int generation, string? cryptFilterName = null)
     {
+        if (_custom is not null) return _custom.Encrypt(data, objectNumber, generation, _encryptionKey);
         var filterName = cryptFilterName ?? _defaultStreamFilter;
         if (filterName == "Identity") return data;
         var objectKey = DeriveObjectKey(objectNumber, generation, filterName == "AESV2" || filterName == "AESV3");
@@ -404,8 +456,11 @@ internal sealed class PdfDecryptor
         int keyLength, byte[] oBytes, byte[] uBytes, string password,
         bool encryptMetadata, string stmF, string strF)
     {
-        // UTF-8 password, truncated to 127 bytes
-        var pwBytes = System.Text.Encoding.UTF8.GetBytes(password);
+        // SASLprep (RFC 4013) the password, then UTF-8 encode and truncate to
+        // 127 bytes (ISO 32000-2 §7.6.4.3.3), matching how the key was derived
+        // at encryption time.
+        var pwBytes = System.Text.Encoding.UTF8.GetBytes(
+            Engine.Security.Impl.Sasl.Stringprep.PrepareForKeyDerivation(password));
         if (pwBytes.Length > 127)
             pwBytes = pwBytes[..127];
 

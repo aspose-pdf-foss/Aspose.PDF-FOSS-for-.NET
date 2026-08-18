@@ -77,6 +77,10 @@ public class PdfAction : IAppointment
     public string GetECMAScriptString()
         => this is JavascriptAction js ? js.Script : string.Empty;
 
+    /// <summary>Run this action against the document. The base action has no
+    /// runtime effect; JavaScript actions interpret their embedded script.</summary>
+    internal virtual void Execute(Document document) { }
+
     internal PdfDictionary Dict => _dict;
     internal PdfReader Reader => _reader;
 
@@ -736,6 +740,48 @@ public sealed class JavascriptAction : PdfAction
         }
         set => Dict.Set("JS", new PdfString(System.Text.Encoding.UTF8.GetBytes(value ?? string.Empty)));
     }
+
+    // Recognised field-property assignments of the form
+    //   this.getField("NAME").textColor = color.NAME
+    //   this.getField("NAME").fillColor = color.NAME
+    private static readonly System.Text.RegularExpressions.Regex FieldColorAssign = new(
+        @"getField\s*\(\s*""([^""]*)""\s*\)\s*\.\s*(textColor|fillColor)\s*=\s*color\.(\w+)",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>Interpret the supported subset of Acrobat form JavaScript — field
+    /// text/fill colour assignments through <c>getField(...)</c> — and apply the
+    /// changes to the document's form fields so they persist on save.</summary>
+    internal override void Execute(Document document)
+    {
+        if (document?.Form is not { } form) return;
+        foreach (System.Text.RegularExpressions.Match m in FieldColorAssign.Matches(Script))
+        {
+            if (form.FindField(m.Groups[1].Value) is not { } field) continue;
+            if (JsColor(m.Groups[3].Value) is not { } color) continue;
+            if (m.Groups[2].Value == "textColor")
+                field.Color = Aspose.Pdf.Color.FromRgb(color);
+            else
+                field.Characteristics.Background = color;
+        }
+    }
+
+    /// <summary>Map an Acrobat <c>color.*</c> constant to an RGB colour.</summary>
+    private static System.Drawing.Color? JsColor(string name) => name switch
+    {
+        "red" => System.Drawing.Color.Red,
+        "green" => System.Drawing.Color.FromArgb(0, 255, 0),
+        "blue" => System.Drawing.Color.Blue,
+        "cyan" => System.Drawing.Color.Cyan,
+        "magenta" => System.Drawing.Color.Magenta,
+        "yellow" => System.Drawing.Color.Yellow,
+        "black" => System.Drawing.Color.Black,
+        "white" => System.Drawing.Color.White,
+        "gray" => System.Drawing.Color.Gray,
+        "ltGray" => System.Drawing.Color.LightGray,
+        "dkGray" => System.Drawing.Color.DarkGray,
+        "transparent" => System.Drawing.Color.Transparent,
+        _ => null,
+    };
 }
 
 /// <summary>
@@ -765,7 +811,7 @@ public sealed class SubmitFormAction : PdfAction
     public const int SubmitCoordinates = 16;
 
     /// <summary>Submit the field data as XFDF rather than FDF
-    /// (bit 6 of /Flags). Spelled "Xfdf" to match the Aspose.Pdf member
+    /// (bit 6 of /Flags). Spelled "Xfdf" to match the public member
     /// name; the wire format is uppercase XFDF.</summary>
     public const int Xfdf = 32;
 
@@ -778,7 +824,7 @@ public sealed class SubmitFormAction : PdfAction
     public const int IncludeAnnotations = 128;
 
     /// <summary>Submit the entire PDF as the request body
-    /// (bit 9 of /Flags). Spelled "SubmitPdf" to match the Aspose.Pdf
+    /// (bit 9 of /Flags). Spelled "SubmitPdf" to match the public
     /// member name.</summary>
     public const int SubmitPdf = 256;
 

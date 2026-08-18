@@ -140,18 +140,21 @@ public class DocumentFeatureTests
     }
 
     [Fact]
-    public void Encrypt_WithCustomSecurityHandler_ThrowsNotSupported()
+    public void Encrypt_WithNullCustomSecurityHandler_ThrowsArgumentNull()
     {
+        // Custom security handlers are now honoured, so a missing one is a caller error.
         using var doc = Document.Open(PdfBuilder.BuildMinimal());
-        Assert.Throws<System.NotSupportedException>(
+        Assert.Throws<System.ArgumentNullException>(
             () => doc.Encrypt("u", "o", Aspose.Pdf.Permissions.PrintDocument, (Aspose.Pdf.Security.ICustomSecurityHandler)null!));
     }
 
     [Fact]
-    public void Encrypt_WithPublicCertificates_ThrowsNotSupported()
+    public void Encrypt_WithEmptyCertificateList_ThrowsArgumentException()
     {
+        // Public-key (certificate) encryption is now implemented; passing no recipient
+        // certificates is a caller error, so the overload rejects an empty list.
         using var doc = Document.Open(PdfBuilder.BuildMinimal());
-        Assert.Throws<System.NotSupportedException>(
+        Assert.Throws<System.ArgumentException>(
             () => doc.Encrypt(
                 Aspose.Pdf.Permissions.PrintDocument,
                 Aspose.Pdf.CryptoAlgorithm.AESx128,

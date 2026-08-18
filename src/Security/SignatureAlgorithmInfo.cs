@@ -54,6 +54,20 @@ namespace Aspose.Pdf.Security
             _signatureName = signatureName ?? string.Empty;
         }
 
+        /// <summary>Populate the algorithm triple directly — used by
+        /// <see cref="TimestampAlgorithmInfo"/> and other subclasses that
+        /// derive the values from a parsed signature value.</summary>
+        internal SignatureAlgorithmInfo(string signatureName,
+            CryptographicStandard cryptographicStandard,
+            DigestHashAlgorithm digestHashAlgorithm,
+            SignatureAlgorithmType algorithmType)
+            : this(signatureName)
+        {
+            CryptographicStandard = cryptographicStandard;
+            DigestHashAlgorithm = digestHashAlgorithm;
+            AlgorithmType = algorithmType;
+        }
+
         public SignatureAlgorithmType AlgorithmType;
         public CryptographicStandard CryptographicStandard;
         public DigestHashAlgorithm DigestHashAlgorithm;
@@ -84,9 +98,11 @@ namespace Aspose.Pdf.Security
                             or "1.2.840.113549.1.1.13" or "1.2.840.113549.1.1.5" => SignatureAlgorithmType.Rsa,
                         // DSA OID
                         "1.2.840.10040.4.1" or "1.2.840.10040.4.3" => SignatureAlgorithmType.Dsa,
-                        // ECDSA OIDs
+                        // ECDSA OIDs (…4.3.2/3/4 = with SHA-256/384/512; …4.3.10/11/12 = with SHA3-256/384/512)
                         "1.2.840.10045.2.1" or "1.2.840.10045.4.1" or "1.2.840.10045.4.3.2"
-                            or "1.2.840.10045.4.3.3" or "1.2.840.10045.4.3.4" => SignatureAlgorithmType.Ecdsa,
+                            or "1.2.840.10045.4.3.3" or "1.2.840.10045.4.3.4"
+                            or "2.16.840.1.101.3.4.3.10" or "2.16.840.1.101.3.4.3.11"
+                            or "2.16.840.1.101.3.4.3.12" => SignatureAlgorithmType.Ecdsa,
                         _ => SignatureAlgorithmType.Unknown,
                     };
                 }
@@ -96,6 +112,31 @@ namespace Aspose.Pdf.Security
                 info.AlgorithmType = SignatureAlgorithmType.Unknown;
             }
             return info;
+        }
+
+        /// <summary>Parse an RFC 3161 timestamp token (/Contents of an
+        /// <c>ETSI.RFC3161</c> document-timestamp signature) into a
+        /// <see cref="TimestampAlgorithmInfo"/>: the TSA signer's digest
+        /// algorithm plus the message-imprint (content) hash algorithm.</summary>
+        internal static SignatureAlgorithmInfo FromTimestampToken(byte[]? contents, string? signName)
+        {
+            var digest = DigestHashAlgorithm.Auto;
+            var contentDigest = DigestHashAlgorithm.Sha256;
+            if (contents is { Length: > 0 })
+            {
+                try
+                {
+                    if (CmsParser.TryGetSignerAlgorithms(contents, out var digestOid, out _))
+                        digest = MapDigest(digestOid);
+                    if (Rfc3161.TryGetContentHashAlgorithm(contents, out var ch))
+                        contentDigest = ch;
+                }
+                catch
+                {
+                    // Malformed token — fall back to the defaults above.
+                }
+            }
+            return new TimestampAlgorithmInfo(signName ?? string.Empty, digest, contentDigest);
         }
 
         private static CryptographicStandard MapSubFilter(string? subFilter) => subFilter switch
@@ -117,5 +158,29 @@ namespace Aspose.Pdf.Security
             "2.16.840.1.101.3.4.2.10" => DigestHashAlgorithm.Sha3_512,
             _ => DigestHashAlgorithm.Auto,
         };
+    }
+
+    /// <summary>Algorithm info for an RFC 3161 document-timestamp signature
+    /// (/SubFilter <c>ETSI.RFC3161</c>). <see cref="SignatureAlgorithmInfo.AlgorithmType"/>
+    /// is always <see cref="SignatureAlgorithmType.Timestamp"/> and
+    /// <see cref="SignatureAlgorithmInfo.CryptographicStandard"/> is
+    /// <see cref="CryptographicStandard.Rfc3161"/>. <see cref="ContentHashAlgorithm"/>
+    /// is the message-imprint digest the timestamp covers.</summary>
+    public sealed class TimestampAlgorithmInfo : SignatureAlgorithmInfo
+    {
+        /// <summary>Digest algorithm of the timestamp's <c>messageImprint</c> —
+        /// i.e. the hash of the document bytes that the timestamp covers.</summary>
+        public readonly DigestHashAlgorithm ContentHashAlgorithm;
+
+        public TimestampAlgorithmInfo() { }
+
+        internal TimestampAlgorithmInfo(string signatureName,
+            DigestHashAlgorithm digestHashAlgorithm,
+            DigestHashAlgorithm contentHashAlgorithm)
+            : base(signatureName, CryptographicStandard.Rfc3161, digestHashAlgorithm,
+                   SignatureAlgorithmType.Timestamp)
+        {
+            ContentHashAlgorithm = contentHashAlgorithm;
+        }
     }
 }

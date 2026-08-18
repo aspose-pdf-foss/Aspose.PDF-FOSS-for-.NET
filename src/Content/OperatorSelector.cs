@@ -10,7 +10,7 @@ using Aspose.Pdf.Operators;
 ///
 /// When constructed with a template operator (e.g. <c>new OperatorSelector(new
 /// Operators.Fill())</c>) the selector admits only operators whose runtime type
-/// equals the template's — mirroring the Aspose.Pdf expectation that a caller
+/// equals the template's — mirroring the public API's expectation that a caller
 /// asking for <c>Fill</c> gets back only <c>Fill</c> instances. The
 /// parameterless constructor admits every visited operator.
 /// </summary>
@@ -31,8 +31,25 @@ public class OperatorSelector : IOperatorSelector
     private void Match(Operator op)
     {
         if (op is null) return;
-        if (_template is not null && op.GetType() != _template.GetType()) return;
+        if (_template is not null && !Matches(op, _template)) return;
         Selected.Add(op);
+    }
+
+    // Template matching is wider than type equality for the text families:
+    //  * any text-STATE operator template (Tc/Tw/Tz/TL/Tf/Tr/Ts) admits every
+    //    text-state operator, and any text-PLACE template (Td/TD/Tm/T*) admits
+    //    every text-place operator;
+    //  * T* additionally answers to EVERY text-operator template (show, state,
+    //    place or BT/ET) — but never to a non-text template;
+    //  * everything else (text-show ops, BT/ET, path/paint/state ops) matches
+    //    on exact runtime type only.
+    private static bool Matches(Operator op, Operator template)
+    {
+        if (op.GetType() == template.GetType()) return true;
+        if (op is Operators.TextStateOperator && template is Operators.TextStateOperator) return true;
+        if (op is Operators.TextPlaceOperator && template is Operators.TextPlaceOperator) return true;
+        if (op is Operators.MoveToNextLine && template is Operators.TextOperator) return true;
+        return false;
     }
 
     public virtual void Visit(BDC BDC) => Match(BDC);

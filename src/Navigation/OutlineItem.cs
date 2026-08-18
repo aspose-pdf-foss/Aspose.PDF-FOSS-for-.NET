@@ -448,7 +448,6 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
     }
 
     private readonly OutlineCollection? _backingCollection;
-    private Outlines? _parentOutlines;
 
     /// <summary>The top-level collection that owns this item, so <c>Delete()</c>
     /// can remove it. Set when <see cref="OutlineCollection.Items"/> materializes
@@ -553,7 +552,7 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
     /// <summary>Whether the bookmark is expanded.</summary>
     public new bool Open { get => base.Open; set => base.Open = value; }
 
-    // ── Aspose.Pdf additions ─────────────────────────────────────
+    // ── Public-API additions ─────────────────────────────────────
 
     /// <summary>Whether the collection is read-only. Always false.</summary>
     public bool IsReadOnly => false;
@@ -600,19 +599,7 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
     }
 
     /// <summary>The owning outline tree, or null when this item is not yet attached.</summary>
-    public Outlines? Parent
-    {
-        get
-        {
-            if (_parentOutlines is not null) return _parentOutlines;
-            if (_backingCollection is not null)
-            {
-                _parentOutlines = new Outlines(_backingCollection);
-                return _parentOutlines;
-            }
-            return null;
-        }
-    }
+    public Outlines? Parent => _backingCollection;
 
     /// <summary>Signed visible-descendant count following PDF /Count semantics:
     /// the number of items that appear when this node is open (immediate children
@@ -734,7 +721,7 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
     }
 }
 
-public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<OutlineItem>
+public sealed class OutlineCollection : Outlines, System.Collections.Generic.IEnumerable<OutlineItem>
 {
     private readonly PdfDictionary _dict;
     private readonly PdfReader _reader;
@@ -742,10 +729,10 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
     private bool _dirty;
 
     /// <summary>Enumerator over the top-level outline items, typed as
-    /// <see cref="OutlineItemCollection"/> to match the Aspose.Pdf
+    /// <see cref="OutlineItemCollection"/> to match the public
     /// reflection signature. The items stored are concrete
     /// OutlineItemCollection instances anyway.</summary>
-    public System.Collections.Generic.IEnumerator<OutlineItemCollection> GetEnumerator()
+    public override System.Collections.Generic.IEnumerator<OutlineItemCollection> GetEnumerator()
     {
         foreach (var item in Items)
             yield return (OutlineItemCollection)item;
@@ -753,12 +740,28 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
 
     System.Collections.Generic.IEnumerator<OutlineItem>
         System.Collections.Generic.IEnumerable<OutlineItem>.GetEnumerator() => Items.GetEnumerator();
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
 
     internal OutlineCollection(PdfDictionary dict, PdfReader reader)
     {
         _dict = dict;
         _reader = reader;
+    }
+
+    /// <summary>Create an outline collection bound to <paramref name="document"/>'s
+    /// bookmark tree, creating an empty /Outlines dictionary if the document has none
+    /// (mirrors <see cref="Document.Outlines"/>).</summary>
+    public OutlineCollection(Document document)
+    {
+        if (document is null) throw new ArgumentNullException(nameof(document));
+        _reader = document.Reader;
+        var dict = _reader.ResolveDict(_reader.Catalog.Get("Outlines"));
+        if (dict is null)
+        {
+            dict = new PdfDictionary();
+            dict.Set("Type", new PdfName("Outlines"));
+            _reader.Catalog.Set("Outlines", dict);
+        }
+        _dict = dict;
     }
 
     /// <summary>Top-level outline items.</summary>
@@ -788,7 +791,7 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
         }
     }
 
-    public int Count => Items.Count;
+    public override int Count => Items.Count;
 
     /// <summary>The first top-level outline item, or null if the collection is empty.</summary>
     public OutlineItemCollection? First
@@ -851,9 +854,9 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
     }
 
     /// <summary>Add an item typed as <see cref="OutlineItemCollection"/> (the
-    /// Aspose.Pdf overload signature). Forwards to the OutlineItem-typed
+    /// public overload signature). Forwards to the OutlineItem-typed
     /// path.</summary>
-    public void Add(OutlineItemCollection outline)
+    public override void Add(OutlineItemCollection outline)
     {
         _ = Items;
         _items!.Add(outline);
@@ -862,7 +865,7 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
 
     /// <summary>Removes every item from the collection (counterpart to
     /// <see cref="Delete()"/>).</summary>
-    public void Clear()
+    public override void Clear()
     {
         _ = Items;
         _items!.Clear();
@@ -870,7 +873,7 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
     }
 
     /// <summary>Whether <paramref name="item"/> is currently in the collection.</summary>
-    public bool Contains(OutlineItemCollection item)
+    public override bool Contains(OutlineItemCollection item)
     {
         if (item is null) return false;
         _ = Items;
@@ -881,7 +884,7 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
 
     /// <summary>Copy items into <paramref name="array"/> starting at
     /// <paramref name="index"/>.</summary>
-    public void CopyTo(OutlineItemCollection[] array, int index)
+    public override void CopyTo(OutlineItemCollection[] array, int index)
     {
         if (array is null) throw new ArgumentNullException(nameof(array));
         _ = Items;
@@ -900,7 +903,7 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
 
     /// <summary>Remove the OutlineItemCollection-typed item by reference;
     /// reports whether it was present.</summary>
-    public bool Remove(OutlineItemCollection item)
+    public override bool Remove(OutlineItemCollection item)
     {
         if (item is null) return false;
         return Remove((OutlineItem)item);
@@ -918,7 +921,7 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
     }
 
     /// <summary>Always false: the collection is mutable.</summary>
-    public bool IsReadOnly => false;
+    public override bool IsReadOnly => false;
 
     /// <summary>Always false: callers serialise their own access.</summary>
     public bool IsSynchronized => false;
@@ -929,7 +932,7 @@ public sealed class OutlineCollection : System.Collections.Generic.IEnumerable<O
     /// <summary>Total number of outline items currently visible (PDF /Count of
     /// the /Outlines root): every top-level item plus, for each open item, its
     /// visible-descendant magnitude. Computed live from the in-memory tree.</summary>
-    public int VisibleCount
+    public override int VisibleCount
     {
         get
         {
