@@ -22,9 +22,9 @@ internal static class RsaKeyTransport
         var eb = new byte[keyLen];
         eb[1] = 0x02;
         var psLen = keyLen - data.Length - 3;
-        var ps = CryptoRandom.GetBytes(psLen);
+        var ps = System.Security.Cryptography.RandomNumberGenerator.GetBytes(psLen);
         for (var i = 0; i < psLen; i++)
-            while (ps[i] == 0) ps[i] = CryptoRandom.GetBytes(1)[0];
+            while (ps[i] == 0) ps[i] = System.Security.Cryptography.RandomNumberGenerator.GetBytes(1)[0];
         ps.CopyTo(eb, 2);
         eb[2 + psLen] = 0x00;
         data.CopyTo(eb, 3 + psLen);
@@ -102,8 +102,8 @@ internal static class PubSecEnvelope
     /// as one /Recipients entry.</summary>
     public static byte[] Build(byte[] content, X509Certificate2 recipient)
     {
-        var cek = CryptoRandom.GetBytes(16);   // AES-128 content-encryption key
-        var iv  = CryptoRandom.GetBytes(16);
+        var cek = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);   // AES-128 content-encryption key
+        var iv  = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
         var encryptedContent = new AesCipher(cek).EncryptCbc(content, iv, pkcs7Padding: true);
 
         using var rsa = recipient.GetRSAPublicKey()

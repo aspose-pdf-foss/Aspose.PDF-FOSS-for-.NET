@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.IO.Filters;
 
 namespace Aspose.Pdf.IO;
@@ -60,6 +60,8 @@ internal static class TiffDecoder
         long width = 0, height = 0, compression = 1, photometric = -1, fillOrder = 1;
         long samplesPerPixel = 1, rowsPerStrip = long.MaxValue, planarConfig = 1, predictor = 1;
         long newSubfileType = 0, t4Options = 0, tileWidth = 0, tileLength = 0;
+        long jpegIfOffset = 0, jpegIfLength = 0;
+        byte[]? jpegTables = null;
         long[] bitsPerSample = { 1 };
         long[]? stripOffsets = null, stripCounts = null, tileOffsets = null, tileCounts = null;
         long[]? colorMap = null, extraSamples = null;
@@ -92,6 +94,9 @@ internal static class TiffDecoder
                 case 324: tileOffsets = ReadValues(d, le, eo, type, count); break;
                 case 325: tileCounts = ReadValues(d, le, eo, type, count); break;
                 case 338: extraSamples = ReadValues(d, le, eo, type, count); break;
+                case 347: jpegTables = RawBytes(d, le, eo, type, count); break;
+                case 513: jpegIfOffset = ReadValues(d, le, eo, type, count)[0]; break;
+                case 514: jpegIfLength = ReadValues(d, le, eo, type, count)[0]; break;
             }
         }
 
@@ -105,7 +110,16 @@ internal static class TiffDecoder
         foreach (var b in bitsPerSample)
             if (b != bps && photometric != 6) return null;             // heterogeneous depths unsupported
         if (bps is not (1 or 2 or 4 or 8 or 16)) return null;
-        if (compression is 6 or 7) return null;                        // JPEG-in-TIFF — codec fallback handles it
+        // JPEG-in-TIFF. Both flavours in practice carry the frame as ONE complete
+        // stream: old-style (6) points at a whole JFIF file through JPEGInterchangeFormat,
+        // and new-style (7) puts an abbreviated stream in a single strip whose quantisation
+        // and Huffman tables live in the shared JPEGTables tag. Rebuild the stream and hand
+        // it to the managed JPEG decoder rather than declining the frame - the decline used
+        // to be covered by the platform codec, which does not exist off Windows, so these
+        // files lost their picture entirely there.
+        if (compression is 6 or 7)
+            return JpegFrameAsPng(d, le, compression, stripOffsets, stripCounts,
+                jpegTables, jpegIfOffset, jpegIfLength);
         if (photometric is not (0 or 1 or 2 or 3 or 5)) return null;
         if (planarConfig == 2 && bps != 8) return null;
 
@@ -429,6 +443,75 @@ internal static class TiffDecoder
 
     /// <summary>Read an entry's values (SHORT/LONG/BYTE), resolving the inline-vs-offset
     /// storage rule. RATIONALs and other types return their first LONG as a best effort.</summary>
+    /// <summary>A tag's value as raw bytes (type 7, UNDEFINED - how JPEGTables is
+    /// stored). Null when the value does not lie inside the file.</summary>
+    private static byte[]? RawBytes(byte[] d, bool le, int entryOffset, int type, long count)
+    {
+        if (count <= 0 || count > 1 << 20) return null;
+        var at = count <= 4 ? entryOffset + 8 : (long)U32(d, entryOffset + 8, le);
+        if (at < 0 || at + count > d.Length) return null;
+        var bytes = new byte[count];
+        System.Array.Copy(d, at, bytes, 0, count);
+        return bytes;
+    }
+
+    /// <summary>
+    /// Rebuild a JPEG-compressed frame into one self-contained stream and decode it to
+    /// PNG. For new-style JPEG the shared JPEGTables prologue (everything up to its
+    /// terminating EOI) is spliced in front of the strip's own body (everything after
+    /// its leading SOI); for old-style the interchange block already IS a whole file.
+    /// Null for anything that is not one whole-frame stream - a multi-strip new-style
+    /// frame would need its scans stitched, which is not what these files carry.
+    /// </summary>
+    private static byte[]? JpegFrameAsPng(byte[] d, bool le, long compression,
+        long[]? stripOffsets, long[]? stripCounts, byte[]? jpegTables,
+        long jpegIfOffset, long jpegIfLength)
+    {
+        byte[]? stream = null;
+        if (compression == 6 && jpegIfOffset > 0 && jpegIfLength > 0
+            && jpegIfOffset + jpegIfLength <= d.Length)
+        {
+            stream = new byte[jpegIfLength];
+            System.Array.Copy(d, jpegIfOffset, stream, 0, jpegIfLength);
+        }
+        else if (stripOffsets is { Length: 1 } && stripCounts is { Length: 1 }
+                 && stripOffsets[0] >= 0 && stripCounts[0] > 0
+                 && stripOffsets[0] + stripCounts[0] <= d.Length)
+        {
+            var body = new byte[stripCounts[0]];
+            System.Array.Copy(d, stripOffsets[0], body, 0, stripCounts[0]);
+            stream = SpliceJpegTables(jpegTables, body);
+        }
+        if (stream is null || stream.Length < 4) return null;
+
+        try
+        {
+            var (pixels, pw, ph, components) = JpegDecoder.Decode(stream);
+            if (pw <= 0 || ph <= 0 || pixels.Length == 0) return null;
+            if (components == 1 && pixels.Length >= (long)pw * ph)
+                return PngEncoder.Encode(pixels, pw, ph, colorType: 0);
+            if (components >= 3 && pixels.Length >= (long)pw * ph * 3)
+                return PngEncoder.Encode(pixels, pw, ph, colorType: 2);
+            return null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Put the JPEGTables prologue in front of a strip body: tables minus their
+    /// trailing EOI, then the body minus its leading SOI. A body that already carries its
+    /// own tables (it starts with SOI and no tables tag is present) is returned as is.</summary>
+    private static byte[] SpliceJpegTables(byte[]? tables, byte[] body)
+    {
+        if (tables is null || tables.Length < 4) return body;
+        var tblEnd = tables.Length;
+        if (tables[tblEnd - 2] == 0xFF && tables[tblEnd - 1] == 0xD9) tblEnd -= 2;   // drop EOI
+        var bodyStart = body.Length >= 2 && body[0] == 0xFF && body[1] == 0xD8 ? 2 : 0;  // drop SOI
+        var outBytes = new byte[tblEnd + (body.Length - bodyStart)];
+        System.Array.Copy(tables, 0, outBytes, 0, tblEnd);
+        System.Array.Copy(body, bodyStart, outBytes, tblEnd, body.Length - bodyStart);
+        return outBytes;
+    }
+
     private static long[] ReadValues(byte[] d, bool le, int entryOffset, int type, long count)
     {
         var size = type switch { 1 => 1, 3 => 2, 4 => 4, _ => 4 };

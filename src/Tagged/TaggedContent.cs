@@ -126,6 +126,7 @@ public sealed class TaggedContent : ITaggedContent
         _lsRoot = new LS.StructTreeRootElement(dict, _document.Reader);
         _lsRoot._roleMap = GetRoleMap();
         _lsRoot._idRegistry = GetIdRegistry();
+        _lsRoot._sourceDoc = _document;
 
         // Seed the ID registry with identifiers already present in a loaded
         // document so SetId can detect duplicates against existing elements.

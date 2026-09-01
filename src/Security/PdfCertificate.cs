@@ -28,6 +28,11 @@ public sealed class PdfCertificate
     /// <summary>The subject name extracted from the certificate (CN or O).</summary>
     public string SubjectName { get; }
 
+    /// <summary>The full subject distinguished name, most-specific attribute
+    /// first ("E=…, CN=…, C=…") — the form the visible-signature banner shows.</summary>
+    internal string SubjectDn => _subjectDn ??= ParseSubjectDnFull(CertificateDer) ?? SubjectName;
+    private string? _subjectDn;
+
     /// <summary>The issuer name extracted from the certificate.</summary>
     public string IssuerName { get; }
 
@@ -150,6 +155,55 @@ public sealed class PdfCertificate
         var subjectName = ParseDistinguishedName(subjectDer);
 
         return (subjectName, issuerName, serial, issuerDer);
+    }
+
+    /// <summary>Format the certificate's whole subject DN, RDNs reversed to
+    /// most-specific-first, attributes as "{abbrev}={value}" joined with ", ".</summary>
+    private static string? ParseSubjectDnFull(byte[] certDer)
+    {
+        try
+        {
+            var cert = new Asn1Reader(certDer).ReadSequence();
+            var tbsCert = cert.ReadSequence();
+            tbsCert.TryReadContextConstructed(0); // version
+            tbsCert.ReadIntegerBytes();           // serialNumber
+            tbsCert.Skip();                       // signature AlgorithmIdentifier
+            tbsCert.ReadRawTlv();                 // issuer
+            tbsCert.Skip();                       // validity
+            var subjectDer = tbsCert.ReadRawTlv();
+
+            var r = new Asn1Reader(subjectDer).ReadSequence();
+            var parts = new List<string>();
+            while (r.HasData)
+            {
+                var set = r.ReadSet();
+                while (set.HasData)
+                {
+                    var atv = set.ReadSequence();
+                    var oid = atv.ReadOid();
+                    var value = atv.ReadAnyString();
+                    var abbrev = oid switch
+                    {
+                        "2.5.4.3" => "CN",
+                        "2.5.4.6" => "C",
+                        "2.5.4.7" => "L",
+                        "2.5.4.8" => "S",
+                        "2.5.4.10" => "O",
+                        "2.5.4.11" => "OU",
+                        "1.2.840.113549.1.9.1" => "E",
+                        _ => "OID." + oid,
+                    };
+                    parts.Add($"{abbrev}={value}");
+                }
+            }
+            if (parts.Count == 0) return null;
+            parts.Reverse();
+            return string.Join(", ", parts);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static string ParseDistinguishedName(byte[] der)

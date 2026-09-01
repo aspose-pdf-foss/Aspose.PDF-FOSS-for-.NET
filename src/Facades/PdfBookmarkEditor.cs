@@ -239,20 +239,114 @@ public sealed class PdfBookmarkEditor : IDisposable
     public void ExportBookmarksToXML(Stream stream)
     {
         if (stream is null) throw new ArgumentNullException(nameof(stream));
+        // The schema: one root <Bookmark>; each outline item is a nested
+        // <Title Page="<page> <fit-type> [args…]" Action="…" [Open="…"]> element whose
+        // direct text is the title — the exact shape ImportBookmarksWithXML reads back.
+        // Latin-1 output keeps non-Latin titles as numeric character references.
         using var writer = System.Xml.XmlWriter.Create(stream, new System.Xml.XmlWriterSettings
         {
             Indent = true,
             CloseOutput = false,
+            Encoding = System.Text.Encoding.Latin1,
         });
         writer.WriteStartDocument();
-        writer.WriteStartElement("bookmarks");
+        writer.WriteStartElement("Bookmark");
         if (_document is not null)
         {
-            foreach (var bm in ExtractBookmarks(upperLevel: true))
-                WriteBookmarkXml(writer, bm);
+            _document.SyncInMemoryPageTree();
+            var namedDests = new NamedDestinationCollection(_document.Reader.Catalog, _document.Reader);
+            foreach (var item in _document.Outlines)
+                WriteTitleElement(writer, item, namedDests);
         }
         writer.WriteEndElement();
         writer.WriteEndDocument();
+    }
+
+    private static void WriteTitleElement(System.Xml.XmlWriter writer, OutlineItem item,
+        NamedDestinationCollection namedDests)
+    {
+        writer.WriteStartElement("Title");
+        var page = ResolveExportPage(item, namedDests, out var dest);
+        if (page > 0)
+            writer.WriteAttributeString("Page", FormatLegacyDestination(page, dest));
+        writer.WriteAttributeString("Action", ActionTypeName(item.Action));
+        if (item.Children.Count > 0)
+            writer.WriteAttributeString("Open", item.Open ? "True" : "False");
+        if (!string.IsNullOrEmpty(item.Title))
+            writer.WriteString(item.Title);
+        foreach (var child in item.Children)
+            WriteTitleElement(writer, child, namedDests);
+        writer.WriteEndElement();
+    }
+
+    /// <summary>The destination page for export — the item's own resolved page, or the
+    /// named destination's when /Dest (or the action /D) is a name; <paramref name="dest"/>
+    /// carries the explicit destination when one is directly reachable.</summary>
+    private static int ResolveExportPage(OutlineItem item, NamedDestinationCollection namedDests,
+        out Annotations.ExplicitDestination? dest)
+    {
+        dest = null;
+        var reader = item.Reader;
+        if (reader is null)
+        {
+            dest = item.Destination as Annotations.ExplicitDestination;
+            return dest?.PageNumber ?? 0;
+        }
+        var destObj = reader.Resolve(item.Dict.Get("Dest"));
+        if (destObj is null)
+        {
+            var actionDict = reader.ResolveDict(item.Dict.Get("A"));
+            destObj = actionDict is not null ? reader.Resolve(actionDict.Get("D")) : null;
+        }
+        if (destObj is Core.PdfArray arr)
+            dest = Annotations.ExplicitDestination.FromArray(arr, reader);
+        var page = item.DestinationPageNumber;
+        if (page == 0)
+        {
+            var name = destObj switch
+            {
+                Core.PdfName n => n.Value,
+                Core.PdfString s => s.ToText(),
+                _ => string.Empty,
+            };
+            if (name.Length > 0 && namedDests.FindByName(name) is { PageNumber: > 0 } resolved)
+                page = resolved.PageNumber;
+        }
+        return page;
+    }
+
+    /// <summary>The legacy Page attribute — "&lt;page&gt; &lt;fit-type&gt; [args…]",
+    /// e.g. "140 XYZ 56.7 735.3 0" — the inverse of <see cref="ParseLegacyDestination"/>.</summary>
+    private static string FormatLegacyDestination(int page, Annotations.ExplicitDestination? dest)
+    {
+        static string N(double v) => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        var sb = new System.Text.StringBuilder();
+        sb.Append(page.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (dest is null) return sb.ToString();
+        sb.Append(' ').Append(dest.Type);
+        switch (dest)
+        {
+            case Annotations.XYZExplicitDestination xyz:
+                sb.Append(' ').Append(N(xyz.Left)).Append(' ').Append(N(xyz.Top)).Append(' ').Append(N(xyz.Zoom));
+                break;
+            case Annotations.FitRExplicitDestination r:
+                sb.Append(' ').Append(N(r.Left)).Append(' ').Append(N(r.Bottom)).Append(' ').Append(N(r.Right)).Append(' ').Append(N(r.Top));
+                break;
+            case Annotations.FitHExplicitDestination h:
+                sb.Append(' ').Append(N(h.Top));
+                break;
+            case Annotations.FitBHExplicitDestination bh:
+                sb.Append(' ').Append(N(bh.Top));
+                break;
+            case Annotations.FitVExplicitDestination v:
+                sb.Append(' ').Append(N(v.Left));
+                break;
+            case Annotations.FitBVExplicitDestination bv:
+                sb.Append(' ').Append(N(bv.Left));
+                break;
+            // Fit / FitB carry no coordinates.
+        }
+        return sb.ToString();
     }
 
     /// <summary>Export the outline tree to <paramref name="xmlFile"/>.</summary>
@@ -386,20 +480,6 @@ public sealed class PdfBookmarkEditor : IDisposable
             RenameOutline(child, sTitle, dTitle);
     }
 
-    private static void WriteBookmarkXml(System.Xml.XmlWriter writer, Bookmark bm)
-    {
-        writer.WriteStartElement("bookmark");
-        if (!string.IsNullOrEmpty(bm.Title)) writer.WriteAttributeString("title", bm.Title);
-        if (bm.PageNumber > 0)
-            writer.WriteAttributeString("page", bm.PageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        writer.WriteAttributeString("level", bm.Level.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        if (bm.BoldFlag) writer.WriteAttributeString("bold", "true");
-        if (bm.ItalicFlag) writer.WriteAttributeString("italic", "true");
-        foreach (var child in bm.ChildItems)
-            WriteBookmarkXml(writer, child);
-        writer.WriteEndElement();
-    }
-
     private void ImportBookmarkElement(System.Xml.XmlElement el)
     {
         if (!string.Equals(el.LocalName, "bookmark", StringComparison.OrdinalIgnoreCase)) return;
@@ -454,23 +534,24 @@ public sealed class PdfBookmarkEditor : IDisposable
         }
     }
 
+    private static string ActionTypeName(Annotations.PdfAction? action) => action switch
+    {
+        Annotations.GoToAction => "GoTo",
+        Annotations.GoToRemoteAction => "GoToR",
+        Annotations.UriAction or Annotations.GoToURIAction => "URI",
+        Annotations.LaunchAction => "Launch",
+        Annotations.NamedAction => "Named",
+        Annotations.JavascriptAction => "JavaScript",
+        Annotations.SubmitFormAction => "SubmitForm",
+        not null => "Unknown",
+        // A bookmark with a direct /Dest (or no action at all) is semantically a
+        // go-to, so report its Action as "GoTo" rather than leaving it empty.
+        _ => "GoTo",
+    };
+
     private static Bookmark ToBookmark(OutlineItem item, int level, NamedDestinationCollection namedDests)
     {
-        var action = item.Action;
-        var actionType = action switch
-        {
-            Annotations.GoToAction => "GoTo",
-            Annotations.GoToRemoteAction => "GoToR",
-            Annotations.UriAction or Annotations.GoToURIAction => "URI",
-            Annotations.LaunchAction => "Launch",
-            Annotations.NamedAction => "Named",
-            Annotations.JavascriptAction => "JavaScript",
-            Annotations.SubmitFormAction => "SubmitForm",
-            not null => "Unknown",
-            // A bookmark with a direct /Dest (or no action at all) is semantically a
-            // go-to, so report its Action as "GoTo" rather than leaving it empty.
-            _ => "GoTo",
-        };
+        var actionType = ActionTypeName(item.Action);
         var pageNumber = item.DestinationPageNumber;
         string destinationName = string.Empty;
 

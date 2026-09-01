@@ -1,4 +1,4 @@
-namespace Aspose.Pdf.Devices.Rasterizer;
+﻿namespace Aspose.Pdf.Devices.Rasterizer;
 
 /// <summary>
 /// Scanline polygon fill with anti-aliasing. Uses 4× vertical supersampling and
@@ -175,10 +175,23 @@ internal static class ScanlineFiller
             }
 
             int sR = ir, sG = ig, sB = ib;
+            var backdropA = pixels[idx + 3];
             if (mode != BlendMode.Normal)
             {
                 BlendModes.Blend(mode, pixels[idx], pixels[idx + 1], pixels[idx + 2],
                     ir, ig, ib, out sR, out sG, out sB);
+                // PDF 32000 §11.3.6: Cs' = (1 - ab)*Cs + ab*B(Cb, Cs) - the blend applies
+                // only in proportion to how much backdrop is actually there. A group
+                // scratch starts TRANSPARENT and its empty pixels still carry RGB zero,
+                // so blending against them unweighted made every Multiply inside a group
+                // darken toward black. SetPixel has carried this weighting for a while;
+                // this filler is its sibling and never did.
+                if (backdropA != 255)
+                {
+                    sR = ir + (sR - ir) * backdropA / 255;
+                    sG = ig + (sG - ig) * backdropA / 255;
+                    sB = ib + (sB - ib) * backdropA / 255;
+                }
             }
 
             if (effectiveA == 255)
@@ -188,13 +201,30 @@ internal static class ScanlineFiller
                 pixels[idx + 2] = (byte)sB;
                 pixels[idx + 3] = 255;
             }
-            else
+            else if (backdropA == 255)
             {
+                // Opaque backdrop: the familiar lerp, byte-identical to what this always did.
                 int iaInv = 255 - effectiveA;
                 pixels[idx]     = (byte)((sR * effectiveA + pixels[idx]     * iaInv + 127) / 255);
                 pixels[idx + 1] = (byte)((sG * effectiveA + pixels[idx + 1] * iaInv + 127) / 255);
                 pixels[idx + 2] = (byte)((sB * effectiveA + pixels[idx + 2] * iaInv + 127) / 255);
                 pixels[idx + 3] = 255;
+            }
+            else
+            {
+                // Straight-alpha source-over onto a PARTLY TRANSPARENT backdrop - a group
+                // scratch. Stamping alpha 255 here promoted every partial-alpha fill to
+                // OPAQUE in the group's own layer, so the group then composited it at full
+                // strength: a 45% drop shadow behind a panel landed at 100% and painted a
+                // hard dark frame where a soft fade is expected. The destination colour is
+                // weighted by its own alpha so empty pixels contribute nothing, not black.
+                int srcW8 = effectiveA * 255;
+                int dstW8 = backdropA * (255 - effectiveA);
+                int outW8 = srcW8 + dstW8;
+                pixels[idx]     = (byte)((sR * srcW8 + pixels[idx]     * dstW8 + outW8 / 2) / outW8);
+                pixels[idx + 1] = (byte)((sG * srcW8 + pixels[idx + 1] * dstW8 + outW8 / 2) / outW8);
+                pixels[idx + 2] = (byte)((sB * srcW8 + pixels[idx + 2] * dstW8 + outW8 / 2) / outW8);
+                pixels[idx + 3] = (byte)(effectiveA + backdropA * (255 - effectiveA) / 255);
             }
         }
     }
@@ -414,23 +444,6 @@ internal static class ScanlineFiller
             coverage[xEnd] += (int)((x1 - xEnd) * 255.0 + 0.5);
     }
 
-    private static void BlendRowCoverage(byte[] pixels, int pixelW, int y, int[] coverage,
-        byte r, byte g, byte b, byte a, byte[]? clipMask)
-    {
-        var rowBase = y * pixelW;
-        for (var x = 0; x < pixelW; x++)
-        {
-            if (coverage[x] <= 0) continue;
-            // Skip clipped columns before doing any alpha math — honours W / W*.
-            if (clipMask is not null && clipMask[rowBase + x] == 0) continue;
-            var cov = coverage[x] / SubSamples;
-            if (cov > 255) cov = 255;
-            var effectiveA = (cov * a) / 255;
-            if (effectiveA <= 0) continue;
-            BlendPixel(pixels, pixelW, x, y, r, g, b, (byte)effectiveA);
-        }
-    }
-
     // ── Mask builders (binary clip) ─────────────────────────────────────────────
 
     private static void MaskEvenOdd(List<EdgeHit> hits, byte[] mask, int pixelW, int y)
@@ -479,7 +492,7 @@ internal static class ScanlineFiller
             pixels[idx + 2] = b;
             pixels[idx + 3] = 255;
         }
-        else if (a > 0)
+        else if (a > 0 && pixels[idx + 3] == 255)
         {
             // Integer alpha blend: (src * a + dst * (255 - a)) / 255 with rounding.
             // Cheaper than double-precision math on every covered pixel.
@@ -488,6 +501,20 @@ internal static class ScanlineFiller
             pixels[idx + 1] = (byte)((g * ia + pixels[idx + 1] * iaInv + 127) / 255);
             pixels[idx + 2] = (byte)((b * ia + pixels[idx + 2] * iaInv + 127) / 255);
             pixels[idx + 3] = 255;
+        }
+        else if (a > 0)
+        {
+            // Partly transparent backdrop (a group scratch): straight-alpha source-over,
+            // same rationale as the fill composite above - stamping 255 promoted a
+            // partial-alpha stroke to opaque in the group's layer.
+            int backdropA = pixels[idx + 3];
+            int srcW8 = a * 255;
+            int dstW8 = backdropA * (255 - a);
+            int outW8 = srcW8 + dstW8;
+            pixels[idx]     = (byte)((r * srcW8 + pixels[idx]     * dstW8 + outW8 / 2) / outW8);
+            pixels[idx + 1] = (byte)((g * srcW8 + pixels[idx + 1] * dstW8 + outW8 / 2) / outW8);
+            pixels[idx + 2] = (byte)((b * srcW8 + pixels[idx + 2] * dstW8 + outW8 / 2) / outW8);
+            pixels[idx + 3] = (byte)(a + backdropA * (255 - a) / 255);
         }
     }
 

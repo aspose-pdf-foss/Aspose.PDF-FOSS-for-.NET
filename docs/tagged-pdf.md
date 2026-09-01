@@ -94,7 +94,14 @@ foreach (var fig in figures)
 ## Creating tagged content
 
 `Document.TaggedContent` returns an `ITaggedContent` that ensures the document
-is marked as tagged and exposes factories for typed structure elements.
+is marked as tagged and exposes factories for typed structure elements. The
+factories return detached elements: attach each one with `AppendChild`, either
+to `RootElement` (the `/Document` element, created on first access) or to
+another element. On save the authored tree is written to `/StructTreeRoot`. For
+a document built from scratch this way (no page content of its own), the text
+set through `SetText` is also laid out onto pages on save, wrapped in marked
+content that the structure elements point to; a document that already has page
+content keeps it and only gains the structure tree.
 
 ```csharp
 using Aspose.Pdf;
@@ -105,14 +112,19 @@ var tagged = doc.TaggedContent;
 tagged.SetTitle("Accessible Report");
 tagged.SetLanguage("en-US");
 
+var root = tagged.RootElement;
+
 var h1 = tagged.CreateHeaderElement(1);
 h1.SetText("Annual Report 2024");
+root.AppendChild(h1);
 
 var para = tagged.CreateParagraphElement();
 para.SetText("This report covers the fiscal year 2024.");
+root.AppendChild(para);
 
 var h2 = tagged.CreateHeaderElement(2);
 h2.SetText("Financial Summary");
+root.AppendChild(h2);
 
 doc.Save("tagged-report.pdf");
 ```
@@ -137,12 +149,57 @@ var tr     = tagged.CreateTableTRElement();
 var th     = tagged.CreateTableTHElement();
 var td     = tagged.CreateTableTDElement();
 
+// Lists
+var list  = tagged.CreateListElement();
+var li    = tagged.CreateListLIElement();
+var lbl   = tagged.CreateListLblElement();
+var lbody = tagged.CreateListLBodyElement();
+
+// Grouping
+var part  = tagged.CreatePartElement();
+var sect  = tagged.CreateSectElement();
+var div   = tagged.CreateDivElement();
+var bq    = tagged.CreateBlockQuoteElement();
+var cap   = tagged.CreateCaptionElement();
+var toc   = tagged.CreateTOCElement();
+var toci  = tagged.CreateTOCIElement();
+var index = tagged.CreateIndexElement();
+var ns    = tagged.CreateNonStructElement();
+var priv  = tagged.CreatePrivateElement();
+
+// Inline
+var quote = tagged.CreateQuoteElement();
+var code  = tagged.CreateCodeElement();
+var link  = tagged.CreateLinkElement();
+var refe  = tagged.CreateReferenceElement();
+var bib   = tagged.CreateBibEntryElement();
+var ruby  = tagged.CreateRubyElement();
+var wari  = tagged.CreateWarichuElement();
+
 // Other
-var figure = tagged.CreateFigureElement();
-var note   = tagged.CreateNoteElement();
-var annot  = tagged.CreateAnnotElement();
-var art    = tagged.CreateArtElement();
+var figure  = tagged.CreateFigureElement();
+var formula = tagged.CreateFormulaElement();
+var form    = tagged.CreateFormElement();
+var note    = tagged.CreateNoteElement();
+var annot   = tagged.CreateAnnotElement();
+var art     = tagged.CreateArtElement();
 ```
+
+Every element is an `Aspose.Pdf.LogicalStructure.StructureElement`. Its
+`StructureType` property is a `StructureTypeStandard` — the standard role the
+element maps to (`StructureTypeStandard.P`, `.H1`, `.Table`, `.Ruby`, ...),
+with a `Tag` string and a `Category` (`StructureTypeCategory.GroupingElements`,
+`.BLSEs`, `.ILSEs`, `.IllustrationElements`). A custom role applied with
+`SetTag` still reports the standard type it is role-mapped to; `S` returns the
+raw `/S` tag.
+
+Ruby and Warichu containers are created with `CreateRubyElement()` and
+`CreateWarichuElement()`. Their content children — `RubyRBElement`,
+`RubyRTElement`, `RubyRPElement` (base `RubyChildElement`) and
+`WarichuWTElement`, `WarichuWPElement` (base `WarichuChildElement`) — are typed
+when an existing tree is read, and are authored by tag through
+`StructureTreeBuilder` (`ruby.CreateChild("RB")`, see below); `ITaggedContent`
+has no factory for them.
 
 ### Figures with alt text
 
@@ -154,7 +211,9 @@ figure.AlternativeText = "Bar chart showing quarterly revenue growth";
 ## Using `StructureTreeBuilder`
 
 `StructureTreeBuilder` gives a fluent, builder-style construction for the
-parent / marked-content side of the structure tree.
+parent / marked-content side of the structure tree. Elements are created by
+role tag, so it also covers roles without an `ITaggedContent` factory (the
+Ruby `RB` / `RT` / `RP` and Warichu `WT` / `WP` children, for example).
 
 ```csharp
 using Aspose.Pdf;
@@ -239,17 +298,22 @@ element.RemoveAndMoveItsChildObjectsToItsParent(validate: true);
 
 ### Adjusting element positioning
 
-`AdjustPosition` accepts a `PositionSettings` instance. Note that the settings
-are stored on the element but are not yet applied to content layout.
+`AdjustPosition` accepts an `Aspose.Pdf.Tagged.PositionSettings` instance. Of
+its members, `Margin`, `IsInNewPage` and `IsInLineParagraph` are read when the
+authored tree is laid out on save (left/right margins indent the block,
+top/bottom add space around it, `IsInNewPage` starts a new page,
+`IsInLineParagraph` flows the element inline). `HorizontalAlignment`,
+`VerticalAlignment`, `IsFirstParagraphInColumn` and `IsKeptWithNext` are stored
+on the settings object but not applied.
 
 ```csharp
 using Aspose.Pdf;
 using Aspose.Pdf.LogicalStructure;
+using Aspose.Pdf.Tagged;
 
 element.AdjustPosition(new PositionSettings
 {
-    HorizontalAlignment = HorizontalAlignment.Center,
-    Margin              = new MarginInfo(10, 10, 10, 10),
-    IsInNewPage         = true,
+    Margin      = new MarginInfo(10, 10, 10, 10),
+    IsInNewPage = true,
 });
 ```

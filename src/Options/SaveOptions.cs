@@ -187,8 +187,10 @@ namespace Aspose.Pdf
         public EmbeddedImagesSavingStrategy CustomStrategyOfEmbeddedImagesSaving;
         public class SvgImageSavingInfo
         {
-            public System.IO.Stream ImageStream { get; set; }
-            public string ImageFileName { get; set; }
+            /// <summary>The embedded image's bytes, positioned at the start.</summary>
+            public System.IO.Stream ContentStream { get; set; }
+            /// <summary>The file name the writer would give this image.</summary>
+            public string SupposedFileName { get; set; }
             /// <summary>Image format hint for the SVG writer.</summary>
             public SvgExternalImageType ImageType;
         }

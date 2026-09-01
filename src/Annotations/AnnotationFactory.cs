@@ -33,6 +33,19 @@ internal static class AnnotationFactory
         return dict;
     }
 
+    /// <summary>A Link annotation with no action or destination (a generator
+    /// hyperlink whose target page the document never received).</summary>
+    public static PdfDictionary CreateBareLinkAnnotation(Rectangle rect)
+    {
+        var dict = BuildBase("Link", rect);
+        var border = new PdfArray();
+        border.Add(new PdfInteger(0));
+        border.Add(new PdfInteger(0));
+        border.Add(new PdfInteger(0));
+        dict.Set("Border", border);
+        return dict;
+    }
+
     public static PdfDictionary CreateLinkAnnotation(Rectangle rect, string uri)
     {
         var dict = BuildBase("Link", rect);

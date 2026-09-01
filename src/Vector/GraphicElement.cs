@@ -19,9 +19,84 @@ public class GraphicElement
         set { }
     }
 
-    /// <summary>Bind this element to the page it was absorbed from and the collection of
-    /// its siblings, so that changing <see cref="Position"/> can rewrite the page.</summary>
-    internal virtual void BindSource(Page page, GraphicElementCollection siblings) { }
+    /// <summary>The collection this element was absorbed into (the absorber's
+    /// top-level elements, or a form placement's children). User collections
+    /// refuse to mix elements from different parents.</summary>
+    internal GraphicElementCollection? SourceCollection;
+
+    /// <summary>The form placement this element is a child of (null for
+    /// top-level elements). Replays add the ancestors' accumulated Position
+    /// moves so a child lands where the moved parent would draw it.</summary>
+    internal XFormPlacement? ParentPlacement;
+
+    /// <summary>The clipping path in force when this element was painted on the
+    /// source page (top-level elements only). A source-page move translates the
+    /// clip together with the element.</summary>
+    internal GraphicsClipInfo? SourceClip;
+
+    /// <summary>The CTM in force when this element was constructed — used to map
+    /// a page-space move into the element's own user space. Null when unknown.</summary>
+    internal virtual Aspose.Pdf.Matrix? SourceCtm => null;
+
+    /// <summary>The edit session of the page this element was absorbed from
+    /// (null for form children and un-absorbed elements). Lets bulk operations
+    /// batch their rewrites.</summary>
+    internal GraphicsEditState? SourceEditState => EditState;
+
+    /// <summary>Sum of the ancestors' page-space Position moves.</summary>
+    internal (double Dx, double Dy) AncestorTranslation()
+    {
+        double dx = 0, dy = 0;
+        for (var p = ParentPlacement; p is not null; p = p.ParentPlacement)
+        {
+            var t = p.SourceTranslation;
+            dx += t.Dx;
+            dy += t.Dy;
+        }
+        return (dx, dy);
+    }
+
+    // The element's operator range in the source page's content (top-level
+    // elements only) and the shared edit session that rewrites the page.
+    private int _srcStart = -1, _srcEnd = -1;
+    private protected GraphicsEditState? EditState;
+
+    internal void SetSourceRange(int start, int end) { _srcStart = start; _srcEnd = end; }
+
+    /// <summary>Whether <see cref="Remove"/> took this element out of its page.</summary>
+    internal bool SourceRemoved { get; private protected set; }
+
+    /// <summary>The page-space translation accumulated by Position assignments.</summary>
+    internal virtual (double Dx, double Dy) SourceTranslation => (0, 0);
+
+    /// <summary>Bind this element to the edit session of the page it was absorbed
+    /// from, so that changing <see cref="Position"/> or calling <see cref="Remove"/>
+    /// rewrites the page.</summary>
+    internal virtual void BindSource(GraphicsEditState editState)
+    {
+        EditState = editState;
+        if (_srcStart >= 0) editState.Register(this, _srcStart, _srcEnd);
+    }
+
+    /// <summary>Append this element's geometry to <paramref name="page"/>'s
+    /// content (the single-element form of <see cref="Page.AddGraphics(GraphicElementCollection)"/>).</summary>
+    public void AddOnPage(Page page)
+    {
+        if (page is null || SourceRemoved) return;
+        var content = page.ReplayElement(this);
+        if (string.IsNullOrEmpty(content)) return;
+        page.AddContentStream(System.Text.Encoding.ASCII.GetBytes(content));
+    }
+
+    /// <summary>Remove this element from its source page. The page content is
+    /// rewritten without the element's operators; replays
+    /// (<see cref="AddOnPage"/> / <see cref="Page.AddGraphics(GraphicElementCollection)"/>)
+    /// skip it from then on.</summary>
+    public void Remove()
+    {
+        SourceRemoved = true;
+        EditState?.MarkDirty();
+    }
 
     internal virtual GraphicElement Clone(XFormPlacement xFormPlacement) => this;
 
@@ -111,11 +186,8 @@ public sealed class SubPath : GraphicElement
         _style = style ?? SubPathStyle.Default;
     }
 
-    // Page-space translation accumulated by assignments to Position, and the source
-    // page/collection to rewrite when it changes.
+    // Page-space translation accumulated by assignments to Position.
     private double _dx, _dy;
-    private Page? _sourcePage;
-    private GraphicElementCollection? _siblings;
 
     public override Rectangle Rectangle => _rectangle;
 
@@ -129,34 +201,21 @@ public sealed class SubPath : GraphicElement
         {
             _dx = value.X - _rectangle.LLX;
             _dy = value.Y - _rectangle.LLY;
-            WriteBackToSourcePage();
+            EditState?.MarkDirty();
         }
     }
 
-    internal override void BindSource(Page page, GraphicElementCollection siblings)
-    {
-        _sourcePage = page;
-        _siblings = siblings;
-    }
+    internal override (double Dx, double Dy) SourceTranslation => (_dx, _dy);
 
-    /// <summary>Re-emit every sibling element (this one carrying its translation) as the
-    /// source page's content stream, so a following <c>Document.Save</c> writes the moved
-    /// geometry. The absorber has already materialised the page's typed-operator view, so
-    /// reset that cache too or it would win on save and drop the edit.</summary>
-    private void WriteBackToSourcePage()
-    {
-        if (_sourcePage is null || _siblings is null) return;
-        var sb = new System.Text.StringBuilder();
-        foreach (var el in _siblings) sb.Append(el.ToContent());
-        _sourcePage.SetContentStream(System.Text.Encoding.ASCII.GetBytes(sb.ToString()));
-        _sourcePage.ResetContentsCache();
-    }
+    internal override Aspose.Pdf.Matrix? SourceCtm => _ctm;
 
     internal override GraphicElement Clone(XFormPlacement xFormPlacement) => this;
 
     internal override string ToContent()
     {
+        if (SourceRemoved) return string.Empty;
         var sb = new System.Text.StringBuilder();
+        string F(double v) => v.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
         // Re-apply the original CTM, then replay the path operators verbatim so the
         // re-extracted bounding box is identical. Wrapped in q/Q to isolate the CTM.
         // A page-space translation (from a Position change) is concatenated BEFORE the
@@ -171,6 +230,16 @@ public sealed class SubPath : GraphicElement
         }
         sb.Append(new Aspose.Pdf.Operators.ConcatenateMatrix(_ctm).ToPdf());
         sb.Append('\n');
+        // Re-establish the paint state the sub-path was absorbed with — the
+        // destination page's ambient colours/width are arbitrary at replay time.
+        if (_style.Fill is { } fill)
+            sb.Append($"{F(fill.R)} {F(fill.G)} {F(fill.B)} rg\n");
+        if (_style.Stroke is { } stroke)
+        {
+            sb.Append($"{F(stroke.R)} {F(stroke.G)} {F(stroke.B)} RG\n");
+            sb.Append($"{F(_style.LineWidth)} w\n");
+            sb.Append($"{_style.LineJoin} j\n");
+        }
         foreach (var op in _construction)
         {
             sb.Append(op.ToPdf());
@@ -287,7 +356,25 @@ public sealed class GraphicElementCollection : IEnumerable<GraphicElement>
         }
     }
 
-    public void Add(GraphicElement item) => _items.Add(item);
+    /// <summary>Add an element. A user collection may only hold elements
+    /// absorbed from the SAME parent (all top-level, or all children of one
+    /// form placement) — mixing parents throws.</summary>
+    public void Add(GraphicElement item)
+    {
+        if (item is null) throw new ArgumentNullException(nameof(item));
+        if (_items.Count > 0 && !ReferenceEquals(_items[0].SourceCollection, item.SourceCollection))
+            throw new InvalidOperationException(
+                "Cannot add the graphic element: it belongs to a different parent than the collection's existing elements.");
+        _items.Add(item);
+    }
+
+    /// <summary>Absorber-side add: stamps the element's parent collection.</summary>
+    internal void AddInternal(GraphicElement item)
+    {
+        item.SourceCollection ??= this;
+        _items.Add(item);
+    }
+
     public void Clear() => _items.Clear();
     public bool Contains(GraphicElement item) => _items.Contains(item);
     public void CopyTo(GraphicElement[] array, int arrayIndex) => _items.CopyTo(array, arrayIndex);

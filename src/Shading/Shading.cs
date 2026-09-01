@@ -1,4 +1,4 @@
-// PDF shading dictionaries — PDF32000_2008 §8.7
+﻿// PDF shading dictionaries — PDF32000_2008 §8.7
 //
 // Shadings define smooth colour gradients. They appear as the /Shading entry
 // in a Type 2 Pattern dictionary or are painted directly via the `sh` operator.
@@ -138,6 +138,8 @@ public sealed class FunctionBasedShading : ShadingBase
     public override ShadingType ShadingType => ShadingType.FunctionBased;
     public double[] Domain { get; }
     public PdfFunction? Function { get; }
+    /// <summary>Maps the function domain into the shading's target space (§8.7.4.5.3).</summary>
+    public double[] Matrix { get; }
 
     internal FunctionBasedShading(PdfDictionary dict, PdfReader reader) : base(dict, reader)
     {
@@ -146,6 +148,10 @@ public sealed class FunctionBasedShading : ShadingBase
             ? PdfArrayHelper.ToDoubleArray(domainArr)
             : [0, 1, 0, 1];
         Function = PdfFunction.Parse(dict.Get("Function"), reader);
+        // §8.7.4.5.3: /Matrix maps the function's DOMAIN into the shading's target
+        // coordinate space. Optional, defaulting to the identity.
+        var mArr = reader.Resolve(dict.Get("Matrix")) as PdfArray;
+        Matrix = mArr is { Count: >= 6 } ? PdfArrayHelper.ToDoubleArray(mArr) : new double[] { 1, 0, 0, 1, 0, 0 };
     }
 }
 

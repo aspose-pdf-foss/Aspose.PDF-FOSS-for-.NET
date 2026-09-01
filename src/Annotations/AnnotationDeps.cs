@@ -149,6 +149,66 @@ public class Measure
 
     /// <summary>Y-coordinate number-format list.</summary>
     public NumberFormatList YFormat { get; set; } = new NumberFormatList();
+
+    /// <summary>Serialise this measure into the owning annotation's /Measure
+    /// dictionary (PDF 32000 §12.5.6.10) — called when the annotation is added
+    /// to a page, after the caller has finished configuring the lists (the DOM
+    /// is mutated field-by-field, so an eager per-setter write-through would
+    /// miss later assignments).</summary>
+    internal void WriteTo(Aspose.Pdf.Core.PdfDictionary annotDict)
+    {
+        var hasContent = !string.IsNullOrEmpty(ScaleRatio)
+            || DistanceFormat.Count > 0 || AreaFormat.Count > 0 || AngleFormat.Count > 0
+            || SlopeFormat.Count > 0 || XFormat.Count > 0 || YFormat.Count > 0;
+        if (!hasContent) return;
+
+        var m = new Aspose.Pdf.Core.PdfDictionary();
+        m.Set("Type", new Aspose.Pdf.Core.PdfName("Measure"));
+        if (!string.IsNullOrEmpty(ScaleRatio))
+            m.Set("R", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(ScaleRatio)));
+
+        static Aspose.Pdf.Core.PdfDictionary FormatDict(NumberFormat f)
+        {
+            var d = new Aspose.Pdf.Core.PdfDictionary();
+            d.Set("Type", new Aspose.Pdf.Core.PdfName("NumberFormat"));
+            d.Set("U", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(f.UnitLabel ?? string.Empty)));
+            d.Set("C", new Aspose.Pdf.Core.PdfReal(f.ConvresionFactor));
+            d.Set("D", new Aspose.Pdf.Core.PdfInteger(f.Denominator));
+            if (!string.IsNullOrEmpty(f.FractionSeparator) && f.FractionSeparator != "/")
+                d.Set("RD", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(f.FractionSeparator)));
+            if (!string.IsNullOrEmpty(f.ThousandsSeparator) && f.ThousandsSeparator != ",")
+                d.Set("RT", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(f.ThousandsSeparator)));
+            if (!string.IsNullOrEmpty(f.BeforeText))
+                d.Set("PS", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(f.BeforeText)));
+            if (!string.IsNullOrEmpty(f.AfterText))
+                d.Set("SS", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(f.AfterText)));
+            var fCode = f.FractionDisplayment switch
+            {
+                NumberFormat.FractionStyle.ShowAsFraction => "F",
+                NumberFormat.FractionStyle.Round => "R",
+                NumberFormat.FractionStyle.Truncate => "T",
+                _ => "D",
+            };
+            d.Set("F", new Aspose.Pdf.Core.PdfName(fCode));
+            return d;
+        }
+
+        void SetList(string key, NumberFormatList list)
+        {
+            if (list.Count == 0) return;
+            var arr = new Aspose.Pdf.Core.PdfArray();
+            for (var i = 1; i <= list.Count; i++) arr.Add(FormatDict(list[i]));
+            m.Set(key, arr);
+        }
+
+        SetList("D", DistanceFormat);
+        SetList("A", AreaFormat);
+        SetList("T", AngleFormat);
+        SetList("S", SlopeFormat);
+        SetList("X", XFormat);
+        SetList("Y", YFormat);
+        annotDict.Set("Measure", m);
+    }
 }
 
 /// <summary>Per-event PDF action slots for a widget annotation
@@ -292,7 +352,7 @@ public class PdfActionCollection : IEnumerable<PdfAction>
 
 /// <summary>Appearance-stream dictionary on an annotation (/AP entry):
 /// maps appearance-state name -> <see cref="XForm"/>. Implements the full
-/// <see cref="IDictionary{TKey,TValue}"/> shape for public-API parity.
+/// <see cref="IDictionary{TKey,TValue}"/> shape for public-API compatibility.
 /// The FOSS implementation backs the dictionary in memory; round-trip
 /// to the /AP entry is not currently emitted at save time.</summary>
 public class AppearanceDictionary : IDictionary<string, XForm>

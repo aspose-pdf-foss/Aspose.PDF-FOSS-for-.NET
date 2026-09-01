@@ -66,6 +66,9 @@ internal static class TaggedContentRenderer
         private const double ContentBottom = 72.0;
         private const double LineBox = 1.16;      // clip-box height in em
         private const double DefaultColumnWidth = 100.0;
+        // Default margin of an unleveled "H" header (the H1 margin at the 16 pt
+        // H size) — probed on the tagged-TOC flow: caption pitch 9+16+9 = 34 pt.
+        private const double UnleveledHeaderMargin = 9.0;
 
         private readonly Document _doc;
 
@@ -95,18 +98,53 @@ internal static class TaggedContentRenderer
         // Link elements that need an annotation, with the rect of their text.
         private readonly List<(LS.LinkElement El, Page Page, double LLX, double LLY, double URX, double URY)> _links = new();
 
+        // Pre-existing content-less pages, consumed by NewPage before any page
+        // is appended (see Render).
+        private readonly Queue<Page> _reusablePages = new();
+
+        /// <summary>True when the page carries no content stream bytes at all.</summary>
+        private static bool PageHasNoContent(Page page)
+        {
+            try
+            {
+                var contents = page.Reader.Resolve(page.Dict.Get("Contents"));
+                if (contents is null) return true;
+                if (contents is PdfStream s) return s.RawData.Length == 0;
+                if (contents is PdfArray arr)
+                {
+                    foreach (var item in arr)
+                        if (page.Reader.ResolveStream(item) is { } cs && cs.RawData.Length > 0)
+                            return false;
+                    return true;
+                }
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private readonly Dictionary<byte[], double> _descentCache = new(ReferenceEqualityComparer.Instance);
 
         internal Engine(Document doc) => _doc = doc;
 
         internal void Render(LS.StructureElement root)
         {
-            var body = FontRepository.FindFont("Times New Roman")?.SourceFontData;
+            var body = FontRepository.TryFindFont("Times New Roman")?.SourceFontData;
             var header = ResolveStyled("Arial", FontStyles.Bold)
-                         ?? FontRepository.FindFont("Arial")?.SourceFontData;
+                         ?? FontRepository.TryFindFont("Arial")?.SourceFontData;
             if (body?.TtfData is null || header?.TtfData is null) return;
             _bodyFont = body;
             _headerFont = header;
+
+            // Pages the caller pre-added but never drew on become the render's
+            // first canvases, in order (probed: an authored tagged-TOC document
+            // with one blank Pages.Add() saves with the TOC flow starting ON
+            // that page — 4 pages total, not a leading blank plus 4).
+            foreach (var page in _doc.Pages)
+                if (PageHasNoContent(page))
+                    _reusablePages.Enqueue(page);
 
             WalkChildren(root);
             CloseLine();
@@ -160,7 +198,7 @@ internal static class TaggedContentRenderer
         {
             CloseLine();
             FlushPage();
-            _page = _doc.Pages.Add(PageW, PageH);
+            _page = _reusablePages.Count > 0 ? _reusablePages.Dequeue() : _doc.Pages.Add(PageW, PageH);
             EnsurePageFontResources(_page);
             _cs = new ContentStreamBuilder();
             _nextMcid = 0;
@@ -222,8 +260,8 @@ internal static class TaggedContentRenderer
         {
             try
             {
-                if (style == 0) return FontRepository.FindFont(family)?.SourceFontData;
-                return FontRepository.FindFont(family, style)?.SourceFontData;
+                if (style == 0) return FontRepository.TryFindFont(family)?.SourceFontData;
+                return FontRepository.TryFindFont(family, style)?.SourceFontData;
             }
             catch
             {
@@ -310,7 +348,7 @@ internal static class TaggedContentRenderer
 
         private static int HeaderLevel(LS.StructureElement header)
         {
-            var s = header.StructureType; // "H1".."H6" or "H"
+            var s = header.Role; // "H1".."H6" or "H"
             if (s.Length == 2 && s[0] == 'H' && s[1] >= '1' && s[1] <= '6')
                 return s[1] - '0';
             return 0; // unleveled "H"
@@ -323,16 +361,23 @@ internal static class TaggedContentRenderer
 
             int level = HeaderLevel(header);
             double size = level switch { 0 => 16, 1 => 18, 2 => 16, 3 => 14, 4 => 12, 5 => 11, _ => 10 };
-            // Leveled headers carry a default size/2 margin above and below;
-            // the unleveled "H" has none. Explicit margins replace the defaults.
+            // Leveled headers carry a default size/2 margin above and below; the
+            // unleveled "H" carries the H1 margin (9 pt) at its 16 pt size —
+            // probed on the tagged-TOC flow: unleveled-H pitch 9+16+9 = 34 pt.
+            // Explicit margins replace the defaults.
             var (margin, newPage, _) = Position(header);
-            double mTop = margin?.Top ?? (level > 0 ? size / 2 : 0);
-            double mBottom = margin?.Bottom ?? (level > 0 ? size / 2 : 0);
+            double mTop = margin?.Top ?? (level > 0 ? size / 2 : UnleveledHeaderMargin);
+            double mBottom = margin?.Bottom ?? (level > 0 ? size / 2 : UnleveledHeaderMargin);
             double mLeft = margin?.Left ?? 0;
 
             BlockStart(newPage);
+            // The break budget is the whole block — line plus BOTH margins
+            // (probed: the 21st TOC caption would still fit its bare line above
+            // the bottom margin, yet the expected output breaks; the block's own
+            // bottom margin is part of the fit test). The top margin is charged
+            // on whichever page the block actually lands on.
+            PageBreakIfNeeded(mTop + size + mBottom);
             _flowTop -= mTop;
-            PageBreakIfNeeded(size);
 
             double d = DescentRatio(_headerFont);
             double x = ContentLeft + mLeft;
@@ -341,7 +386,7 @@ internal static class TaggedContentRenderer
 
             var cs = _cs!;
             cs.SaveState();
-            cs.BeginMarkedContent(header.StructureType, mcid);
+            cs.BeginMarkedContent(header.Role, mcid);
             cs.SaveState();
             cs.Rectangle(x, baseline - d * size, ContentRight - x, LineBox * size);
             cs.Clip();
@@ -395,8 +440,11 @@ internal static class TaggedContentRenderer
             if (right <= left + 10) right = left + 10;
 
             BlockStart(newPage);
+            // Same block-budget break rule as headers: the line plus both
+            // margins must fit (probed: the paragraph after the 24th data
+            // header breaks to the next page although its bare line would fit).
+            PageBreakIfNeeded(mTop + baseSize + mBottom);
             _flowTop -= mTop;
-            PageBreakIfNeeded(baseSize);
 
             double d = DescentRatio(baseFont);
             double pitch = baseSize; // 1 em leading
@@ -485,7 +533,7 @@ internal static class TaggedContentRenderer
                     currentRun = chunk.RunIdx;
                     var el = runs[currentRun].El;
                     var mcid = _nextMcid++;
-                    cs.BeginMarkedContent(el.StructureType, mcid);
+                    cs.BeginMarkedContent(el.Role, mcid);
                     RecordMcid(mcid, el);
                     if (!clipEmitted)
                     {
@@ -538,7 +586,7 @@ internal static class TaggedContentRenderer
             var mcid = _nextMcid++;
             var cs = _cs!;
             cs.SaveState();
-            cs.BeginMarkedContent(el.StructureType, mcid);
+            cs.BeginMarkedContent(el.Role, mcid);
             cs.SaveState();
             cs.Rectangle(x, _lineBaseline - d * size, ContentRight - x, LineBox * size);
             cs.Clip();
@@ -575,7 +623,7 @@ internal static class TaggedContentRenderer
 
             var cs = _cs!;
             cs.SaveState();
-            cs.BeginMarkedContent(link.StructureType, mcid);
+            cs.BeginMarkedContent(link.Role, mcid);
             // Underline bar: text-width wide, size/20 thick, its bottom at
             // baseline − 0.9·descent.
             cs.SaveState();
@@ -648,7 +696,7 @@ internal static class TaggedContentRenderer
 
             var cs = _cs!;
             cs.SaveState();
-            cs.BeginMarkedContent(fig.StructureType, mcid);
+            cs.BeginMarkedContent(fig.Role, mcid);
             cs.SaveState();
             cs.SetMatrix(w, 0, 0, h, x, top - h);
             cs.DrawXObject(resName);
@@ -690,7 +738,7 @@ internal static class TaggedContentRenderer
             // The whole table gets wrapped in its own marked content;
             // the id stays unreferenced in the structure tree (the cells carry
             // the real content links).
-            cs.BeginMarkedContent(table.StructureType, _nextMcid++);
+            cs.BeginMarkedContent(table.Role, _nextMcid++);
 
             for (var r = 0; r < rows.Count; r++)
             {
@@ -704,7 +752,7 @@ internal static class TaggedContentRenderer
                     NewPage();
                     cs = _cs!;
                     cs.SaveState();
-                    cs.BeginMarkedContent(table.StructureType, _nextMcid++);
+                    cs.BeginMarkedContent(table.Role, _nextMcid++);
                     for (var hr = 0; hr < repeating && hr < r; hr++)
                         RenderTableRow(cs, rows[hr], tableLeft, rowSize, register: false);
                 }
@@ -735,7 +783,7 @@ internal static class TaggedContentRenderer
                     double baseline = _flowTop - (1 - d) * size;
                     var mcid = _nextMcid++;
                     cs.SaveState();
-                    cs.BeginMarkedContent(cell.StructureType, mcid);
+                    cs.BeginMarkedContent(cell.Role, mcid);
                     cs.SaveState();
                     cs.Rectangle(x, _flowTop - rowSize, width, LineBox * size);
                     cs.Clip();
@@ -792,6 +840,16 @@ internal static class TaggedContentRenderer
                     for (var i = 0; i < k.Count; i++)
                         if (k[i] is PdfDictionary kd && refs.TryGetValue(kd, out var r))
                             k.ReplaceAt(i, r);
+                }
+                // /Ref associations recorded through AddRef (PDF 32000 §14.7.4.3):
+                // written as an array of the referenced elements' indirect refs.
+                if (el._referencedElements is { Count: > 0 } targets)
+                {
+                    var refArr = new PdfArray();
+                    foreach (var target in targets)
+                        if (refs.TryGetValue(target._dict, out var tr))
+                            refArr.Add(tr);
+                    if (refArr.Count > 0) el._dict.Set("Ref", refArr);
                 }
             }
             if (_doc.Catalog.Get("StructTreeRoot") is PdfIndirectRef structRootRef)

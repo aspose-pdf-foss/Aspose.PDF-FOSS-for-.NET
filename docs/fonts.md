@@ -39,9 +39,12 @@ fragment.TextState.IsItalic = true;
 
 ## Finding and embedding fonts
 
-`FontRepository.FindFont` resolves a font by name (searching the Standard 14 set
-and any registered [font sources](#registering-font-folders)). Assigning the
-resulting `Font` to `TextState.Font` embeds it in the document:
+`FontRepository.FindFont` resolves a font by name, searching the Standard 14
+set, then the registered [font sources](#registering-font-folders) (which by
+default include the installed system fonts), then the library's built-in faces.
+It throws `FontNotFoundException` when nothing resolves; `FindFont(name,
+ignoreCase: true)` relaxes the name match. Assigning the resulting `Font` to
+`TextState.Font` embeds it in the document:
 
 ```csharp
 using Aspose.Pdf.Text;
@@ -63,6 +66,13 @@ var boldItalic = FontRepository.FindFont("Arial", FontStyles.Bold | FontStyles.I
 > Setting `TextState.FontName` (a string) references a font by name; setting
 > `TextState.Font` (a `Font` object) embeds the actual font program.
 
+Embedding honours the face's own licence: a TrueType/OpenType font whose OS/2
+`fsType` forbids embedding raises `FontEmbeddingException` at save time. Set
+`Document.DisableFontLicenseVerifications = true` to embed it anyway, or clear
+`font.FontOptions.NotifyAboutFontEmbeddingError` to let the save finish with
+the face referenced by name only; the reason stays readable through
+`font.GetLastFontEmbeddingError()`.
+
 ## Loading a font from a file or stream
 
 `FontRepository.OpenFont` loads a font that isn't installed on the machine:
@@ -77,34 +87,56 @@ Font font = FontRepository.OpenFont(@"C:\fonts\MyFont.ttf");
 using var fs = File.OpenRead("MyFont.otf");
 Font otf = FontRepository.OpenFont(fs, FontTypes.OTF);
 
+// Type 1: a .pfb program plus its .afm metrics
+Font type1 = FontRepository.OpenFont(@"C:\fonts\MyFont.pfb", @"C:\fonts\MyFont.afm");
+
 var fragment = new TextFragment("Custom font") { TextState = { Font = font } };
 ```
 
 ## Registering font folders
 
-Add directories or files to `FontRepository.Sources` so `FindFont` can resolve
-fonts that live outside the system font path:
+Add directories, files, or in-memory font programs to `FontRepository.Sources`
+so `FindFont` can resolve fonts that live outside the system font path:
 
 ```csharp
 using Aspose.Pdf.Text;
 
 FontRepository.Sources.Add(new FolderFontSource(@"C:\app\fonts"));
 FontRepository.Sources.Add(new FileFontSource(@"C:\app\fonts\Brand.ttf"));
+FontRepository.Sources.Add(new MemoryFontSource(File.ReadAllBytes("Brand-Bold.ttf")));
 
 var brand = FontRepository.FindFont("Brand");
 ```
 
+The collection starts with a `SystemFontSource` (the platform's installed fonts
+— Windows, `/usr/share/fonts`, and the macOS font folders) and the per-user
+fonts folder. `FontRepository.ReloadFonts()` resets it to that default.
+
 ## Substituting missing fonts
 
-When a document references a font that can't be resolved, register a
-substitution so a fallback is used instead:
+`FontRepository.Substitutions` is a registry of `FontSubstitution` rules
+(`Add`, `Remove`, `Delete`, `Clear`, `Count`). `SimpleFontSubstitution` maps one
+font name to another; derive from `CustomFontSubstitutionBase` and override
+`TrySubstitute` for custom logic:
 
 ```csharp
 using Aspose.Pdf.Text;
 
-FontRepository.Substitutions.Add(
-    new SimpleFontSubstitution("MissingFont", "Helvetica"));
+var rule = new SimpleFontSubstitution("MissingFont", "Helvetica");
+FontRepository.Substitutions.Add(rule);
+
+var spec = new CustomFontSubstitutionBase.OriginalFontSpecification("MissingFont", isEmbedded: false);
+if (rule.TrySubstitute(spec, out Font? fallback))
+    Console.WriteLine($"Use {fallback!.FontName}");
 ```
+
+The registry is not consulted automatically: `FindFont` and text extraction do
+not read it, so apply a rule's `TrySubstitute` result yourself. The automatic
+substitution the library does perform is glyph-coverage based — when a
+replacement text contains characters the current font lacks and
+`TextEditOptions.NoCharacterAction.ReplaceFonts` is in effect, a covering face
+is chosen from the registered sources (caller-registered folders first, then the
+system fonts).
 
 ## Inspecting the fonts in a document
 
@@ -130,16 +162,19 @@ foreach (var font in doc.Pages[1].Fonts)
     Console.WriteLine(font.FontName);
 ```
 
-`Font.Save(stream)` writes the raw font program to a stream, but only for a
-`Font` that was loaded with embeddable data via `FontRepository.OpenFont`
-(or `FindFont`). Fonts returned by `GetAllFonts()` are document-dictionary
-views and do not carry that data, so `Save` writes nothing for them:
+`Font.Save(stream)` writes the raw font program to a stream. It uses, in order,
+the data loaded via `FontRepository.OpenFont` / `FindFont`, the program embedded
+in the source PDF (for a font returned by `GetAllFonts()` or `Page.Fonts`), or
+the installed system face that resolves by name. When none of these is
+available it writes nothing and `GetLastFontEmbeddingError()` reports why:
 
 ```csharp
-var font = FontRepository.OpenFont(@"C:onts\MyFont.ttf");
+var font = FontRepository.OpenFont(@"C:\fonts\MyFont.ttf");
 
 using var outFs = File.Create("copy.ttf");
-font.Save(outFs);   // writes nothing when no embeddable data is available
+font.Save(outFs);
+if (outFs.Length == 0)
+    Console.WriteLine(font.GetLastFontEmbeddingError());
 ```
 
 ## Subsetting embedded fonts
@@ -162,7 +197,10 @@ size-reduction pipeline.
 
 ## What's not included
 
-- Font **rasterisation hints** and platform font enumeration beyond the
-  registered sources.
-- See [What's not included](../README.md#whats-not-included-vs-asposepdf-for-net)
-  in the README for the full list of Aspose.PDF for .NET-only features.
+- Font **rasterisation hints**: glyphs are rendered from their unhinted
+  outlines.
+- Fonts whose licence forbids embedding are not embedded unless
+  `Document.DisableFontLicenseVerifications` is set (see
+  [Finding and embedding fonts](#finding-and-embedding-fonts)).
+- See [Scope and Limitations](../README.md#scope-and-limitations) in the README
+  for the library-wide list.

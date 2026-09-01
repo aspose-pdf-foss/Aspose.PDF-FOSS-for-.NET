@@ -45,6 +45,11 @@ foreach (var annot in doc.Pages[1].Annotations)
 }
 ```
 
+Every annotation exposes its activation action as `Action` (a `PdfAction`
+subclass such as `GoToAction`, `GoToURIAction`, `JavascriptAction`,
+`NamedAction`, `SubmitFormAction`, `LaunchAction`, or `HideAction`) and its
+additional-actions dictionary as `Actions`.
+
 ## Adding annotations
 
 `Page.Annotations` exposes `Add*` helpers that build the annotation dictionary,
@@ -63,6 +68,11 @@ page.Annotations.AddTextAnnotation(
     new Rectangle(100, 700, 130, 730),
     contents: "Review this section",
     title: "Reviewer",
+    open: true);
+
+// A stand-alone popup window
+page.Annotations.AddPopupAnnotation(
+    new Rectangle(300, 500, 500, 600),
     open: true);
 ```
 
@@ -90,9 +100,20 @@ page.Annotations.AddLinkAnnotation(
     new Rectangle(100, 520, 200, 540),
     destinationPage: 3,
     destRect: new Rectangle(0, 0, 612, 792));
+
+// Link that runs any PdfAction — here a HideAction that hides a form field
+page.Annotations.AddLinkAnnotation(
+    new Rectangle(100, 490, 200, 510),
+    new HideAction("optionalNotes"));   // HideAction(name, isHidden: false) shows it again
 ```
 
+`HideAction` also takes an `Annotation`, an array of annotations, or an array of
+field names; `IsHidden` reads or flips the direction.
+
 ### Highlight, underline, strikeout, squiggly
+
+Each helper takes an optional `quadPoints` array (eight numbers per
+quadrilateral); when omitted the quads are derived from the rectangle.
 
 ```csharp
 page.Annotations.AddHighlightAnnotation(
@@ -206,8 +227,11 @@ page.Annotations.AddRedactAnnotation(
 ## Watermark annotations
 
 Watermarks are constructed separately and added via
-`page.Annotations.Add(watermark)`. The watermark text and font are set via
-`SetTextAndState`.
+`page.Annotations.Add(watermark)` (a bare watermark annotation with only
+`/Contents` can also be added with `page.Annotations.AddWatermarkAnnotation(rect,
+contents)`). The watermark text and font are set via `SetTextAndState`;
+`Opacity`, `FixedPrint`, and `Characteristics` (rotation, border and background
+colours) shape its appearance.
 
 ```csharp
 using Aspose.Pdf;
@@ -239,8 +263,11 @@ page.Annotations.Delete(1);
 // 0-based remove
 page.Annotations.RemoveAt(0);
 
+// Remove a specific instance
+page.Annotations.Delete(page.Annotations[2]);
+
 // Remove every annotation
-page.Annotations.Clear();
+page.Annotations.Clear();   // Delete() with no arguments does the same
 ```
 
 ## Flattening annotations
@@ -284,3 +311,17 @@ editor.RedactArea(
 
 editor.Save("edited.pdf");
 ```
+
+`RedactArea` also accepts the colour as `(r, g, b)` integers or a
+`System.Drawing.Color`. It paints a filled rectangle over the area, overwrites
+the pixels of any image XObject that intersects it (so the original samples are
+gone, not merely covered), and removes form-field widgets inside the area. This
+works on every platform; Windows decodes the images through GDI+, other hosts
+through the managed decoder.
+
+The editor further offers `ExtractAnnotations(start, end, AnnotationType[])`,
+`FlatteningAnnotations(start, end, AnnotationType[])` for a page range and
+subtype subset, `ModifyAnnotationsAuthor(start, end, from, to)`, and XFDF
+round-tripping via `ExportAnnotationsXfdf(stream, start, end, types)` /
+`ImportAnnotationFromXfdf(path)`. `Save()` with no argument returns the edited
+PDF as a byte array.

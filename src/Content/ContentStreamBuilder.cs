@@ -10,6 +10,30 @@ public sealed class ContentStreamBuilder
 {
     private readonly StringBuilder _sb = new();
 
+    // Baseline bookkeeping for a caller that bounds a text block AFTER drawing it (the
+    // generator's per-cell text clip): every non-empty Tj records the baseline the
+    // text matrix seated it at and its font size, from the last ResetTextExtent on.
+    private double _textX, _textY, _textSize;
+    private readonly List<(double Y, double Size)> _shows = new();
+
+    /// <summary>Current length of the stream — an insertion point for
+    /// <see cref="InsertAt"/>.</summary>
+    internal int Mark => _sb.Length;
+
+    /// <summary>Splice operators in at an earlier <see cref="Mark"/>.</summary>
+    internal void InsertAt(int mark, string ops) => _sb.Insert(mark, ops);
+
+    /// <summary>Baseline and font size of every non-empty text run shown since the last
+    /// <see cref="ResetTextExtent"/>.</summary>
+    internal IReadOnlyList<(double Y, double Size)> TextShows => _shows;
+
+    internal void ResetTextExtent() => _shows.Clear();
+
+    private void RecordShow(bool nonEmpty)
+    {
+        if (nonEmpty) _shows.Add((_textY, _textSize));
+    }
+
     // Graphics state
     public ContentStreamBuilder SaveState() { _sb.Append("q\n"); return this; }
     public ContentStreamBuilder RestoreState() { _sb.Append("Q\n"); return this; }
@@ -129,24 +153,27 @@ public sealed class ContentStreamBuilder
     public ContentStreamBuilder ClipEvenOdd() { _sb.Append("W* n\n"); return this; }
 
     // Text
-    public ContentStreamBuilder BeginText() { _sb.Append("BT\n"); return this; }
+    public ContentStreamBuilder BeginText() { _sb.Append("BT\n"); _textX = _textY = 0; return this; }
     public ContentStreamBuilder EndText() { _sb.Append("ET\n"); return this; }
 
     public ContentStreamBuilder SetFont(string fontName, double size)
     {
         _sb.Append($"/{fontName} {F(size)} Tf\n");
+        _textSize = size;
         return this;
     }
 
     public ContentStreamBuilder MoveTextPosition(double tx, double ty)
     {
         _sb.Append($"{F(tx)} {F(ty)} Td\n");
+        _textX += tx; _textY += ty;
         return this;
     }
 
     public ContentStreamBuilder SetTextMatrix(double a, double b, double c, double d, double e, double f)
     {
         _sb.Append($"{F(a)} {F(b)} {F(c)} {F(d)} {F(e)} {F(f)} Tm\n");
+        _textX = e; _textY = f;
         return this;
     }
 
@@ -217,6 +244,7 @@ public sealed class ContentStreamBuilder
             _sb.Append(ch);
         }
         _sb.Append(") Tj\n");
+        RecordShow(text.Length > 0);
         return this;
     }
 
@@ -258,6 +286,7 @@ public sealed class ContentStreamBuilder
             _sb.Append((char)b);
         }
         _sb.Append(") Tj\n");
+        RecordShow(bytes.Length > 0);
         return this;
     }
 
@@ -268,6 +297,7 @@ public sealed class ContentStreamBuilder
         foreach (var b in glyphIds)
             _sb.Append(b.ToString("X2"));
         _sb.Append("> Tj\n");
+        RecordShow(glyphIds.Length > 0);
         return this;
     }
 
@@ -296,6 +326,7 @@ public sealed class ContentStreamBuilder
         }
         Flush(n);
         _sb.Append("] TJ\n");
+        RecordShow(glyphIds.Length > 0);
         return this;
     }
 
@@ -409,7 +440,7 @@ public sealed class ContentStreamBuilder
     }
 
     // Colour components (rg/RG/g/G operands) keep more precision than geometry:
-    // The reference writes e.g. 119/255 as "0.4666666667" (10 fractional digits), and
+    // e.g. 119/255 is written as "0.4666666667" (10 fractional digits), and
     // an exact-string check on the parsed operator needs that form.
     // 10 digits, no exponent, trailing zeros trimmed.
     private static string Fc(double v)

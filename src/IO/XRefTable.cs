@@ -17,6 +17,18 @@ internal sealed class XRefTable
     /// PDF/A-1 prohibits xref streams, so validation reports this.</summary>
     public bool UsedXrefStream { get; private set; }
 
+    /// <summary>True when this table was rebuilt by <c>RecoverXref</c>'s full-file
+    /// scan because the declared cross-reference structure could not be read.
+    /// The cross-document merge path uses this to apply its
+    /// strict-xref semantics (see PageCollection.Add(PageCollection)).</summary>
+    public bool RecoveredByScan { get; internal set; }
+
+    /// <summary>True when the final startxref was broken and this table is the last
+    /// cross-reference STREAM recovered by scanning back from the end of file. An
+    /// object such a table has no entry for resolves by a file-wide header search;
+    /// one the file holds nowhere is a NULL slot (probed).</summary>
+    public bool RecoveredFromBrokenTail { get; internal set; }
+
     /// <summary>
     /// Object numbers of the source file's cross-reference infrastructure: the cross-reference
     /// stream objects (/Type /XRef) and the object-stream containers (/Type /ObjStm) that hold
@@ -188,11 +200,29 @@ internal sealed class XRefTable
     /// </summary>
     public static XRefTable Read(byte[] data)
     {
-        var table = new XRefTable();
+        // The FINAL startxref decides — but when its target is not an xref AT ALL
+        // (a tail revision whose startxref points into stream data — neither an
+        // "xref" keyword nor an object header), the reader recovers the
+        // LAST cross-reference STREAM the file actually holds, scanning backward
+        // from the end — the revision the broken pointer was written for — rather
+        // than scan-repairing the file into a merge of every revision (probed on
+        // a concatenated 6-page tail: Pages.Count 6, the kid its xref
+        // cannot name anywhere is a NULL page slot). Objects the recovered table
+        // has no entry for resolve by a file-wide header search. A target that IS
+        // a readable header whose CHAIN then fails keeps the classic full-scan
+        // recovery — such files pin the merged read.
         var startXrefOffset = FindStartXref(data);
-
-        var visited = new HashSet<long>();
-        table.ReadXrefAt(data, startXrefOffset, visited);
+        var headerPos = SkipWhitespace(data, startXrefOffset);
+        var targetIsXref = headerPos + 4 <= data.Length
+            && (Encoding.ASCII.GetString(data, (int)headerPos, 4) == "xref"
+                || (data[headerPos] >= (byte)'0' && data[headerPos] <= (byte)'9'));
+        if (!targetIsXref)
+        {
+            var tail = ReadLastDeclaredXrefStream(data);
+            if (tail is not null) return tail;
+        }
+        var table = new XRefTable();
+        table.ReadXrefAt(data, startXrefOffset, new HashSet<long>());
 
         // Validate: a valid xref must have a trailer with /Root.
         // If not, the startxref might be wrong (e.g., garbage header or empty offset).
@@ -203,6 +233,63 @@ internal sealed class XRefTable
         }
 
         return table;
+    }
+
+    /// <summary>Parse the LAST cross-reference STREAM in the file, found by scanning
+    /// backward for a /Type/XRef stream object — the recovery target when the final
+    /// startxref is broken. Missing-entry objects on such a table resolve by a
+    /// file-wide header search (<see cref="RecoveredFromBrokenTail"/>). Returns null
+    /// when no candidate parses to a rooted table.</summary>
+    private static XRefTable? ReadLastDeclaredXrefStream(byte[] data)
+    {
+        var needle = "/XRef"u8.ToArray();
+        for (var i = data.Length - needle.Length; i >= 0; i--)
+        {
+            if (!data.AsSpan(i, needle.Length).SequenceEqual(needle)) continue;
+            // Backtrack to the "N G obj" header that owns this dictionary.
+            var h = LastIndexOf(data, "obj"u8.ToArray(), i);
+            if (h < 0) continue;
+            var lineStart = h;
+            while (lineStart > 0 && data[lineStart - 1] is not ((byte)'\r' or (byte)'\n')) lineStart--;
+            if (lineStart >= h || data[lineStart] < (byte)'0' || data[lineStart] > (byte)'9') continue;
+            var t = new XRefTable();
+            try { t.ReadXrefStream(data, lineStart, new HashSet<long>()); }
+            catch { continue; }
+            if (t._trailer is null || !t._trailer.ContainsKey("Root")) continue;
+            t.RecoveredFromBrokenTail = true;
+            return t;
+        }
+        return null;
+    }
+
+    private static int LastIndexOf(byte[] data, byte[] needle, int before)
+    {
+        for (var i = Math.Min(before, data.Length - needle.Length); i >= 0; i--)
+            if (data.AsSpan(i, needle.Length).SequenceEqual(needle)) return i;
+        return -1;
+    }
+
+    /// <summary>Parse the LAST classic cross-reference table in the file, found by
+    /// scanning backwards for an "xref" line. Used after a full-scan recovery to
+    /// answer "was this object reachable through the file's DECLARED xref?" —
+    /// the recovered table has correct offsets, so the declared one must be
+    /// re-read separately. Returns null when no classic table parses.</summary>
+    internal static XRefTable? ReadLastDeclaredClassic(byte[] data)
+    {
+        for (var pos = data.Length - 4; pos >= 0; pos--)
+        {
+            if (data[pos] != 'x' || data[pos + 1] != 'r' || data[pos + 2] != 'e' || data[pos + 3] != 'f')
+                continue;
+            // A real table's keyword starts its own line ("startxref" is rejected
+            // here too — its 'xref' is preceded by 't').
+            if (pos > 0 && data[pos - 1] != '\n' && data[pos - 1] != '\r')
+                continue;
+            var t = new XRefTable();
+            try { t.ReadTraditionalXref(data, pos, new HashSet<long>()); }
+            catch { /* partially parsed entries still count */ }
+            if (t._entries.Count > 0) return t;
+        }
+        return null;
     }
 
     private void ReadXrefAt(byte[] data, long offset, HashSet<long> visited)
@@ -342,6 +429,10 @@ internal sealed class XRefTable
         var parser = new PdfParser(data);
         parser.Lexer.Position = offset;
 
+        // No strict header check here: /Prev chain nodes with shifted offsets rely
+        // on the lexer's garbage-skipping recovery (a broken chain). The TOP-LEVEL
+        // startxref target is vetted in Read() instead — only a target that names
+        // no object at all routes to the tail-stream recovery.
         var indirectObj = parser.ParseIndirectObject();
         if (indirectObj.Value is not PdfStream stream)
             throw new InvalidOperationException($"Expected xref stream at offset {offset}");

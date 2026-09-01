@@ -1,4 +1,4 @@
-namespace Aspose.Pdf.Text;
+﻿namespace Aspose.Pdf.Text;
 
 /// <summary>
 /// On-demand fallback glyph source for CJK text rendered via non-embedded
@@ -38,13 +38,13 @@ internal static class CjkFallbackFont
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     ];
 
-    private static GlyphOutlineParser? _parser;
+    private static IGlyphOutlineSource? _parser;
     private static bool _lookupAttempted;
     private static readonly object _lock = new();
 
     // Cache of named system CJK fonts (keyed by file path), so a SimHei title and a
     // SimSun body each load the right face once.
-    private static readonly System.Collections.Generic.Dictionary<string, GlyphOutlineParser?> _named =
+    private static readonly System.Collections.Generic.Dictionary<string, IGlyphOutlineSource?> _named =
         new(System.StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -55,7 +55,7 @@ internal static class CjkFallbackFont
     /// that aren't installed on the host — then the installed
     /// system fonts, then the generic broad-coverage fallback (<see cref="TryGet"/>).
     /// </summary>
-    public static GlyphOutlineParser? ResolveNamed(string? baseFont, string? ordering = null)
+    public static IGlyphOutlineSource? ResolveNamed(string? baseFont, string? ordering = null)
     {
         var (repoNames, sysFiles) = CjkCandidates(baseFont, ordering);
 
@@ -66,7 +66,7 @@ internal static class CjkFallbackFont
                 foreach (var source in FontRepository.Sources)
                 {
                     var data = source.FindFont(rn, true)?.TtfData;
-                    if (data is { Length: > 12 }) return new GlyphOutlineParser(data);
+                    if (data is { Length: > 12 }) return LoadOutlineSource(data);
                 }
                 return null;
             });
@@ -75,7 +75,7 @@ internal static class CjkFallbackFont
         foreach (var f in sysFiles)
         {
             var p = LoadCached(f, () =>
-                System.IO.File.Exists(f) ? new GlyphOutlineParser(System.IO.File.ReadAllBytes(f)) : null);
+                LocateFontFile(f) is { } fp ? LoadOutlineSource(System.IO.File.ReadAllBytes(fp)) : null);
             if (p is not null) return p;
         }
         return TryGet();
@@ -115,12 +115,12 @@ internal static class CjkFallbackFont
         return step == 2 ? 1000 : 500;
     }
 
-    private static GlyphOutlineParser? LoadCached(string key, System.Func<GlyphOutlineParser?> load)
+    private static IGlyphOutlineSource? LoadCached(string key, System.Func<IGlyphOutlineSource?> load)
     {
         lock (_lock)
         {
             if (_named.TryGetValue(key, out var cached)) return cached;
-            GlyphOutlineParser? parser = null;
+            IGlyphOutlineSource? parser = null;
             try { parser = load(); } catch { /* unreadable / unparseable */ }
             _named[key] = parser;
             return parser;
@@ -198,7 +198,26 @@ internal static class CjkFallbackFont
     /// exists on the host — callers should fall through to the existing
     /// no-outline behaviour (advance cursor, draw nothing).
     /// </summary>
-    public static GlyphOutlineParser? TryGet()
+    /// <summary>
+    /// Build an outline source from a font FILE's bytes: reduce a collection to its first
+    /// face, then pick the parser that matches the outline format. A CFF-flavoured
+    /// OpenType face ('OTTO') carries no glyf table, so handing it to
+    /// <see cref="GlyphOutlineParser"/> yields a source that resolves every glyph to
+    /// nothing and renders the text BLANK rather than failing - which is what the standard
+    /// Linux fallback, Noto Sans CJK, did. Returns null when neither parser can read it,
+    /// so the caller moves to the next candidate.
+    /// </summary>
+    private static IGlyphOutlineSource? LoadOutlineSource(byte[] data)
+    {
+        if (data is null || data.Length < 4) return null;
+        var sfnt = NormalizeToSfnt(data);
+        if (sfnt.Length >= 4 && sfnt[0] == (byte)'O' && sfnt[1] == (byte)'T'
+            && sfnt[2] == (byte)'T' && sfnt[3] == (byte)'O')
+            return CffGlyphSource.TryLoad(sfnt);
+        return new GlyphOutlineParser(sfnt);
+    }
+
+    public static IGlyphOutlineSource? TryGet()
     {
         if (_parser is not null) return _parser;
         if (_lookupAttempted) return null;
@@ -209,11 +228,12 @@ internal static class CjkFallbackFont
             _lookupAttempted = true;
             foreach (var path in CandidatePaths)
             {
-                if (!System.IO.File.Exists(path)) continue;
+                if (LocateFontFile(path) is not { } located) continue;
                 try
                 {
-                    var bytes = System.IO.File.ReadAllBytes(path);
-                    _parser = new GlyphOutlineParser(bytes);
+                    var bytes = System.IO.File.ReadAllBytes(located);
+                    _parser = LoadOutlineSource(bytes);
+                    if (_parser is null) continue;
                     return _parser;
                 }
                 catch
@@ -231,13 +251,23 @@ internal static class CjkFallbackFont
     /// when anything in the chain fails, which the caller treats as "draw
     /// nothing for this CID".</summary>
     public static int ResolveFallbackGid(string? ordering, int cid)
+        => ResolveFallbackGid(ordering, cid, TryGet());
+
+    /// <summary>
+    /// Glyph id for an Adobe CID in a SPECIFIC face: CID to Unicode through the
+    /// collection's table, then that face's own cmap. Callers that resolved a NAMED face
+    /// (see <see cref="ResolveNamed"/>) must pass it here. The overload above consults the
+    /// generic broad-coverage font, which is only the right cmap when the caller also
+    /// DRAWS from that font - pairing one font's glyph ids with another font's outlines
+    /// picks real but unrelated glyphs, which is exactly how a page of Chinese comes out
+    /// fluent and wrong.
+    /// </summary>
+    public static int ResolveFallbackGid(string? ordering, int cid, IGlyphOutlineSource? face)
     {
-        if (string.IsNullOrEmpty(ordering)) return 0;
-        var parser = TryGet();
-        if (parser is null) return 0;
+        if (string.IsNullOrEmpty(ordering) || face is null) return 0;
         var unicode = AdobeCidTables.LookupCid(ordering, cid);
         if (unicode is null) return 0;
-        parser.CMap.TryGetValue(unicode.Value, out var gid);
+        face.CMap.TryGetValue(unicode.Value, out var gid);
         return gid;
     }
 
@@ -255,6 +285,25 @@ internal static class CjkFallbackFont
     /// extracted into a standalone sfnt so it embeds as a valid FontFile2. Returns null
     /// when no covering system font is found. Cached per file path.
     /// </summary>
+    /// <summary>
+    /// A fallback candidate's real location on THIS machine. The chains below name their
+    /// faces by the path the Windows platform stores them at - a literal
+    /// C:\\Windows\\Fonts entry - which resolves to nothing anywhere else, so the run those
+    /// candidates were meant to carry was dropped from the document even on a box where the
+    /// same face is installed where every other tool can see it. When the literal path
+    /// misses, look the FILE NAME up in the platform's own font directories.
+    /// </summary>
+    private static string? LocateFontFile(string candidate)
+    {
+        if (string.IsNullOrEmpty(candidate)) return null;
+        if (System.IO.File.Exists(candidate)) return candidate;
+        // Split on BOTH separators by hand: off Windows a backslash is an ordinary
+        // filename character, so Path.GetFileName would hand back the whole path.
+        var cut = candidate.LastIndexOfAny(new[] { '/', '\\' });
+        var name = cut >= 0 ? candidate.Substring(cut + 1) : candidate;
+        return name.Length == 0 ? null : SystemFontResolver.FindFontFile(name);
+    }
+
     public static byte[]? ResolveEmbeddableBytes(string text)
     {
         if (string.IsNullOrEmpty(text)) return null;
@@ -270,8 +319,8 @@ internal static class CjkFallbackFont
                 byte[]? bytes = null;
                 try
                 {
-                    if (System.IO.File.Exists(f))
-                        bytes = NormalizeToSfnt(System.IO.File.ReadAllBytes(f));
+                    if (LocateFontFile(f) is { } fp)
+                        bytes = NormalizeToSfnt(System.IO.File.ReadAllBytes(fp));
                 }
                 catch { bytes = null; }
                 _embeddable[f] = bytes;
@@ -279,6 +328,73 @@ internal static class CjkFallbackFont
             }
         }
         return null;
+    }
+
+    // ── Coverage-chain fallback (mixed-script cell text) ────────────────────
+    // Substitution runs PER CODEPOINT, not per run: SimSun carries the
+    // han and radical glyphs, Segoe UI Symbol the technical symbols, and
+    // SimSun-ExtB the plane-2 ideographs — one drawn line can mix all three.
+    private static List<(byte[] Bytes, string Name)>? _chain;
+
+    /// <summary>The UA's serif Latin face (Times New Roman), normalised for
+    /// embedding: a CJK cell's ASCII runs — digits, parens, SPACES — are drawn
+    /// in the UA serif, not in the CJK face's full/half-width forms
+    /// (a SimSun space is 0.5 em where the drawn Times space is 0.25).</summary>
+    public static (byte[] Bytes, string Name)? SerifLatinFace(bool bold = false)
+    {
+        lock (_lock)
+        {
+            var file = bold ? @"C:\Windows\Fonts\timesbd.ttf" : @"C:\Windows\Fonts\times.ttf";
+            var name = bold ? "TimesNewRomanBold" : "TimesNewRoman";
+            _latinBytes ??= new System.Collections.Generic.Dictionary<string, byte[]?>(
+                System.StringComparer.OrdinalIgnoreCase);
+            if (_latinBytes.TryGetValue(file, out var cached))
+                return cached is null ? null : (cached, name);
+            byte[]? bytes = null;
+            try
+            {
+                if (LocateFontFile(file) is { } fp)
+                    bytes = NormalizeToSfnt(System.IO.File.ReadAllBytes(fp));
+            }
+            catch { bytes = null; }
+            _latinBytes[file] = bytes;
+            return bytes is null ? null : (bytes, name);
+        }
+    }
+
+    private static System.Collections.Generic.Dictionary<string, byte[]?>? _latinBytes;
+
+    /// <summary>Embeddable faces, in substitution priority order, for text the
+    /// single script-picked face cannot fully cover. Only faces present on the
+    /// host are returned; each is normalised to a standalone sfnt.</summary>
+    public static System.Collections.Generic.IReadOnlyList<(byte[] Bytes, string Name)> ChainFaces()
+    {
+        lock (_lock)
+        {
+            if (_chain is not null) return _chain;
+            _chain = new System.Collections.Generic.List<(byte[], string)>();
+            const string F = @"C:\Windows\Fonts\";
+            foreach (var (file, name) in new[]
+            {
+                (F + "simsun.ttc", "SimSun"),
+                // YaHei carries the CJK-radical range SimSun's cmap lacks
+                // (U+2E86… — 21 of the filing form's 30 address radicals).
+                (F + "msyh.ttc", "MicrosoftYaHei"),
+                (F + "seguisym.ttf", "SegoeUISymbol"),
+                (F + "simsunb.ttf", "SimSun-ExtB"),
+                (F + "msgothic.ttc", "MSGothic"),
+                (F + "malgun.ttf", "MalgunGothic"),
+            })
+            {
+                try
+                {
+                    if (LocateFontFile(file) is { } fp)
+                        _chain.Add((NormalizeToSfnt(System.IO.File.ReadAllBytes(fp)), name));
+                }
+                catch { /* unreadable candidate — the next may work */ }
+            }
+            return _chain;
+        }
     }
 
     private static string[] EmbeddableCandidates(string text)

@@ -24,7 +24,7 @@ public sealed class BDCProperties
     }
 
     /// <summary>Full ctor with optional /MCID + language + expansion text.</summary>
-    public BDCProperties(int? mcid, string lang, string expansionText)
+    public BDCProperties(int? mcid, string? lang, string? expansionText)
     {
         MCID = mcid;
         Lang = lang;

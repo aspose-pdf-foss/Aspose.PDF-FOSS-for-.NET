@@ -105,10 +105,16 @@ internal static class PdfLinearizer
         var firstSection = objs.Values.Where(o => firstPageSet.Contains(o.Num)).OrderBy(o => o.Num).ToList();
         var restSection = objs.Values.Where(o => !firstPageSet.Contains(o.Num)).OrderBy(o => o.Num).ToList();
 
+        // The two tables PARTITION the file (PDF 32000-1 Annex F): the first-page table
+        // carries the linearization dictionary, the hint stream and the first-page objects;
+        // the main table carries everything else and opens on object 0's free entry. Listing
+        // every object in BOTH still resolves - a reader finds the first-page entries before
+        // it walks /Prev - but it writes each first-page object twice and puts the main
+        // table's leading subsection at odds with the section it actually describes.
         var firstXrefNums = new List<int> { linObjNum, hintObjNum };
         firstXrefNums.AddRange(firstSection.Select(o => o.Num));
         firstXrefNums = firstXrefNums.Distinct().OrderBy(n => n).ToList();
-        var allNums = objs.Keys.Concat(new[] { linObjNum, hintObjNum }).Distinct().OrderBy(n => n).ToList();
+        var allNums = restSection.Select(o => o.Num).Distinct().OrderBy(n => n).ToList();
 
         var ms = new MemoryStream();
         var offsets = new Dictionary<int, long>();
@@ -136,7 +142,7 @@ internal static class PdfLinearizer
 
         // 3. First-page cross-reference section + trailer (/Prev patched later).
         long firstXrefPos = ms.Position;
-        EmitXref(ms, firstXrefNums, xrefEntryPos, section: 0, W);
+        EmitXref(ms, firstXrefNums, xrefEntryPos, section: 0, W, withFreeHead: false);
         W($"trailer\n<< /Size {size} /Root {rootRef.ObjectNumber} 0 R");
         if (reader.Trailer.Get("Info") is PdfIndirectRef inf) W($" /Info {inf.ObjectNumber} 0 R");
         var idStr = TrailerIdString(reader.Trailer); if (idStr is not null) W(" /ID " + idStr);
@@ -167,12 +173,16 @@ internal static class PdfLinearizer
         ms.Write(Enumerable.Repeat((byte)' ', ReservedSpace).ToArray(), 0, ReservedSpace);
         W("\n");
 
-        // 7. Main cross-reference section + trailer.
+        // 7. Main cross-reference section + trailer. The main trailer carries /Size (and /ID,
+        // /Encrypt where they apply) and nothing else: /Root and /Info belong to the
+        // first-page trailer, which is the one the file-final startxref points at and the one
+        // a reader reads first (PDF 32000-1 Annex F.3.7). Repeating them here is 26 bytes of
+        // the only part of the file a reader is guaranteed to fetch.
         long mainXrefPos = ms.Position;
-        EmitXref(ms, allNums, xrefEntryPos, section: 1, W);
-        W($"trailer\n<< /Size {size} /Root {rootRef.ObjectNumber} 0 R");
-        if (reader.Trailer.Get("Info") is PdfIndirectRef inf2) W($" /Info {inf2.ObjectNumber} 0 R");
+        EmitXref(ms, allNums, xrefEntryPos, section: 1, W, withFreeHead: true);
+        W($"trailer\n<< /Size {size}");
         if (idStr is not null) W(" /ID " + idStr);
+        if (reader.Trailer.Get("Encrypt") is PdfIndirectRef enc) W($" /Encrypt {enc.ObjectNumber} 0 R");
         W($" >>\nstartxref\n{firstXrefPos}\n%%EOF\n");
 
         var buf = ms.ToArray();
@@ -192,11 +202,15 @@ internal static class PdfLinearizer
 
     // Emit a traditional xref section, recording each entry's 10-digit offset placeholder
     // position so it can be patched once object offsets are final.
+    /// <summary><paramref name="withFreeHead"/>: whether this table opens on object 0's free
+    /// entry. Only the MAIN table does - Annex F gives the free-list head to the table that
+    /// describes the rest of the file, and a first-page table that also claims object 0
+    /// describes a section it holds nothing of.</summary>
     private static void EmitXref(Stream ms, List<int> nums, Dictionary<(int, int), long> entryPos,
-        int section, Action<string> W)
+        int section, Action<string> W, bool withFreeHead)
     {
         W("xref\n");
-        var withZero = nums.Contains(0) ? nums : new List<int>(nums) { 0 };
+        var withZero = !withFreeHead || nums.Contains(0) ? nums : new List<int>(nums) { 0 };
         withZero = withZero.Distinct().OrderBy(n => n).ToList();
         int i = 0;
         while (i < withZero.Count)
@@ -265,19 +279,40 @@ internal static class PdfLinearizer
             for (int i = 1; i < kids.Count; i++)
                 if (kids[i] is PdfIndirectRef pr) otherPages.Add(pr.ObjectNumber);
 
-        if (catalog.Get("Pages") is PdfIndirectRef pgr) section.Add(pgr.ObjectNumber);
+        // The page TREE is not first-page material (PDF 32000-1 Annex F): a tree node names
+        // every page beneath it through /Kids, so putting one in the first-page section
+        // drags the whole document's page identity into the part that is supposed to be the
+        // first page alone. The first page reaches its parent through /Parent, so the walk
+        // has to EXCLUDE the nodes, not merely refrain from seeding them.
+        var treeNodes = new HashSet<int>();
+        {
+            var pending = new Stack<PdfObject?>();
+            pending.Push(catalog.Get("Pages"));
+            var treeGuard = 0;
+            while (pending.Count > 0 && treeGuard++ < 4096)
+            {
+                if (pending.Pop() is not PdfIndirectRef nodeRef) continue;
+                if (!treeNodes.Add(nodeRef.ObjectNumber)) continue;
+                var node = reader.ResolveDict(nodeRef);
+                if (node?.GetName("Type") != "Pages") { treeNodes.Remove(nodeRef.ObjectNumber); continue; }
+                if (node.Get("Kids") is PdfArray nodeKids)
+                    foreach (var kid in nodeKids) pending.Push(kid);
+            }
+        }
+
         var stack = new Stack<int>();
         stack.Push(firstPageNum);
         int guard = 0;
         while (stack.Count > 0 && guard++ < 8192)
         {
             int n = stack.Pop();
-            if (otherPages.Contains(n)) continue;
+            if (otherPages.Contains(n) || treeNodes.Contains(n)) continue;
             if (!section.Add(n) && n != firstPageNum) continue;
             PdfObject? obj;
             try { obj = reader.Resolve(new PdfIndirectRef(n, 0)); } catch { continue; }
             foreach (var refNum in ReferencedObjectNumbers(obj))
-                if (!otherPages.Contains(refNum) && !section.Contains(refNum)) stack.Push(refNum);
+                if (!otherPages.Contains(refNum) && !treeNodes.Contains(refNum)
+                    && !section.Contains(refNum)) stack.Push(refNum);
         }
         return section;
     }

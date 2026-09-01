@@ -13,7 +13,7 @@ namespace Aspose.Pdf
         AESx128,
         /// <summary>AES with 256-bit key (PDF 2.0).</summary>
         AESx256,
-        /// <summary>A custom encryption handler is used (placeholder value for parity).</summary>
+        /// <summary>A custom encryption handler is used (placeholder value for API compatibility).</summary>
         Custom,
     }
 }

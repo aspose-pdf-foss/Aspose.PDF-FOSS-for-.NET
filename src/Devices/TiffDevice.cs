@@ -211,8 +211,16 @@ public sealed class TiffDevice : ImageDevice
         RgbaBuffer buf;
         if (EffectiveDepth(Settings) == ColorDepth.Format1bpp)
         {
-            superFactor = BilevelSupersample;
-            buf = RenderSupersampled(page, superFactor);
+            // Raised Brightness (> 0.5) reproduces the expected bilevel output: a PLAIN
+            // render thresholded per pixel at the measured linear cutoff (see
+            // BilevelCutoff). Supersampled area-averaging must not run there — on a
+            // scan whose paper tone sits at the cutoff it flips whole regions that
+            // per-pixel thresholding leaves alone (measured at Brightness 0.8: the
+            // per-pixel threshold of the plain render matches the expected bilevel
+            // to 0.05%). The default-brightness path keeps the supersampled
+            // three-zone halftone packing unchanged.
+            superFactor = Settings.Brightness > 0.5f ? 1 : BilevelSupersample;
+            buf = superFactor > 1 ? RenderSupersampled(page, superFactor) : RenderPage(page);
         }
         else
         {
@@ -257,21 +265,33 @@ public sealed class TiffDevice : ImageDevice
     // box. Either way the resulting buffer is super × the final output bitmap.
     private RgbaBuffer RenderSupersampled(Page page, int superFactor)
     {
-        if (TargetWidth > 0 && TargetHeight > 0)
+        // Tell a GDI+ renderer it is drawing an INTERMEDIATE this many times the output
+        // size, so scale-dependent rules (the image sample grid) judge the output scale.
+        if (OperatingSystem.IsWindows() && Renderer is GdiPlusPageRenderer marked)
+            marked.OutputSupersample = superFactor;
+        try
         {
-            if (Renderer is SoftwarePageRenderer swDirect)
-                return swDirect.RenderPageAtPixelSize(page, TargetWidth * superFactor, TargetHeight * superFactor);
-            if (OperatingSystem.IsWindows() && Renderer is GdiPlusPageRenderer gdiDirect)
-                return gdiDirect.RenderPageAtPixelSize(page, TargetWidth * superFactor, TargetHeight * superFactor);
-        }
+            if (TargetWidth > 0 && TargetHeight > 0)
+            {
+                if (Renderer is SoftwarePageRenderer swDirect)
+                    return swDirect.RenderPageAtPixelSize(page, TargetWidth * superFactor, TargetHeight * superFactor);
+                if (OperatingSystem.IsWindows() && Renderer is GdiPlusPageRenderer gdiDirect)
+                    return gdiDirect.RenderPageAtPixelSize(page, TargetWidth * superFactor, TargetHeight * superFactor);
+            }
 
-        var xDpi = Resolution.X * superFactor;
-        var yDpi = Resolution.Y * superFactor;
-        if (Renderer is SoftwarePageRenderer sw)
-            return sw.RenderPage(page, xDpi, yDpi);
-        if (OperatingSystem.IsWindows() && Renderer is GdiPlusPageRenderer gdi)
-            return gdi.RenderPage(page, xDpi, yDpi);
-        return Renderer.RenderPage(page.Reader.RawData, page.Number, xDpi);
+            var xDpi = Resolution.X * superFactor;
+            var yDpi = Resolution.Y * superFactor;
+            if (Renderer is SoftwarePageRenderer sw)
+                return sw.RenderPage(page, xDpi, yDpi);
+            if (OperatingSystem.IsWindows() && Renderer is GdiPlusPageRenderer gdi)
+                return gdi.RenderPage(page, (int)xDpi, (int)yDpi, superFactor);
+            return Renderer.RenderPage(page.Reader.RawData, page.Number, xDpi);
+        }
+        finally
+        {
+            if (OperatingSystem.IsWindows() && Renderer is GdiPlusPageRenderer done)
+                done.OutputSupersample = 1;
+        }
     }
 
     // CCITT3/CCITT4 are bilevel-only fax encodings, so they imply 1-bit depth even
@@ -289,32 +309,38 @@ public sealed class TiffDevice : ImageDevice
 
     // Maps TiffSettings.Brightness (0..1) to the 0..255 bilevel cutoff used by both
     // 1bpp packers: a pixel is black when its lightness (min RGB channel) is below the
-    // cutoff. Binarisation floors at the mid-grey cutoff 128
-    // (the value both packers hard-coded before) and only *raises* it as Brightness
-    // climbs above 0.5, linearly to 255 at Brightness 1.0 — cutoff = max(128,
-    // Brightness×255). Brightness ≤ 0.5 (the default) leaves output unchanged; higher
-    // Brightness pushes the cutoff up so mid-grey ink — scanned form rules, faint
-    // handwriting — also binarises to black instead of dropping out (Brightness 0.85 ⇒
-    // 217). Calibrated against 1bpp/CCITT output at Brightness 0.85
-    // (more black) and 0.1 (unchanged from the 128 floor, not the naïve 0.1×255=26).
+    // cutoff. Measured on the expected CCITT output of a 300-dpi scanned
+    // page across six Brightness points: the cutoff is LINEAR at 235×Brightness + 20
+    // (0.5 → 138, 0.6 → 161, 0.8 → 208, 0.85 → 220, 0.95 → 243, each within one grey
+    // level of the empirical best-fit threshold). Below 0.5 the expected output is
+    // no longer a pure threshold (a plain-threshold fit leaves a 1.4% residual — it
+    // dithers the mid band), which the supersampled three-zone halftone packing
+    // approximates; that default path keeps its calibrated 128 cutoff. The previous
+    // max(128, 255×B) mapping sat 4 levels low at 0.8, which on a scan whose paper
+    // tone straddles the cutoff flipped whole regions (the bank-logo band of the
+    // regression fixture binarised black where it is expected white).
     private static int BilevelCutoff(float brightness)
     {
-        var t = (int)System.Math.Round(brightness * 255f);
-        if (t < 128) t = 128;
+        // Brightness ≤ 0.5 (the default is 0.33) keeps the legacy 128 cutoff that
+        // the supersampled three-zone halftone packing is calibrated around.
+        if (brightness <= 0.5f) return 128;
+        var t = (int)System.Math.Round(brightness * 235f + 20f);
         return t > 255 ? 255 : t;
     }
 
     private static void ThresholdToBlackAndWhite(byte[] rgb, int cutoff)
     {
-        // Ink-coverage threshold: a pixel is white only when every channel is light
-        // (near paper white), so coloured ink — e.g. a cyan/azure heading printed as
-        // CMYK — binarises to black rather than dropping out: the
-        // fax/bilevel conversion preserves any non-white ink. For grey
-        // content (R=G=B) this is identical to the previous Rec.601 luminance cutoff.
+        // Rec.601 LUMINANCE threshold — the expected raised-Brightness
+        // bilevel is a luminance cutoff, measured to 0.05% on a 300-dpi scan (a
+        // min-channel "ink coverage" test reads a JPEG's chroma noise as ink and
+        // behaves like a cutoff ~18 levels higher, flipping paper-tone regions).
+        // This path only runs for Brightness > 0.5, where any coloured ink's
+        // luminance sits below the raised cutoff and still binarises to black; the
+        // default-brightness path keeps the supersampled ink-coverage packing.
         for (var i = 0; i < rgb.Length; i += 3)
         {
-            var ink = System.Math.Min(rgb[i], System.Math.Min(rgb[i + 1], rgb[i + 2]));
-            var v = ink >= cutoff ? (byte)255 : (byte)0;
+            var lum = (299 * rgb[i] + 587 * rgb[i + 1] + 114 * rgb[i + 2] + 500) / 1000;
+            var v = lum >= cutoff ? (byte)255 : (byte)0;
             rgb[i] = v; rgb[i + 1] = v; rgb[i + 2] = v;
         }
     }

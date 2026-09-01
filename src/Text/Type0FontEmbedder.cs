@@ -33,6 +33,10 @@ internal static class Type0FontEmbedder
         public GlyphOutlineParser Parser = null!;
         public double Upm = 1000;
         public readonly Dictionary<int, int> UsedGlyphs = new(); // charCode → glyphId
+        /// <summary>Glyphs a SHAPED run put in the stream that no single character maps
+        /// to — a conjunct, a reph, a half form. They need /W entries like any other
+        /// glyph, but they have no ToUnicode source character of their own.</summary>
+        public readonly HashSet<ushort> ShapedGlyphs = new();
         public PdfDictionary CidFont = null!;
         public PdfDictionary Type0Font = null!;
         public PdfStream FontFile = null!;   // the embedded /FontFile2 stream
@@ -60,11 +64,14 @@ internal static class Type0FontEmbedder
             for (var i = _liveFonts.Count - 1; i >= 0; i--)
             {
                 if (!_liveFonts[i].TryGetTarget(out var st)) { _liveFonts.RemoveAt(i); continue; }
-                if (!st.SubsetDirty || st.UsedGlyphs.Count == 0) continue;
+                if (!st.SubsetDirty || (st.UsedGlyphs.Count == 0 && st.ShapedGlyphs.Count == 0)) continue;
                 try
                 {
                     var gids = new HashSet<int> { 0 }; // keep .notdef
                     foreach (var (_, gid) in st.UsedGlyphs) gids.Add(gid);
+                    // A conjunct or reph the shaper put in the stream must survive the
+                    // subset too — it is reachable from no character map.
+                    foreach (var gid in st.ShapedGlyphs) gids.Add(gid);
                     var parser = new TrueTypeParser(st.Ttf);
                     parser.Parse();
                     var subset = new TrueTypeSubsetter(st.Ttf, parser).SubsetSparse(gids);
@@ -92,12 +99,12 @@ internal static class Type0FontEmbedder
     /// </summary>
     public static (string resName, byte[] hexGlyphIds) Embed(
         PdfDictionary fontDict, byte[] ttfData, string fontName, string text,
-        bool stripSpacesInBaseFont = false)
+        bool stripSpacesInBaseFont = false, string? resNameHint = null)
     {
         var pageFonts = _cache.GetValue(fontDict, static _ => new PageFonts());
         if (!pageFonts.ByTtf.TryGetValue(ttfData, out var st))
         {
-            st = BuildFont(fontDict, ttfData, fontName, stripSpacesInBaseFont);
+            st = BuildFont(fontDict, ttfData, fontName, stripSpacesInBaseFont, resNameHint);
             pageFonts.ByTtf[ttfData] = st;
         }
 
@@ -107,6 +114,21 @@ internal static class Type0FontEmbedder
         // UTF-16 units would look each half up in the cmap and emit two .notdef glyphs.
         var hex = new System.Collections.Generic.List<byte>(text.Length * 2);
         var added = false;
+        // A complex script (Devanagari, Telugu, …) is not one glyph per codepoint: its
+        // conjuncts and its reph are glyphs the FONT substitutes in, and some marks are
+        // drawn before the consonant they follow in memory. Shape the run first when the
+        // font carries rules for it; every other script keeps the straight cmap walk.
+        if (ShapeRun(st, text) is { } shaped)
+        {
+            foreach (var gid in shaped)
+            {
+                if (st.ShapedGlyphs.Add(gid)) added = true;
+                hex.Add((byte)(gid >> 8));
+                hex.Add((byte)(gid & 0xFF));
+            }
+            if (added) { RefreshWidthsAndToUnicode(st); st.SubsetDirty = true; }
+            return (st.ResName, hex.ToArray());
+        }
         for (var i = 0; i < text.Length; i++)
         {
             int cp = text[i];
@@ -130,15 +152,24 @@ internal static class Type0FontEmbedder
     /// layout agrees exactly with what extraction later measures from the file.
     /// </summary>
     public static double MeasureText(PdfDictionary fontDict, byte[] ttfData, string fontName,
-        string text, double fontSize, bool stripSpacesInBaseFont = false)
+        string text, double fontSize, bool stripSpacesInBaseFont = false, string? resNameHint = null)
     {
         var pageFonts = _cache.GetValue(fontDict, static _ => new PageFonts());
         if (!pageFonts.ByTtf.TryGetValue(ttfData, out var st))
         {
-            st = BuildFont(fontDict, ttfData, fontName, stripSpacesInBaseFont);
+            st = BuildFont(fontDict, ttfData, fontName, stripSpacesInBaseFont, resNameHint);
             pageFonts.ByTtf[ttfData] = st;
         }
         double total = 0;
+        // Measure what will actually be WRITTEN: a shaped run is a different glyph
+        // sequence (a conjunct is one glyph where the text had three), so measuring the
+        // codepoints instead would over-measure every Indic line.
+        if (ShapeRun(st, text) is { } shaped)
+        {
+            foreach (var gid in shaped)
+                total += Math.Round(st.Parser.GetAdvanceWidth(gid) * 1000.0 / st.Upm);
+            return total * fontSize / 1000.0;
+        }
         // Same codepoint walk as Embed: a surrogate pair is ONE glyph.
         for (var i = 0; i < text.Length; i++)
         {
@@ -157,9 +188,12 @@ internal static class Type0FontEmbedder
     // Build the Type0 font structure once (descriptor + FontFile2 + CIDFont + Type0), register
     // it under a free F-name, and return the mutable state used to grow /W + /ToUnicode later.
     private static FontState BuildFont(PdfDictionary fontDict, byte[] ttfData, string fontName,
-        bool stripSpacesInBaseFont)
+        bool stripSpacesInBaseFont, string? resNameHint = null)
     {
-        var name = "F1";
+        // A caller with its own naming convention (the SVG converter's C0_0/C1_0 …)
+        // gets its name when it is still free; everything else keeps F1, F2, ….
+        var name = resNameHint is { Length: > 0 } && !fontDict.ContainsKey(resNameHint)
+            ? resNameHint : "F1";
         var counter = 1;
         while (fontDict.ContainsKey(name))
             name = $"F{++counter}";
@@ -239,17 +273,63 @@ internal static class Type0FontEmbedder
 
     // Rebuild /W (per-glyph advances) and /ToUnicode from the accumulated glyph set. Cheap
     // relative to the one-time font-program embed; only runs when a call introduced new glyphs.
+    /// <summary>
+    /// Declare glyphs a SHAPED run put in the stream for a font program that is already
+    /// embedded, so they gain /W advances and survive subsetting. Writers that encode
+    /// their own glyph ids (the multi-line CID path) call this after shaping, because the
+    /// substituted glyphs are reachable from no character map.
+    /// </summary>
+    internal static void RegisterShapedGlyphs(byte[] ttfData, ushort[] glyphs)
+    {
+        if (glyphs.Length == 0) return;
+        lock (_liveFonts)
+        {
+            for (var i = _liveFonts.Count - 1; i >= 0; i--)
+            {
+                if (!_liveFonts[i].TryGetTarget(out var st)) { _liveFonts.RemoveAt(i); continue; }
+                if (!ReferenceEquals(st.Ttf, ttfData)) continue;
+                var added = false;
+                foreach (var g in glyphs) if (st.ShapedGlyphs.Add(g)) added = true;
+                if (added) { RefreshWidthsAndToUnicode(st); st.SubsetDirty = true; }
+            }
+        }
+    }
+
+    /// <summary>The shaped glyph run for <paramref name="text"/>, or null when the run
+    /// needs no shaping (every script but the Indic ones) or the font carries no layout
+    /// rules for it. Both the writer and the measurer go through here so a line is
+    /// measured as the glyphs it will actually be written as.</summary>
+    private static ushort[]? ShapeRun(FontState st, string text)
+    {
+        try
+        {
+            return OpenType.TextShaper.Shape(st.Ttf, text,
+                cp => (ushort)st.Parser.GlyphIdOrLookAlike(cp));
+        }
+        catch
+        {
+            // A malformed layout table must never cost the caller its text.
+            return null;
+        }
+    }
+
     private static void RefreshWidthsAndToUnicode(FontState st)
     {
         var wArray = new PdfArray();
-        foreach (var (_, gid) in st.UsedGlyphs)
+        var widthsWritten = new HashSet<int>();
+        void AddWidth(int gid)
         {
+            if (!widthsWritten.Add(gid)) return;
             var pdfWidth = (int)Math.Round(st.Parser.GetAdvanceWidth(gid) * 1000.0 / st.Upm);
             var widthArr = new PdfArray();
             widthArr.Add(new PdfInteger(pdfWidth));
             wArray.Add(new PdfInteger(gid));
             wArray.Add(widthArr);
         }
+        foreach (var (_, gid) in st.UsedGlyphs) AddWidth(gid);
+        // A shaped run's conjuncts and rephs are in the stream too and need their own
+        // advances — no character maps to them, so UsedGlyphs never sees them.
+        foreach (var gid in st.ShapedGlyphs) AddWidth(gid);
         if (wArray.Count > 0) st.CidFont.Set("W", wArray);
 
         var toUnicode = BuildToUnicodeCMap(st.UsedGlyphs);

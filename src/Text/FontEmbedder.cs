@@ -238,8 +238,13 @@ public sealed class FontEmbedder
         if (fontDict.Get("Widths") is null)
         {
             var widths = new PdfArray();
+            // The array is indexed by WinAnsi CODE, so each code must resolve
+            // through CP1252 to its character before the cmap lookup — the
+            // 0x80..0x9F block (€, curly quotes, dashes, ™ …) otherwise reads
+            // control codepoints and lands on the notdef advance.
             for (var c = 32; c <= 255; c++)
-                widths.Add(new PdfInteger((int)(parser.GetCharWidth(c) * scale)));
+                widths.Add(new PdfInteger((int)(
+                    parser.GetCharWidth(Cp1252.GetString(new[] { (byte)c })[0]) * scale)));
             fontDict.Set("FirstChar", new PdfInteger(32));
             fontDict.Set("LastChar", new PdfInteger(255));
             fontDict.Set("Widths", widths);
@@ -420,7 +425,12 @@ public sealed class FontEmbedder
         for (var c = firstChar; c <= lastChar; c++)
         {
             var w = _parser.GetCharWidth(c);
-            widths.Add(new PdfInteger((int)(w * scale)));
+            // The face's advance as it really is, not truncated to a whole 1000th. Verdana's
+            // 'A' is 1400/2048 = 683.59375 and its 'P' 603.02734375; truncating each loses
+            // up to a full 1000th, and a 35-glyph run then reads back an eighth of a point
+            // short of the width it was laid out at. The fractional advances are written
+            // as they are (/W carries 683.59375 verbatim).
+            widths.Add(new PdfReal(Math.Round(w * scale, 4)));
         }
 
         // 4. Font dictionary (TrueType simple font)
@@ -441,11 +451,11 @@ public sealed class FontEmbedder
             var toUnicodeData = BuildToUnicodeCMap(_charCodes);
             var toUnicodeObjNum = _document.AllocateObjectNumber();
             var toUnicodeStream = new PdfStream(new PdfDictionary(), toUnicodeData);
-            _document.AddNewObject(toUnicodeObjNum, toUnicodeStream);
+            _document.AddNewObject(toUnicodeObjNum, toUnicodeStream, registerOverlay: true);
             font.Set("ToUnicode", new PdfIndirectRef(toUnicodeObjNum, 0));
         }
 
-        _document.AddNewObject(_fontObjNum, font);
+        _document.AddNewObject(_fontObjNum, font, registerOverlay: true);
 
         FontDict = font;
         DescriptorObjNum = descriptorObjNum;

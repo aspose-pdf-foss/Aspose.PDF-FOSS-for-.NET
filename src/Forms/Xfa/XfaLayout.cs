@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Xml;
 
@@ -28,6 +30,32 @@ internal static class XfaLayout
             if (!b.EffectiveHidden) total += Height(b.Template);
         if (total <= 0) return 1;
         return Math.Max(1, (int)Math.Ceiling(total / contentAreaMm - 1e-6));
+    }
+
+    /// <summary>Number of physical pages when page capacities follow the ordered
+    /// pageSet sequence: capacity i applies to page i, and the LAST capacity repeats
+    /// for every further page (the continuation master). Mirrors the renderer's
+    /// ordered-pageArea progression.</summary>
+    internal static int PageCount(IEnumerable<XfaNode> bodyBlocks, IReadOnlyList<double> pageCapacitiesMm)
+    {
+        if (pageCapacitiesMm.Count == 0) return 1;
+        double total = 0;
+        foreach (var b in bodyBlocks)
+            if (!b.EffectiveHidden) total += Height(b.Template);
+        if (total <= 0) return 1;
+        var pages = 0;
+        var remaining = total;
+        // A zero capacity (an area-less master) would never drain the flow; the
+        // page cap is a runaway guard far above any real form.
+        const int MaxPages = 4096;
+        while (remaining > 1e-6 && pages < MaxPages)
+        {
+            var cap = pageCapacitiesMm[Math.Min(pages, pageCapacitiesMm.Count - 1)];
+            if (cap <= 0) break;
+            remaining -= cap;
+            pages++;
+        }
+        return Math.Max(1, pages);
     }
 
     /// <summary>Content-area height (mm) of a master pageArea, or 0 if none declared.</summary>

@@ -53,7 +53,7 @@ namespace Aspose.Pdf.Facades
         public ExtractImageMode ExtractImageMode { get; set; } = ExtractImageMode.DefinedInResources;
 
         /// <summary>Rendering resolution for image extraction (DPI). Stored
-        /// for API-parity; the FOSS image-extraction stubs don't consult it.</summary>
+        /// for API compatibility; the FOSS image-extraction stubs don't consult it.</summary>
         public int Resolution { get; set; } = 150;
 
         /// <summary>True when the most recently extracted text contains a
@@ -126,11 +126,12 @@ namespace Aspose.Pdf.Facades
         /// Walks every page in the bound document with <see cref="TextAbsorber"/> and
         /// concatenates the extracted text. Must be called before <c>GetText</c>.
         /// </summary>
-        public void ExtractText()
+        /// <summary>A TextAbsorber configured for the facade's current mode/options —
+        /// the single place ExtractText and GetNextPageText build one, so a per-page
+        /// pull honours ExtractTextMode (Raw) and the search options exactly as the
+        /// whole-document extraction does.</summary>
+        private TextAbsorber NewConfiguredAbsorber()
         {
-            if (_document is null)
-                throw new InvalidOperationException("No document bound. Call BindPdf first.");
-
             var absorber = new TextAbsorber();
             if (_textSearchOptions is not null)
                 absorber.TextSearchOptions = _textSearchOptions;
@@ -139,12 +140,47 @@ namespace Aspose.Pdf.Facades
             if (ExtractTextMode == (int)Aspose.Pdf.ExtractTextMode.Raw)
                 absorber.ExtractionOptions = new Aspose.Pdf.Text.TextExtractionOptions(
                     Aspose.Pdf.Text.TextExtractionOptions.TextFormattingMode.Raw);
+            return absorber;
+        }
+
+        /// <summary>Apply the facade's text post-processing (RTL line binding, ligature
+        /// decomposition, symbol-PUA folding, control-char strip) — the same transform
+        /// ExtractText runs, so GetNextPageText output matches the whole-document result.</summary>
+        private string PostProcess(string raw) =>
+            StripControlChars(FoldSymbolPua(DecomposeLigatures(ReorderRtlLines(raw))));
+
+        /// <summary>The facade removes control characters a glyph's ToUnicode may map to
+        /// (e.g. an ornament glyph mapped to U+0008 BACKSPACE) — the extractor
+        /// strips these "special chars" from its output. Whitespace controls
+        /// (tab, newline, carriage return, form feed) survive.</summary>
+        private static string StripControlChars(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            bool has = false;
+            foreach (var c in text)
+                if (c < ' ' && c is not ('\t' or '\n' or '\r' or '\f')) { has = true; break; }
+            if (!has) return text;
+            var sb = new System.Text.StringBuilder(text.Length);
+            foreach (var c in text)
+                if (c >= ' ' || c is '\t' or '\n' or '\r' or '\f')
+                    sb.Append(c);
+            return sb.ToString();
+        }
+
+        public void ExtractText()
+        {
+            if (_document is null)
+                throw new InvalidOperationException("No document bound. Call BindPdf first.");
+
+            var absorber = NewConfiguredAbsorber();
             var from = StartPage > 0 ? StartPage : 1;
-            var to = EndPage > 0 ? EndPage : _document.PageCount;
+            // A range end past the last page is clamped, not rejected: the facade
+            // contract lets a caller ask for pages 1..10 of a shorter document.
+            var to = Math.Min(EndPage > 0 ? EndPage : _document.PageCount, _document.PageCount);
             for (var i = from; i <= to; i++)
                 absorber.Visit(_document.Pages.At(i));
 
-            _extractedText = FoldSymbolPua(DecomposeLigatures(ReorderRtlLines(absorber.Text)));
+            _extractedText = PostProcess(absorber.Text);
             _extracted = true;
             _nextPageCursor = from;
         }
@@ -245,32 +281,6 @@ namespace Aspose.Pdf.Facades
         private static bool IsStrongLtr(char c) =>
             char.IsLetter(c) && !Aspose.Pdf.Text.BidiReorderer.IsRtlChar(c);
 
-        /// <summary>Reverse the whitespace-separated words of an RTL line, keeping each
-        /// maximal run of consecutive left-to-right words (numbers, Latin) in its original
-        /// order so embedded numbers read forward.</summary>
-        private static string ReverseWordOrder(string line)
-        {
-            var words = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (words.Length <= 1) return line;
-            var isLtr = new bool[words.Length];
-            for (var i = 0; i < words.Length; i++) isLtr[i] = WordIsLtr(words[i]);
-
-            var outWords = new List<string>(words.Length);
-            var idx = words.Length - 1;
-            while (idx >= 0)
-            {
-                if (isLtr[idx])
-                {
-                    var j = idx;
-                    while (j - 1 >= 0 && isLtr[j - 1]) j--;
-                    for (var k = j; k <= idx; k++) outWords.Add(words[k]);
-                    idx = j - 1;
-                }
-                else { outWords.Add(words[idx]); idx--; }
-            }
-            return string.Join(" ", outWords);
-        }
-
         /// <summary>A word is treated as left-to-right when its first strong-or-numeric
         /// character is Latin/number; a word of only neutrals (punctuation) is not LTR, so
         /// it flows with the RTL reversal.</summary>
@@ -340,7 +350,9 @@ namespace Aspose.Pdf.Facades
         public bool HasNextPageText()
         {
             if (_document is null) return false;
-            var to = EndPage > 0 ? EndPage : _document.PageCount;
+            // A range end past the last page is clamped, not rejected: the facade
+            // contract lets a caller ask for pages 1..10 of a shorter document.
+            var to = Math.Min(EndPage > 0 ? EndPage : _document.PageCount, _document.PageCount);
             return _nextPageCursor >= 1 && _nextPageCursor <= to;
         }
 
@@ -356,12 +368,15 @@ namespace Aspose.Pdf.Facades
         {
             if (_document is null)
                 throw new InvalidOperationException("No document bound. Call BindPdf first.");
+            // Without a prior ExtractText the facade writes nothing (empty
+            // output) — the facade contract.
+            if (!_extracted) return;
             if (!HasNextPageText())
                 throw new InvalidOperationException("No more pages to extract.");
 
-            var absorber = new TextAbsorber();
+            var absorber = NewConfiguredAbsorber();
             absorber.Visit(_document.Pages.At(_nextPageCursor));
-            var bytes = Encoding.Unicode.GetBytes(absorber.Text);
+            var bytes = Encoding.Unicode.GetBytes(PostProcess(absorber.Text));
             outputStream.Write(bytes, 0, bytes.Length);
             _nextPageCursor++;
         }
@@ -393,7 +408,9 @@ namespace Aspose.Pdf.Facades
             // across pages (a per-page letterhead logo) dedupe by content instead.
             var inlineSeen = new System.Collections.Generic.HashSet<string>();
             var from = StartPage > 0 ? StartPage : 1;
-            var to = EndPage > 0 ? EndPage : _document.PageCount;
+            // A range end past the last page is clamped, not rejected: the facade
+            // contract lets a caller ask for pages 1..10 of a shorter document.
+            var to = Math.Min(EndPage > 0 ? EndPage : _document.PageCount, _document.PageCount);
             for (var i = from; i <= to; i++)
             {
                 var page = _document.Pages.At(i);
@@ -755,10 +772,11 @@ namespace Aspose.Pdf.Facades
 
         private void EnsureExtracted()
         {
-            // Docs show the ExtractText→GetText sequence, but some samples call GetText
-            // without an explicit ExtractText (e.g. "CheckIfPdfContainsTextOrImages").
-            // Extract lazily so both usage patterns work.
-            if (!_extracted) ExtractText();
+            // The facade contract: GetText WITHOUT a prior ExtractText writes
+            // nothing (an empty result rather than
+            // extracting lazily). Surface that as empty text instead of
+            // running an implicit extraction.
+            if (!_extracted) _extractedText = string.Empty;
         }
 
         private void Reset()
@@ -769,6 +787,10 @@ namespace Aspose.Pdf.Facades
             _selectedAttachments = null;
             _extractedImages = null;
             _imageCursor = 0;
+            // The page range surfaces the bound document's extent immediately
+            // after BindPdf (StartPage 1 .. EndPage = page count).
+            StartPage = 1;
+            EndPage = _document?.PageCount ?? 0;
         }
 
         public void Close()

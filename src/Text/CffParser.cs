@@ -517,9 +517,6 @@ internal sealed class CffParser
     private int ReadUInt16(int offset) =>
         (_data[offset] << 8) | _data[offset + 1];
 
-    private int ReadOffset(int pos, int offSize) =>
-        ReadOffsetStatic(_data, pos, offSize);
-
     internal static int ReadOffsetStatic(byte[] data, int pos, int offSize)
     {
         var val = 0;

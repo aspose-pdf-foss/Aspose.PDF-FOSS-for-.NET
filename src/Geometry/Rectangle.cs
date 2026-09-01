@@ -160,6 +160,10 @@ public sealed class Rectangle
 
     public bool Contains(double x, double y) => ContainsPoint(x, y);
 
+    /// <summary>Test whether <paramref name="point"/> falls inside the
+    /// rectangle (inclusive of edges).</summary>
+    public bool Contains(Point point) => Contains(point, inclusive: true);
+
     public bool Contains(Rectangle other) =>
         other.LLX >= LLX && other.LLY >= LLY &&
         other.URX <= URX && other.URY <= URY;
@@ -205,29 +209,27 @@ public sealed class Rectangle
     public void Rotate(int angle)
     {
         var a = ((angle % 360) + 360) % 360;
-        // A quarter-turn (90/270) swaps the X and Y
-        // coordinate pairs (the box keeps positive coords and takes the rotated
-        // dimensions); a half-turn (0/180) leaves the axis-aligned box unchanged.
-        // Earlier this rotated the corners about the ORIGIN, which pushed the box to
-        // negative, off-page coordinates (rotated FreeText vanished).
-        if (a == 90 || a == 270)
-        {
-            (LLX, LLY, URX, URY) = (LLY, LLX, URY, URX);
-            return;
-        }
         if (a == 0 || a == 180) return;
 
-        // Arbitrary angle: fall back to the bounding box of the rotated corners.
+        // ★ The box turns ABOUT ITS OWN CENTRE, so a quarter-turn keeps the centre and
+        // swaps the dimensions: a 200×30 box at (50,600)-(250,630) becomes the 30×200
+        // box (135,515)-(165,715) — measured on rotated FreeText output, whose
+        // appearance sits exactly there. Rotating about the ORIGIN instead
+        // pushes the box off-page, and merely swapping the LL/UR pairs moves it to an
+        // unrelated place on the page.
+        var cx = (LLX + URX) / 2.0;
+        var cy = (LLY + URY) / 2.0;
         var rad = a * Math.PI / 180.0;
         var cos = Math.Cos(rad);
         var sin = Math.Sin(rad);
-        var pts = ToPoints();
         double minX = double.PositiveInfinity, minY = double.PositiveInfinity;
         double maxX = double.NegativeInfinity, maxY = double.NegativeInfinity;
-        foreach (var p in pts)
+        foreach (var p in ToPoints())
         {
-            var x = p.X * cos - p.Y * sin;
-            var y = p.X * sin + p.Y * cos;
+            var dx = p.X - cx;
+            var dy = p.Y - cy;
+            var x = cx + dx * cos - dy * sin;
+            var y = cy + dx * sin + dy * cos;
             if (x < minX) minX = x;
             if (y < minY) minY = y;
             if (x > maxX) maxX = x;
@@ -289,7 +291,12 @@ public sealed class Rectangle
         new(Math.Min(LLX, otherRect.LLX), Math.Min(LLY, otherRect.LLY),
             Math.Max(URX, otherRect.URX), Math.Max(URY, otherRect.URY));
 
-    public override string ToString() => $"[{LLX:F2} {LLY:F2} {URX:F2} {URY:F2}]";
+    /// <summary>Comma-separated coordinate list (<c>llx,lly,urx,ury</c>) —
+    /// the public-API string shape callers compare against.</summary>
+    public override string ToString() =>
+        $"{Fmt(LLX)},{Fmt(LLY)},{Fmt(URX)},{Fmt(URY)}";
+
+    private static string Fmt(double v) => v.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>Convert from System.Drawing.Rectangle (x, y, width, height) to PDF Rectangle (LLX/LLY/URX/URY).</summary>
     public static Rectangle FromRect(System.Drawing.Rectangle src) =>

@@ -64,6 +64,32 @@ internal static class CmsParser
         }
     }
 
+    /// <summary>
+    /// Extract the DER bytes of every certificate in the CMS certificate set
+    /// (the signer's certificate plus any embedded intermediates), in stored
+    /// order. Empty on parse failure or when the set is absent.
+    /// </summary>
+    public static List<byte[]> GetCertificatesDer(byte[] cms)
+    {
+        var result = new List<byte[]>();
+        try
+        {
+            var sd = ReadSignedData(cms);
+            if (sd is null) return result;
+            sd.ReadInteger();   // version
+            sd.ReadSet();       // digestAlgorithms
+            sd.ReadSequence();  // encapContentInfo
+            var certs = sd.TryReadContextConstructed(0); // certificates [0] IMPLICIT (optional)
+            while (certs is not null && certs.HasData)
+                result.Add(certs.ReadRawTlv());
+        }
+        catch
+        {
+            // best-effort: return whatever parsed before the failure
+        }
+        return result;
+    }
+
     private static Asn1Reader? ReadSignedData(byte[] cms)
     {
         var contentInfo = new Asn1Reader(cms).ReadSequence();

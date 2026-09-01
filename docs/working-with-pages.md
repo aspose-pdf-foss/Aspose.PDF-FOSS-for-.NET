@@ -33,7 +33,9 @@ Page letter = doc.Pages.Add(612, 792);              // explicit points
 ```
 
 `PageSize` provides the common presets: `A0`–`A6`, `B5`, `Letter`, `Legal`,
-`P11x17`. Each exposes `Width` / `Height` (points) and an `IsLandscape` toggle.
+`P11x17`, `PageLedger` (plus the `PageLetter` / `PageLegal` aliases). Each
+exposes `Width` / `Height` (`float`, points) and an `IsLandscape` toggle; a
+custom size is `new PageSize(width, height)`.
 
 ## Inserting and deleting
 
@@ -63,7 +65,7 @@ doc.Pages.Delete(6);         // original slot shifted to 6 after the insert
 ## Rotating pages
 
 ```csharp
-// Rotation enum: None, on90, on180, on270
+// Rotation enum: None, on90, on180, on270 (on360 is stored as 0)
 doc.Pages[1].Rotate = Rotation.on90;
 
 // Or by degrees
@@ -97,7 +99,8 @@ dest.Save("copied.pdf");
 
 ## Merging documents
 
-Append every page of one document onto another with `Pages.Add(PageCollection)`:
+Append every page of one document onto another with `Pages.Add(PageCollection)`
+(or a chosen subset with `Pages.Add(Page[])`):
 
 ```csharp
 using Aspose.Pdf;

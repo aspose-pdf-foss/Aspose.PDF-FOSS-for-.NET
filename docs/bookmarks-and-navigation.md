@@ -36,7 +36,12 @@ Console.WriteLine($"Has bookmarks: {doc.HasOutlines}");
 ```
 
 `DestinationPageNumber` is the 1-based target page (0 when the bookmark has no
-page destination).
+page destination). It resolves an inline `/Dest` array, a `/Dest` that is
+itself a GoTo action dictionary, a `/A` GoTo action, and named destinations.
+Each item also exposes `Destination` (`IAppointment`), `Action`, `IsOpen`,
+`IsBold`, `IsItalic`, `Color`, `Children`, and `Delete()`; `OutlineCollection`
+offers `Count`, `First`, `Last`, an integer indexer, `Delete()` (all) and
+`Delete(string title)`.
 
 ## Creating bookmarks
 
@@ -64,8 +69,9 @@ builder.Add("Chapter 2", doc.Pages[4]);      // by Page object
 doc.Save("bookmarked.pdf");
 ```
 
-`OutlineItemBuilder` supports `AddChild`, `SetOpen`, `SetBold`, `SetItalic`, and
-`SetColor`, each returning the builder for chaining.
+`OutlineItemBuilder` supports `AddChild` (by `pageIndex` or by `Page`),
+`SetOpen`, `SetBold`, `SetItalic`, and `SetColor`, each returning the builder
+for chaining. Items are open by default.
 
 ## Named destinations
 
@@ -83,8 +89,19 @@ foreach (var dest in doc.NamedDestinations)
 var intro = doc.NamedDestinations["Introduction"];
 ```
 
+Each `NamedDestination` carries `Name`, `PageIndex` (0-based) and `PageNumber`
+(1-based, 0 when unresolved), the fit `Type`, and the `Left` / `Top` / `Right`
+/ `Bottom` / `Zoom` parameters of the destination array.
+`NamedDestinationCollection` also exposes `Count`, `Names`, `All`,
+`FindByName(name)` (the `NamedDestination` rather than its `IAppointment`) and
+`Remove(name)`.
+
 `NamedDestinationCollection.Add(string name, IAppointment appointment)` adds a
-new entry; pass any destination object that implements `IAppointment`.
+new entry; pass any destination object that implements `IAppointment`. The
+static factories on `NamedDestination` — `CreateFitDestination`,
+`CreateFitHDestination`, `CreateFitVDestination`, `CreateXYZDestination`,
+`CreateFitRDestination` — build the corresponding explicit destination arrays
+from a 0-based page index.
 
 ## Page labels
 
@@ -105,8 +122,12 @@ labels.Add(10, NumberingStyle.Decimal, prefix: "A-");  // page 11..  -> A-1, A-2
 doc.Save("labeled.pdf");
 ```
 
-`NumberingStyle` values: `None`, `Decimal`, `UpperRoman`, `LowerRoman`,
-`UpperAlpha`, `LowerAlpha` (parity aliases like `NumeralsArabic` also exist).
+`Add` also takes `start` (the first number of the range, default 1).
+
+`NumberingStyle` values: `NumeralsArabic`, `NumeralsRomanUppercase`,
+`NumeralsRomanLowercase`, `LettersUppercase`, `LettersLowercase`, `None`. The
+short aliases `Decimal`, `UpperRoman`, `LowerRoman`, `UpperAlpha` and
+`LowerAlpha` map onto the same values.
 
 `Document.PageLabels` is always a usable collection — never `null`, even when the
 document declares no labels yet — so you can also add, replace, or remove labels
@@ -118,6 +139,12 @@ doc.PageLabels.UpdateLabel(0, label);   // add or replace the range starting at 
 doc.PageLabels.RemoveLabel(3);          // remove the range starting at page 4
 doc.Save("relabeled.pdf");
 ```
+
+`PageLabelCollection` also answers `GetLabel(pageIndex)` (the range covering a
+page), `GetLabelForPage(pageIndex)` (the formatted label text), and
+`GetPages()` (the 0-based start index of every range). `PageLabel` exposes
+`Prefix` (init-only), `StartPage`, `Style` / `NumberingStyle`, and
+`Start` / `StartingValue`.
 
 Test whether any labels are declared with `doc.HasPageLabels` (or
 `doc.PageLabels.Count`) — `doc.PageLabels` itself is never `null`.

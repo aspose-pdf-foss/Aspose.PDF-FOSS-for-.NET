@@ -27,13 +27,13 @@ public sealed class GraphInfo
     internal Drawing.Color? StrokeColor
     {
         get => Color is { } c ? (Drawing.Color)c : null;
-        set => Color = value is { } v ? Aspose.Pdf.Color.FromRgb((int)(v.R * 255), (int)(v.G * 255), (int)(v.B * 255)) : null;
+        set => Color = value is { } v ? Aspose.Pdf.Color.FromRgbBytes((int)(v.R * 255), (int)(v.G * 255), (int)(v.B * 255)) : null;
     }
 
     internal Drawing.Color? FillColorInternal
     {
         get => FillColor is { } c ? (Drawing.Color)c : null;
-        set => FillColor = value is { } v ? Aspose.Pdf.Color.FromRgb((int)(v.R * 255), (int)(v.G * 255), (int)(v.B * 255)) : null;
+        set => FillColor = value is { } v ? Aspose.Pdf.Color.FromRgbBytes((int)(v.R * 255), (int)(v.G * 255), (int)(v.B * 255)) : null;
     }
 
     // Opacity is carried by the alpha channel of the fill/stroke colours: a colour

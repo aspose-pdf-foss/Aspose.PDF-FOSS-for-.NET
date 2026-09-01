@@ -14,7 +14,7 @@ public class ExplicitDestination : IAppointment
     /// <summary>The destination type name (Fit, XYZ, FitH, etc).</summary>
     public string Type { get; }
 
-    /// <summary>The target page (API parity). Populated when resolvable.</summary>
+    /// <summary>The target page (API compatibility). Populated when resolvable.</summary>
     public Page? Page { get; internal set; }
 
     internal ExplicitDestination(int pageNumber, string type)
@@ -225,7 +225,7 @@ public class XYZExplicitDestination : ExplicitDestination
         Zoom = zoom;
     }
 
-    /// <summary>Create an XYZ destination for a page number in the given document (API parity).</summary>
+    /// <summary>Create an XYZ destination for a page number in the given document (API compatibility).</summary>
     public XYZExplicitDestination(Document document, int pageNumber, double left, double top, double zoom)
         : base(pageNumber, "XYZ")
     {

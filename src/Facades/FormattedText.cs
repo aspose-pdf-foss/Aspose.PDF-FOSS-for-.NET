@@ -485,7 +485,7 @@ public sealed class FormattedText
         FontStyle.Symbol => "Symbol",
         FontStyle.ZapfDingbats => "ZapfDingbats",
         FontStyle.CjkFont => "MS-Gothic",
-        // The reference resolves FontStyle.Unknown to Times-Roman (a plain
+        // FontStyle.Unknown resolves to Times-Roman (a plain
         // Standard-14 Type1 with WinAnsi — the EncodingType is not honoured for it).
         FontStyle.Unknown => "Times-Roman",
         _ => "Helvetica",

@@ -7,6 +7,11 @@ namespace Aspose.Pdf.Text;
 /// </summary>
 internal static class Standard14Fonts
 {
+    /// <summary>Full-size line extent of the DEFAULT face (Helvetica: ascent 718 plus
+    /// descent 207 per its AFM), as an em ratio. A line with no glyphs has no font of
+    /// its own to measure, so a full-size flow gives it this height.</summary>
+    public const double FullSizeEmptyLineEm = (718 + 207) / 1000.0;
+
     /// <summary>
     /// Get the width of a character code for the given standard font.
     /// Returns the width in 1/1000 units, or -1 if not a standard font.
@@ -68,8 +73,10 @@ internal static class Standard14Fonts
             "Helvetica-Bold" or "Helvetica-BoldOblique" => -207,
             "Times-Roman" or "Times-Italic" => -217,
             "Times-Bold" or "Times-BoldItalic" => -217,
-            "Symbol" => -14,
-            "ZapfDingbats" => -14,
+            // The Symbol and ZapfDingbats AFMs define no Descender; their boxes
+            // seat on the baseline (a bullet glyph's box bottom is its
+            // baseline, 1.56 pt above the item text's).
+            "Symbol" or "ZapfDingbats" => 0,
             _ => 0,
         };
     }
@@ -150,6 +157,29 @@ internal static class Standard14Fonts
             "Times-BoldItalic" => 669,
             "Courier" or "Courier-Bold" or "Courier-Oblique" or "Courier-BoldOblique" => 562,
             _ => 0,
+        };
+    }
+
+    /// <summary>
+    /// The whole FontBBox [llx, lly, urx, ury] for a Standard-14 font (1/1000 units),
+    /// from the Adobe AFM files; null when the name isn't Standard-14. A generated
+    /// appearance names these faces without embedding them, and a descriptor still has
+    /// to carry their box.
+    /// </summary>
+    internal static int[]? GetFontBBox(string baseFontName)
+    {
+        var canonical = ResolveAlias(baseFontName);
+        return canonical switch
+        {
+            "Courier" or "Courier-Bold" or "Courier-Oblique" or "Courier-BoldOblique"
+                => [-23, -250, 715, 805],
+            "Helvetica" or "Helvetica-Oblique" => [-166, -225, 1000, 931],
+            "Helvetica-Bold" or "Helvetica-BoldOblique" => [-170, -228, 1003, 962],
+            "Times-Roman" or "Times-Italic" => [-168, -218, 1000, 898],
+            "Times-Bold" or "Times-BoldItalic" => [-168, -218, 1000, 921],
+            "Symbol" => [-180, -293, 1090, 1010],
+            "ZapfDingbats" => [-1, -143, 981, 820],
+            _ => null,
         };
     }
 

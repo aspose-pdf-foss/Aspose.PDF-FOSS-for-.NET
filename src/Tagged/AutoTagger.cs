@@ -30,8 +30,12 @@ internal static class AutoTagger
         public int Level;     // heading level (1..6) for Heading blocks
         public List<Aspose.Pdf.Core.PdfObject>? Links; // link-annotation refs inside a paragraph
         public int Rows, Cols; // grid dimensions for Table blocks
-        public double Y;      // representative page Y (baseline / block top), for figure interleaving
-        public int HeaderFigures; // figures absorbed into a Heading block (inline heading icons)
+        public double Y;      // bottom anchor (baseline of the block's last/only line)
+        public double SortTop; // top edge, orders blocks inside a heading segment
+        public double TextMinX; // heading text left edge (orders absorbed icons around the MCR)
+        public List<double>? HeaderFigXs; // x of figures absorbed into a Heading (inline icons)
+        public int FigCount;  // images in a grouped figure paragraph (Figure blocks)
+        public int InlineFigures; // small in-line images inside a text paragraph
     }
 
     public static void Apply(Document document, AutoTaggingSettings settings)
@@ -78,11 +82,21 @@ internal static class AutoTagger
 
         var inParagraph = false;
         double paraY = 0;
+        // Per-paragraph line list (parallel to result), used to spot in-line images.
+        var blockLines = new List<List<Line>?>();
+        List<Line>? paraLines = null;
+        void Emit(Block b, List<Line>? bl)
+        {
+            result.Add(b);
+            blockLines.Add(bl);
+        }
         void FlushParagraph()
         {
             if (!inParagraph) return;
-            result.Add(new Block { Kind = BlockKind.Paragraph, Y = paraY });
+            var first = paraLines![0];
+            Emit(new Block { Kind = BlockKind.Paragraph, Y = paraY, SortTop = first.Y + first.Size }, paraLines);
             inParagraph = false;
+            paraLines = null;
         }
 
         foreach (var line in lines)
@@ -97,7 +111,7 @@ internal static class AutoTagger
                 FlushParagraph();
                 if (!tableEmitted[inTable])
                 {
-                    result.Add(new Block { Kind = BlockKind.Table, Rows = tables[inTable].rows, Cols = tables[inTable].cols, Y = line.Y });
+                    Emit(new Block { Kind = BlockKind.Table, Rows = tables[inTable].rows, Cols = tables[inTable].cols, Y = line.Y, SortTop = line.Y + line.Size }, null);
                     tableEmitted[inTable] = true;
                 }
                 continue; // the table's cell text doesn't form paragraphs
@@ -108,13 +122,15 @@ internal static class AutoTagger
             if (headingIdx >= 0)
             {
                 FlushParagraph();
-                result.Add(new Block { Kind = BlockKind.Heading, Level = Math.Min(headingIdx + 1, 6), Y = line.Y });
+                Emit(new Block { Kind = BlockKind.Heading, Level = Math.Min(headingIdx + 1, 6), Y = line.Y, SortTop = line.Y + line.Size, TextMinX = line.MinX }, null);
             }
             else
             {
                 // Accumulate consecutive body lines into one paragraph.
-                if (!inParagraph) paraY = line.Y;
+                if (!inParagraph) { paraY = line.Y; paraLines = new List<Line>(); }
                 inParagraph = true;
+                paraLines!.Add(line);
+                paraY = line.Y;
             }
         }
         FlushParagraph();
@@ -125,7 +141,7 @@ internal static class AutoTagger
         // grouping stable, whereas the image's top/centre Y crosses bands for
         // tall floated images. A figure sitting on a heading's line is absorbed into that
         // HeaderElement; otherwise it becomes an image-only paragraph interleaved by Y.
-        MergeFigures(result, CollectFigures(page));
+        MergeFigures(result, blockLines, CollectFigures(page));
 
         // A page whose body is a single paragraph carries its in-text link annotations as
         // children of that paragraph (Link → OBJR + content).
@@ -166,13 +182,21 @@ internal static class AutoTagger
         return figs.OrderByDescending(f => f.Item1).ToList();
     }
 
-    /// <summary>Interleave figures into the block stream by their bottom Y so each lands in the
-    /// correct section (the block list is heading-then-content in reading order, and BuildTree
-    /// assigns content after a heading to that heading's section). A figure whose baseline sits
-    /// on a heading's line is absorbed into that Heading block (an inline heading icon); the rest
-    /// become image-only paragraphs inserted at their Y position.</summary>
-    private static void MergeFigures(List<Block> blocks, List<(double y, double x, double w, double h)> figures)
+    /// <summary>Place the page's images into the block stream (measured 2026-08-28 on
+    /// the expected tagging of a markdown-rendered page):
+    ///  - an image sitting on a heading's line is absorbed into that Heading (an inline
+    ///    heading icon), keeping its x so it can stand before or after the heading text;
+    ///  - an image no taller than a body line that overlaps one of a paragraph's lines is
+    ///    an IN-LINE figure of that paragraph (the paragraph's content splits around it);
+    ///  - everything else forms figure-only paragraphs: images grouped while every pair
+    ///    overlaps vertically (one rendered row of images = one paragraph, even when the
+    ///    row's members are floated to different heights), each group anchored in its
+    ///    heading segment by the figure bottoms and ordered among the segment's blocks
+    ///    by top edge.</summary>
+    private static void MergeFigures(List<Block> blocks, List<List<Line>?> blockLines,
+        List<(double y, double x, double w, double h)> figures)
     {
+        var loose = new List<(double y, double x, double w, double h)>();
         foreach (var fig in figures)
         {
             // Heading icon: a small figure whose baseline lies within a line-height of a
@@ -189,17 +213,77 @@ internal static class AutoTagger
             if (headerIdx >= 0)
             {
                 var h = blocks[headerIdx];
-                h.HeaderFigures++;
+                (h.HeaderFigXs ??= new List<double>()).Add(fig.x);
                 blocks[headerIdx] = h;
                 continue;
             }
-            // Image-only paragraph: insert before the first block that sits below this figure,
-            // keeping the top-to-bottom order so the figure falls in its section.
-            var insert = blocks.Count;
-            for (var i = 0; i < blocks.Count; i++)
-                if (blocks[i].Y < fig.y - 0.01) { insert = i; break; }
-            blocks.Insert(insert, new Block { Kind = BlockKind.Figure, Y = fig.y });
+
+            // In-line figure: no taller than the line it sits on, overlapping that line's band.
+            var inlineIdx = -1;
+            for (var i = 0; i < blocks.Count && inlineIdx < 0; i++)
+            {
+                if (blocks[i].Kind != BlockKind.Paragraph || blockLines[i] is not { } lines) continue;
+                foreach (var line in lines)
+                    if (fig.h <= line.Size + 0.5
+                        && fig.y + fig.h > line.Y && fig.y < line.Y + line.Size)
+                    { inlineIdx = i; break; }
+            }
+            if (inlineIdx >= 0)
+            {
+                var b = blocks[inlineIdx];
+                b.InlineFigures++;
+                blocks[inlineIdx] = b;
+                continue;
+            }
+
+            loose.Add(fig);
         }
+
+        // Group the loose figures into rows: walk top-to-bottom, a figure joins the open
+        // group while it vertically overlaps EVERY member (pairwise, not chained — a tall
+        // figure hanging into the next row must not weld the rows together).
+        foreach (var group in loose
+            .GroupBy(f => SegmentOf(blocks, f.y))
+            .SelectMany(seg => GroupRows(seg.OrderByDescending(f => f.y + f.h).ToList())))
+        {
+            var bottom = group.Min(f => f.y);
+            var top = group.Max(f => f.y + f.h);
+            var segIdx = SegmentOf(blocks, bottom);
+            // Insert into the block list inside its segment ordered by top edge.
+            var insert = segIdx + 1;
+            while (insert < blocks.Count && blocks[insert].Kind != BlockKind.Heading
+                   && blocks[insert].SortTop > top)
+                insert++;
+            blocks.Insert(insert, new Block { Kind = BlockKind.Figure, Y = bottom, SortTop = top, FigCount = group.Count });
+            blockLines.Insert(insert, null);
+        }
+    }
+
+    /// <summary>Index of the heading block whose section contains a figure whose BOTTOM is
+    /// at <paramref name="y"/> (the last heading above that bottom), or -1 for the region
+    /// before the first heading.</summary>
+    private static int SegmentOf(List<Block> blocks, double y)
+    {
+        var seg = -1;
+        for (var i = 0; i < blocks.Count; i++)
+            if (blocks[i].Kind == BlockKind.Heading && blocks[i].Y > y)
+                seg = i;
+        return seg;
+    }
+
+    private static List<List<(double y, double x, double w, double h)>> GroupRows(
+        List<(double y, double x, double w, double h)> figs)
+    {
+        var groups = new List<List<(double y, double x, double w, double h)>>();
+        foreach (var f in figs)
+        {
+            var open = groups.Count > 0 ? groups[^1] : null;
+            if (open is not null && open.All(m => f.y + f.h > m.y && f.y < m.y + m.h))
+                open.Add(f);
+            else
+                groups.Add(new List<(double y, double x, double w, double h)> { f });
+        }
+        return groups;
     }
 
     /// <summary>The indirect references of the page's link annotations that carry an action,
@@ -280,12 +364,18 @@ internal static class AutoTagger
             el.AppendChild(new LogicalStructure.MCRElement());
             return el;
         }
-        // A heading carries its text (MCR) plus any inline heading-icon figures absorbed into it.
+        // A heading carries its text (MCR) plus any inline heading-icon figures absorbed
+        // into it, in reading order: an icon left of the heading text stands before the
+        // MCR, one to its right after it (probed: "## ![icon] *Title*" tags [Figure, MCR],
+        // "## *Title* ![icon]" tags [MCR, Figure]).
         LogicalStructure.StructureElement MakeHeaderEl(Block b)
         {
             var h = tc.CreateHeaderElement(b.Level);
+            var icons = b.HeaderFigXs ?? new List<double>();
+            foreach (var x in icons.Where(x => x < b.TextMinX).OrderBy(x => x))
+                h.AppendChild(WithMcr(tc.CreateFigureElement()));
             h.AppendChild(new LogicalStructure.MCRElement());
-            for (var i = 0; i < b.HeaderFigures; i++)
+            foreach (var x in icons.Where(x => x >= b.TextMinX).OrderBy(x => x))
                 h.AppendChild(WithMcr(tc.CreateFigureElement()));
             return h;
         }
@@ -309,13 +399,22 @@ internal static class AutoTagger
                 }
                 return p;
             }
+            // An in-line image splits the paragraph's content around itself:
+            // [MCR, Figure, MCR] (probed: "text ![img] text" in one source paragraph).
             p.AppendChild(new LogicalStructure.MCRElement());
+            for (var i = 0; i < b.InlineFigures; i++)
+            {
+                p.AppendChild(WithMcr(tc.CreateFigureElement()));
+                p.AppendChild(new LogicalStructure.MCRElement());
+            }
             return p;
         }
-        LogicalStructure.StructureElement MakeFigure()
+        LogicalStructure.StructureElement MakeFigure(Block b)
         {
+            // One rendered row of images = one paragraph holding every figure of the row.
             var p = tc.CreateParagraphElement();
-            p.AppendChild(WithMcr(tc.CreateFigureElement()));
+            for (var i = 0; i < Math.Max(1, b.FigCount); i++)
+                p.AppendChild(WithMcr(tc.CreateFigureElement()));
             return p;
         }
         LogicalStructure.StructureElement MakeTable(Block b)
@@ -332,7 +431,7 @@ internal static class AutoTagger
         }
         LogicalStructure.StructureElement MakeContent(Block b) => b.Kind switch
         {
-            BlockKind.Figure => MakeFigure(),
+            BlockKind.Figure => MakeFigure(b),
             BlockKind.Table => MakeTable(b),
             BlockKind.Heading => MakeHeaderEl(b),
             _ => MakeBody(b),

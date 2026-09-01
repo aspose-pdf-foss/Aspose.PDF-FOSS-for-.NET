@@ -27,9 +27,12 @@ public sealed class HeadingLevels
     /// <summary>All recorded font-size thresholds.</summary>
     public System.Collections.Generic.IList<double> AllLevels => _levels;
 
-    /// <summary>Append every entry from <paramref name="fontSizes"/> to <see cref="AllLevels"/>.
+    /// <summary>Append entries from <paramref name="fontSizes"/> to <see cref="AllLevels"/>.
     /// Heading font sizes map to levels largest-first, so the supplied sizes must be in
-    /// strictly descending order; otherwise an <see cref="System.ArgumentException"/> is thrown.</summary>
+    /// strictly descending order; otherwise an <see cref="System.ArgumentException"/> is thrown.
+    /// A later call can only EXTEND the ladder downward: sizes at or above the current
+    /// smallest threshold would renumber every established level, so they are dropped and
+    /// only sizes strictly below the current minimum are appended.</summary>
     public void AddLevels(System.Collections.Generic.ICollection<double> fontSizes)
     {
         if (fontSizes is null) return;
@@ -41,7 +44,40 @@ public sealed class HeadingLevels
                     "Heading font sizes must be in strictly descending order.", nameof(fontSizes));
             prev = size;
         }
-        foreach (var size in fontSizes) _levels.Add(size);
+        foreach (var size in fontSizes)
+            if (_levels.Count == 0 || size < _levels[_levels.Count - 1])
+                _levels.Add(size);
+    }
+
+    /// <summary>The 1-based level of an exact recorded threshold; false when
+    /// <paramref name="fontSize"/> is not one of <see cref="AllLevels"/>.</summary>
+    internal bool FindLevel(double fontSize, out int level)
+    {
+        for (var i = 0; i < _levels.Count; i++)
+        {
+            if (System.Math.Abs(_levels[i] - fontSize) < 0.0001)
+            {
+                level = i + 1;
+                return true;
+            }
+        }
+        level = 0;
+        return false;
+    }
+
+    /// <summary>The 1-based level whose threshold lies nearest to
+    /// <paramref name="fontSize"/>; a tie between two thresholds resolves to the larger
+    /// size (the smaller level number). Sizes beyond either end clamp to that end.</summary>
+    internal int EstimateLevel(double fontSize)
+    {
+        if (_levels.Count == 0) return 0;
+        var best = 0;
+        for (var i = 1; i < _levels.Count; i++)
+        {
+            if (System.Math.Abs(_levels[i] - fontSize) < System.Math.Abs(_levels[best] - fontSize))
+                best = i;
+        }
+        return best + 1;
     }
 }
 

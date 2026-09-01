@@ -10,3 +10,7 @@ TestResults/
 
 # local-only solutions (e.g. generated compat TestProject wired in for local dev)
 *.local.sln
+
+# analyzer run output (opt-in, never committed)
+issues.sarif
+sonar-reports/

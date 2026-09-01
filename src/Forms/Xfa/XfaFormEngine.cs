@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Xml;
 
 namespace Aspose.Pdf.Forms.Xfa;
@@ -75,22 +78,33 @@ internal sealed class XfaFormEngine
 
     private static void EmitMasterPages(XfaFormModel model, List<XfaFlatField> fields)
     {
-        var master = ActiveMaster(model);
-        if (master is null) return;
+        // Ordered pageSet sequence: page i takes sequence[i], and the LAST pageArea
+        // repeats for every further page (the continuation master). Page capacities
+        // follow the same sequence, so a taller continuation content area paginates
+        // exactly as expected (a first-page header master hands over to a
+        // header-less master from page 2 on).
+        var sequence = MasterSequence(model);
+        if (sequence.Count == 0) return;
 
-        double contentH = XfaLayout.ContentAreaHeightMm(master);
-        int pages = XfaLayout.PageCount(TopBodyBlocks(model), contentH);
+        var capacities = new List<double>(sequence.Count);
+        foreach (var m in sequence) capacities.Add(XfaLayout.ContentAreaHeightMm(m));
+        int pages = XfaLayout.PageCount(TopBodyBlocks(model), capacities);
 
         var present = model.FindByName("MyPresentPageCount");
         var total = model.FindByName("MyTotalPageCount");
-        string baseSom = StripLastIndex(master.SomPath);        // e.g. TopForm[0].MPs[0].MP1
-        int suffixStart = master.SomPath.Length;                // suffix begins after the pageArea path
 
         // The page-count fields' own calculates need a full layout engine (FormCalc/xfa.layout); we
         // inject the values instead and pin them so the re-run does not overwrite them.
         var pinned = new HashSet<string> { "MyPresentPageCount", "MyTotalPageCount" };
+        var perMasterOccurrence = new Dictionary<XfaNode, int>();
         for (int i = 0; i < pages; i++)
         {
+            var master = sequence[Math.Min(i, sequence.Count - 1)];
+            perMasterOccurrence.TryGetValue(master, out var occ);
+            perMasterOccurrence[master] = occ + 1;
+            string baseSom = StripLastIndex(master.SomPath);    // e.g. TopForm[0].MPs[0].MP1
+            int suffixStart = master.SomPath.Length;            // suffix begins after the pageArea path
+
             // Set the page context and re-evaluate page-dependent presence for this physical page.
             if (present is not null) present.RawValue = (i + 1).ToString();
             if (total is not null) total.RawValue = pages.ToString();
@@ -100,26 +114,35 @@ internal sealed class XfaFormEngine
             {
                 if (!n.IsField || n.EffectiveHidden || !ReferenceEquals(n.PageAreaAncestor, master)) continue;
                 var suffix = n.SomPath.Substring(suffixStart);  // ".Footer[0]…"
-                fields.Add(new XfaFlatField { Path = $"{baseSom}[{i}]{suffix}", Ft = n.Ft, Ff = n.Ff, Value = n.RawValue, IsImage = n.IsImage });
+                fields.Add(new XfaFlatField { Path = $"{baseSom}[{occ}]{suffix}", Ft = n.Ft, Ff = n.Ff, Value = n.RawValue, IsImage = n.IsImage });
             }
         }
     }
 
-    /// <summary>The master pageArea the rendered body flows onto: the target of a visible top-level
-    /// body subform's breakBefore, else the pageArea that has any visible field.</summary>
-    private static XfaNode? ActiveMaster(XfaFormModel model)
+    /// <summary>The ordered master sequence: from the pageArea the first visible body's
+    /// breakBefore targets (else the pageArea the single-master heuristic picks, else the
+    /// first declared), through the FOLLOWING pageAreas in template order. The renderer
+    /// walks the same order; the caller repeats the final entry for remaining pages.</summary>
+    private static List<XfaNode> MasterSequence(XfaFormModel model)
     {
+        var all = new List<XfaNode>();
+        foreach (var pa in model.All)
+            if (pa.Kind == "pageArea") all.Add(pa);
+        if (all.Count <= 1) return all;
+
+        var start = -1;
         foreach (var b in TopBodyBlocks(model))
         {
             if (b.EffectiveHidden) continue;
             var target = BreakBeforeTarget(b.Template);
             if (target is not null)
-                foreach (var pa in model.All)
-                    if (pa.Kind == "pageArea" && pa.Name == target) return pa;
+                // A contentArea-style target ("PageAreaName.ContentAreaName") starts
+                // on the owning pageArea.
+                start = all.FindIndex(pa => pa.Name == target || target.StartsWith(pa.Name + ".", StringComparison.Ordinal));
+            break;                       // only the entry break picks the start
         }
-        foreach (var pa in model.All)
-            if (pa.Kind == "pageArea" && HasVisibleField(model, pa)) return pa;
-        return null;
+        if (start < 0) start = 0;
+        return all.GetRange(start, all.Count - start);
     }
 
     /// <summary>Top-level body subforms (direct subform children of the root) — the flowing content.</summary>
@@ -127,13 +150,6 @@ internal sealed class XfaFormEngine
     {
         foreach (var c in model.Root.Children)
             if (c.Kind is "subform" or "subformSet" or "area") yield return c;
-    }
-
-    private static bool HasVisibleField(XfaFormModel model, XfaNode pageArea)
-    {
-        foreach (var n in model.All)
-            if (n.IsField && !n.EffectiveHidden && ReferenceEquals(n.PageAreaAncestor, pageArea)) return true;
-        return false;
     }
 
     private static string? BreakBeforeTarget(System.Xml.XmlNode subform)

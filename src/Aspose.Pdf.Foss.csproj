@@ -10,18 +10,18 @@
 
     <!-- Package / release metadata -->
     <PackageId>Aspose.PDF.FOSS</PackageId>
-    <Version>26.8.0</Version>
+    <Version>26.9.0</Version>
     <Product>Aspose.PDF FOSS for .NET</Product>
     <PackageReleaseNotes>
-v26.8.0 - conversion fidelity release.
+v26.9.0 - rendering and cross-platform release.
 
-New: side-by-side PDF comparison (SideBySidePdfComparer, SideBySideComparisonOptions) and graphical page diff (GraphicalPdfComparer); PDF 2.0 deprecation gates raising DeprecatedFeatureException.
-HTML-&gt;PDF: large fidelity push - print stylesheets and @page sheets, float and multi-column layout, percent / max-content table grids, chart and grid pagination, right-to-left and Word-filtered exports.
-Text: ligature handling and word-gap reconstruction, TrueType collection faces, Unicode CMap decoding, symbol fallback, Type3 / ActualText rebuild.
-XFA: dynamic layout - field heights from laid-out content, per-edge border chrome, captions, rich text, dataRef binding and occur rules.
-Also: PDF/A implementation limits with conformance clauses and part-4 embedded-file semantics, font substitution reporting and SubsetAllFonts embedding, Markdown pipe tables, plus forms, stamps, annotations and rendering fixes.
+New: PdfFileSanitization repairs files too damaged to load (header/EOF waste, broken cross-reference table); DateField form fields; HideAction; ruby and warichu tagged-structure elements with the StructureTypeStandard role set; a composite drawing Path shape; typed exceptions for empty values, forbidden font embedding, signature-length mismatch and missing optional dependencies (the printing guard names the package to add).
+Rendering: dash patterns on software strokes, soft masks (matte, backdrop, isolated/non-isolated groups), colour-key masks, overprint and multi-spot ink spaces, tiling-pattern ranges, function-based shadings, indexed images with soft masks, DPI-exact output, annotations rotating with the page, sub-pixel-thin images.
+Text: horizontal scaling and negative sizes flip and stretch glyphs, vertical CMaps, substitute faces for fonts without a program, CJK radical fallback, whole-paragraph re-flow on replace.
+Cross-platform: managed BMP/JPEG/TIFF paths, font fallback by name, case-blind and Windows-authored asset paths, glyph recognition, redaction and image colour sampling all work off Windows.
+Also: PDF 2.0 saves move descriptive Info text into XMP and write non-Latin-1 text as UTF-16BE; PDF/A conversion refuses live-signed files and exempts freshly UA-converted documents from the untagged-content scan; signature trust reads intermediates from the per-user store; action Next chains and submit targets; XMP structs stay live; forms treat a field as the collection of its widgets; plus HTML-to-PDF, generator table, facade and annotation fixes.
 
-Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/releases/tag/v26.8.0
+Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/releases/tag/v26.9.0
     </PackageReleaseNotes>
     <Authors>Aspose</Authors>
     <Company>Aspose Pty Ltd</Company>
@@ -56,8 +56,30 @@ Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/
   <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
 </ItemGroup>
 
+<!-- SonarSource's C# rules - the same engine a SonarQube server applies, delivered as
+     analyzers that run inside the compiler. OFF unless asked for: a first analysis of a
+     library this size reports thousands of findings, and TreatWarningsAsErrors above
+     would turn every one of them into a build error. Every ordinary build - the test
+     jobs, pack, sign, the compat harness - therefore sees the project exactly as before.
+
+     To read the findings:
+       dotnet build src/Aspose.Pdf.Foss.csproj -c Release -p:RunSonarAnalyzer=true \
+         -p:TreatWarningsAsErrors=false "-p:ErrorLog=issues.sarif%2Cversion=2.1"
+     or run the sonar-issues job, which renders that SARIF into a report by rule.
+
+     The findings are advisory. Promoting a chosen subset to real warnings belongs in
+     .editorconfig, deliberately, once the backlog has been read. -->
+<ItemGroup Condition="'$(RunSonarAnalyzer)' == 'true'">
+  <PackageReference Include="SonarAnalyzer.CSharp" Version="10.33.0.1635" PrivateAssets="all" />
+</ItemGroup>
+
 <ItemGroup>
   <EmbeddedResource Include="Devices\CmykToRgbLut.bin" />
+  <EmbeddedResource Include="Text\Resources\DjVuDingbats.ttf" LogicalName="Aspose.Pdf.Text.Resources.DjVuDingbats.ttf" />
+  <EmbeddedResource Include="Text\Resources\AdobeCid.Japan1.bin" LogicalName="Aspose.Pdf.Text.Resources.AdobeCid.Japan1.bin" />
+  <EmbeddedResource Include="Text\Resources\AdobeCid.CNS1.bin" LogicalName="Aspose.Pdf.Text.Resources.AdobeCid.CNS1.bin" />
+  <EmbeddedResource Include="Text\Resources\AdobeCid.GB1.bin" LogicalName="Aspose.Pdf.Text.Resources.AdobeCid.GB1.bin" />
+  <EmbeddedResource Include="Text\Resources\AdobeCid.Korea1.bin" LogicalName="Aspose.Pdf.Text.Resources.AdobeCid.Korea1.bin" />
 </ItemGroup>
 
   <!-- Force a full rebuild of this project on EVERY build, even when no source

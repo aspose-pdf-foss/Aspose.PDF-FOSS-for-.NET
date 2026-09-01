@@ -115,11 +115,7 @@ public class RectangleTests
     public void ToString_ContainsCoordinates()
     {
         var r = new Rectangle(0, 0, 612, 792);
-        var s = r.ToString();
-        Assert.StartsWith("[", s);
-        Assert.EndsWith("]", s);
-        Assert.Contains("612", s);
-        Assert.Contains("792", s);
+        Assert.Equal("0,0,612,792", r.ToString());
     }
 
     [Fact]

@@ -90,7 +90,9 @@ public sealed class XmpValue
     public bool IsNamedValue => _value is KeyValuePair<string, XmpValue>;
 
     /// <summary>Whether the value is an array of named-value pairs.</summary>
-    public bool IsNamedValues => _value is KeyValuePair<string, XmpValue>[];
+    // A struct parsed from the packet is Dictionary-backed (the live-mutation
+    // contract); it IS named values for readers — ToNamedValues() serves both shapes.
+    public bool IsNamedValues => _value is KeyValuePair<string, XmpValue>[] or Dictionary<string, XmpValue>;
 
     /// <summary>Whether the value is a raw XML node.</summary>
     public bool IsRaw => _value is XmlNode;
@@ -205,6 +207,47 @@ public sealed class XmpValue
 
     /// <inheritdoc />
     public override string ToString() => ToStringValue();
+
+    /// <summary>Extended string form: a structured / named-values property
+    /// renders EVERY field as <c>key=value</c> lines (nested structs indent
+    /// recursively), an array joins its items, and a scalar is its plain
+    /// string — so a struct with an empty first field still stringifies to
+    /// its full content instead of that field's empty value.</summary>
+    internal string ToStringEx()
+    {
+        var sb = new System.Text.StringBuilder();
+        AppendEx(sb, this, 0);
+        return sb.ToString();
+
+        static void AppendEx(System.Text.StringBuilder sb, XmpValue v, int depth)
+        {
+            var indent = new string(' ', depth * 2);
+            switch (v._value)
+            {
+                case KeyValuePair<string, XmpValue>[] nv:
+                    foreach (var kv in nv)
+                    {
+                        if (kv.Value._value is KeyValuePair<string, XmpValue>[] or Dictionary<string, XmpValue> or XmpValue[])
+                        {
+                            sb.Append(indent).Append(kv.Key).AppendLine("=");
+                            AppendEx(sb, kv.Value, depth + 1);
+                        }
+                        else
+                            sb.Append(indent).Append(kv.Key).Append('=').AppendLine(kv.Value.ToStringValue());
+                    }
+                    break;
+                case Dictionary<string, XmpValue> dict:
+                    AppendEx(sb, new XmpValue(dict.ToArray()), depth);
+                    break;
+                case XmpValue[] arr:
+                    foreach (var item in arr) AppendEx(sb, item, depth);
+                    break;
+                default:
+                    sb.Append(indent).AppendLine(v.ToStringValue());
+                    break;
+            }
+        }
+    }
 
     /// <summary>Format with a culture-specific provider. Numeric and
     /// DateTime values honour <paramref name="formatProvider"/>; all other

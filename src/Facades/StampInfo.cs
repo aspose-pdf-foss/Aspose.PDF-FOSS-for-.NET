@@ -38,6 +38,15 @@ public sealed class StampInfo
         get
         {
             if (ImageBytes is null || ImageBytes.Length == 0) return null;
+            // Decoding goes through a System.Drawing (Windows-only) codec. Say so instead
+            // of handing back a null the caller then dereferences: a stamp that HAS image
+            // bytes but cannot decode them here is a platform limit, not an absent image,
+            // and a null is indistinguishable from "no image at all". The raw bytes stay
+            // available through ImageBytes.
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException(
+                    "StampInfo.Image returns a System.Drawing.Image, which is supported only on "
+                    + "Windows; use ImageBytes for the undecoded stamp image.");
 #pragma warning disable CA1416 // Validate platform compatibility
             try { return System.Drawing.Image.FromStream(new System.IO.MemoryStream(ImageBytes)); }
             catch { return null; }
@@ -61,6 +70,6 @@ public enum StampType
     Form = 0,
     Image = 1,
     /// <summary>FOSS-only convenience value used by the stamp parser when it
-    /// recognises a text-only block. The reference omits this value.</summary>
+    /// recognises a text-only block (an internal extension of the enum).</summary>
     Text = 2,
 }

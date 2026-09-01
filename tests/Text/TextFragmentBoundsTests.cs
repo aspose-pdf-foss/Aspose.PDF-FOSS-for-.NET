@@ -130,8 +130,10 @@ public class TextFragmentBoundsTests
         // Position should be scaled: (50*2, 100*2) = (100, 200)
         Assert.Equal(100, frag.Position!.XIndent, 1);
         Assert.Equal(200, frag.Position.YIndent, 1);
-        // Height should be 2*fontSize = 20
-        Assert.Equal(20, frag.Rectangle!.Height, 1);
+        // The fragment box is the canonical 1.1-em line box (bottom at baseline +
+        // descent, 1.1 x FontSize tall - reported for every face);
+        // under the 2x CTM the effective size is 20, so the box is 22 tall.
+        Assert.Equal(22, frag.Rectangle!.Height, 1);
     }
 
     [Fact]

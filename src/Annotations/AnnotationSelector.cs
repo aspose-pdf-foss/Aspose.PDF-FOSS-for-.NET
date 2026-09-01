@@ -23,7 +23,7 @@ public class AnnotationSelector
     public AnnotationSelector() { }
 
     /// <summary>Create a selector that retains <paramref name="annotation"/>
-    /// as a template (kept for API parity; not currently consulted by the
+    /// as a template (kept for API compatibility; not currently consulted by the
     /// default Visit implementations).</summary>
     public AnnotationSelector(Annotation annotation)
     {
@@ -278,24 +278,46 @@ public sealed partial class PDF3DAnnotation : Annotation
         private set { _artwork = value; _artworkResolved = true; }
     }
 
+    /// <summary>Standalone default view parsed from the annotation's /3DV
+    /// entry when that dictionary is not one of the /VA members.</summary>
+    private PDF3DView? _annotDefaultView;
+
     /// <summary>Default (annotation-level) 3D view: the 1-based
-    /// <see cref="SetDefaultViewIndex"/> selection, or the artwork's first view
-    /// when no (valid) index was set.</summary>
+    /// <see cref="SetDefaultViewIndex"/> selection, the annotation's own /3DV
+    /// view, or the artwork's first view.</summary>
     public PDF3DView? DefaultView
     {
         get
         {
-            var va = Pdf3DArtwork?.ViewArray;
-            if (va is not { Count: > 0 }) return null;
-            var idx = _defaultViewIndex >= 1 && _defaultViewIndex <= va.Count ? _defaultViewIndex : 1;
-            return va[idx];
+            var artwork = Pdf3DArtwork; // touching it parses /3DV for a read annotation
+            var va = artwork?.ViewArray;
+            if (_defaultViewIndex >= 1 && va is not null && _defaultViewIndex <= va.Count)
+                return va[_defaultViewIndex];
+            if (_annotDefaultView is not null) return _annotDefaultView;
+            return va is { Count: > 0 } ? va[1] : null;
         }
     }
 
     public PDF3DContent? Content
     {
         get => Pdf3DArtwork?.Content;
-        set { if (Pdf3DArtwork is not null) Pdf3DArtwork.Content = value; }
+        set
+        {
+            if (Pdf3DArtwork is not null) Pdf3DArtwork.Content = value;
+            // Write-back: an annotation read from a document carries a live
+            // /3DD stream — replace its data so the assignment survives a save.
+            if (_stream3d is not null && value is not null)
+            {
+                var bytes = value.GetAsByteArray();
+                using var ms = new MemoryStream();
+                using (var z = new System.IO.Compression.ZLibStream(ms, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+                    z.Write(bytes, 0, bytes.Length);
+                _stream3d.ReplaceData(ms.ToArray());
+                _stream3d.Dict.Set("Filter", new PdfName("FlateDecode"));
+                _stream3d.Dict.Remove("DecodeParms");
+                _stream3d.Dict.Set("Length", new PdfInteger(ms.Length));
+            }
+        }
     }
 
     public PDF3DLightingScheme? LightingScheme => Pdf3DArtwork?.LightingScheme;
@@ -310,7 +332,96 @@ public sealed partial class PDF3DAnnotation : Annotation
 
     public void SetDefaultViewIndex(int index) => _defaultViewIndex = index;
 
-    public Stream GetImagePreview() => new MemoryStream(_imagePreview, writable: false);
+    /// <summary>The annotation's poster image. For an annotation read from a
+    /// document this is the image XObject inside the /AP normal appearance —
+    /// a DCT (JPEG) poster is handed back as its stored file bytes.</summary>
+    public Stream GetImagePreview()
+    {
+        if (_imagePreview.Length == 0 && InternalReader is { } reader)
+            _imagePreview = ExtractPosterBytes(reader);
+        return new MemoryStream(_imagePreview, writable: false);
+    }
+
+    private byte[] ExtractPosterBytes(PdfReader reader)
+    {
+        if (reader.Resolve(Dict.Get("AP")) is not PdfDictionary ap
+            || reader.Resolve(ap.Get("N")) is not PdfStream form
+            || reader.Resolve(form.Dict.Get("Resources")) is not PdfDictionary res
+            || reader.Resolve(res.Get("XObject")) is not PdfDictionary xobjects)
+            return System.Array.Empty<byte>();
+        foreach (var key in xobjects.Keys)
+        {
+            if (reader.Resolve(xobjects.Get(key)) is not PdfStream img
+                || img.Dict.GetName("Subtype") != "Image")
+                continue;
+            // A DCT/JPX poster's raw stream IS the image file; other filters
+            // (flate pixel data) hand back the decoded samples.
+            var filter = reader.Resolve(img.Dict.Get("Filter"));
+            var filterName = filter is PdfName fn ? fn.Value
+                : filter is PdfArray { Count: 1 } fa && reader.Resolve(fa[0]) is PdfName fan ? fan.Value
+                : null;
+            if (filterName is "DCTDecode" or "JPXDecode")
+                return img.RawData;
+            byte[] samples;
+            try { samples = reader.DecodeStream(img, img.ObjectNumber, img.Generation); }
+            catch { return System.Array.Empty<byte>(); }
+            return OperatingSystem.IsWindows()
+                ? EncodePosterJpeg(reader, img, samples) ?? samples
+                : samples;
+        }
+        return System.Array.Empty<byte>();
+    }
+
+    /// <summary>Re-encode a non-DCT poster's decoded samples as the JPEG the
+    /// preview API hands out: a default-quality GDI+ encode stamped 150 dpi —
+    /// byte-identical to the expected preview for the same poster (verified
+    /// md5-exact on a poster sample). Null
+    /// when the sample layout isn't a plain 8-bit gray/RGB raster or off
+    /// Windows, in which case the caller falls back to the raw samples.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static byte[]? EncodePosterJpeg(PdfReader reader, PdfStream img, byte[] samples)
+    {
+        int width = (int)((reader.Resolve(img.Dict.Get("Width")) as PdfInteger)?.Value ?? 0);
+        int height = (int)((reader.Resolve(img.Dict.Get("Height")) as PdfInteger)?.Value ?? 0);
+        int bpc = (int)((reader.Resolve(img.Dict.Get("BitsPerComponent")) as PdfInteger)?.Value ?? 8);
+        // Only the plain 8-bit RGB raster layout is verified against the
+        // reference preview; anything else keeps the raw-samples fallback.
+        if (width <= 0 || height <= 0 || bpc != 8) return null;
+        if (samples.Length != (long)width * height * 3) return null;
+        const int components = 3;
+
+        try
+        {
+            using var bmp = new System.Drawing.Bitmap(width, height,
+                System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            bmp.SetResolution(150f, 150f);
+            var data = bmp.LockBits(new System.Drawing.Rectangle(0, 0, width, height),
+                System.Drawing.Imaging.ImageLockMode.WriteOnly,
+                System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            var row = new byte[width * 3];
+            for (var y = 0; y < height; y++)
+            {
+                for (var x = 0; x < width; x++)
+                {
+                    // PDF samples are RGB; GDI+ 24bpp rows are BGR.
+                    var src = (y * width + x) * components;
+                    row[x * 3 + 0] = samples[src + 2];
+                    row[x * 3 + 1] = samples[src + 1];
+                    row[x * 3 + 2] = samples[src];
+                }
+                System.Runtime.InteropServices.Marshal.Copy(row, 0,
+                    data.Scan0 + y * data.Stride, width * 3);
+            }
+            bmp.UnlockBits(data);
+            using var ms = new System.IO.MemoryStream();
+            bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Jpeg);
+            return ms.ToArray();
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     public void SetImagePreview(Stream image)
     {
@@ -329,12 +440,17 @@ public sealed partial class PDF3DAnnotation : Annotation
 
     public void ClearImagePreview() => _imagePreview = System.Array.Empty<byte>();
 
+    /// <summary>The /3DD stream this annotation was read from; kept so a
+    /// Content assignment can write the new bytes back into the document.</summary>
+    private PdfStream? _stream3d;
+
     // ── reading path: reconstruct the artwork from the /3DD 3D stream ────────
     private PDF3DArtwork? TryReadArtwork()
     {
         var reader = InternalReader;
         if (reader is null) return null;
         if (reader.Resolve(Dict.Get("3DD")) is not PdfStream stream3d) return null;
+        _stream3d = stream3d;
         var sdict = stream3d.Dict;
         var doc = reader.OwnerDocument;
 
@@ -347,38 +463,121 @@ public sealed partial class PDF3DAnnotation : Annotation
 
         var artwork = new PDF3DArtwork(doc!, content);
 
+        var viewDicts = new List<PdfDictionary>();
         if (reader.Resolve(sdict.Get("VA")) is PdfArray va)
         {
             foreach (var vref in va)
             {
                 if (reader.Resolve(vref) is not PdfDictionary vd) continue;
-                var camera = ReadMatrix(reader, vd.Get("C2W"));
-                double orbit = ReadNum(reader, vd.Get("CO"));
-                string name = reader.Resolve(vd.Get("XN")) is PdfString xn ? xn.ToText() : string.Empty;
-                var view = new PDF3DView(doc!, camera ?? new Matrix3D(), orbit, name);
-
-                if (reader.Resolve(vd.Get("SA")) is PdfArray sa)
-                {
-                    foreach (var cref in sa)
-                    {
-                        if (reader.Resolve(cref) is not PdfDictionary cd) continue;
-                        var cs = new PDF3DCrossSection(doc!);
-                        if (reader.Resolve(cd.Get("C")) is PdfArray cc && cc.Count >= 3)
-                            cs.Center = new Point3D(ReadNum(reader, cc[0]), ReadNum(reader, cc[1]), ReadNum(reader, cc[2]));
-                        if (reader.Resolve(cd.Get("O")) is PdfArray oo && oo.Count >= 3)
-                            cs.CuttingPlaneOrientation = new PDF3DCuttingPlaneOrientation(
-                                ReadNullNum(reader, oo[0]), ReadNullNum(reader, oo[1]), ReadNullNum(reader, oo[2]));
-                        cs.CuttingPlaneOpacity = ReadNum(reader, cd.Get("PO"));
-                        if (ReadColor(reader, cd.Get("PC")) is Color pc) cs.CuttingPlaneColor = pc;
-                        if (ReadColor(reader, cd.Get("IC")) is Color ic) cs.CuttingPlanesIntersectionColor = ic;
-                        if (reader.Resolve(cd.Get("IV")) is PdfBoolean iv) cs.Visibility = iv.Value;
-                        view.CrossSectionsArray.Add(cs);
-                    }
-                }
-                artwork.ViewArray.Add(view);
+                viewDicts.Add(vd);
+                artwork.ViewArray.Add(ReadView(reader, doc!, vd));
             }
         }
+
+        // The default view: the annotation's /3DV (a /VA member or a
+        // standalone view dictionary), else the 3D stream's /DV (a /VA
+        // reference, a 0-based index, or /F first / /L last).
+        switch (reader.Resolve(Dict.Get("3DV")) ?? reader.Resolve(sdict.Get("DV")))
+        {
+            case PdfDictionary dv:
+                var di = viewDicts.IndexOf(dv);
+                if (di >= 0) { if (_defaultViewIndex == 0) _defaultViewIndex = di + 1; }
+                else _annotDefaultView = ReadView(reader, doc!, dv);
+                break;
+            case PdfInteger dvi when _defaultViewIndex == 0
+                && dvi.Value >= 0 && dvi.Value < artwork.ViewArray.Count:
+                _defaultViewIndex = (int)dvi.Value + 1;
+                break;
+            case PdfName dvn when _defaultViewIndex == 0 && artwork.ViewArray.Count > 0:
+                _defaultViewIndex = dvn.Value == "L" ? artwork.ViewArray.Count : 1;
+                break;
+        }
+
+        // A view that names no lighting scheme / render mode inherits the
+        // default view's; the viewer-default scheme is Headlamp over Solid.
+        var defView = _annotDefaultView
+            ?? (artwork.ViewArray.Count > 0
+                ? artwork.ViewArray[_defaultViewIndex >= 1 && _defaultViewIndex <= artwork.ViewArray.Count ? _defaultViewIndex : 1]
+                : null);
+        var defLs = defView?.LightingScheme ?? new PDF3DLightingScheme(LightingSchemeType.Headlamp);
+        var defRm = defView?.RenderMode ?? new PDF3DRenderMode(RenderModeType.Solid);
+        if (defView is not null)
+        {
+            defView.LightingScheme ??= defLs;
+            defView.RenderMode ??= defRm;
+        }
+        for (int i = 1; i <= artwork.ViewArray.Count; i++)
+        {
+            var v = artwork.ViewArray[i];
+            v.LightingScheme ??= defLs;
+            v.RenderMode ??= defRm;
+            if (!v.HasOwnBackground && defView is { HasOwnBackground: true })
+                v.BackGroundColor = defView.BackGroundColor;
+        }
+        artwork.LightingScheme = defLs;
+        artwork.RenderMode = defRm;
+
         return artwork;
+    }
+
+    /// <summary>Materialise one 3D view dictionary (camera, names, background,
+    /// lighting scheme, render mode and cross-sections).</summary>
+    private static PDF3DView ReadView(PdfReader reader, Document doc, PdfDictionary vd)
+    {
+        var camera = ReadMatrix(reader, vd.Get("C2W"));
+        double orbit = ReadNum(reader, vd.Get("CO"));
+        string name = reader.Resolve(vd.Get("XN")) is PdfString xn ? xn.ToText() : string.Empty;
+        var view = new PDF3DView(doc, camera ?? new Matrix3D(), orbit, name);
+        if (reader.Resolve(vd.Get("IN")) is PdfString inName)
+            view.InternalName = inName.ToText();
+        // /BG background dictionary: the colour rides its /C component array.
+        if (reader.Resolve(vd.Get("BG")) is PdfDictionary bg
+            && ReadRawComponents(reader, bg.Get("C")) is { } bgComps)
+        {
+            view.BackGroundColor = new Color(bgComps);
+            view.HasOwnBackground = true;
+        }
+        if (ReadSubtypeName(reader, vd.Get("LS")) is { } ls)
+            view.LightingScheme = new PDF3DLightingScheme(ls);
+        if (ReadSubtypeName(reader, vd.Get("RM")) is { } rm)
+            view.RenderMode = new PDF3DRenderMode(rm);
+
+        if (reader.Resolve(vd.Get("SA")) is PdfArray sa)
+        {
+            foreach (var cref in sa)
+            {
+                if (reader.Resolve(cref) is not PdfDictionary cd) continue;
+                var cs = new PDF3DCrossSection(doc);
+                if (reader.Resolve(cd.Get("C")) is PdfArray cc && cc.Count >= 3)
+                    cs.Center = new Point3D(ReadNum(reader, cc[0]), ReadNum(reader, cc[1]), ReadNum(reader, cc[2]));
+                if (reader.Resolve(cd.Get("O")) is PdfArray oo && oo.Count >= 3)
+                    cs.CuttingPlaneOrientation = new PDF3DCuttingPlaneOrientation(
+                        ReadNullNum(reader, oo[0]), ReadNullNum(reader, oo[1]), ReadNullNum(reader, oo[2]));
+                cs.CuttingPlaneOpacity = ReadNum(reader, cd.Get("PO"));
+                if (ReadColor(reader, cd.Get("PC")) is Color pc) cs.CuttingPlaneColor = pc;
+                if (ReadColor(reader, cd.Get("IC")) is Color ic) cs.CuttingPlanesIntersectionColor = ic;
+                if (reader.Resolve(cd.Get("IV")) is PdfBoolean iv) cs.Visibility = iv.Value;
+                view.CrossSectionsArray.Add(cs);
+            }
+        }
+        return view;
+    }
+
+    /// <summary>The /Subtype name of a nested dictionary entry (lighting
+    /// scheme / render mode dictionaries).</summary>
+    private static string? ReadSubtypeName(PdfReader reader, PdfObject? obj)
+        => reader.Resolve(obj) is PdfDictionary d && reader.Resolve(d.Get("Subtype")) is PdfName n ? n.Value : null;
+
+    /// <summary>A raw colour-component array (e.g. a background dictionary's
+    /// /C entry), kept at full precision.</summary>
+    private static double[]? ReadRawComponents(PdfReader reader, PdfObject? obj)
+    {
+        if (reader.Resolve(obj) is not PdfArray a || a.Count == 0) return null;
+        int start = reader.Resolve(a[0]) is PdfName ? 1 : 0;
+        if (a.Count - start <= 0) return null;
+        var v = new double[a.Count - start];
+        for (int i = 0; i < v.Length; i++) v[i] = ReadNum(reader, a[start + i]);
+        return v;
     }
 
     private static double ReadNum(PdfReader reader, PdfObject? obj) => reader.Resolve(obj) switch
@@ -584,7 +783,7 @@ public sealed partial class PrinterMarkAnnotation : Annotation
 // ── Accept overrides on the existing 22 concrete annotation types ──────────
 //
 // The base virtual `Annotation.Accept` is a no-op so static-typed callers
-// that hold an `Annotation` reference still get reflection-shape parity.
+// that hold an `Annotation` reference still get reflection-shape compatibility.
 // Each concrete partial below declares its own `Accept` override so the
 // double-dispatch lands on the typed Visit overload.
 

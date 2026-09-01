@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
@@ -161,27 +161,40 @@ internal static class SystemFontResolver
         // Map PDF Standard 14 names to common system font names/files
         var (fileName, familyName, isBold, isItalic) = MapFontName(name);
 
-        foreach (var dir in FontDirectories())
+        foreach (var dir in FontDirectories().SelectMany(WithSubdirectories))
         {
             if (!Directory.Exists(dir)) continue;
 
             // Try exact file name match
-            if (fileName is not null)
-            {
-                var path = Path.Combine(dir, fileName);
-                if (File.Exists(path))
-                    return LoadFont(path, familyName, isBold, isItalic);
-            }
+            if (fileName is not null && FindCandidateInDir(dir, fileName) is { } mapped)
+                return LoadFont(mapped, familyName, isBold, isItalic);
 
             // Try common variations
             foreach (var candidate in GetCandidateFiles(familyName, isBold, isItalic))
-            {
-                var path = Path.Combine(dir, candidate);
-                if (File.Exists(path))
+                if (FindCandidateInDir(dir, candidate) is { } path)
                     return LoadFont(path, familyName, isBold, isItalic);
-            }
         }
 
+        return null;
+    }
+
+    /// <summary>A candidate file in <paramref name="dir"/>, matched exactly and then
+    /// case-insensitively. Windows resolved every candidate case-blind for free (NTFS),
+    /// so names like "SegoeUI.ttf" found segoeui.ttf there and returned NULL on a
+    /// case-sensitive file system - probed: "SegoeUI-Bold" resolved the regular Segoe
+    /// face on Windows and nothing on Linux, with the same font files installed. The
+    /// sibling FindFontFile has carried this exact retry all along.</summary>
+    private static string? FindCandidateInDir(string dir, string fileName)
+    {
+        var path = Path.Combine(dir, fileName);
+        if (File.Exists(path)) return path;
+        if (OperatingSystem.IsWindows()) return null; // NTFS already matched case-blind
+        string[] entries;
+        try { entries = Directory.GetFiles(dir); }
+        catch { return null; }
+        foreach (var e in entries)
+            if (string.Equals(Path.GetFileName(e), fileName, StringComparison.OrdinalIgnoreCase))
+                return e;
         return null;
     }
 
@@ -199,6 +212,12 @@ internal static class SystemFontResolver
         {
             family = family.Replace(suffix, "", StringComparison.OrdinalIgnoreCase);
         }
+        // …including the space-joined and bare TRAILING spellings a WinAnsi
+        // resource writes ("Tahoma Bold", "TahomaBold") — anchored at the end
+        // so a family whose real name merely contains the word survives.
+        family = System.Text.RegularExpressions.Regex.Replace(family,
+            @"[ ]?(Bold|Italic|Oblique)+$", "",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         // Strip trailing hyphens/commas
         family = family.TrimEnd('-', ',', ' ');
 
@@ -372,6 +391,15 @@ internal static class SystemFontResolver
         {
             // CJK system faces (collection files with non-family file names).
             ("MS Gothic", _, _) or ("MS-Gothic", _, _) or ("MSGothic", _, _) => "msgothic.ttc",
+            // msgothic.ttc is a COLLECTION: MS Gothic, MS PGothic and MS UI Gothic ride
+            // in one file, and only the first is fixed-width. A PDF that names the
+            // PROPORTIONAL face had no mapping at all, so the resolve failed outright and
+            // the caller substituted MS Gothic - measuring every Latin advance at the
+            // fixed half-em and the ideographic space at 1.000 instead of 0.664.
+            // ExtractFromTtc matches the exact face from the family name carried below.
+            ("MS PGothic", _, _) or ("MS-PGothic", _, _) or ("MSPGothic", _, _) => "msgothic.ttc",
+            ("MS UI Gothic", _, _) or ("MS-UI-Gothic", _, _) or ("MSUIGothic", _, _) => "msgothic.ttc",
+            ("MS PMincho", _, _) or ("MS-PMincho", _, _) or ("MSPMincho", _, _) => "msmincho.ttc",
             ("MS Mincho", _, _) or ("MS-Mincho", _, _) or ("MSMincho", _, _) => "msmincho.ttc",
             ("Yu Gothic", _, _) or ("YuGothic", _, _) => "YuGothR.ttc",
             ("Meiryo", _, _) => "meiryo.ttc",
@@ -381,6 +409,9 @@ internal static class SystemFontResolver
             ("SimHei", _, _) or ("Sim Hei", _, _) => "simhei.ttf",
             ("Microsoft YaHei", _, _) or ("MicrosoftYaHei", _, _) or ("Microsoft-YaHei", _, _) => "msyh.ttc",
             ("Malgun Gothic", _, _) => "malgun.ttf",
+            // Symbol faces ship under clipped 8.3-era names.
+            ("Wingdings", _, _) => "wingding.ttf",
+            ("Webdings", _, _) => "webdings.ttf",
             ("Arial Narrow", false, false) => "ARIALN.TTF",
             ("Arial Narrow", true, false) => "ARIALNB.TTF",
             ("Arial Narrow", false, true) => "ARIALNI.TTF",
@@ -457,8 +488,10 @@ internal static class SystemFontResolver
             yield return $"arial{arialStyle}.ttf";
             yield return $"Arial{(arialStyle.Length > 0 ? " " + style : "")}.ttf";
         }
-        // Same idea for Times → Times New Roman on Windows.
-        else if (family is "Times")
+        // Times and Times New Roman both live in times*.ttf. The full name matched
+        // nothing here and has no short-name mapping either, so a request for it skipped
+        // the real face and fell through to whatever generic the host offered.
+        else if (family is "Times" or "Times New Roman" or "TimesNewRoman")
         {
             var timesStyle = (bold, italic) switch
             {
@@ -520,6 +553,63 @@ internal static class SystemFontResolver
         }
     }
 
+    /// <summary>A configured font root plus every directory beneath it. Distributions nest
+    /// their faces (ttf-mscorefonts-installer lands in /usr/share/fonts/truetype/msttcorefonts,
+    /// a user drop is often one folder deep) and fontconfig recurses, so a flat scan of the
+    /// roots alone reports fonts as missing that every other tool on the box can see.</summary>
+    internal static IEnumerable<string> WithSubdirectories(string root)
+    {
+        if (string.IsNullOrEmpty(root) || !Directory.Exists(root))
+            yield break;
+        yield return root;
+        string[] nested;
+        try { nested = Directory.GetDirectories(root, "*", SearchOption.AllDirectories); }
+        catch { yield break; }
+        foreach (var dir in nested)
+            yield return dir;
+    }
+
+    /// <summary>
+    /// Where a font shipped under a known Windows FILE NAME actually lives on this box.
+    /// Several fallback chains name their faces by file - simsun.ttc, times.ttf,
+    /// segoeui.ttf - because that is how the Windows platform stores them, and they were
+    /// read straight from a literal C:\Windows\Fonts path. Off Windows that path does not
+    /// exist, so the chain resolved to nothing and the text it was meant to carry (CJK runs
+    /// especially) was dropped from the document altogether - even on a machine where the
+    /// very same face is installed where fontconfig can see it. Search the platform's own
+    /// font directories for the file name instead, case-insensitively, since a face copied
+    /// off Windows often lands as SIMSUN.TTC.
+    /// </summary>
+    internal static string? FindFontFile(string fileName)
+    {
+        if (string.IsNullOrEmpty(fileName)) return null;
+        if (_fontFilePaths.TryGetValue(fileName, out var cached)) return cached;
+        string? found = null;
+        foreach (var root in FontDirectories())
+        {
+            foreach (var dir in WithSubdirectories(root))
+            {
+                var direct = Path.Combine(dir, fileName);
+                if (File.Exists(direct)) { found = direct; break; }
+                // Case-insensitive retry only when the exact name missed: on a
+                // case-sensitive file system SIMSUN.TTC and simsun.ttc are different names.
+                string[] entries;
+                try { entries = Directory.GetFiles(dir); }
+                catch { continue; }
+                foreach (var e in entries)
+                    if (string.Equals(Path.GetFileName(e), fileName, StringComparison.OrdinalIgnoreCase))
+                    { found = e; break; }
+                if (found is not null) break;
+            }
+            if (found is not null) break;
+        }
+        _fontFilePaths[fileName] = found;
+        return found;
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string?>
+        _fontFilePaths = new(StringComparer.OrdinalIgnoreCase);
+
     private static IEnumerable<string> FontDirectories()
     {
         // macOS
@@ -530,7 +620,17 @@ internal static class SystemFontResolver
         if (home.Length > 0)
             yield return Path.Combine(home, "Library/Fonts");
 
-        // Linux
+        // Linux. fontconfig honours both user locations - the XDG one is where fc-cache
+        // and every current desktop put per-user fonts, and ~/.fonts is its long-lived
+        // predecessor. Missing them made a font that `fc-match` resolves invisible here.
+        var xdgData = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+        if (!string.IsNullOrEmpty(xdgData))
+            yield return Path.Combine(xdgData, "fonts");
+        else if (home.Length > 0)
+            yield return Path.Combine(home, ".local", "share", "fonts");
+        if (home.Length > 0)
+            yield return Path.Combine(home, ".fonts");
+        yield return "/usr/share/fonts";
         yield return "/usr/share/fonts/truetype";
         yield return "/usr/share/fonts/truetype/liberation";
         yield return "/usr/share/fonts/truetype/dejavu";
@@ -541,6 +641,15 @@ internal static class SystemFontResolver
         var winDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
         if (winDir.Length > 0)
             yield return Path.Combine(winDir, "Fonts");
+        // ★ …and the PER-USER font store. Since Windows 10 1803 a font installed by a
+        // user without administrator rights ("Install for me only", which is what the
+        // installer defaults to when it cannot elevate) goes to
+        // %LOCALAPPDATA%\Microsoft\Windows\Fonts, not the machine directory above.
+        // Looking only at the machine directory makes every such face invisible, so a
+        // document naming it silently falls back to a substitute — or FindFont throws.
+        var localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (localApp.Length > 0)
+            yield return Path.Combine(localApp, "Microsoft", "Windows", "Fonts");
     }
 
     /// <summary>

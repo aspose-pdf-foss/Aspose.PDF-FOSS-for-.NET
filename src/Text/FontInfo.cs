@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
@@ -258,13 +258,19 @@ public class FontInfo
             else
             {
                 // Turning it OFF discards a program this font already put into the
-                // document as a replacement resource.
+                // document as a replacement resource, and detaches the program of a font
+                // read out of the document.
                 UnembedMaterialised();
+                if (was) UnembedInPlace();
             }
         }
     }
     private bool _isEmbedded;
     private bool _isEmbeddedExplicit;
+
+    /// <summary>True when the caller pinned <see cref="IsEmbedded"/> to false: the face
+    /// carries a program but was told not to travel with the document.</summary>
+    internal bool EmbeddingRefusedExplicitly => _isEmbeddedExplicit && !_isEmbedded;
 
     /// <summary>Set the embedded flag as a default that yields to an explicit caller
     /// choice. Used by the text pipeline to auto-embed an assigned font without
@@ -359,6 +365,44 @@ public class FontInfo
             doc.RemoveNewObject(fontFileObjNum);
         }
         _materialised.Clear();
+    }
+
+    /// <summary>Detach the embedded program of a font read out of a document: the
+    /// /FontFile* entries come off its FontDescriptor and the program objects are freed,
+    /// so the saved file references the face by name. The descriptor keeps its metrics.
+    /// ⚠ Font dictionaries commonly SHARE one descriptor object — a simple font and the
+    /// Type0 built over the same face routinely do — so this un-embeds every font backed
+    /// by that program, which is what un-embedding a shared program means.</summary>
+    private void UnembedInPlace()
+    {
+        if (_reader is null) return;
+        var doc = _reader.OwnerDocument;
+        try
+        {
+            foreach (var descriptor in Descriptors())
+            {
+                foreach (var key in new[] { "FontFile", "FontFile2", "FontFile3" })
+                {
+                    if (!descriptor.ContainsKey(key)) continue;
+                    if (doc is not null && descriptor.Get(key) is PdfIndirectRef fileRef)
+                        doc.RemoveNewObject(fileRef.ObjectNumber);
+                    descriptor.Remove(key);
+                }
+            }
+        }
+        catch { /* best-effort: a font that can't be detached stays embedded */ }
+    }
+
+    /// <summary>This font's FontDescriptor dictionaries — its own, plus every descendant
+    /// CIDFont's for a composite font.</summary>
+    private IEnumerable<PdfDictionary> Descriptors()
+    {
+        if (_reader is null) yield break;
+        if (_reader.ResolveDict(_fontDict.Get("FontDescriptor")) is { } own) yield return own;
+        if (_reader.Resolve(_fontDict.Get("DescendantFonts")) is PdfArray df)
+            foreach (var entry in df)
+                if (_reader.ResolveDict(_reader.ResolveDict(entry)?.Get("FontDescriptor")) is { } d)
+                    yield return d;
     }
 
     /// <summary>Embed the full program of the face this font names into its own
@@ -473,7 +517,7 @@ public class FontInfo
     private bool? _systemFontAvailable;
 
     private bool IsSystemFontAvailable()
-        => _systemFontAvailable ??= !string.IsNullOrEmpty(FontName) && FontRepository.FindFont(FontName) is not null;
+        => _systemFontAvailable ??= !string.IsNullOrEmpty(FontName) && FontRepository.TryFindFont(FontName) is not null;
 
     /// <summary>
     /// Implicit conversion from FontData to FontInfo.
@@ -726,7 +770,7 @@ public sealed class FontCollection : IEnumerable<Font>
 
     public int Count => _fonts.Count;
 
-    /// <summary>1-based indexer for API parity.</summary>
+    /// <summary>1-based indexer for API compatibility.</summary>
     public Font this[int index] => _fonts[index - 1];
 
     /// <summary>Look up a font by its PDF resource name (e.g. "F1") or BaseFont name.</summary>
@@ -790,7 +834,8 @@ public class Font : FontInfo
     public new bool IsSubset { get => base.IsSubset; set => base.IsSubset = value; }
     public new bool IsAccessible => base.IsAccessible;
 
-    public IFontOptions FontOptions { get; } = new FontOptionsImpl();
+    public IFontOptions FontOptions => _fontOptions ??= new FontOptionsImpl(this);
+    private IFontOptions? _fontOptions;
 
     /// <summary>Lower-level PDF-font view of this Font. The public API exposes
     /// the engine's IPdfFont through here; FOSS returns a thin wrapper
@@ -798,7 +843,8 @@ public class Font : FontInfo
     public PdfFontView iPdfFont => new PdfFontView(this);
 
     /// <summary>Last error encountered embedding this font in a PDF; empty when none.</summary>
-    public string GetLastFontEmbeddingError() => _lastEmbeddingError ?? string.Empty;
+    public string GetLastFontEmbeddingError() =>
+        _lastEmbeddingError ?? SourceFontData?.LastEmbeddingError ?? string.Empty;
     private string? _lastEmbeddingError;
 
     /// <summary>Measure the rendered width of a string at the given size, in points.</summary>
@@ -839,9 +885,25 @@ public class Font : FontInfo
         return font;
     }
 
+    /// <summary>The options ride on the face program (<see cref="SourceFontData"/>) when
+    /// there is one, so the embedding writer — which is handed the program, not this
+    /// wrapper — sees the caller's choice. A Font with no program of its own keeps the
+    /// value locally.</summary>
     private sealed class FontOptionsImpl : IFontOptions
     {
-        public bool NotifyAboutFontEmbeddingError { get; set; }
+        private readonly Font _owner;
+        private bool _notify = true;
+        public FontOptionsImpl(Font owner) { _owner = owner; }
+
+        public bool NotifyAboutFontEmbeddingError
+        {
+            get => _owner.SourceFontData?.NotifyAboutEmbeddingError ?? _notify;
+            set
+            {
+                _notify = value;
+                if (_owner.SourceFontData is { } data) data.NotifyAboutEmbeddingError = value;
+            }
+        }
     }
 }
 
@@ -851,7 +913,7 @@ public interface IFontOptions
     bool NotifyAboutFontEmbeddingError { get; set; }
 }
 
-/// <summary>Thin engine-font view used by public-API parity (Font.iPdfFont).
+/// <summary>Thin engine-font view exposed for public-API compatibility (Font.iPdfFont).
 /// Stripped down to the members the test corpus actually reads.</summary>
 public sealed class PdfFontView
 {

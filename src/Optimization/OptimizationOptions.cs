@@ -119,7 +119,7 @@ public class OptimizationOptions
 }
 
 /// <summary>Strategy version for image compression. All values are treated
-/// the same; the property is stored for API parity.</summary>
+/// the same; the property is stored for API compatibility.</summary>
 public enum ImageCompressionVersion
 {
     /// <summary>Standard algorithm. Default value.</summary>

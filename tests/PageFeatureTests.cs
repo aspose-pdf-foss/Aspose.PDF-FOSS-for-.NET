@@ -6,7 +6,7 @@ using Xunit;
 namespace Aspose.Pdf.Tests;
 
 /// <summary>Smoke tests for Page.SendTo(PageDevice), Page.OnBeforePageGenerate,
-/// Page.AddStamp(Aspose.Pdf.Stamp), Page.AddGraphics throw, Page.Layers.</summary>
+/// Page.AddStamp(Aspose.Pdf.Stamp), Page.AddGraphics/DeleteGraphics, Page.Layers.</summary>
 public class PageFeatureTests
 {
     [Fact]
@@ -48,15 +48,13 @@ public class PageFeatureTests
     }
 
     [Fact]
-    public void AddGraphics_AppendsWithoutThrowing_DeleteGraphics_Throws()
+    public void AddGraphics_And_DeleteGraphics_AcceptEmptyCollections()
     {
         using var doc = Document.Open(PdfBuilder.BuildMinimal());
         var page = doc.Pages[1];
-        // AddGraphics is implemented (vector-path copy) — it must not throw.
+        // Both are implemented; empty collections are no-ops.
         page.AddGraphics(new Vector.GraphicElementCollection(), new Rectangle(0, 0, 100, 100));
-        // DeleteGraphics is not wired yet — it still reports NotSupported.
-        Assert.Throws<System.NotSupportedException>(
-            () => page.DeleteGraphics(new Vector.GraphicElementCollection()));
+        page.DeleteGraphics(new Vector.GraphicElementCollection());
     }
 
     [Fact]

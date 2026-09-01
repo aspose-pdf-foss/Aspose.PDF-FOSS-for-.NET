@@ -197,6 +197,20 @@ public class WatermarkArtifact : Artifact
     /// <summary>The raw-content-space `cm` operands compensating for the page's
     /// /Rotate, or null when no rotation. Used by the inline (string-built)
     /// image-watermark path.</summary>
+    /// <summary>The /Rotate compensation as raw matrix components [a b c d e f],
+    /// or null when the page is unrotated.</summary>
+    internal static double[]? PageRotationMatrix(Page page)
+    {
+        var mb = page.MediaBox;
+        return page.Rotate switch
+        {
+            Aspose.Pdf.Rotation.on90 => new double[] { 0, 1, -1, 0, mb.Width, 0 },
+            Aspose.Pdf.Rotation.on180 => new double[] { -1, 0, 0, -1, mb.Width, mb.Height },
+            Aspose.Pdf.Rotation.on270 => new double[] { 0, -1, 1, 0, 0, mb.Height },
+            _ => null,
+        };
+    }
+
     internal static string? PageRotationCm(Page page)
     {
         var mb = page.MediaBox;
@@ -277,7 +291,12 @@ public class WatermarkArtifact : Artifact
         if (IsBackground)
             page.PrependContentStream(content);
         else
+        {
+            // A foreground watermark must not inherit the page content's residual
+            // CTM (a printout's top-level flip matrix mirrors and shrinks it).
+            page.WrapExistingContentInGraphicsState();
             page.AddContentStream(content);
+        }
     }
 
     /// <summary>Emit the text watermark with its glyphs inside a Form XObject:
@@ -343,6 +362,11 @@ public class WatermarkArtifact : Artifact
             : "0 0 0 rg\n");
         inner.Append("BT\n");
         inner.Append($"/{fontResourceName} {F(fontSize)} Tf\n");
+        // A ROTATED watermark carries its rotation on the PAGE-LEVEL cm (composed
+        // after the /Rotate compensation) with the form's text at the origin —
+        // the output takes exactly this shape (q R·cm /Fm Do Q), and rotation
+        // inside the form's Tm renders mirrored on /Rotate pages.
+        string? rotationCm = null;
         if (Math.Abs(Rotation) > 0.1)
         {
             var rad = Rotation * Math.PI / 180;
@@ -350,9 +374,10 @@ public class WatermarkArtifact : Artifact
             var sin = Math.Sin(rad);
             var cx = pageWidth / 2;
             var cy = pageHeight / 2;
-            inner.Append($"{F(cos)} {F(sin)} {F(-sin)} {F(cos)} " +
+            rotationCm = $"{F(cos)} {F(sin)} {F(-sin)} {F(cos)} " +
                 $"{F(x * cos - y * sin + cx * (1 - cos) + cy * sin)} " +
-                $"{F(x * sin + y * cos + cy * (1 - cos) - cx * sin)} Tm\n");
+                $"{F(x * sin + y * cos + cy * (1 - cos) - cx * sin)} cm";
+            inner.Append("0 0 Td\n");
         }
         else
         {
@@ -364,7 +389,29 @@ public class WatermarkArtifact : Artifact
         var formName = page.AddStampForm(System.Text.Encoding.ASCII.GetBytes(inner.ToString()));
 
         var sb = new System.Text.StringBuilder("q\n");
-        if (PageRotationCm(page) is { } rot) sb.Append(rot).Append('\n');
+        // Compose the /Rotate compensation and the watermark rotation into ONE cm —
+        // a single composed matrix is emitted ahead of the form.
+        if (rotationCm is not null && PageRotationMatrix(page) is { } pm)
+        {
+            var rad2 = Rotation * Math.PI / 180;
+            var rc = Math.Cos(rad2); var rs = Math.Sin(rad2);
+            var cx2 = pageWidth / 2; var cy2 = pageHeight / 2;
+            double re = x * rc - y * rs + cx2 * (1 - rc) + cy2 * rs;
+            double rf = x * rs + y * rc + cy2 * (1 - rc) - cx2 * rs;
+            // [rotation] × [pageRot] (row-vector composition).
+            double na = rc * pm[0] + rs * pm[2];
+            double nb = rc * pm[1] + rs * pm[3];
+            double nc = -rs * pm[0] + rc * pm[2];
+            double nd = -rs * pm[1] + rc * pm[3];
+            double ne = re * pm[0] + rf * pm[2] + pm[4];
+            double nf = re * pm[1] + rf * pm[3] + pm[5];
+            sb.Append($"{F(na)} {F(nb)} {F(nc)} {F(nd)} {F(ne)} {F(nf)} cm\n");
+        }
+        else
+        {
+            if (PageRotationCm(page) is { } rot) sb.Append(rot).Append('\n');
+            if (rotationCm is not null) sb.Append(rotationCm).Append('\n');
+        }
         if (Opacity < 1.0)
         {
             var gs = new ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity };

@@ -96,6 +96,11 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
         }
     }
 
+    /// <summary>Serve outlines with every vertex rounded to whole font units — how this
+    /// program renders after a TrueType conversion (see
+    /// <see cref="CffGlyphSource.QuantizeToFontUnits"/>).</summary>
+    public bool QuantizeToFontUnits { get; set; }
+
     public GlyphOutline? GetOutline(int glyphId)
     {
         if (glyphId < 0 || glyphId >= _charStringsByGid.Length) return null;
@@ -103,7 +108,13 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
         if (cs is null || cs.Length == 0) return null;
 
         var interp = new Type1Interpreter(this);
-        try { return interp.Run(cs); }
+        try
+        {
+            var outline = interp.Run(cs);
+            return QuantizeToFontUnits && outline is not null
+                ? GlyphOutlineQuantizer.Quantize(outline, UnitsPerEm)
+                : outline;
+        }
         catch { return null; }
     }
 

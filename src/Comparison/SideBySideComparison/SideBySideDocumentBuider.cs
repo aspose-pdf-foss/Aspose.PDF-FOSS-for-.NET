@@ -92,7 +92,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
                 var text = edit.Operation.Text;
                 if (string.IsNullOrEmpty(text)) continue;
 
-                var deleted = edit.Operation.Operation == Diff.Operation.Delete;
+                var deleted = edit.Operation.Operation == Operation.Delete;
                 var rect = edit.Rects[0];
                 var annotation = new Annotations.HighlightAnnotation(sheet, rect)
                 {
@@ -109,7 +109,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
         {
             foreach (var edit in edits)
             {
-                var color = edit.Operation.Operation == Diff.Operation.Delete
+                var color = edit.Operation.Operation == Operation.Delete
                     ? options.DeleteColor
                     : options.InsertColor;
                 foreach (var rect in edit.Rects)

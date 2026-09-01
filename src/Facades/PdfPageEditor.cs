@@ -9,7 +9,7 @@ namespace Aspose.Pdf.Facades;
 /// </summary>
 public sealed class PdfPageEditor : System.IDisposable
 {
-    // ── Page-transition style constants (T.J. Aspose legacy IDs; persisted via TransitionType) ──
+    // ── Page-transition style constants (legacy transition IDs; persisted via TransitionType) ──
     public const int SPLITVOUT = 1;
     public const int SPLITHOUT = 2;
     public const int SPLITVIN  = 3;
@@ -207,7 +207,17 @@ public sealed class PdfPageEditor : System.IDisposable
         double sx = Zoom > 0 ? Zoom : 1.0;
         bool hasAlignment = HorizontalAlignment != Aspose.Pdf.HorizontalAlignment.None
             || VerticalAlignmentType != Aspose.Pdf.VerticalAlignment.None;
-        if (sx == 1.0 && _moveX == 0 && _moveY == 0 && !hasAlignment) return;
+        // The identity case wraps too: the editor wraps every page's
+        // contents into a /Fm0 Form XObject on a plain BindPdf/Save — the page
+        // stream becomes "q 1 0 0 1 0 0 cm /Fm0 Do Q" and the original operators
+        // live on, bracketed by q…Q, inside the form. A save that ALSO rotates
+        // keeps the unwrapped /Rotate pipeline instead: our artifact and stamp
+        // readers report through page-level content, and wrapping a rotated save
+        // hid every artifact and %StampId from them (rotated saves could wrap
+        // as well — with the rotation baked into the wrapper cm — once the
+        // readers see through the wrapper; adopt that model only together
+        // with wrapper-aware readers).
+        if (sx == 1.0 && _moveX == 0 && _moveY == 0 && !hasAlignment && Rotation != 0) return;
         foreach (var page in TargetPagesForStateful())
         {
             if (!_transformedPages.Add(page)) continue;
@@ -479,7 +489,7 @@ public sealed class PdfPageEditor : System.IDisposable
 
     /// <summary>
     /// Return the named page-box rectangle as <see cref="System.Drawing.Rectangle"/>.
-    /// <paramref name="pageBoxName"/> matches the Aspose convention: "Media", "Crop",
+    /// <paramref name="pageBoxName"/> follows the legacy facade convention: "Media", "Crop",
     /// "Trim", "Bleed", or "Art" (case-insensitive). Falls back to MediaBox for unknown
     /// or unset boxes.
     /// </summary>

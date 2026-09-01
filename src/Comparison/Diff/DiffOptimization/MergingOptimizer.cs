@@ -1,12 +1,17 @@
-using System;
 using System.Collections.Generic;
+using System.Text;
 
 namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
 {
-    /// <summary>Semantic clean-up pass: eliminates equalities that are no larger than the edits
-    /// surrounding them (folding those short common runs back into the adjacent delete/insert),
-    /// then re-merges the result into canonical form. Produces a diff with fewer, more meaningful
-    /// edits at the cost of a slightly larger edit distance.</summary>
+    /// <summary>Reduces a diff to its canonical form: coalesce adjacent runs of the same
+    /// operation and factor the common prefix and suffix out of a mixed delete/insert run
+    /// (<see cref="OperationsMerger"/>), then slide any single edit that is fenced by two
+    /// equalities sideways to dissolve one of them (<see cref="OperationsSlideMerger"/>).
+    ///
+    /// The two passes feed each other - a slide dissolves an equality and so butts two edits
+    /// of the same kind together, which the merger then coalesces - so they run alternately
+    /// until the diff stops moving. Each productive slide removes one equality, so the number
+    /// of useful rounds cannot exceed the length of the diff.</summary>
     public sealed class MergingOptimizer : IDiffOptimizationOperation
     {
         private readonly EditOperationsOrder _order;
@@ -19,51 +24,34 @@ namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
         {
             if (diffs is null || diffs.Count == 0) return;
 
-            var changes = false;
-            var equalities = new Stack<int>();   // indices of equalities pending review
-            string? lastEquality = null;
-            var pointer = 0;
-            // Running edit lengths before (…1) and after (…2) the last equality.
-            int insertions1 = 0, deletions1 = 0, insertions2 = 0, deletions2 = 0;
+            var merger = new OperationsMerger(_order);
+            var slider = new OperationsSlideMerger();
 
-            while (pointer < diffs.Count)
+            var rounds = diffs.Count + 1;
+            var previous = Shape(diffs);
+            for (var round = 0; round < rounds; round++)
             {
-                if (diffs[pointer].Operation == Operation.Equal)
-                {
-                    equalities.Push(pointer);
-                    insertions1 = insertions2;
-                    deletions1 = deletions2;
-                    insertions2 = 0;
-                    deletions2 = 0;
-                    lastEquality = diffs[pointer].Text;
-                }
-                else
-                {
-                    if (diffs[pointer].Operation == Operation.Insert)
-                        insertions2 += diffs[pointer].Text.Length;
-                    else
-                        deletions2 += diffs[pointer].Text.Length;
+                merger.Execute(diffs);
+                slider.Execute(diffs);
 
-                    if (lastEquality is not null
-                        && lastEquality.Length <= Math.Max(insertions1, deletions1)
-                        && lastEquality.Length <= Math.Max(insertions2, deletions2))
-                    {
-                        var eqIndex = equalities.Pop();
-                        // Split the equality into a delete + insert of the same text.
-                        diffs.Insert(eqIndex, new DiffOperation(Operation.Delete, lastEquality));
-                        diffs[eqIndex + 1].Operation = Operation.Insert;
-                        if (equalities.Count != 0) equalities.Pop();
-                        pointer = equalities.Count != 0 ? equalities.Peek() : -1;
-                        insertions1 = deletions1 = insertions2 = deletions2 = 0;
-                        lastEquality = null;
-                        changes = true;
-                    }
-                }
-                pointer++;
+                var shape = Shape(diffs);
+                if (shape == previous) break;
+                previous = shape;
             }
+        }
 
-            if (changes)
-                new OperationsMerger(_order).Execute(diffs);
+        /// <summary>The diff written out as one string, so a round that changed nothing can be
+        /// told from one that did.</summary>
+        private static string Shape(List<DiffOperation> diffs)
+        {
+            var sb = new StringBuilder();
+            foreach (var op in diffs)
+            {
+                // Length-framed, so no separator can be confused with the edit text itself.
+                sb.Append((int)op.Operation).Append(':').Append(op.Text.Length)
+                  .Append(':').Append(op.Text);
+            }
+            return sb.ToString();
         }
     }
 }

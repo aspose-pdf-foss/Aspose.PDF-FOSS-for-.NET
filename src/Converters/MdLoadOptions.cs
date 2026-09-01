@@ -10,6 +10,10 @@ public sealed class MdLoadOptions : LoadOptions
 
     /// <summary>Custom CSS styles to apply to the rendered content.</summary>
     public string? CssStyles { get; set; }
+
+    /// <summary>When set, a <c>@page</c> rule found in a <c>&lt;style&gt;</c> block of the
+    /// markdown source takes priority over <see cref="PageInfo"/> for the page geometry.</summary>
+    public bool IsPriorityCssPageRule { get; set; }
 }
 
 /// <summary>

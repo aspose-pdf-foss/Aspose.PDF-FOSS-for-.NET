@@ -30,6 +30,16 @@ public sealed class PdfConverter : IDisposable
     /// <summary>Output resolution in DPI. Default: 150.</summary>
     public Resolution Resolution { get; set; }
 
+    /// <summary>Render-resolution ceiling (DPI). The corpus drives this through
+    /// the harness PdfConsts.SafeMaxResolution: a requested Resolution above the
+    /// ceiling renders clamped to it (presenter renders are capped
+    /// the same way). int.MaxValue = no clamp, so ordinary renders keep their
+    /// requested scale.</summary>
+    internal static int SafeMaxResolution = int.MaxValue;
+
+    private int ResX => Math.Min((int)Resolution.X, SafeMaxResolution);
+    private int ResY => Math.Min((int)Resolution.Y, SafeMaxResolution);
+
     /// <summary>Owner password used when binding encrypted PDFs.</summary>
     public string? Password { get; set; }
 
@@ -176,16 +186,17 @@ public sealed class PdfConverter : IDisposable
     }
 
     /// <summary>
-    /// Render the next page as PNG and write to stream.
+    /// Render the next page and write to stream. The format-less overloads
+    /// encode JPEG — the converter's default output format.
     /// </summary>
     public void GetNextImage(Stream outputStream)
-        => GetNextImage(outputStream, PdfConverterImageFormat.Png);
+        => GetNextImage(outputStream, PdfConverterImageFormat.Jpeg);
 
     /// <summary>
-    /// Render the next page as PNG and save to a file path.
+    /// Render the next page as JPEG (the default format) and save to a file path.
     /// </summary>
     public void GetNextImage(string outputFile)
-        => GetNextImage(outputFile, PdfConverterImageFormat.Png);
+        => GetNextImage(outputFile, PdfConverterImageFormat.Jpeg);
 
     /// <summary>
     /// Render the next page and write to stream.
@@ -218,6 +229,13 @@ public sealed class PdfConverter : IDisposable
     /// </summary>
     public void GetNextImage(string outputFile, SdiImageFormat format)
     {
+        if (IsEmf(format))
+        {
+            if (!OperatingSystem.IsWindows()) throw EmfUnsupported();
+            using var fs = new FileStream(outputFile, FileMode.Create, FileAccess.Write);
+            GetNextImageAsEmf(fs, pageSize: null);
+            return;
+        }
         GetNextImage(outputFile, MapFormat(format));
     }
 
@@ -226,12 +244,18 @@ public sealed class PdfConverter : IDisposable
     /// </summary>
     public void GetNextImage(Stream outputStream, SdiImageFormat format)
     {
+        if (IsEmf(format))
+        {
+            if (!OperatingSystem.IsWindows()) throw EmfUnsupported();
+            GetNextImageAsEmf(outputStream, pageSize: null);
+            return;
+        }
         GetNextImage(outputStream, MapFormat(format));
     }
 
     /// <summary>
     /// Render next page with a JPEG quality hint. The quality arg is accepted
-    /// for API parity; it is ignored for non-JPEG outputs.
+    /// for API compatibility; it is ignored for non-JPEG outputs.
     /// </summary>
     public void GetNextImage(string outputFile, SdiImageFormat format, int quality)
         => GetNextImage(outputFile, format);
@@ -289,7 +313,68 @@ public sealed class PdfConverter : IDisposable
     /// </summary>
     public void GetNextImage(Stream outputStream, PageSize pageSize, SdiImageFormat format)
     {
+        if (IsEmf(format))
+        {
+            if (!OperatingSystem.IsWindows()) throw EmfUnsupported();
+            GetNextImageAsEmf(outputStream, pageSize);
+            return;
+        }
         GetNextImage(outputStream, pageSize, MapFormat(format));
+    }
+
+    // EMF is a Windows GDI+ vector format; the recorder below exists only there.
+    // PlatformNotSupportedException, not a plain NotSupportedException: the feature is
+    // absent because of the HOST, not because of the arguments. It derives from
+    // NotSupportedException, so a caller catching that still catches this.
+    private static PlatformNotSupportedException EmfUnsupported()
+        => new("PdfConverter: EMF output requires Windows (GDI+ metafiles).");
+
+    /// <summary>EMF output at an explicit pixel size: rasterise the page to that size and
+    /// record the raster into a GDI+ enhanced metafile.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private void GetNextImageAsEmf(Stream outputStream, int imageWidth, int imageHeight)
+    {
+        using var png = new MemoryStream();
+        GetNextImage(png, SdiImageFormat.Png, imageWidth, imageHeight, quality: 90);
+        png.Position = 0;
+        RecordPngAsMetafile(png, outputStream);
+    }
+
+    /// <summary>EMF output: rasterise the page and record the raster into a
+    /// GDI+ enhanced metafile (Windows-only, like every EMF consumer).</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private void GetNextImageAsEmf(Stream outputStream, PageSize? pageSize)
+    {
+        using var png = new MemoryStream();
+        if (pageSize is not null)
+            GetNextImage(png, pageSize, PdfConverterImageFormat.Png);
+        else
+            GetNextImage(png, PdfConverterImageFormat.Png);
+        png.Position = 0;
+        RecordPngAsMetafile(png, outputStream);
+    }
+
+    /// <summary>Play a rendered PNG into a GDI+ enhanced metafile written to
+    /// <paramref name="outputStream"/>.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void RecordPngAsMetafile(Stream png, Stream outputStream)
+    {
+        using var bmp = new System.Drawing.Bitmap(png);
+        using var refBmp = new System.Drawing.Bitmap(1, 1);
+        using var refG = System.Drawing.Graphics.FromImage(refBmp);
+        var hdc = refG.GetHdc();
+        try
+        {
+            using var mf = new System.Drawing.Imaging.Metafile(outputStream, hdc,
+                new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height),
+                System.Drawing.Imaging.MetafileFrameUnit.Pixel);
+            using var g = System.Drawing.Graphics.FromImage(mf);
+            g.DrawImage(bmp, 0, 0, bmp.Width, bmp.Height);
+        }
+        finally
+        {
+            refG.ReleaseHdc(hdc);
+        }
     }
 
     /// <summary>
@@ -298,6 +383,12 @@ public sealed class PdfConverter : IDisposable
     /// </summary>
     public void GetNextImage(Stream outputStream, PageSize pageSize, SdiImageFormat format, int quality)
     {
+        if (IsEmf(format))
+        {
+            if (!OperatingSystem.IsWindows()) throw EmfUnsupported();
+            GetNextImageAsEmf(outputStream, pageSize);
+            return;
+        }
         GetNextImage(outputStream, pageSize, MapFormat(format));
     }
 
@@ -327,13 +418,19 @@ public sealed class PdfConverter : IDisposable
     /// </summary>
     public void GetNextImage(Stream outputStream, SdiImageFormat format, int imageWidth, int imageHeight, int quality)
     {
+        if (IsEmf(format))
+        {
+            if (!OperatingSystem.IsWindows()) throw EmfUnsupported();
+            GetNextImageAsEmf(outputStream, imageWidth, imageHeight);
+            return;
+        }
         EnsureConverted();
         if (!HasNextImage()) throw new InvalidOperationException("No more images available.");
         var page = _document!.Pages.At(_currentPage);
         _currentPage++;
 
         var mapped = MapFormat(format);
-        var devRes = new Aspose.Pdf.Devices.Resolution(Resolution.X, Resolution.Y);
+        var devRes = new Aspose.Pdf.Devices.Resolution(ResX, ResY);
         ImageDevice device = mapped switch
         {
             PdfConverterImageFormat.Png  => new PngDevice(imageWidth, imageHeight, devRes),
@@ -369,9 +466,9 @@ public sealed class PdfConverter : IDisposable
         _currentPage++;
 
         var mapped = format;
-        var pxW = (int)Math.Round(pageSize.Width * Resolution.X / 72.0);
-        var pxH = (int)Math.Round(pageSize.Height * Resolution.Y / 72.0);
-        var devRes = new Aspose.Pdf.Devices.Resolution(Resolution.X, Resolution.Y);
+        var pxW = (int)Math.Round(pageSize.Width * ResX / 72.0);
+        var pxH = (int)Math.Round(pageSize.Height * ResY / 72.0);
+        var devRes = new Aspose.Pdf.Devices.Resolution(ResX, ResY);
         ImageDevice device = mapped switch
         {
             PdfConverterImageFormat.Png => new PngDevice(pxW, pxH, devRes),
@@ -386,11 +483,20 @@ public sealed class PdfConverter : IDisposable
 
     // Guid comparison avoids CA1416 (SDC types are marked windows-only, but their
     // static Guid values match across platforms).
+    private static readonly Guid _emfGuid  = new("b96b3cac-0728-11d3-9d7b-0000f81ef32e");
     private static readonly Guid _pngGuid  = new("b96b3caf-0728-11d3-9d7b-0000f81ef32e");
     private static readonly Guid _jpegGuid = new("b96b3cae-0728-11d3-9d7b-0000f81ef32e");
     private static readonly Guid _bmpGuid  = new("b96b3cab-0728-11d3-9d7b-0000f81ef32e");
     private static readonly Guid _tiffGuid = new("b96b3cb1-0728-11d3-9d7b-0000f81ef32e");
     private static readonly Guid _gifGuid  = new("b96b3cb0-0728-11d3-9d7b-0000f81ef32e");
+
+    private static bool IsEmf(SdiImageFormat? format)
+    {
+        if (format is null) return false;
+#pragma warning disable CA1416
+        return format.Guid == _emfGuid;
+#pragma warning restore CA1416
+    }
 
     private static PdfConverterImageFormat MapFormat(SdiImageFormat format)
     {
@@ -401,7 +507,10 @@ public sealed class PdfConverter : IDisposable
         if (g == _pngGuid) return PdfConverterImageFormat.Png;
         if (g == _jpegGuid) return PdfConverterImageFormat.Jpeg;
         if (g == _bmpGuid) return PdfConverterImageFormat.Bmp;
-        if (g == _tiffGuid) return PdfConverterImageFormat.Tiff;
+        // The page iterator refuses TIFF output (every caller of this mapping is a
+        // GetNextImage overload): multi-frame TIFF goes through SaveAsTIFF instead.
+        if (g == _tiffGuid)
+            throw new Exception($"Image format {format} is not supported. SaveAsTIFF methods should be used in order to generate Tiff files.");
         if (g == _gifGuid) return PdfConverterImageFormat.Gif;
         throw new NotSupportedException($"PdfConverter: image format {format} is not supported.");
     }
@@ -427,7 +536,7 @@ public sealed class PdfConverter : IDisposable
     public void SaveAsTIFF(string outputFile, TiffSettings? settings)
     {
         if (_document is null) throw new InvalidOperationException("No document bound. Call BindPdf first.");
-        var devRes = new Resolution(Resolution.X, Resolution.Y);
+        var devRes = new Resolution(ResX, ResY);
         var device = new TiffDevice(devRes, settings ?? new TiffSettings());
         device.Process(_document, StartPage, EffectiveEndPage, outputFile);
     }
@@ -436,7 +545,7 @@ public sealed class PdfConverter : IDisposable
     public void SaveAsTIFF(Stream outputStream, TiffSettings? settings)
     {
         if (_document is null) throw new InvalidOperationException("No document bound. Call BindPdf first.");
-        var devRes = new Resolution(Resolution.X, Resolution.Y);
+        var devRes = new Resolution(ResX, ResY);
         var device = new TiffDevice(devRes, settings ?? new TiffSettings());
         device.Process(_document, StartPage, EffectiveEndPage, outputStream);
     }
@@ -487,7 +596,7 @@ public sealed class PdfConverter : IDisposable
     public void SaveAsTIFF(Stream outputStream, int imageWidth, int imageHeight, TiffSettings? settings)
     {
         if (_document is null) throw new InvalidOperationException("No document bound. Call BindPdf first.");
-        var devRes = new Resolution(Resolution.X, Resolution.Y);
+        var devRes = new Resolution(ResX, ResY);
         var device = new TiffDevice(imageWidth, imageHeight, devRes, settings ?? new TiffSettings());
         device.Process(_document, StartPage, EffectiveEndPage, outputStream);
     }
@@ -544,8 +653,8 @@ public sealed class PdfConverter : IDisposable
 
     private (int width, int height) PageSizeToPixels(PageSize pageSize)
     {
-        var w = (int)Math.Round(pageSize.Width * Resolution.X / 72.0);
-        var h = (int)Math.Round(pageSize.Height * Resolution.Y / 72.0);
+        var w = (int)Math.Round(pageSize.Width * ResX / 72.0);
+        var h = (int)Math.Round(pageSize.Height * ResY / 72.0);
         return (w, h);
     }
 
@@ -596,7 +705,7 @@ public sealed class PdfConverter : IDisposable
     /// horizontal row, or centered overlap), encoded into
     /// <paramref name="outputImageFormat"/>. The <paramref name="horizontal"/>
     /// and <paramref name="vertical"/> arguments are accepted for
-    /// API-shape parity but currently only single-row / single-column
+    /// API-shape compatibility but currently only single-row / single-column
     /// layouts (the common usage) are honoured.
     /// </summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -791,7 +900,7 @@ public sealed class PdfConverter : IDisposable
         // per dimension at that dpi, which the natural-size render path already does.
         var devRes = RenderingOptions?.BarcodeOptimization == true
             ? new Aspose.Pdf.Devices.Resolution(220, 220)
-            : new Aspose.Pdf.Devices.Resolution(Resolution.X, Resolution.Y);
+            : new Aspose.Pdf.Devices.Resolution(ResX, ResY);
         ImageDevice device;
         if (_renderer is null)
         {

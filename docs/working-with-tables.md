@@ -3,6 +3,9 @@
 ## Extracting tables
 
 `TableAbsorber` detects table-shaped layouts on a page. Pages are 1-based.
+`Visit(Document)` visits every page in turn. The `TextSearchOptions` accepted by
+the constructor and the `UseFlowEngine` flag are stored on the absorber but do
+not influence detection.
 
 ```csharp
 using Aspose.Pdf;
@@ -73,6 +76,18 @@ if (absorber.Tables.Count > 0)
     absorber.Remove(absorber.Tables[0]);
     doc.Save("no-table.pdf");
 }
+```
+
+`Replace(page, oldTable, newTable)` removes a detected table the same way and
+draws a `Table` in its place, with the new table's top-left corner on the old
+table's rectangle:
+
+```csharp
+var replacement = new Table { ColumnWidths = "100 100" };
+replacement.Rows.Add().Cells.Add("Updated");
+
+absorber.Replace(doc.Pages[1], absorber.Tables[0], replacement);
+doc.Save("replaced-table.pdf");
 ```
 
 ## Creating tables
@@ -190,7 +205,7 @@ var row = table.Rows.Add();
 
 var fragment = new TextFragment("Bold text");
 fragment.TextState.IsBold          = true;
-fragment.TextState.ForegroundColor = Color.FromRgb(255, 0, 0);
+fragment.TextState.ForegroundColor = Color.FromRgb(1, 0, 0);   // components are 0..1
 row.Cells.Add(fragment);
 
 row.Cells.Add("Plain text");
@@ -215,9 +230,9 @@ table.RepeatingRowsCount = 1;   // first row repeats on each continuation page
 
 `RepeatingRowsCount` (and `Broken`, below) are only honoured by the flow
 layout that runs when a table is added to a page's paragraph stream and the
-document is saved. `page.AddTable(table)` renders the table on a single page
-in one pass and does not paginate, so to get header repetition / page breaks
-add the table to `Page.Paragraphs` instead:
+document is saved. `page.AddTable(table)` builds the table into a single
+content stream on that page and does not paginate, so to get header
+repetition / page breaks add the table to `Page.Paragraphs` instead:
 
 ```csharp
 page.Paragraphs.Add(table);

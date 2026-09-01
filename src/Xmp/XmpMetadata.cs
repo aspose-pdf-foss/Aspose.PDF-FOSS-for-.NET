@@ -109,6 +109,21 @@ public sealed partial class XmpMetadata
     /// </summary>
     public void Set(string key, string value)
     {
+        if (key == "pdf:Producer") ProducerExplicitlySet = true;
+        _properties[key] = value;
+        _structured.Remove(key);
+        _dirty = true;
+        PersistToBackingStream();
+    }
+
+    /// <summary>The caller assigned pdf:Producer through the public mutators, so
+    /// the save-time library stamp must not overwrite it (a value parsed from a
+    /// loaded packet does not set this).</summary>
+    internal bool ProducerExplicitlySet;
+
+    /// <summary>Save-time stamp write: bypasses <see cref="ProducerExplicitlySet"/>.</summary>
+    internal void SetStamped(string key, string value)
+    {
         _properties[key] = value;
         _structured.Remove(key);
         _dirty = true;
@@ -138,6 +153,7 @@ public sealed partial class XmpMetadata
             SetStructured(key, value);
             return;
         }
+        if (key == "pdf:Producer") ProducerExplicitlySet = true;
         _properties[key] = value?.ToStringValue() ?? string.Empty;
         _structured.Remove(key);
         _dirty = true;
@@ -150,6 +166,7 @@ public sealed partial class XmpMetadata
     /// </summary>
     public void Add(string key, string value)
     {
+        if (key == "pdf:Producer") ProducerExplicitlySet = true;
         _properties[key] = value;
         _structured.Remove(key);
         _dirty = true;
@@ -477,6 +494,7 @@ public sealed partial class XmpMetadata
             "pdf" => "http://ns.adobe.com/pdf/1.3/",
             "pdfaid" => "http://www.aiim.org/pdfa/ns/id/",
             "pdfx" => "http://ns.adobe.com/pdfx/1.3/",
+            "pdfxid" => "http://www.npes.org/pdfx/ns/id/",
             "xmpRights" => "http://ns.adobe.com/xap/1.0/rights/",
             "photoshop" => "http://ns.adobe.com/photoshop/1.0/",
             "tiff" => "http://ns.adobe.com/tiff/1.0/",
@@ -632,7 +650,10 @@ public sealed partial class XmpMetadata
                 // Parse the whole subtree into a nested struct so callers can traverse it via
                 // ToNamedValues(). The single-rdf:Description struct form is handled by the
                 // regex pass above; this catches the wrapper-less nesting it misses.
-                if (prop.Elements().Any(e => e.Name.Namespace != RdfNs)
+                // ...including the fully ABBREVIATED form, where the property is an
+                // EMPTY element carrying every struct field as an attribute —
+                //   <abaxmp:archive abaxmp:name="" abaxmp:title="…"/>
+                if ((prop.Elements().Any(e => e.Name.Namespace != RdfNs) || HasStructAttributes(prop))
                     && !_structured.ContainsKey(QName(prop)))
                     _structured[QName(prop)] = ParseStructNode(prop);
             }
@@ -657,9 +678,12 @@ public sealed partial class XmpMetadata
         return string.IsNullOrEmpty(prefix) ? el.Name.LocalName : $"{prefix}:{el.Name.LocalName}";
     }
 
-    // Parse an element into a struct (dict) built from its struct-field attributes
+    // Parse an element into a struct built from its struct-field attributes
     // and child field elements, recursing into nested structs/arrays. Falls back to
-    // a string scalar when the element has no structured content.
+    // a string scalar when the element has no structured content. The struct is a
+    // LIVE Dictionary — callers mutate it in place through ToDictionary() and
+    // write the same XmpValue back (the manifest-edit contract), so the backing
+    // store must be the dictionary the accessor hands out, not a copy.
     private static XmpValue ParseStructNode(XElement el)
     {
         var dict = new Dictionary<string, XmpValue>(StringComparer.Ordinal);
@@ -686,20 +710,25 @@ public sealed partial class XmpMetadata
     // dict, transparently unwrapping any nested rdf:Description — XMP serialises a
     // struct either as parseType="Resource" with inline fields, or as an
     // <rdf:Description> wrapper carrying fields as attributes and/or child elements.
-    private static void CollectFields(XElement el, Dictionary<string, XmpValue> dict)
+    private static void CollectFields(XElement el, Dictionary<string, XmpValue> dict, List<string>? order = null)
     {
+        void Set(string key, XmpValue v)
+        {
+            if (!dict.ContainsKey(key)) order?.Add(key);
+            dict[key] = v;
+        }
         foreach (var a in el.Attributes())
         {
             if (a.IsNamespaceDeclaration || a.Name.Namespace == RdfNs) continue;
             if (a.Name == XNamespace.Xml + "lang") continue;
             var ap = el.GetPrefixOfNamespace(a.Name.Namespace);
-            dict[string.IsNullOrEmpty(ap) ? a.Name.LocalName : $"{ap}:{a.Name.LocalName}"] = new XmpValue(a.Value);
+            Set(string.IsNullOrEmpty(ap) ? a.Name.LocalName : $"{ap}:{a.Name.LocalName}", new XmpValue(a.Value));
         }
         foreach (var child in el.Elements())
         {
-            if (child.Name == RdfNs + "Description") { CollectFields(child, dict); continue; }
+            if (child.Name == RdfNs + "Description") { CollectFields(child, dict, order); continue; }
             if (child.Name.Namespace == RdfNs) continue;
-            dict[QName(child)] = ParseFieldValue(child);
+            Set(QName(child), ParseFieldValue(child));
         }
     }
 

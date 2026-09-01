@@ -1,11 +1,16 @@
 # Rendering
 
-Render PDF pages to raster images (PNG, JPEG, BMP, TIFF) or to vector SVG.
+Render PDF pages to raster images (PNG, JPEG, BMP, GIF, TIFF) or to vector SVG.
 
 ## Quick start
 
-`SoftwarePageRenderer` is the built-in pure-managed renderer. It is used
-automatically when no renderer is passed to an image-device constructor.
+`SoftwarePageRenderer` is the built-in pure-managed renderer. When no renderer
+is passed to an image-device constructor, the device picks one for the host:
+the GDI+-backed `GdiPlusPageRenderer` on Windows, `SoftwarePageRenderer`
+everywhere else (setting the environment variable
+`ASPOSE_PDF_FORCE_SOFTWARE_RENDERER=1` selects the software renderer on Windows
+too). Pass `new SoftwarePageRenderer()` explicitly for output that is identical
+on every platform.
 
 ```csharp
 using Aspose.Pdf;
@@ -22,7 +27,7 @@ File.WriteAllBytes("page1.png", pngBytes);
 
 `IPageRenderer` is the rendering extension point. Provide your own
 implementation (e.g. backed by Skia or PDFium) to plug in an alternative
-backend; otherwise `SoftwarePageRenderer` is used.
+backend; otherwise the built-in renderer described above is used.
 
 ```csharp
 public interface IPageRenderer
@@ -30,6 +35,28 @@ public interface IPageRenderer
     RgbaBuffer RenderPage(byte[] pdfBytes, int pageNumber, int dpi);
 }
 ```
+
+`RgbaBuffer` carries the pixels as a flat RGBA `Data` array plus `Width` and
+`Height`.
+
+The software renderer covers the full graphics model: paths with dash
+patterns (each dash element is widened to at least the line width, as the
+PDF rasterisation convention requires); clipping; text in every font type
+(Type 1, CFF, TrueType, Type 0 / CID, Type 3); images in every standard filter
+(Flate, LZW, RunLength, CCITT, JPEG baseline and progressive, JPEG 2000,
+JBIG2); stencil masks, soft masks (`/SMask`) and colour-key masks; ICC,
+Indexed, Separation, DeviceN, CalRGB and Lab colour spaces; blend modes and
+transparency groups; overprint; tiling and shading patterns with all seven
+shading types (function-based, axial, radial, free-form and lattice-form
+Gouraud, Coons and tensor patches); optional content; and annotation
+appearance streams, which rotate with the page's `/Rotate` value.
+
+`ImageDevice.RenderingOptions` tunes the renderer: `ConvertFontsToUnicodeTTF`
+applies to both built-in renderers; `DefaultFontName` (the substitute for
+fonts whose program cannot be resolved) and `BarcodeOptimization` (vector
+fills without anti-aliasing) are consulted by the GDI+ renderer.
+`CoordinateType` selects the `CropBox` (default) or `MediaBox` as the rendered
+area.
 
 ## PNG
 
@@ -69,6 +96,10 @@ byte[] pngBytes = device.Process(doc.Pages[1]);
 File.WriteAllBytes("page1.png", pngBytes);
 ```
 
+`Process(page, outputFileName)` writes straight to a path. Every image device
+also has `(int width, int height)` and `(PageSize pageSize)` constructors that
+pin the output pixel size (see [Resolution](#resolution)).
+
 ## JPEG
 
 ```csharp
@@ -92,10 +123,14 @@ var device = new JpegDevice(quality: 90);
 byte[] jpeg = device.Process(doc.Pages[1]);
 ```
 
+`Quality` defaults to 100.
+
 ### Custom JPEG encoder
 
-The built-in encoder writes baseline JPEG. Plug in a higher-fidelity encoder
-(SkiaSharp, ImageSharp, etc.) by registering a callback:
+The built-in managed encoder writes baseline JFIF with the device resolution
+recorded in the header; on Windows the platform (GDI+) codec is used instead.
+Plug in a different encoder (SkiaSharp, ImageSharp, etc.) by registering a
+callback, which takes precedence on every platform:
 
 ```csharp
 JpegDevice.SetEncoder((rgba, width, height, quality) =>
@@ -118,6 +153,9 @@ var device = new BmpDevice(new Resolution(150));
 using var stream = File.Create("page1.bmp");
 device.Process(doc.Pages[1], stream);
 ```
+
+The BMP writer is managed and produces a 24-bit file on every platform.
+`GifDevice` has the same constructors and writes GIF.
 
 ## TIFF
 
@@ -146,6 +184,10 @@ byte[] range = device.ProcessRange(doc, startPage: 2, endPage: 5);
 File.WriteAllBytes("document.tiff", tiff);
 ```
 
+`ProcessRange(doc, startPage, endPage, Stream)` and the `Process(Document, …)`
+overloads (whole document, or `fromPage` / `toPage`, to a stream or a file
+name) write the same multi-page output directly.
+
 ### `TiffSettings`
 
 ```csharp
@@ -160,6 +202,15 @@ var settings = new TiffSettings
 
 var device = new TiffDevice(settings);
 ```
+
+The TIFF writer is managed. `CompressionType` offers `None`, `LZW` (default),
+`CCITT3`, `CCITT4`, `RLE` and `Packbits`; the CCITT fax encodings are bilevel
+and therefore imply a 1-bit image regardless of `Depth`. `ColorDepth` offers
+`Default` (24-bit), `Format1bpp`, `Format4bpp`, `Format8bpp` and
+`Format24bpp`; `Brightness` (0–1, default 0.5) is the threshold for the 1-bit
+conversion. `SkipBlankPages` drops empty pages and `CoordinateType` selects
+the page box. `Shape` and `Margins` are stored for API compatibility only: each
+page keeps its native aspect ratio and crop-box extents.
 
 ## SVG (vector output)
 
@@ -178,6 +229,8 @@ using var stream = File.Create("page1.svg");
 device.Process(doc.Pages[1], stream);
 ```
 
+`Process(page, outputFileName)` writes to a path.
+
 ## Text
 
 `TextDevice` extracts plain text via the device API:
@@ -190,6 +243,9 @@ var device = new TextDevice();
 string singlePage = device.Process(doc.Pages[1]);
 string allText    = device.Process(doc);
 ```
+
+Constructor overloads take a `TextExtractionOptions` and/or the output
+`Encoding` (default UTF-16) used by the stream and file `Process` overloads.
 
 ## Rendering every page
 
@@ -211,3 +267,13 @@ for (int i = 1; i <= doc.PageCount; i++)
 var res1 = new Resolution(300);        // Uniform 300 DPI
 var res2 = new Resolution(300, 600);   // 300 x DPI, 600 y DPI
 ```
+
+The default is 150 DPI. The page is rendered at exactly the requested
+resolution — the output is `round(points × dpi / 72)` pixels on each axis
+(A4 at 150 DPI = 1240 × 1754) — and the DPI is recorded in the JPEG and TIFF
+headers. One guard applies: when the page at the requested DPI would
+exceed 40 million pixels, the resolution is halved until it fits.
+
+The `(width, height)` device constructors pin the output size instead: the page
+is drawn straight onto that pixel grid when its aspect ratio matches, and
+otherwise rendered at the given resolution and resampled bilinearly to fit.

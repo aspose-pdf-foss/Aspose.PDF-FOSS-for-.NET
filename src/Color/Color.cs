@@ -49,15 +49,37 @@ public sealed class Color
     /// <summary>Creates an empty (transparent black) color.</summary>
     public Color() : this(0, 0, 0, 0) { }
 
+    /// <summary>Create a colour from raw colour-space components (one entry =
+    /// DeviceGray, three = DeviceRGB), keeping the exact component values in
+    /// <see cref="Data"/> — the shape a 3D view's /BG colour array carries.</summary>
+    public Color(double[] components)
+        : this(255, ComponentByte(components, 0), ComponentByte(components, 1), ComponentByte(components, 2))
+    {
+        if (components is { Length: > 0 })
+        {
+            _data = (double[])components.Clone();
+            if (components.Length == 1) ColorType = ColorType.Grayscale;
+        }
+    }
+
+    // Map a raw component array onto byte channels: a single gray component
+    // replicates across R/G/B; a 3+ component array reads positionally.
+    private static byte ComponentByte(double[]? components, int index)
+    {
+        if (components is null || components.Length == 0) return 0;
+        if (components.Length == 1) return ToByte(components[0]);
+        return index < components.Length ? ToByte(components[index]) : (byte)0;
+    }
+
     private Color(byte a, byte r, byte g, byte b)
     {
         AByte = a; R = r; G = g; B = b;
     }
 
     // ── Value equality ─────────────────────────────────────────────
-    // Color is a value-like type: two FromRgb(0,0,0) calls compare equal, and the
+    // Color is a value-like type: two FromArgb(0,0,0) calls compare equal, and the
     // ColorSpace marker keeps RGB and CMYK distinct even when the byte values match
-    // (so FromRgb(1,0,0) != FromCmyk(1,0,0,0)).
+    // (so FromArgb(1,0,0) != FromCmyk(1,0,0,0)).
 
     /// <inheritdoc/>
     public override bool Equals(object? obj)
@@ -89,7 +111,11 @@ public sealed class Color
 
     public static Color FromArgb(int r, int g, int b) => new(255, (byte)r, (byte)g, (byte)b);
     public static Color FromArgb(int a, int r, int g, int b) => new((byte)a, (byte)r, (byte)g, (byte)b);
-    public static Color FromRgb(int r, int g, int b) => new(255, (byte)r, (byte)g, (byte)b);
+    /// <summary>Byte-component constructor for internal callers. NOT part of the
+    /// public surface: the public API offers FromRgb only with 0..1 doubles (and a
+    /// System.Drawing.Color), so a caller's <c>FromArgb(1, 0, 0)</c> is pure red there;
+    /// a public int overload would silently turn it into near-black.</summary>
+    internal static Color FromRgbBytes(int r, int g, int b) => new(255, (byte)r, (byte)g, (byte)b);
 
     public static Color FromRgb(double r, double g, double b) =>
         new(255, ToByte(r), ToByte(g), ToByte(b));
@@ -108,7 +134,7 @@ public sealed class Color
     }
 
     public static Color FromGray(double g) =>
-        new(255, ToByte(g), ToByte(g), ToByte(g));
+        new(255, ToByte(g), ToByte(g), ToByte(g)) { ColorType = ColorType.Grayscale };
 
     // Quantise a 0..1 colour component to an 8-bit channel by rounding (Adobe
     // convention), matching how XFDF/PDF colour values round-trip through #RRGGBB.

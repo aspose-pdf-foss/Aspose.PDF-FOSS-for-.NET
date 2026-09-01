@@ -57,8 +57,26 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
         0x20DE => 0x25A1,   // COMBINING ENCLOSING SQUARE  → WHITE SQUARE
         0x2610 or 0x2611 or 0x2612 => 0x25A1,   // BALLOT BOX (and its marked forms)
         0x2B24 or 0x2B58 => 0x25CF,             // BLACK LARGE CIRCLE / HEAVY CIRCLE
-        _ => 0,
+        _ => RadicalLookAlike(cp),
     };
+
+    /// <summary>A CJK radical (Radicals Supplement U+2E80–U+2EF3, Kangxi U+2F00–U+2FD5)
+    /// is a compatibility form of a unified ideograph (⽇ U+2F47 ≡ 日 U+65E5), and most
+    /// CJK text faces carry only the unified char — the radical is rendered
+    /// with the unified glyph (such templates). NFKC yields the
+    /// singleton; a radical with no mapping in the runtime's tables stays 0.</summary>
+    internal static int RadicalLookAlike(int cp)
+    {
+        if (cp is < 0x2E80 or > 0x2FD5) return 0;
+        try
+        {
+            var s = char.ConvertFromUtf32(cp).Normalize(System.Text.NormalizationForm.FormKC);
+            if (s.Length == 0) return 0;
+            var mapped = char.ConvertToUtf32(s, 0);
+            return mapped != cp ? mapped : 0;
+        }
+        catch { return 0; }
+    }
 
     /// <summary>Glyph id for a codepoint, falling back to the nearest shape this face DOES
     /// carry before giving up on the missing-glyph box. Every consumer that resolves a glyph
@@ -200,6 +218,11 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
     private GlyphOutline? ParseGlyph(int glyphId, int depth)
     {
         if (depth > 10 || _locaOffsets is null) return null;
+        // A composite glyph names its components by index, straight out of the font file,
+        // and reaches this method without passing GetOutline's range check. A component
+        // index past the end of /loca then read one entry BEYOND it for the glyph's end
+        // offset and took the page down with it.
+        if (glyphId < 0 || glyphId + 1 >= _locaOffsets.Length) return null;
 
         var start = _glyfOffset + _locaOffsets[glyphId];
         var end = _glyfOffset + _locaOffsets[glyphId + 1];
@@ -299,11 +322,16 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
             yCoords[i] = y;
         }
 
-        // Build contours
+        // Build contours. numPoints comes from the LAST endPt alone, so a font whose
+        // endPtsOfContours is not non-descending - or which names a point past the end -
+        // yields a count that walks the flag and coordinate arrays off their ends. The
+        // outline is unusable at that point, so report it missing like every other
+        // malformed case here rather than drawing part of it.
         var contours = new ContourPoint[numContours][];
         var ptIdx = 0;
         for (var c = 0; c < numContours; c++)
         {
+            if (endPts[c] < ptIdx - 1 || endPts[c] >= numPoints) return null;
             var count = endPts[c] - ptIdx + 1;
             var pts = new ContourPoint[count];
             for (var i = 0; i < count; i++)

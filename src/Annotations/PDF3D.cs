@@ -162,7 +162,11 @@ public sealed class PDF3DRenderMode
 
     public PDF3DRenderMode(string typeName)
     {
-        if (System.Enum.TryParse<RenderModeType>(typeName, ignoreCase: true, out var t))
+        // The PDF-spec subtype spells it "TransparentWireframe"; the public
+        // enum member carries the historical "WareFrame" spelling.
+        if (string.Equals(typeName, "TransparentWireframe", System.StringComparison.OrdinalIgnoreCase))
+            Type = RenderModeType.TransparentWareFrame;
+        else if (System.Enum.TryParse<RenderModeType>(typeName, ignoreCase: true, out var t))
             Type = t;
     }
 
@@ -288,6 +292,14 @@ public sealed class PDF3DView
     public PDF3DLightingScheme? LightingScheme { get; set; }
     public PDF3DRenderMode? RenderMode { get; set; }
     public string ViewName { get; set; } = string.Empty;
+
+    /// <summary>The view's internal name (/IN entry), distinct from the
+    /// user-visible <see cref="ViewName"/> (/XN).</summary>
+    public string? InternalName { get; set; }
+
+    /// <summary>Whether the view dictionary carried its own /BG entry —
+    /// a view without one inherits the default view's background.</summary>
+    internal bool HasOwnBackground;
 }
 
 /// <summary>Indexed collection of <see cref="PDF3DView"/> snapshots
@@ -339,6 +351,12 @@ public sealed class PDF3DArtwork
     public PDF3DLightingScheme? LightingScheme { get; set; }
     public PDF3DRenderMode? RenderMode { get; set; }
     public PDF3DViewArray ViewArray { get; } = new PDF3DViewArray();
+
+    private PDF3DStream? _pdf3dStream;
+
+    /// <summary>The /3DD stream wrapper for this artwork; its content is the
+    /// decoded 3D data this artwork was read with.</summary>
+    public PDF3DStream Pdf3DStream => _pdf3dStream ??= new PDF3DStream(null!, this);
 
     public PDF3DView[] GetViewsArray() => System.Linq.Enumerable.ToArray(ViewArray.Items);
     public ReadOnlyCollection<PDF3DView> GetViewsList()

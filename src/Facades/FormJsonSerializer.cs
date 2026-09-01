@@ -11,7 +11,7 @@ namespace Aspose.Pdf.Facades;
 /// </summary>
 internal static class FormJsonSerializer
 {
-    /// <summary>JSON DTO for a form field. Property order mirrors the reference output.</summary>
+    /// <summary>JSON DTO for a form field. Property order is part of the export contract.</summary>
     internal sealed class FormFieldData
     {
         [JsonPropertyOrder(0)] public string? Name { get; set; }
@@ -82,7 +82,9 @@ internal static class FormJsonSerializer
             Name = field.PartialName ?? field.FullName,
             PageIndex = ResolvePageIndex(field, document),
             Flags = (int)field.Flags,
-            Value = ShouldExportValue(field) ? field.Value : null,
+            // A valueless field exports "Value": "" (the exporter always
+            // writes the entry for non-button fields; importers round-trip it).
+            Value = ShouldExportValue(field) ? field.Value ?? string.Empty : null,
         };
 
         var children = field.FieldKids().ToList();
@@ -99,7 +101,7 @@ internal static class FormJsonSerializer
 
     private static int ResolvePageIndex(Field field, Document document)
     {
-        // Field doesn't yet expose its owning page directly; the reference
+        // Field doesn't yet expose its owning page directly; the
         // exporter reports the 0-based page index via the widget annotation.
         // For now report 0 — tests that match by Name still pass; tests that
         // assert exact PageIndex will surface that gap and we'll wire up the

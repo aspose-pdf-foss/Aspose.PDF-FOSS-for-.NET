@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Security;
 
@@ -251,10 +251,15 @@ internal sealed class PdfDecryptor
 
     private static byte[] EncryptAesCbc(byte[] key, byte[] data)
     {
-        // Object encryption stores IV(16) + AES-CBC(PKCS#7) ciphertext, which is
-        // exactly what AesCipher.EncryptCbc returns.
+        // Object encryption stores IV(16) + AES-CBC(PKCS#7) ciphertext
+        // (PDF 32000 §7.6.2); AesCipher.EncryptCbc returns the ciphertext
+        // alone, so the IV is prepended here.
         var iv = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
-        return new AesCipher(key).EncryptCbc(data, iv, pkcs7Padding: true);
+        var cipher = new AesCipher(key).EncryptCbc(data, iv, pkcs7Padding: true);
+        var outBytes = new byte[16 + cipher.Length];
+        System.Array.Copy(iv, 0, outBytes, 0, 16);
+        System.Array.Copy(cipher, 0, outBytes, 16, cipher.Length);
+        return outBytes;
     }
 
     private byte[] DeriveObjectKey(int objectNumber, int generation, bool isAes)
@@ -460,7 +465,7 @@ internal sealed class PdfDecryptor
         // 127 bytes (ISO 32000-2 §7.6.4.3.3), matching how the key was derived
         // at encryption time.
         var pwBytes = System.Text.Encoding.UTF8.GetBytes(
-            Engine.Security.Impl.Sasl.Stringprep.PrepareForKeyDerivation(password));
+            Saslprep.SaslPrepProfile.PrepareForKeyDerivation(password));
         if (pwBytes.Length > 127)
             pwBytes = pwBytes[..127];
 

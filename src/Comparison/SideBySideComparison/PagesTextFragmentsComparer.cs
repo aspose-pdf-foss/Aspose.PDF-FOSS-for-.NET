@@ -49,7 +49,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
             Text2 = text2;
 
             var diffs = new DiffSolver().FindDiff(Text1, Text2);
-            new OperationsMerger(Diff.DiffOptimization.EditOperationsOrder.DeleteFirst).Execute(diffs);
+            new OperationsMerger(EditOperationsOrder.DeleteFirst).Execute(diffs);
             new OperationsSlideMerger().Execute(diffs);
             // Canonicalising merges only — deliberately NOT the semantic pass
             // (MergingOptimizer), which folds a short equality back into the edits flanking it.
@@ -59,8 +59,8 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
             // change counts keep that granularity.
 
             var ids = AssignChangeIds(diffs);
-            firstEdits = _changesMapper.FindEditedFragments(fragments1, diffs, Diff.Operation.Delete, ids);
-            secondEdits = _changesMapper.FindEditedFragments(fragments2, diffs, Diff.Operation.Insert, ids);
+            firstEdits = _changesMapper.FindEditedFragments(fragments1, diffs, Operation.Delete, ids);
+            secondEdits = _changesMapper.FindEditedFragments(fragments2, diffs, Operation.Insert, ids);
             return diffs;
         }
 
@@ -80,7 +80,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
             var id = 0;
             for (var i = 0; i < diffs.Count; i++)
             {
-                if (diffs[i].Operation == Diff.Operation.Equal) continue;
+                if (diffs[i].Operation == Operation.Equal) continue;
                 ids[i] = ++id;
             }
             return ids;

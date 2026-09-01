@@ -1,8 +1,9 @@
 # Comparison
 
 Two ways to compare PDFs, plus the text-diff model both are built on. Everything
-lives in `Aspose.Pdf.Comparison`, except the diff primitives in
-`Aspose.Pdf.Comparison.Diff`:
+lives in `Aspose.Pdf.Comparison` — including the `Operation` and
+`EditOperationsOrder` enums — except the diff primitives `DiffOperation` and
+`DiffUtils` in `Aspose.Pdf.Comparison.Diff`:
 
 | API | Compares | Produces |
 |-----|----------|----------|
@@ -101,7 +102,8 @@ text comparison cannot — moved images, changed vector art, colour edits.
 
 > **Windows only.** `GraphicalPdfComparer` and `ImagesDifference` are marked
 > `[SupportedOSPlatform("windows")]` because they expose `System.Drawing` bitmaps.
-> On Linux/macOS, render both pages with `PngDevice` and diff the bytes yourself.
+> Page rendering itself is cross-platform: on Linux/macOS, render both pages with
+> `PngDevice` and diff the bytes yourself.
 
 ```csharp
 using Aspose.Pdf;
@@ -115,7 +117,7 @@ var comparer = new GraphicalPdfComparer
 {
     Resolution = new Resolution(150),
     Color = Color.Red,      // colour the differing pixels are marked in
-    Threshold = 0.01,       // per-pixel tolerance
+    Threshold = 5,          // per-channel tolerance in percent (0..100); 0 = exact
 };
 
 using var difference = comparer.GetDifference(v1.Pages[1], v2.Pages[1]);
@@ -123,23 +125,50 @@ using var image = difference.DifferenceToImage(Color.Red, Color.White);
 image.Save("diff.png");
 ```
 
+`Threshold` is a percentage of the per-channel colour range: two pixels whose
+channels differ by less than it count as identical. The default `0` flags any
+difference.
+
 `ImagesDifference` also exposes the raw data — `Difference` (an `int[]`), with
 `Stride` and `Height` describing its shape — plus `SourceImage` and
 `GetDestinationImage()` for the two rendered pages.
 
+The comparer can also write its result directly:
+
+```csharp
+comparer.ComparePagesToImage(v1.Pages[1], v2.Pages[1], "diff.png");
+comparer.ComparePagesToPdf(v1.Pages[1], v2.Pages[1], "diff.pdf");
+comparer.CompareDocumentsToPdf(v1, v2, "diff-all-pages.pdf");
+comparer.CompareDocumentsToImages(v1, v2, "diff-images", "page",
+    System.Drawing.Imaging.ImageFormat.Png);
+```
+
+`ComparePagesToPdf` also accepts a `Document` to append the result page to
+instead of a path.
+
 ## The diff model
 
 Both comparers sit on `Aspose.Pdf.Comparison.Diff`, which you can use directly on
-text. A `DiffOperation` pairs an `Operation` — `Equal`, `Delete`, or `Insert` — with
-the text run it applies to, and `DiffUtils` provides the helpers around it
-(`FindCommonStartParts`, `FindCommonEndParts`, `AssemblySourceText`).
+text. A `DiffOperation` pairs an `Operation` (the `Aspose.Pdf.Comparison.Operation`
+enum — `Equal`, `Delete`, or `Insert`) with the text run it applies to, and
+`DiffUtils` provides the helpers around it (`FindCommonStartParts`,
+`FindCommonEndParts`, `AssemblySourceText`, `AssemblyDestinationText`).
 
 ```csharp
 using Aspose.Pdf.Comparison.Diff;
 
-// reconstruct the original text from an edit sequence
+// reconstruct the original and the edited text from an edit sequence
 string source = DiffUtils.AssemblySourceText(result.FullChanges[0]);
+string target = DiffUtils.AssemblyDestinationText(result.FullChanges[0]);
 ```
+
+The edit sequences the comparers return are normalized by the mergers in
+`Aspose.Pdf.Comparison.Diff.DiffOptimization` (`OperationsMerger`,
+`MergingOptimizer`, `OperationsSlideMerger`, all implementing
+`IDiffOptimizationOperation`). Adjacent deletions and insertions are coalesced
+and emitted in the order given by `EditOperationsOrder` — `DeleteFirst` or
+`InsertFirst`; the comparers use `DeleteFirst`, so a replaced run appears as its
+`Delete` followed by its `Insert`.
 
 ## Notes
 

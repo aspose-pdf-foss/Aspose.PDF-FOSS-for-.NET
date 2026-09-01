@@ -32,6 +32,11 @@ namespace Aspose.Pdf.Printing
         public int FromPage { get; set; }
         public int ToPage { get; set; }
         public bool Collate { get; set; }
+        /// <summary>Route the job to <see cref="PrintFileName"/> instead of a
+        /// physical printer. The FOSS viewer honours a PDF target directly.</summary>
+        public bool PrintToFile { get; set; }
+        /// <summary>Target path for <see cref="PrintToFile"/> jobs.</summary>
+        public string PrintFileName { get; set; }
     }
 
     public class PaperSize

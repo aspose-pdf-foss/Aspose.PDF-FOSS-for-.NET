@@ -51,6 +51,19 @@ public sealed class BorderInfo
 
     private GraphInfo NewSide() => new GraphInfo { LineWidth = (float)Width };
 
+    /// <summary>True when any side draws: named by <see cref="Side"/> or given an
+    /// explicit GraphInfo (a `new BorderInfo()` whose four sides were assigned is a
+    /// full box even though Side stays None).</summary>
+    internal bool HasAnySide => Side != BorderSide.None
+        || TopAssigned || BottomAssigned || LeftAssigned || RightAssigned;
+
+    /// <summary>The sides that draw: <see cref="Side"/> plus every explicitly assigned side.</summary>
+    internal BorderSide EffectiveSides => Side
+        | (TopAssigned ? BorderSide.Top : BorderSide.None)
+        | (BottomAssigned ? BorderSide.Bottom : BorderSide.None)
+        | (LeftAssigned ? BorderSide.Left : BorderSide.None)
+        | (RightAssigned ? BorderSide.Right : BorderSide.None);
+
     public double RoundedBorderRadius { get; set; }
 
     public BorderInfo() { }
@@ -93,4 +106,26 @@ public sealed class BorderInfo
     }
 
     public object Clone() => MemberwiseClone();
+
+    /// <summary>A copy of this border with every side's <see cref="GraphInfo.IsDoubled"/>
+    /// cleared — the single rules a doubled border strokes around its inner box. The
+    /// Side flags and the per-side assignment record are kept exactly as they are, so
+    /// the copy draws the same sides the original does.</summary>
+    internal BorderInfo WithoutDoubling()
+    {
+        var copy = (BorderInfo)MemberwiseClone();
+        copy._top = Undoubled(_top);
+        copy._bottom = Undoubled(_bottom);
+        copy._left = Undoubled(_left);
+        copy._right = Undoubled(_right);
+        return copy;
+
+        static GraphInfo? Undoubled(GraphInfo? gi)
+        {
+            if (gi is null || !gi.IsDoubled) return gi;
+            var c = (GraphInfo)gi.Clone();
+            c.IsDoubled = false;
+            return c;
+        }
+    }
 }

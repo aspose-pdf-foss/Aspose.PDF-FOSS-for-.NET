@@ -22,6 +22,13 @@ internal sealed class CidFontInfo
     /// </summary>
     public System.Collections.Generic.Dictionary<int, int>? CMapCodeToCid { get; init; }
 
+    /// <summary>True when the font's embedded CMap declares ONLY single-byte
+    /// codespace ranges — a fixed-width one-byte encoding whose codes are CIDs.
+    /// False for a mixed-width CMap (a UTF-8 CMap declares 1- to 4-byte ranges):
+    /// its codes cannot be walked at a constant step, so such a font keeps the
+    /// simple-font path.</summary>
+    public bool HasFixedSingleByteCMap { get; init; }
+
     /// <summary>
     /// True when the 2-byte encoding produces Unicode codepoints directly
     /// (Uni*-UCS2-*, Uni*-UTF16-*) rather than Adobe CIDs. Affects fallback
@@ -153,6 +160,7 @@ internal sealed class CidFontInfo
         // the stream's codespace ranges. Custom subset CMaps name themselves after
         // the font (e.g. "NQTMYA+Lucida Sans Unicode,Bold") which can't be guessed.
         System.Collections.Generic.Dictionary<int, int>? cmapCodeToCid = null;
+        var singleByteCMap = false;
         if (encStream is not null)
         {
             try
@@ -160,6 +168,7 @@ internal sealed class CidFontInfo
                 var cmapBytes = reader.DecodeStream(encStream);
                 if (!isTwoByte)
                     isTwoByte = CMapHasTwoByteCodespace(cmapBytes);
+                singleByteCMap = !isTwoByte && CMapHasOnlySingleByteCodespace(cmapBytes);
                 // Custom CMaps map byte-codes → CIDs via `cidchar` / `cidrange`.
                 // Without this, codes hit `CidToGidMap[code]` directly, which
                 // produces wrong glyphs (e.g. 0x0046 looked up as CID 70 instead
@@ -217,6 +226,7 @@ internal sealed class CidFontInfo
             CidToGidMap = cidToGid,
             Ordering = ordering,
             CMapCodeToCid = cmapCodeToCid,
+            HasFixedSingleByteCMap = singleByteCMap,
             LegacyCodepage = legacyCodepage,
             CjkBaseFont = fontDict.GetName("BaseFont"),
             IsVertical = encoding is not null && encoding.EndsWith("-V", StringComparison.Ordinal),
@@ -354,6 +364,38 @@ internal sealed class CidFontInfo
     /// emitted by PDF generators for Type0 fonts use either all-1-byte or all-2-byte
     /// ranges. Spot the first 2-byte range and treat the whole CMap as 2-byte.
     /// </summary>
+    /// <summary>True when EVERY codespace range in the CMap declares single-byte
+    /// codes. A CMap that mixes code widths (a UTF-8 CMap declares 1-, 2-, 3- and
+    /// 4-byte ranges) is NOT a fixed-width one-byte encoding: its codes cannot be
+    /// walked at a constant step, so such a font stays on the simple-font path.</summary>
+    private static bool CMapHasOnlySingleByteCodespace(byte[] cmapBytes)
+    {
+        if (cmapBytes is null || cmapBytes.Length == 0) return false;
+        var text = System.Text.Encoding.Latin1.GetString(cmapBytes);
+        var start = text.IndexOf("begincodespacerange", StringComparison.Ordinal);
+        if (start < 0) return false;
+        var end = text.IndexOf("endcodespacerange", start, StringComparison.Ordinal);
+        if (end < 0) return false;
+        var slice = text.Substring(start, end - start);
+        var any = false;
+        for (var i = 0; i < slice.Length; i++)
+        {
+            if (slice[i] != '<') continue;
+            var close = slice.IndexOf('>', i + 1);
+            if (close < 0) break;
+            var hexCount = 0;
+            for (var k = i + 1; k < close; k++)
+            {
+                var c = slice[k];
+                if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) hexCount++;
+            }
+            if (hexCount > 2) return false; // a range wider than one byte
+            if (hexCount > 0) any = true;
+            i = close;
+        }
+        return any;
+    }
+
     private static bool CMapHasTwoByteCodespace(byte[] cmapBytes)
     {
         if (cmapBytes is null || cmapBytes.Length == 0) return false;

@@ -163,7 +163,7 @@ public class ManagedInflaterTests
             rnd.NextBytes(input);
             var compressed = CompressZlib(input);
 
-            // BCL decoded (golden truth on a working host).
+            // BCL decoded (the expected output on a working host).
             var bcl = DecompressViaBcl(compressed);
             var mine = ManagedInflater.InflateZlib(compressed);
             Assert.Equal(bcl, mine);

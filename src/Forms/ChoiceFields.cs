@@ -178,12 +178,18 @@ public class ChoiceField : Field
         }
     }
 
-    /// <summary>0-based selected-option indices (public-API shape int[] sibling
-    /// of <see cref="SelectedIndices"/>; setter rewrites /V from the matching
-    /// options).</summary>
+    /// <summary>Selected-option indices, **1-based** like <see cref="Option.Index"/>,
+    /// <see cref="Options"/> and <see cref="Selected"/> — `SelectedItems = [1, 3]`
+    /// selects the first and third options and reads back as `[1, 3]`.
+    /// (<see cref="SelectedIndices"/> stays 0-based; this is the public-API shape.)</summary>
     public int[] SelectedItems
     {
-        get => SelectedIndices.ToArray();
+        get
+        {
+            var res = new List<int>();
+            foreach (var i in SelectedIndices) res.Add(i + 1);
+            return res.ToArray();
+        }
         set
         {
             if (value is null || value.Length == 0)
@@ -194,7 +200,7 @@ public class ChoiceField : Field
             var opts = Options;
             var picked = new List<string>();
             foreach (var i in value)
-                if (i >= 0 && i < opts.Count) picked.Add(opts[i + 1].Value);
+                if (i >= 1 && i <= opts.Count) picked.Add(opts[i].Value);
             SelectedValues = picked;
         }
     }
@@ -705,9 +711,12 @@ public class ListBoxField : ChoiceField
     {
     }
 
-    /// <summary>Set-only selected-items array.</summary>
+    /// <summary>Selected-items array. Readable as well as writable: a caller that
+    /// assigns a selection commonly reads it straight back, and the base exposes
+    /// both directions already.</summary>
     public new int[] SelectedItems
     {
+        get => base.SelectedItems;
         set => base.SelectedItems = value;
     }
 

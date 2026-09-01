@@ -77,8 +77,13 @@ internal static class FontSubsetter
     /// Walks the page tree recursively and follows text into Form XObjects and
     /// annotation appearance streams — a font used ONLY inside a form/appearance
     /// (or a code used only there) must not lose its glyphs to the subset.
+    /// A font written as a DIRECT dictionary in its resources (the form /DA embed
+    /// nests the whole Type0 graph inline; the writer hoists it only at save time)
+    /// has no object number — its codes are recorded in <paramref name="directCodes"/>
+    /// keyed by dictionary instance.
     /// </summary>
-    public static Dictionary<int, HashSet<int>> CollectUsedGlyphs(PdfReader reader)
+    public static Dictionary<int, HashSet<int>> CollectUsedGlyphs(PdfReader reader,
+        Dictionary<PdfDictionary, HashSet<int>>? directCodes = null)
     {
         // Map: font object number → used character codes
         var usedCodes = new Dictionary<int, HashSet<int>>();
@@ -96,7 +101,7 @@ internal static class FontSubsetter
 
             var resources = reader.ResolveDict(node.Get("Resources"));
             foreach (var streamBytes in GetContentStreams(node, reader))
-                CollectFromContext(streamBytes, resources, reader, usedCodes, visitedForms);
+                CollectFromContext(streamBytes, resources, reader, usedCodes, directCodes, visitedForms);
 
             // Annotation appearance streams draw with their own resources.
             if (reader.Resolve(node.Get("Annots")) is PdfArray annots)
@@ -109,7 +114,7 @@ internal static class FontSubsetter
                     byte[] data;
                     try { data = reader.DecodeStream(apStream); } catch { continue; }
                     var apRes = reader.ResolveDict(apStream.Dict.Get("Resources")) ?? resources;
-                    CollectFromContext(data, apRes, reader, usedCodes, visitedForms);
+                    CollectFromContext(data, apRes, reader, usedCodes, directCodes, visitedForms);
                 }
         }
 
@@ -120,12 +125,14 @@ internal static class FontSubsetter
     /// <summary>Scan one content stream for text-show codes against its resource
     /// context, recursing through Form XObjects invoked with Do.</summary>
     private static void CollectFromContext(byte[] streamBytes, PdfDictionary? resources,
-        PdfReader reader, Dictionary<int, HashSet<int>> usedCodes, HashSet<PdfDictionary> visitedForms)
+        PdfReader reader, Dictionary<int, HashSet<int>> usedCodes,
+        Dictionary<PdfDictionary, HashSet<int>>? directCodes, HashSet<PdfDictionary> visitedForms)
     {
         var fontResources = resources is not null ? reader.ResolveDict(resources.Get("Font")) : null;
 
         // Font resource name → (dict, objNum, CID-keyed?). A composite (Type0)
-        // font's show-string bytes are 2-byte codes.
+        // font's show-string bytes are 2-byte codes. A direct (inline) font dict
+        // keeps objNum 0 and its codes go to directCodes.
         var fontMap = new Dictionary<string, (PdfDictionary dict, int objNum, bool isCid)>();
         if (fontResources is not null)
             foreach (var fontKey in fontResources.Keys)
@@ -133,13 +140,13 @@ internal static class FontSubsetter
                 var fontRef = fontResources.Get(fontKey);
                 int fontObjNum = fontRef is PdfIndirectRef iref ? iref.ObjectNumber : 0;
                 var fontDict = reader.ResolveDict(fontRef);
-                if (fontDict is not null && fontObjNum > 0)
+                if (fontDict is not null && (fontObjNum > 0 || directCodes is not null))
                     fontMap[fontKey] = (fontDict, fontObjNum, fontDict.GetName("Subtype") == "Type0");
             }
 
         var xobjRes = resources is not null ? reader.ResolveDict(resources.Get("XObject")) : null;
 
-        CollectUsedCodesFromStream(streamBytes, fontMap, usedCodes, xobjName =>
+        CollectUsedCodesFromStream(streamBytes, fontMap, usedCodes, directCodes, xobjName =>
         {
             if (xobjRes is null) return;
             if (reader.Resolve(xobjRes.Get(xobjName)) is not PdfStream formStream) return;
@@ -148,7 +155,7 @@ internal static class FontSubsetter
             byte[] data;
             try { data = reader.DecodeStream(formStream); } catch { return; }
             var subRes = reader.ResolveDict(formStream.Dict.Get("Resources")) ?? resources;
-            CollectFromContext(data, subRes, reader, usedCodes, visitedForms);
+            CollectFromContext(data, subRes, reader, usedCodes, directCodes, visitedForms);
         });
     }
 
@@ -158,13 +165,14 @@ internal static class FontSubsetter
     public static void SubsetEmbeddedFonts(PdfReader reader, Func<int, PdfStream?>? resolveNewStream = null,
         bool newlyEmbeddedOnly = false)
     {
-        var usedCodes = CollectUsedGlyphs(reader);
-        if (usedCodes.Count == 0) return;
+        var directCodes = new Dictionary<PdfDictionary, HashSet<int>>();
+        var usedCodes = CollectUsedGlyphs(reader, directCodes);
+        if (usedCodes.Count == 0 && directCodes.Count == 0) return;
 
         // Composite (Type0/CID) fonts first: group by FontFile2 stream so a program
         // shared between several font dictionaries is subset ONCE with the union of
         // their used CIDs (subsetting per-dict would drop the other dict's glyphs).
-        SubsetCidFonts(reader, usedCodes, resolveNewStream, newlyEmbeddedOnly);
+        SubsetCidFonts(reader, usedCodes, directCodes, resolveNewStream, newlyEmbeddedOnly);
 
         // Simple fonts, also grouped by FontFile2 stream: the PDF/A embedder shares one
         // program object between identical faces referenced by several font dictionaries,
@@ -315,6 +323,7 @@ internal static class FontSubsetter
     /// several font dictionaries are subset once with the union of their used CIDs.
     /// </summary>
     private static void SubsetCidFonts(PdfReader reader, Dictionary<int, HashSet<int>> usedCodes,
+        Dictionary<PdfDictionary, HashSet<int>> directCodes,
         Func<int, PdfStream?>? resolveNewStream, bool newlyEmbeddedOnly = false)
     {
         // FontFile2 stream → (union of used GIDs, participating font dicts)
@@ -322,9 +331,20 @@ internal static class FontSubsetter
         // CIDToGIDMap stream → union of used CIDs across the fonts sharing it.
         var byMap = new Dictionary<PdfStream, (HashSet<int> cids, byte[] data)>();
 
+        // Indirect fonts (keyed by object number) and direct inline ones (the form
+        // /DA embed nests its Type0 graph in the resources; the writer hoists it at
+        // save time, so at optimize time it exists only as an instance).
+        var candidates = new List<(PdfDictionary fontDict, HashSet<int> charCodes)>();
         foreach (var (fontObjNum, charCodes) in usedCodes)
         {
             if (reader.Resolve(new PdfIndirectRef(fontObjNum, 0)) is not PdfDictionary fontDict) continue;
+            candidates.Add((fontDict, charCodes));
+        }
+        foreach (var (fontDict, charCodes) in directCodes)
+            candidates.Add((fontDict, charCodes));
+
+        foreach (var (fontDict, charCodes) in candidates)
+        {
             if (fontDict.GetName("Subtype") != "Type0") continue;
 
             var descendants = reader.Resolve(fontDict.Get("DescendantFonts")) as PdfArray;
@@ -503,6 +523,7 @@ internal static class FontSubsetter
     private static void CollectUsedCodesFromStream(byte[] streamBytes,
         Dictionary<string, (PdfDictionary dict, int objNum, bool isCid)> fontMap,
         Dictionary<int, HashSet<int>> usedCodes,
+        Dictionary<PdfDictionary, HashSet<int>>? directCodes = null,
         Action<string>? onFormXObject = null)
     {
         var lexer = new PdfLexer(streamBytes);
@@ -547,23 +568,23 @@ internal static class FontSubsetter
                             break;
 
                         case "Tj" when operands.Count >= 1 && operands[0] is PdfString s:
-                            CollectCodesFromString(s.Value, currentFontKey, fontMap, usedCodes);
+                            CollectCodesFromString(s.Value, currentFontKey, fontMap, usedCodes, directCodes);
                             break;
 
                         case "TJ" when operands.Count >= 1 && operands[0] is PdfArray arr:
                             foreach (var item in arr)
                             {
                                 if (item is PdfString ts)
-                                    CollectCodesFromString(ts.Value, currentFontKey, fontMap, usedCodes);
+                                    CollectCodesFromString(ts.Value, currentFontKey, fontMap, usedCodes, directCodes);
                             }
                             break;
 
                         case "'" when operands.Count >= 1 && operands[0] is PdfString qs:
-                            CollectCodesFromString(qs.Value, currentFontKey, fontMap, usedCodes);
+                            CollectCodesFromString(qs.Value, currentFontKey, fontMap, usedCodes, directCodes);
                             break;
 
                         case "\"" when operands.Count >= 3 && operands[2] is PdfString dqs:
-                            CollectCodesFromString(dqs.Value, currentFontKey, fontMap, usedCodes);
+                            CollectCodesFromString(dqs.Value, currentFontKey, fontMap, usedCodes, directCodes);
                             break;
 
                         case "Do" when operands.Count >= 1 && operands[0] is PdfName xobjName:
@@ -586,12 +607,24 @@ internal static class FontSubsetter
     /// </summary>
     private static void CollectCodesFromString(byte[] bytes, string? currentFontKey,
         Dictionary<string, (PdfDictionary dict, int objNum, bool isCid)> fontMap,
-        Dictionary<int, HashSet<int>> usedCodes)
+        Dictionary<int, HashSet<int>> usedCodes,
+        Dictionary<PdfDictionary, HashSet<int>>? directCodes)
     {
         if (currentFontKey is null) return;
         if (!fontMap.TryGetValue(currentFontKey, out var fontInfo)) return;
 
-        if (!usedCodes.TryGetValue(fontInfo.objNum, out var codes))
+        HashSet<int>? codes;
+        if (fontInfo.objNum == 0)
+        {
+            // Direct (inline) font dictionary — keyed by instance.
+            if (directCodes is null) return;
+            if (!directCodes.TryGetValue(fontInfo.dict, out codes))
+            {
+                codes = new HashSet<int>();
+                directCodes[fontInfo.dict] = codes;
+            }
+        }
+        else if (!usedCodes.TryGetValue(fontInfo.objNum, out codes))
         {
             codes = new HashSet<int>();
             usedCodes[fontInfo.objNum] = codes;

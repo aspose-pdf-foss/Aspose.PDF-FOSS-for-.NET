@@ -109,6 +109,13 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
 
     private CffGlyphSource(byte[] data) { _data = data; }
 
+    /// <summary>Serve outlines with every vertex rounded to whole font units — how this
+    /// program renders after a TrueType conversion, whose glyf records store integer
+    /// coordinates (<see cref="Aspose.Pdf.RenderingOptions.ConvertFontsToUnicodeTTF"/>).
+    /// The quantization is the conversion's only render-visible effect: whisper-level
+    /// glyph-edge anti-aliasing shifts at large sizes, nothing structural.</summary>
+    public bool QuantizeToFontUnits { get; set; }
+
     public GlyphOutline? GetOutline(int glyphId)
     {
         if (glyphId < 0 || glyphId >= _charStrings.count) return null;
@@ -117,7 +124,16 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
 
         var fd = _fonts[GetFdIndex(glyphId)];
         var interp = new CffType2Interpreter(_data, _globalSubrs, fd.LocalSubrs);
-        try { return interp.Run(csData); }
+        try
+        {
+            var outline = interp.Run(csData);
+            // A Unicode TTF can only be built over a font addressed by character —
+            // CID-keyed programs stay unconverted (the converter leaves them
+            // alone: CID-font renders are identical with the flag on).
+            return QuantizeToFontUnits && !IsCidKeyed && outline is not null
+                ? GlyphOutlineQuantizer.Quantize(outline, UnitsPerEm)
+                : outline;
+        }
         catch { return null; }
     }
 

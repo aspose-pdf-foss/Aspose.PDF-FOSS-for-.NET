@@ -20,8 +20,12 @@ internal static class TaggedXmlExporter
     internal static byte[] Export(Document document)
     {
         var reader = document.Reader;
+        // XML conversion serialises the logical structure tree, so a document
+        // without one cannot be converted at all — that is a document-level
+        // condition callers catch as PdfException, not a programming error.
         var root = reader.ResolveDict(reader.Catalog.Get("StructTreeRoot"))
-            ?? throw new InvalidOperationException("The document has no structure tree (/StructTreeRoot) to convert to XML.");
+            ?? throw new PdfException(
+                "Only tagged PDF documents are supported for XML conversion: the document has no structure tree (/StructTreeRoot).");
 
         var sb = new StringBuilder();
         sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n");

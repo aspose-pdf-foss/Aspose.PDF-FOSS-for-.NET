@@ -258,6 +258,87 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
     /// Walks through tokens looking for /Artifact BMC or /Artifact «props» BDC
     /// sequences and extracts text from Tj/TJ operators within each artifact block.
     /// </summary>
+    /// <summary>The raw <c>/Artifact … BDC … EMC</c> byte block of every artifact PARSED from
+    /// this page's content, in page order. An artifact read back out of a document carries no
+    /// model of its own — no image, colour or text this library could re-render — so the only
+    /// faithful way to put it on another page is to copy the block it was read from. Artifacts
+    /// this library models (watermark, background) are skipped: those re-render properly and
+    /// would otherwise be stamped twice.</summary>
+    internal List<byte[]> RawArtifactBlocks()
+    {
+        var blocks = new List<byte[]>();
+        EnsureParsed();
+        var content = _page.GetContentStreamBytes();
+        if (content is null || content.Length == 0) return blocks;
+        for (int i = 0; i < _items!.Count; i++)
+        {
+            if (_items[i] is WatermarkArtifact or BackgroundArtifact) continue;
+            if (FindArtifactBlockRange(content, i) is not var (start, end) || end <= start) continue;
+            var slice = new byte[end - start];
+            Array.Copy(content, start, slice, 0, end - start);
+            // A block a stamp API wrote THIS session stays on its own page: only
+            // artifacts the page was loaded with repeat on continuation pages
+            // (parsed artifacts repeat; an API-added PdfPageStamp does
+            // not follow the table onto its spill page).
+            if (IsSessionStampBlock(slice)) continue;
+            blocks.Add(slice);
+        }
+        return blocks;
+    }
+
+    /// <summary>True when <paramref name="slice"/> is (or sits inside) an
+    /// /Artifact block a stamp API wrote into this page during THIS session —
+    /// the parsed block range and the recorded stamp bytes may differ by
+    /// surrounding whitespace, so containment is checked both ways.</summary>
+    private bool IsSessionStampBlock(byte[] slice)
+    {
+        if (_page.SessionStampBlocks.Count == 0) return false;
+        // The page's content is whitespace-normalised by the time the block is
+        // sliced back out (operators re-joined with single spaces), so the raw
+        // stamp bytes never match verbatim — compare with every whitespace run
+        // collapsed to one space on both sides.
+        var sliceWs = CollapseWhitespace(slice);
+        foreach (var stamp in _page.SessionStampBlocks)
+        {
+            var stampWs = CollapseWhitespace(stamp);
+            if (Contains(stampWs, sliceWs) || Contains(sliceWs, stampWs))
+                return true;
+        }
+        return false;
+
+        static byte[] CollapseWhitespace(byte[] src)
+        {
+            var outBytes = new byte[src.Length];
+            int n = 0;
+            var inWs = true; // leading whitespace drops
+            foreach (var b in src)
+            {
+                if (b is (byte)' ' or (byte)'\n' or (byte)'\r' or (byte)'\t')
+                {
+                    if (!inWs) { outBytes[n++] = (byte)' '; inWs = true; }
+                }
+                else { outBytes[n++] = b; inWs = false; }
+            }
+            while (n > 0 && outBytes[n - 1] == (byte)' ') n--;
+            Array.Resize(ref outBytes, n);
+            return outBytes;
+        }
+
+        static bool Contains(byte[] haystack, byte[] needle)
+        {
+            if (needle.Length == 0 || needle.Length > haystack.Length) return false;
+            var limit = haystack.Length - needle.Length;
+            for (int i = 0; i <= limit; i++)
+            {
+                if (haystack[i] != needle[0]) continue;
+                int j = 1;
+                while (j < needle.Length && haystack[i + j] == needle[j]) j++;
+                if (j == needle.Length) return true;
+            }
+            return false;
+        }
+    }
+
     private void EnsureParsed()
     {
         if (_items is not null) return;

@@ -37,7 +37,7 @@ internal static class PubSecHandler
         var (keyLen, sha256, cfm, version, revision) = Info(algo);
 
         // Enveloped content = 20-byte seed + 4-byte permissions (big-endian).
-        var seed = CryptoRandom.GetBytes(20);
+        var seed = System.Security.Cryptography.RandomNumberGenerator.GetBytes(20);
         var p = (int)permissions;
         var content = new byte[24];
         Array.Copy(seed, content, 20);

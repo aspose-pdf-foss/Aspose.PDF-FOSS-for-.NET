@@ -16,6 +16,13 @@ public abstract class Stamp
     /// <summary>Sets <see cref="StampId"/>.</summary>
     public void setStampId(int id) { StampId = id; }
 
+    /// <summary>PdfFileStamp facade naming:
+    /// the stamp's /Fm{n} index starts at the COUNT of entries already in the page's
+    /// /XObject dict, then advances to the next free name — a page with no XObjects
+    /// gets /Fm0, a page already holding /Xf1 gets /Fm1, a page holding three forms
+    /// gets /Fm3. The public Page.AddStamp path keeps plain next-free-from-0.</summary>
+    internal bool NameFormAfterExistingXObjects { get; set; }
+
     /// <summary>Horizontal scale factor applied to the stamp (1.0 = original size).</summary>
     public double ZoomX { get; set; } = 1.0;
 

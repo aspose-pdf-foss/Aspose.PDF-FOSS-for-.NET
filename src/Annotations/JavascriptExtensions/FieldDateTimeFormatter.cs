@@ -248,18 +248,6 @@ public static class FieldDateTimeFormatter
 
     #region Input parsing
 
-    private static int? MonthNameToNumber(string s)
-    {
-        string lower = s.ToLowerInvariant();
-        for (int i = 0; i < MonthShort.Length; i++)
-        {
-            if (lower == MonthShort[i].ToLowerInvariant()) return i + 1;
-            if (lower == MonthLong[i].ToLowerInvariant()) return i + 1;
-            if (MonthLong[i].ToLowerInvariant().StartsWith(lower) && lower.Length >= 3) return i + 1;
-        }
-        return null;
-    }
-
     private static int ExpandYear(int raw)
     {
         if (raw >= 100) return raw;

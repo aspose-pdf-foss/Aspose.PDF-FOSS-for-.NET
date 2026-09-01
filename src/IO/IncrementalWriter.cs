@@ -25,11 +25,27 @@ internal sealed class IncrementalWriter
     /// drained at the end of <see cref="Flush"/>.</summary>
     private readonly Queue<(int objNum, PdfStream stream)> _deferredStreams = new();
 
-    public IncrementalWriter(Stream output, byte[] originalData, int startObjectNumber)
+    /// <summary>When the source document is encrypted (the copied trailer keeps its
+    /// /Encrypt), every string and every NEW stream appended here must be encrypted
+    /// with the per-object key — readers decrypt the whole file uniformly, so a
+    /// plaintext appendix comes back as garbage. Source-loaded streams
+    /// (<see cref="PdfStream.ObjectNumber"/> &gt; 0) still hold their original
+    /// ciphertext and are written verbatim.</summary>
+    private readonly Security.PdfDecryptor? _encryptor;
+
+    /// <summary>Object/generation of the indirect object currently being written —
+    /// the encryption key context. −1 outside an object body (e.g. the trailer,
+    /// which is never encrypted).</summary>
+    private int _curObjNum = -1;
+    private int _curGen;
+
+    public IncrementalWriter(Stream output, byte[] originalData, int startObjectNumber,
+        Security.PdfDecryptor? encryptor = null)
     {
         _output = output;
         _originalData = originalData;
         _nextObjectNumber = startObjectNumber;
+        _encryptor = encryptor;
     }
 
     /// <summary>
@@ -51,7 +67,11 @@ internal sealed class IncrementalWriter
     /// </summary>
     public void Flush(PdfDictionary originalTrailer, long originalStartXref)
     {
-        // 1. Copy the entire original PDF
+        // 1. Copy the entire original PDF. The output may be the very stream the
+        // document was read from (Save() writes back into its source FileStream,
+        // whose position is then at EOF) — rewind first, or the original bytes
+        // are appended AFTER themselves and the file doubles every save.
+        if (_output.CanSeek) _output.Seek(0, SeekOrigin.Begin);
         _output.Write(_originalData);
 
         // 1b. Producer comment
@@ -115,10 +135,20 @@ internal sealed class IncrementalWriter
 
     private void WriteIndirectObject(int objNum, int gen, PdfObject obj)
     {
-        WriteLn($"{objNum} {gen} obj");
-        WriteObject(obj);
-        Write("\n");
-        WriteLn("endobj");
+        _curObjNum = objNum;
+        _curGen = gen;
+        try
+        {
+            WriteLn($"{objNum} {gen} obj");
+            WriteObject(obj);
+            Write("\n");
+            WriteLn("endobj");
+        }
+        finally
+        {
+            _curObjNum = -1;
+            _curGen = 0;
+        }
     }
 
     /// <summary>Containers currently being written — detects direct-object cycles
@@ -144,14 +174,25 @@ internal sealed class IncrementalWriter
                 Write(r.ToString());
                 break;
             case PdfString s:
-                if (s.IsHex)
+                // In-memory strings are plaintext (the reader decrypts at parse);
+                // under an encrypted trailer they must be re-encrypted with the
+                // owning object's key. Ciphertext is binary — hex form keeps it
+                // byte-exact (a literal string would normalise CR bytes).
+                var strBytes = s.Value;
+                var writeHex = s.IsHex;
+                if (_encryptor is not null && _curObjNum > 0)
                 {
-                    Write($"<{Convert.ToHexString(s.Value)}>");
+                    strBytes = _encryptor.EncryptString(strBytes, _curObjNum, _curGen);
+                    writeHex = true;
+                }
+                if (writeHex)
+                {
+                    Write($"<{Convert.ToHexString(strBytes)}>");
                 }
                 else
                 {
                     Write("(");
-                    foreach (var c in s.Value)
+                    foreach (var c in strBytes)
                     {
                         if (c is (byte)'(' or (byte)')' or (byte)'\\')
                             _output.WriteByte((byte)'\\');
@@ -198,10 +239,18 @@ internal sealed class IncrementalWriter
                 finally { _inFlight.Remove(dict); }
                 break;
             case PdfStream stream:
-                stream.Dict.Set("Length", new PdfInteger(stream.RawData.Length));
+                // A NEW in-memory stream (ObjectNumber == 0, e.g. a regenerated
+                // appearance) holds plaintext and must be encrypted under the
+                // encrypted trailer; a source-loaded stream (ObjectNumber > 0)
+                // still holds its original ciphertext keyed to its own number
+                // and is copied verbatim.
+                var body = stream.RawData;
+                if (_encryptor is not null && _curObjNum > 0 && stream.ObjectNumber == 0)
+                    body = _encryptor.EncryptStream(body, _curObjNum, _curGen);
+                stream.Dict.Set("Length", new PdfInteger(body.Length));
                 WriteObject(stream.Dict);
                 Write("\nstream\n");
-                _output.Write(stream.RawData);
+                _output.Write(body);
                 Write("\nendstream");
                 break;
             case PdfIndirectRef iref:

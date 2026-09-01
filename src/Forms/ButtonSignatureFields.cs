@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -429,6 +429,10 @@ public class SignatureField : Field
         var facade = new Facades.PdfFileSignature(doc);
         facade.Sign(FullName ?? string.Empty, signature);
         _signedBytes = facade.ToByteArray();
+        // Chain the signed revision onto the owner document so a following
+        // field-level Sign signs THESE bytes (interleaved Add+Sign flows) and a
+        // no-arg Save persists every accumulated signature revision.
+        doc.PendingSignedBytes = _signedBytes;
     }
 
     /// <summary>Sign with a PFX from a stream + password — convenience over
@@ -476,12 +480,53 @@ public class SignatureField : Field
 
     /// <summary>Extract the visible-signature appearance and re-encode it as
     /// <paramref name="format"/>. The raw /AP /N stream is decoded then
-    /// re-saved through System.Drawing.Image — Windows-only at runtime.</summary>
+    /// re-saved through System.Drawing.Image — Windows-only at runtime, so off
+    /// Windows this reports null the way an undecodable appearance does; the
+    /// undecoded stream stays reachable through the parameterless overload.</summary>
     public Stream? ExtractImage(System.Drawing.Imaging.ImageFormat format)
     {
-        var raw = ExtractImage();
-        if (raw is null || format is null) return raw;
+        if (format is null) return ExtractImage();
+        // The appearance render below is ALREADY a PNG - PngDevice, which draws
+        // through the software renderer off Windows - so a PNG request needs no
+        // System.Drawing at all; only re-encoding into another format does. Off
+        // Windows serve the render (or the stored appearance) for PNG and report
+        // null for the formats that genuinely need GDI+; the Windows path below
+        // stays byte-identical.
+        if (!OperatingSystem.IsWindows())
+        {
+            // ImageFormat is inert metadata - comparing codec GUIDs runs anywhere;
+            // only ENCODING through System.Drawing is Windows-bound. The analyzer
+            // attributes the whole type, hence the pragma.
 #pragma warning disable CA1416
+            var wantsPng = format.Guid == System.Drawing.Imaging.ImageFormat.Png.Guid;
+#pragma warning restore CA1416
+            return wantsPng ? RenderAppearanceToRectSize() ?? ExtractImage() : null;
+        }
+#pragma warning disable CA1416
+        // The signature as it is SHOWN, at one pixel per point of its /Rect. An
+        // appearance is a DRAWING - ink, soft mask and background composited - not a
+        // picture stored in the field, so it is rendered rather than dug out of the /AP
+        // resources, where taking the first image found returns a mask as readily as the
+        // artwork it masks. It is drawn on its own: the page behind the widget is not
+        // part of the signature, and cropping the page would fold the form's own ruling
+        // into the result.
+        try
+        {
+            if (RenderAppearanceToRectSize() is { } shown)
+            {
+                using var bmp = new System.Drawing.Bitmap(shown);
+                var rendered = new MemoryStream();
+                bmp.Save(rendered, format);
+                rendered.Position = 0;
+                return rendered;
+            }
+        }
+        catch { /* fall back to the stored appearance below */ }
+
+        // No page to render against (a field held on its own, a widget with no /Rect):
+        // hand back whatever the appearance stores, re-encoded.
+        var raw = ExtractImage();
+        if (raw is null) return null;
         try
         {
             using var img = System.Drawing.Image.FromStream(raw);
@@ -493,6 +538,92 @@ public class SignatureField : Field
         catch { return null; }
 #pragma warning restore CA1416
     }
+
+
+    /// <summary>Render this signature's normal appearance on its own, sized to the
+    /// widget's /Rect at one pixel per point. Returns null when the field has no
+    /// appearance to draw, or when the document cannot host the temporary page the
+    /// appearance is drawn onto.</summary>
+    private Stream? RenderAppearanceToRectSize()
+    {
+        var doc = OwnerDocument;
+        var reader = doc?.Reader;
+        if (doc is null || reader is null) return null;
+
+        // The appearance lives on the field itself, or on the widget kid that draws it.
+        var apSource = Dict;
+        var apRef = AppearanceRefOf(apSource, reader);
+        if (apRef is null && reader.Resolve(Dict.Get("Kids")) is Aspose.Pdf.Core.PdfArray kids)
+            foreach (var kid in kids)
+            {
+                var kd = reader.ResolveDict(kid);
+                if (kd is null) continue;
+                apRef = AppearanceRefOf(kd, reader);
+                if (apRef is not null) break;
+            }
+        if (apRef is null) return null;
+        var form = reader.Resolve(apRef) as Aspose.Pdf.Core.PdfStream;
+        if (form is null) return null;
+
+        // The appearance states its own extent through /BBox; that box is what the
+        // widget shows, so the sheet it is drawn on is exactly that size.
+        var bbox = reader.ResolveArray(form.Dict.Get("BBox"));
+        if (bbox is not { Count: >= 4 }) return null;
+        static double N(Aspose.Pdf.Core.PdfObject? o) =>
+            o is Aspose.Pdf.Core.PdfInteger i ? i.Value : o is Aspose.Pdf.Core.PdfReal r ? r.Value : 0;
+        double bx = N(reader.Resolve(bbox[0])), by = N(reader.Resolve(bbox[1]));
+        double bw = Math.Abs(N(reader.Resolve(bbox[2])) - bx);
+        double bh = Math.Abs(N(reader.Resolve(bbox[3])) - by);
+        if (bw < 1 || bh < 1) return null;
+
+        Page? sheet = null;
+        try
+        {
+            sheet = doc.Pages.Add();
+            sheet.SetPageSize(bw, bh);
+            var res = new Aspose.Pdf.Core.PdfDictionary();
+            var xobjs = new Aspose.Pdf.Core.PdfDictionary();
+            xobjs.Set("X0", apRef);
+            res.Set("XObject", xobjs);
+            sheet.Dict.Set("Resources", res);
+            // Seat the box's own origin at the sheet's corner, so an appearance whose
+            // BBox does not start at zero still lands fully on the sheet.
+            var cb = new Content.ContentStreamBuilder();
+            cb.SaveState();
+            cb.SetMatrix(1, 0, 0, 1, -bx, -by);
+            cb.DrawXObject("X0");
+            cb.RestoreState();
+            sheet.SetContentStream(cb.Build());
+
+            var png = new MemoryStream();
+            new Aspose.Pdf.Devices.PngDevice(
+                new Aspose.Pdf.Devices.Resolution(PointsPerInch)).Process(sheet, png);
+            png.Position = 0;
+            return png;
+        }
+        catch { return null; }
+        finally
+        {
+            // The sheet is scaffolding: the caller's document must come back unchanged.
+            if (sheet is not null)
+                try { doc.Pages.Delete(sheet.Number); } catch { }
+        }
+    }
+
+    /// <summary>The indirect reference to a dictionary's normal (/N) appearance, kept as a
+    /// REFERENCE so it can be pointed at from another page without copying the stream.</summary>
+    private static Aspose.Pdf.Core.PdfObject? AppearanceRefOf(
+        Aspose.Pdf.Core.PdfDictionary dict, Aspose.Pdf.IO.PdfReader reader)
+    {
+        var ap = reader.ResolveDict(dict.Get("AP"));
+        var n = ap?.Get("N");
+        if (n is null) return null;
+        return reader.Resolve(n) is Aspose.Pdf.Core.PdfStream ? n : null;
+    }
+
+    /// <summary>Points per inch — rendering the widget's area at this resolution puts one
+    /// pixel on every point of its /Rect.</summary>
+    private const int PointsPerInch = 72;
 
     private static PdfDictionary BuildSignatureFieldDict(Rectangle rect)
     {

@@ -24,7 +24,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
 
     /// <summary>When set (the PdfFileStamp facade path), the imported form's /Font
     /// entries are hoisted to the TARGET page's /Resources/Font and removed from the
-    /// form's own resources — the reference layout, where the stamped page
+    /// form's own resources — the expected layout, where the stamped page
     /// exposes the stamp's fonts (F1/F2…) at page level and the form inherits them.</summary>
     internal bool PromoteFontsToPage { get; set; }
 
@@ -135,7 +135,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
 
             // Hoist the imported form's fonts for page-level promotion (facade path):
             // capture the /Font entries and strip the key from the form's resources so
-            // the form inherits them from the page (the reference layout).
+            // the form inherits them from the page (the expected layout).
             if (PromoteFontsToPage)
             {
                 var formRes = targetReader.ResolveDict(formDict.Get("Resources"))
@@ -188,7 +188,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         }
 
         // Re-apply the hoisted stamp fonts to this target page's /Resources/Font
-        // (fresh names are NOT invented: the reference keeps the source names,
+        // (fresh names are NOT invented: the source names are kept,
         // e.g. F1/F2; existing page entries win on collision).
         if (PromoteFontsToPage && _promotedFonts is { Count: > 0 })
         {
@@ -239,7 +239,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
 
         // Placement matrix. Normally axis-aligned (sx 0 0 sy X Y), but when the target
         // page is displayed rotated 90° the stamp must be rotated with it so it lands
-        // upright in the displayed view — the reference bakes the /Rotate 90 into
+        // upright in the displayed view — the /Rotate 90 is baked into
         // the matrix as (0 sx -sy 0  W-YIndent  XIndent), W being the page width.
         string matrix;
         var rot = ((targetPage.RotateDegrees % 360) + 360) % 360;
@@ -258,7 +258,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         }
 
         // Draw the stamp form inside an /Artifact marked-content block with a default
-        // graphics state (matches the reference): the overlay is a pagination
+        // graphics state: the overlay is a pagination
         // artifact, not real page content, and the leading `gs` resets the graphics
         // state so the stamp is isolated from whatever state the page content left.
         var gsName = targetPage.AddExtGState(new Content.ExtGState());
@@ -277,6 +277,10 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
     {
         var stampBytes = BuildContentStream(page);
         if (stampBytes.Length == 0) return;
+        // A session-stamped artifact belongs to THIS page alone — the flow's
+        // continuation-page artifact copy must not repeat it (see
+        // Page.SessionStampBlocks).
+        page.SessionStampBlocks.Add(stampBytes);
 
         if (IsBackground)
         {
@@ -295,8 +299,8 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         else
         {
             // Isolate the existing page content in its own q…Q so the appended stamp
-            // starts from a clean graphics state (matches the reference, which
-            // brackets the original content before overlaying the stamp).
+            // starts from a clean graphics state (the original content is
+            // bracketed before the stamp is overlaid).
             page.PrependContentStream("q\n"u8.ToArray());
             var wrapped = new byte[2 + stampBytes.Length];
             wrapped[0] = (byte)'Q';

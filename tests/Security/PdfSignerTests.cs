@@ -259,10 +259,43 @@ public class PdfSignerTests
         using var doc = Document.Open(signed);
         Assert.True(Signature.HasAny(doc));
 
+        // The banner draws in an embedded Identity-H face, so its words are hex glyph
+        // ids in the raw bytes. Decode them back
+        // through the face's own /ToUnicode CMap — which also proves the CMap is there
+        // and complete.
+        var text = DecodeBannerText(signed);
+        Assert.Contains("Digitally signed by 'John Doe'", text);
+        Assert.Contains("Reason: Approval", text);
+        Assert.Contains("Location: New York", text);
+    }
+
+    /// <summary>Every hex-string show in <paramref name="signed"/>, decoded glyph id →
+    /// character through the /ToUnicode bfchar entries the file carries.</summary>
+    private static string DecodeBannerText(byte[] signed)
+    {
         var raw = System.Text.Encoding.Latin1.GetString(signed);
-        Assert.Contains("Digitally signed by: John Doe", raw);
-        Assert.Contains("Reason: Approval", raw);
-        Assert.Contains("Location: New York", raw);
+        var map = new System.Collections.Generic.Dictionary<int, char>();
+        foreach (System.Text.RegularExpressions.Match pair in
+                 System.Text.RegularExpressions.Regex.Matches(raw,
+                     @"<([0-9A-Fa-f]{4})>\s*<([0-9A-Fa-f]{4})>"))
+        {
+            map[Convert.ToInt32(pair.Groups[1].Value, 16)] =
+                (char)Convert.ToInt32(pair.Groups[2].Value, 16);
+        }
+
+        var sb = new System.Text.StringBuilder();
+        foreach (System.Text.RegularExpressions.Match show in
+                 System.Text.RegularExpressions.Regex.Matches(raw, @"<([0-9A-Fa-f]{8,})>\s*Tj"))
+        {
+            var hex = show.Groups[1].Value;
+            for (var i = 0; i + 3 < hex.Length; i += 4)
+            {
+                var gid = Convert.ToInt32(hex.Substring(i, 4), 16);
+                sb.Append(map.TryGetValue(gid, out var ch) ? ch : '�');
+            }
+            sb.Append('\n');
+        }
+        return sb.ToString();
     }
 
     [Fact]
@@ -326,10 +359,16 @@ public class PdfSignerTests
         var streamData = dict.Get("__StreamData") as Aspose.Pdf.Core.PdfString;
         Assert.NotNull(streamData);
         var text = System.Text.Encoding.Latin1.GetString(streamData!.Value);
-        Assert.Contains("Digitally signed by: Test User", text);
+        Assert.Contains("Digitally signed by 'Test User'", text);
         Assert.Contains("Reason: Testing", text);
         Assert.Contains("Location: Office", text);
-        Assert.Contains("Date: 2025-01-01 12:00:00", text);
+        // The date line carries the signing instant as local wall-clock time with
+        // its own offset, so assert the shape and the converted instant rather than
+        // a fixed string (the offset depends on the running machine's zone).
+        Assert.Matches(@"Date: \d{4}\.\d{2}\.\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}", text);
+        var localSigned = new DateTime(2025, 1, 1, 12, 0, 0, DateTimeKind.Utc).ToLocalTime();
+        Assert.Contains("Date: " + localSigned.ToString("yyyy.MM.dd HH:mm:ss",
+            System.Globalization.CultureInfo.InvariantCulture), text);
     }
 
     [Fact]

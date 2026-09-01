@@ -24,8 +24,10 @@ foreach (var field in doc.Form.Fields)
 
 ### Look up a field by name
 
-`FindByName` returns the `Field`; the `this[name]` indexer returns the
-`WidgetAnnotation` for the matching field (throws if not found).
+`FindByName` returns the `Field`, or `null` when an AcroForm has no field of
+that name (it throws `ArgumentException` instead when the form is XFA-backed or
+has no fields at all). The `this[name]` indexer returns the `WidgetAnnotation`
+for the matching field and throws `ArgumentException` if not found.
 
 ```csharp
 var field = doc.Form.FindByName("firstName");
@@ -47,6 +49,31 @@ foreach (var (name, value) in data)
     Console.WriteLine($"{name} = {value}");
 ```
 
+For a round-trippable export use FDF / XFDF (`doc.Form.ExportFdf()` returns the
+FDF bytes, `ExportXfdf()` the XFDF string; `ImportFdf` / `ImportXfdf` read them
+back) or JSON:
+
+```csharp
+using Aspose.Pdf.Forms;
+
+// Every field with its value, flags, and widget appearance
+IEnumerable<FieldSerializationResult> results =
+    doc.Form.ExportToJson("fields.json", new ExportFieldsToJsonOptions { WriteIndented = true });
+
+foreach (var r in results)
+    Console.WriteLine($"{r.FieldFullName}: {r.FieldSerializationStatus}");
+
+// Re-create the fields in another document
+other.Form.ImportFromJson("fields.json");
+```
+
+The JSON records each widget's appearance stream; image XObjects referenced by
+an appearance (a barcode field's bars, for example) are captured as
+`FieldExportingData.AppearanceImageData` entries (`Name`, `Width`, `Height`,
+`BitsPerComponent`, `ColorSpace`, base64 `Data`) so the import redraws them.
+Only device colour spaces are captured; an appearance image with an ICC or
+indexed space is skipped.
+
 ## Field types
 
 `Aspose.Pdf.Forms.FieldType` values map to concrete field classes:
@@ -60,10 +87,20 @@ foreach (var (name, value) in data)
 | `ListBox`         | `ListBoxField`    | List box                             |
 | `Button`          | `ButtonField`     | Push button                          |
 | `Signature`       | `SignatureField`  | Digital-signature field              |
+| `Text`            | `DateField`       | Date input (a `TextBoxField` with a date format and calendar script) |
+| `Text`            | `BarcodeField`    | Barcode (a `TextBoxField` whose appearance draws the bars) |
+| `Text`            | `RichTextBoxField`| Rich-text input (a `TextBoxField` subclass) |
 
 `ChoiceField` is the shared base of `ComboBoxField` and `ListBoxField`; a
 concrete choice field reports `FieldType.ComboBox` or `FieldType.ListBox` (never
-a bare `Choice`).
+a bare `Choice`). `Field.Type` is derived from the field dictionary's `/FT` and
+flags, so the `TextBoxField` subclasses report `FieldType.Text`; the enum's
+`Barcode`, `Numeric`, `DateTime`, `Radio` (alias of `RadioButton`), and
+`Unknown` members exist for facade and export use.
+
+Signing through a `SignatureField` estimates the signature size by default;
+with `Signature.AvoidEstimatingSignatureLength` set, a signature larger than the
+fixed reservation raises `SignatureLengthMismatchException`.
 
 ### Text fields
 
@@ -79,6 +116,25 @@ foreach (var field in doc.Form.Fields)
                           $"multiline={textField.Multiline}");
     }
 }
+```
+
+A `DateField` is a text field whose value is a date: it stores the text formatted
+through `DateFormat` and reads it back as a `System.DateTime`
+(`DateTime.MinValue` when empty or unparseable). `Init(page)` registers the
+field's popup-calendar script on the document; it requires `PartialName` to be
+set and throws `EmptyValueException` otherwise.
+
+```csharp
+using Aspose.Pdf.Forms;
+
+var date = new DateField(page, new Rectangle(100, 560, 250, 580))
+{
+    PartialName = "startDate",
+    DateFormat  = "dd.MM.yyyy",
+};
+date.Init(page);
+doc.Form.Add(date, 1);          // page number is 1-based
+date.Value = new DateTime(2026, 9, 1);
 ```
 
 ### Checkboxes
@@ -230,6 +286,9 @@ byte[] flattened = editor.FlattenForm(File.ReadAllBytes("form.pdf"));
 File.WriteAllBytes("flat.pdf", flattened);
 ```
 
+At the DOM level call `doc.Form.Flatten()` (or `Flatten(doc)`) before saving; a
+bound `FormEditor` offers the same through `FlattenAllFields()`.
+
 ## Removing fields
 
 ```csharp
@@ -239,6 +298,9 @@ var editor = new FormEditor("form.pdf", "no-old.pdf");
 editor.RemoveField("oldField");
 editor.Save();
 ```
+
+The DOM equivalent is `doc.Form.Delete("oldField")` (or `Delete(field)`); new
+fields are attached with `doc.Form.Add(field, pageNumber)`.
 
 ## Renaming fields
 
@@ -260,7 +322,7 @@ using var doc = new Document("xfa.pdf");
 
 if (doc.Form.IsXfa)
 {
-    Console.WriteLine($"Form type: {doc.Form.Type}");   // Static or Dynamic
+    Console.WriteLine($"Form type: {doc.Form.Type}");   // FormType.Standard, Static, or Dynamic
     string? xml = doc.Form.GetXfaDatasetsXml();
     Console.WriteLine(xml);
 }
@@ -280,5 +342,21 @@ target.Save("with-xfa.pdf");
 
 Dynamic XFA layouts can be **flattened** to real PDF pages whose AcroForm fields
 stay searchable and fillable, and XFA datasets sync two-way with the AcroForm
-fields and export / import via FDF, XFDF, and XML. Fine-grained authoring of
-individual XFA dataset fields is still limited.
+fields and export / import via FDF, XFDF, and XML. Individual dataset fields are
+read and written through the `XFA` object by their dotted path, which also keeps
+the matching AcroForm field in sync:
+
+```csharp
+var xfa = doc.Form.XFA!;                  // null when the form is not XFA
+foreach (var name in xfa.FieldNames)
+    Console.WriteLine($"{name} = {xfa[name]}");
+
+xfa["form1.page1.customerName"] = "Jane Smith";
+xfa.SetFieldImage("form1.page1.photo", File.OpenRead("photo.jpg"));
+
+System.Xml.XmlNode? datasets = xfa.Datasets;   // the datasets packet
+System.Xml.XmlNode? template = xfa.Template;   // the template packet
+```
+
+`XFA.Config` and `XFA.Form` (the config and form packets) return `null`; only
+the datasets, template, and whole XDP are exposed.

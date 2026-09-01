@@ -4,26 +4,39 @@ using Aspose.Pdf.IO;
 namespace Aspose.Pdf;
 
 /// <summary>
-/// Numbering style for page labels.
+/// Numbering style for page labels and auto-sequenced headings.
 /// </summary>
+/// <remarks>
+/// The member VALUES are part of the public contract: arabic numerals are the
+/// ZERO member, so a style nobody assigns numbers in arabic, and
+/// <see cref="None"/> — the style that prints no number at all — is a distinct
+/// non-default member. Reordering these renames what an unset
+/// <see cref="Heading.Style"/> means.
+/// </remarks>
 public enum NumberingStyle
 {
-    None,
-    Decimal,
-    UpperRoman,
-    LowerRoman,
-    UpperAlpha,
-    LowerAlpha,
-    /// <summary>Public-API alias for <see cref="Decimal"/>.</summary>
-    NumeralsArabic = Decimal,
-    /// <summary>Public-API alias for <see cref="UpperRoman"/>.</summary>
-    NumeralsRomanUppercase = UpperRoman,
-    /// <summary>Public-API alias for <see cref="LowerRoman"/>.</summary>
-    NumeralsRomanLowercase = LowerRoman,
-    /// <summary>Public-API alias for <see cref="UpperAlpha"/>.</summary>
-    LettersUppercase = UpperAlpha,
-    /// <summary>Public-API alias for <see cref="LowerAlpha"/>.</summary>
-    LettersLowercase = LowerAlpha,
+    /// <summary>Arabic numerals ("1", "2", …). The DEFAULT style.</summary>
+    NumeralsArabic = 0,
+    /// <summary>Uppercase roman numerals ("I", "II", …).</summary>
+    NumeralsRomanUppercase = 1,
+    /// <summary>Lowercase roman numerals ("i", "ii", …).</summary>
+    NumeralsRomanLowercase = 2,
+    /// <summary>Uppercase letters ("A", "B", …).</summary>
+    LettersUppercase = 3,
+    /// <summary>Lowercase letters ("a", "b", …).</summary>
+    LettersLowercase = 4,
+    /// <summary>No number is printed.</summary>
+    None = 5,
+    /// <summary>Alias for <see cref="NumeralsArabic"/>.</summary>
+    Decimal = NumeralsArabic,
+    /// <summary>Alias for <see cref="NumeralsRomanUppercase"/>.</summary>
+    UpperRoman = NumeralsRomanUppercase,
+    /// <summary>Alias for <see cref="NumeralsRomanLowercase"/>.</summary>
+    LowerRoman = NumeralsRomanLowercase,
+    /// <summary>Alias for <see cref="LettersUppercase"/>.</summary>
+    UpperAlpha = LettersUppercase,
+    /// <summary>Alias for <see cref="LettersLowercase"/>.</summary>
+    LowerAlpha = LettersLowercase,
 }
 
 /// <summary>

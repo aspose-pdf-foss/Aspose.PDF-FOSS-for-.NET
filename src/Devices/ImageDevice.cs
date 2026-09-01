@@ -29,7 +29,7 @@ public abstract class ImageDevice
     public Aspose.Pdf.RenderingOptions RenderingOptions { get; set; } = new Aspose.Pdf.RenderingOptions();
 
     /// <summary>Which page box drives the rendered image extents. Stored for
-    /// API-parity; current renderer always uses the CropBox (which equals
+    /// API compatibility; current renderer always uses the CropBox (which equals
     /// the MediaBox when no explicit CropBox is set).</summary>
     public PageCoordinateType CoordinateType { get; set; } = PageCoordinateType.CropBox;
 
@@ -109,7 +109,18 @@ public abstract class ImageDevice
     /// portable software renderer, since GDI+ drawing is unavailable off Windows.
     /// </summary>
     private static IPageRenderer DefaultRenderer() =>
-        OperatingSystem.IsWindows() ? new GdiPlusPageRenderer() : new SoftwarePageRenderer();
+        OperatingSystem.IsWindows() && !ForceSoftwareRenderer
+            ? new GdiPlusPageRenderer()
+            : new SoftwarePageRenderer();
+
+    /// <summary>Diagnostic: <c>ASPOSE_PDF_FORCE_SOFTWARE_RENDERER=1</c> takes the
+    /// non-Windows path on Windows too. The two rasterisers do not agree pixel for
+    /// pixel, so a page that renders wrongly only off Windows is otherwise reproducible
+    /// only on a non-Windows host - a slow loop for what is usually an ordinary bug in
+    /// the software renderer. Read once: the renderer is chosen per device instance and
+    /// a mid-run flip would make one run disagree with itself.</summary>
+    private static readonly bool ForceSoftwareRenderer =
+        Environment.GetEnvironmentVariable("ASPOSE_PDF_FORCE_SOFTWARE_RENDERER") == "1";
 
     /// <summary>Convert a points dimension to pixels at the given DPI for the
     /// EXPLICIT page-size device ctors (e.g. <c>JpegDevice(PageSize.A4)</c>),
@@ -213,6 +224,11 @@ public abstract class ImageDevice
         {
             gdiOpt.DefaultFontName = RenderingOptions?.DefaultFontName;
             gdiOpt.AliasedVectorFills = RenderingOptions?.BarcodeOptimization ?? false;
+            gdiOpt.ConvertFontsToUnicodeTtf = RenderingOptions?.ConvertFontsToUnicodeTTF ?? false;
+        }
+        else if (_renderer is SoftwarePageRenderer swOpt)
+        {
+            swOpt.ConvertFontsToUnicodeTtf = RenderingOptions?.ConvertFontsToUnicodeTTF ?? false;
         }
 
         if (TargetWidth > 0 && TargetHeight > 0)

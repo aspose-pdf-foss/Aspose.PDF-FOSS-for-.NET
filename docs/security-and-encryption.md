@@ -10,9 +10,11 @@
 | `RC4x128`  | 128-bit  | PDF 1.4+    | Legacy                      |
 | `AESx128`  | 128-bit  | PDF 1.5+    | Recommended minimum         |
 | `AESx256`  | 256-bit  | PDF 2.0     | Strongest available         |
+| `Custom`   | —        | —           | Reported for a non-standard security handler (`ICustomSecurityHandler`) |
 
-All crypto primitives ship in pure managed C# — no native dependency on the
-host OS crypto provider.
+The ciphers and digests (AES, RC4, SHA-2, SHA-3, MD5, HMAC) ship in pure
+managed C#; the only call into the platform crypto provider is the
+random-number generator used for salts, file keys and file IDs.
 
 ### PDF 2.0 deprecation gates
 
@@ -20,8 +22,10 @@ ISO 32000-2 retires the SHA-1-era mechanisms, and this library refuses them up
 front rather than writing a file that violates its own declared version. These
 throw `DeprecatedFeatureException`:
 
-- **RC4 under the 2.0 encryption flag**, and any legacy security handler applied to
-  a document that is already PDF 2.0
+- **RC4 under the 2.0 encryption flag** — the `Encrypt(user, owner, privileges,
+  algorithm, usePdf20: true)` overload rejects `RC4x40` / `RC4x128` — and any
+  legacy security handler (`usePdf20: false`) applied to a document that is
+  already PDF 2.0
 - **Converting to PDF 2.0 while an RC4 encryptor is pending** — rejected instead of
   producing a self-violating document
 - **Signing a 2.0 document with a retired subfilter** — raw-RSA
@@ -49,6 +53,18 @@ doc.Encrypt("user123", "owner456", permissions, CryptoAlgorithm.AESx256);
 doc.Save("encrypted.pdf");
 ```
 
+`permissions` defaults to all-allowed and `algorithm` to `AESx128`; an overload
+takes the `Permissions` flags enum instead of `DocumentPrivilege`. A document
+carrying a **certification (DocMDP) signature** refuses encryption with
+`InvalidOperationException`, because encrypting would break the certification;
+ordinary approval signatures are not affected.
+
+Two further handlers are available: `Encrypt(user, owner, privileges,
+ICustomSecurityHandler)` installs your own `/Filter` implementation, and
+`Encrypt(Permissions, CryptoAlgorithm, IList<X509Certificate2>)` writes a
+public-key (certificate) security handler. A certificate-encrypted file is
+opened with the `Document(path, CertificateEncryptionOptions)` constructors.
+
 ### Via the `PdfFileSecurity` facade
 
 ```csharp
@@ -67,6 +83,13 @@ byte[] encrypted = security.EncryptFile(
 
 File.WriteAllBytes("encrypted.pdf", encrypted);
 ```
+
+The facade also has a bound-document form: construct it with an input/output
+path or stream (or call `BindPdf`), then `EncryptFile(userPassword,
+ownerPassword, privilege, keySize, cipher)`, `SetPrivilege`,
+`DecryptFile(ownerPassword)` or `ChangePassword(...)`, and `Save`. Those
+members return `bool`; set `AllowExceptions = true` to have failures throw
+instead (the last error is in `LastException`).
 
 ### Document privileges
 
@@ -102,6 +125,10 @@ var custom = new DocumentPrivilege
 | `AllowScreenReaders`    | Extract text for accessibility               |
 | `AllowAssembly`         | Insert, rotate, or delete pages              |
 | `AllowDegradedPrinting` | Low-resolution printing only                 |
+
+Single-permission presets (`DocumentPrivilege.Print`, `.Copy`, `.FillIn`, …)
+exist for each flag, `ChangeAllowLevel` / `CopyAllowLevel` / `PrintAllowLevel`
+give the graded view, and `Value` is the raw /P integer.
 
 ## Decrypting a PDF
 
@@ -162,8 +189,12 @@ if (info is not null)
     Console.WriteLine($"Algorithm:  {info.Algorithm}");
     Console.WriteLine($"Key length: {info.KeyLength} bits");
     Console.WriteLine($"V/R:        {info.Version}/{info.Revision}");
+    Console.WriteLine($"Passwords:  user={info.HasUserPassword} owner={info.HasOwnerPassword}");
 }
 ```
+
+`EncryptionInfo` is `null` for an unencrypted document; `doc.CryptoAlgorithm`
+is the nullable shortcut to `EncryptionInfo.Algorithm`.
 
 ## Digital signatures
 
@@ -185,6 +216,20 @@ byte[] signed = PdfSigner.Sign(input, cert, new SignatureOptions
 
 File.WriteAllBytes("signed.pdf", signed);
 ```
+
+Signing is an incremental update, so existing signatures stay valid. Further
+`SignatureOptions`: `SubFilter` (default `adbe.pkcs7.detached`), `Digest`
+(`DigestHashAlgorithm`, `Auto` picks by key type), `SigningDate`,
+`SignerName`, `DocMdpPermissions` (a certification signature), `UseLtv`,
+`TimestampUrl` / `TimestampBasicAuth` / `TimestampDigest` (RFC 3161
+timestamp), `CustomSignHash` (sign the digest with your own key material) and
+`Password` (for an encrypted input). `PdfSigner.SignDocumentTimestamp` adds a
+document-level timestamp signature.
+
+The `/Contents` placeholder is `ContentsSize` bytes (default 8192). A signature
+that does not fit throws `InvalidOperationException`, or
+`SignatureLengthMismatchException` when `AvoidEstimating` is set; raise
+`ContentsSize` (long certificate chains, timestamps, LTV data) in either case.
 
 ### Signing with a visible appearance
 
@@ -214,6 +259,9 @@ byte[] signed = PdfSigner.SignWithAppearance(input, cert,
 File.WriteAllBytes("signed-visible.pdf", signed);
 ```
 
+`SignatureAppearance` also takes `ContactInfo`, `SignDate`, `FontFamily`, and
+`ImageBytes` (a raster image drawn in the signature box).
+
 ### Loading certificates
 
 ```csharp
@@ -235,6 +283,8 @@ Console.WriteLine($"Subject: {cert1.SubjectName}");
 Console.WriteLine($"Issuer:  {cert1.IssuerName}");
 ```
 
+`SerialNumber` (bytes) is exposed as well.
+
 ### Verifying
 
 ```csharp
@@ -246,6 +296,21 @@ bool valid = PdfSigner.Verify(signedPdf);
 // Verify a single signature field by name
 bool fieldValid = PdfSigner.Verify(signedPdf, "Signature1");
 ```
+
+Both overloads accept an optional `password` for an encrypted file. These
+checks are cryptographic: byte range, digest and signature against the
+embedded signer certificate.
+
+Certificate **trust** is evaluated by the facade's
+`VerifySignature(name, ValidationOptions, out ValidationResult)` when
+`ValidationOptions.CheckCertificateChain` is set (the default). The chain is
+built from the certificates embedded in the signature plus the host's
+certificate stores — the machine-wide and the per-user intermediate CA stores,
+and the machine-wide and per-user root stores. Nothing is downloaded, every
+link is verified cryptographically, and validity is judged at the signing
+time, so a signer certificate that expired after signing still validates.
+Revocation checking (`ValidationMode.Strict` with OCSP / CRL) is not performed;
+such a request yields `ValidationStatus.Unknown` rather than `Valid`.
 
 ### `PdfFileSignature` facade
 
@@ -263,3 +328,11 @@ foreach (var name in sig.GetSignNames())
     Console.WriteLine($"  Signed at: {sig.GetDateTime(name)}");
 }
 ```
+
+`GetSignerName`, `GetReason`, `GetLocation`, `GetContactInfo`, `GetRevision`
+and `GetTotalRevision` read the signature dictionaries; `IsContainSignature()`
+and `IsCertified` summarise the document; `GetBlankSignNames()` lists unsigned
+signature fields. `RemoveSignature(name)` clears a signature (pass
+`removeField: true` to drop the field too), `RemoveSignatures()` clears them
+all, and `Save(path)` / `Save(stream)` writes the result. `IsLtvEnabled`
+reports whether long-term-validation data is present.

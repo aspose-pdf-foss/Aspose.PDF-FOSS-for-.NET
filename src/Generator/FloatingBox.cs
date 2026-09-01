@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.Drawing;
@@ -40,8 +40,9 @@ public class FloatingBox : BaseParagraph
     /// <summary>Whether the box should repeat on every page.</summary>
     public bool IsNeedRepeating { get; set; }
 
-    /// <summary>Inner padding of the box.</summary>
-    public MarginInfo? Padding { get; set; }
+    /// <summary>Inner padding of the box. Auto-initialised so an object
+    /// initialiser can write <c>Padding = { Top = 20 }</c> on a fresh box.</summary>
+    public MarginInfo? Padding { get; set; } = new MarginInfo();
 
     /// <summary>Outer margin of the box. Auto-initialized so callers can
     /// set <c>box.Margin.Top = 10</c> on a freshly-constructed FloatingBox.</summary>
@@ -70,6 +71,16 @@ public class FloatingBox : BaseParagraph
     /// <summary>How <see cref="Left"/> / <see cref="Top"/> are interpreted —
     /// Default participates in document flow, Absolute pins to page coordinates.</summary>
     public ParagraphPositioningMode PositioningMode { get; set; } = ParagraphPositioningMode.Default;
+
+    /// <summary>Continuation pages produced by the last <see cref="Build"/>: a
+    /// breakable table inside a fixed-height box spills its remaining rows here,
+    /// one content stream per fresh page (the box re-seated at the content top).
+    /// The flow layout appends them to the document's overflow pages.</summary>
+    internal List<byte[]> LastOverflowPages { get; } = new();
+
+    /// <summary>The box rectangle (page points) the last <see cref="Build"/> painted:
+    /// the area a paragraph <see cref="BaseParagraph.Hyperlink"/> covers.</summary>
+    internal Rectangle LastBoxRect { get; private set; } = new Rectangle(0, 0, 0, 0);
 
     /// <summary>
     /// Create a floating box with default (zero) dimensions.
@@ -213,6 +224,7 @@ public class FloatingBox : BaseParagraph
 
     public byte[] Build(Page page)
     {
+        LastOverflowPages.Clear();
         var pageHeight = page.Height;
         var builder = new ContentStreamBuilder();
 
@@ -241,10 +253,12 @@ public class FloatingBox : BaseParagraph
         // Columned text content: the columns flow past the box Height down to the
         // page bottom margin; the border wraps the first column only and grows to
         // the content height. Emitted as its own op run (content, then border).
+        LastBoxRect = new Rectangle(boxX, boxY, boxX + Width, boxY + Height);
+
         if (ColumnInfo is { ColumnCount: > 1 }
             && BuildColumnContent(page, boxX, boxY + Height, out var colContentH) is { } colOps)
         {
-            if (Border is not null && Border.Side != BorderSide.None)
+            if (Border is not null && Border.HasAnySide)
             {
                 var borderH = Math.Max(Height, colContentH);
                 var borderW = ParseFirstColumnWidth() ?? Width;
@@ -284,88 +298,99 @@ public class FloatingBox : BaseParagraph
         }
 
         // Draw border
-        if (Border is not null && Border.Side != BorderSide.None)
-        {
-            builder.SetLineWidth(Border.Width);
-            builder.SetStrokeColor(Border.Color);
-
-            var side = Border.Side;
-
-            if (side == BorderSide.All)
-            {
-                // A full border is emitted as a single rectangle subpath so the box
-                // outline is one `re` operator (matching the all-sides border shape)
-                // rather than four disjoint line segments.
-                builder.Rectangle(boxX, boxY, Width, Height);
-                builder.Stroke();
-            }
-            else
-            {
-                if (side.HasFlag(BorderSide.Bottom))
-                {
-                    builder.MoveTo(boxX, boxY);
-                    builder.LineTo(boxX + Width, boxY);
-                    builder.Stroke();
-                }
-
-                if (side.HasFlag(BorderSide.Top))
-                {
-                    builder.MoveTo(boxX, boxY + Height);
-                    builder.LineTo(boxX + Width, boxY + Height);
-                    builder.Stroke();
-                }
-
-                if (side.HasFlag(BorderSide.Left))
-                {
-                    builder.MoveTo(boxX, boxY);
-                    builder.LineTo(boxX, boxY + Height);
-                    builder.Stroke();
-                }
-
-                if (side.HasFlag(BorderSide.Right))
-                {
-                    builder.MoveTo(boxX + Width, boxY);
-                    builder.LineTo(boxX + Width, boxY + Height);
-                    builder.Stroke();
-                }
-            }
-        }
+        if (Border is not null && Border.HasAnySide)
+            StrokeBorder(builder, Border, boxX, boxY, Width, Height);
 
         // Render paragraph content (text fragments)
         var contentX = boxX + padLeft;
         var contentY = boxY + Height - padTop; // Start from top of content area
+        // Lines a fixed-height box could not show; they open a continuation page below.
+        var overflowLines = new List<(string Text, double FontSize, string FontRes, Color? Fill)>();
 
+        // The box's own alignment places its CONTENT inside the declared box — the box
+        // itself never moves (probed 2026-08-26: a bottom/right aligned 100x100 box
+        // still seats at the flow cursor and only its text moves).
+        //
+        // ⚠ The vertical alignments do NOT lay the children out as one stack:
+        //   • Bottom pins EVERY text paragraph's line box bottom to the box's bottom
+        //     edge — three paragraphs of 10/14/10 pt all bottom on the same y and
+        //     overprint each other.
+        //   • Center puts the FIRST paragraph's box centre on the box's centre and
+        //     then walks: each following paragraph's centre sits on the previous
+        //     paragraph's box BOTTOM (10/14/10 pt centre on 720/715/708 in a
+        //     670..770 box).
+        //   • Padding takes no part in either axis (a 15 pt padding moved nothing).
+        // Top keeps the ordinary stacking cursor.
+        var boxCentreCursor = boxY + Height / 2;
         foreach (var paragraph in Paragraphs)
         {
             if (paragraph is TextFragment textFragment)
             {
                 var fontSize = textFragment.TextState.FontSize;
-                var fontResName = EnsureFontResource(page, textFragment.TextState.FontName ?? "Helvetica");
-
-                // Move down by font size for each line (PDF text is baseline-positioned)
-                contentY -= fontSize;
-
-                if (contentY < boxY + padBottom)
-                    break; // No more room
-
-                builder.BeginText();
-                builder.SetFont(fontResName, fontSize);
-
+                var faceName = textFragment.TextState.FontName ?? "Helvetica";
+                var fontResName = EnsureFontResource(page, faceName);
+                // A fragment's text carries its own hard breaks; each is a LINE of the box,
+                // not part of one long run. Drawing the whole string as a single show ran it
+                // off the box (and off the page) and left the newlines in the extracted text.
+                var fragLines = (textFragment.Text ?? string.Empty).Split((char)10);
                 // Apply foreground color if set
                 if (textFragment.TextState.ForegroundColor is { } fg)
-                {
                     builder.SetFillColor(fg.R / 255.0, fg.G / 255.0, fg.B / 255.0);
+
+                for (var li = 0; li < fragLines.Length; li++)
+                {
+                    var lineText = fragLines[li].TrimEnd((char)13);
+                    // Move down by font size for each line (PDF text is baseline-positioned)
+                    contentY -= fontSize;
+                    if (contentY < boxY + padBottom)
+                    {
+                        // Out of box: the rest of the fragment CONTINUES rather than being
+                        // dropped. A fixed-height box bounds what it shows, and the remainder
+                        // is carried onto a fresh page where the box re-seats at
+                        // the page's content top with the same Height - the same rule a
+                        // breakable table inside a fixed-height box already follows.
+                        for (var lj = li; lj < fragLines.Length; lj++)
+                            overflowLines.Add((fragLines[lj].TrimEnd((char)13), fontSize,
+                                fontResName, textFragment.TextState.ForegroundColor));
+                        break;
+                    }
+                    // Where this LINE's own box bottoms, per the box's alignment. Each line of
+                    // a multi-line fragment is a line box of its own, so the alignment and the
+                    // seat below are taken per line rather than once for the whole run.
+                    var lineBottom = contentY;
+                    if (Height > 0)
+                    {
+                        if (VerticalAlignment == VerticalAlignment.Bottom) lineBottom = boxY;
+                        else if (VerticalAlignment == VerticalAlignment.Center)
+                        {
+                            lineBottom = boxCentreCursor - fontSize / 2;
+                            boxCentreCursor = lineBottom;
+                        }
+                    }
+                    // The baseline rides the face's own descent above the line box bottom,
+                    // as every other generator seat does.
+                    var seatY = lineBottom + DescentEm(faceName) * fontSize;
+                    var lineX = contentX;
+                    if (Width > 0 && HorizontalAlignment is HorizontalAlignment.Center or HorizontalAlignment.Right)
+                    {
+                        var runW = Aspose.Pdf.Text.TextPaginator.CreateMeasurer(faceName, fontSize, null)
+                            (lineText);
+                        var slack = Width - runW;
+                        if (slack > 0)
+                            lineX = boxX + (HorizontalAlignment == HorizontalAlignment.Center ? slack / 2 : slack);
+                    }
+                    builder.BeginText();
+                    builder.SetFont(fontResName, fontSize);
+                    builder.MoveTextPosition(lineX, seatY);
+                    builder.ShowText(lineText);
+                    builder.EndText();
                 }
-
-                builder.MoveTextPosition(contentX, contentY);
-                builder.ShowText(textFragment.Text);
-                builder.EndText();
-
                 // Add line spacing after the text
                 var lineSpacing = textFragment.TextState.LineSpacing > 0
                     ? textFragment.TextState.LineSpacing
                     : fontSize * 0.2; // Default 20% of font size as inter-paragraph spacing
                 contentY -= lineSpacing;
+                if (overflowLines.Count > 0) break;
             }
             else if (paragraph is HtmlFragment htmlChild)
             {
@@ -386,7 +411,33 @@ public class FloatingBox : BaseParagraph
                 // to 0), leaving the table detached from the box background. FlowLeftOffset
                 // sets the X; the BuildMultiPage startY argument sets the top edge.
                 table.FlowLeftOffset = contentX;
-                var tableContents = table.BuildMultiPage(page, contentY);
+                List<byte[]> tableContents;
+                if (table.IsBroken && Height > 0)
+                {
+                    // A breakable table inside a fixed-height box is BOUNDED by the
+                    // box: rows stop at the box's bottom edge, and the overflow
+                    // continues on fresh pages where the box re-seats at the page's
+                    // content top with the same Height (the generator's layout —
+                    // 100 rows in a 100 pt box run 8 rows on page 1 and 9 rows on
+                    // each continuation page).
+                    var contTopMargin = page.PageInfo?.Margin?.Top ?? 0;
+                    if (contTopMargin <= 0) contTopMargin = marginTop;
+                    var contBottom = pageHeight - contTopMargin - Height + padBottom;
+                    table.ContinuationBottomOverride = contBottom > 0 ? contBottom : 0;
+                    tableContents = table.BuildMultiPage(page, contentY,
+                        boxY + padBottom, contTopMargin);
+                    table.ContinuationBottomOverride = 0;
+                    // ⚠ MEASURED, UNRESOLVED: the box's border should repeat on
+                    // every continuation page (measured 2026-08-26 — a 20-row table in a
+                    // 200x100 bordered box comes out as two pages, both bordered).
+                    // Prepending the chrome to these spill streams does not reach the
+                    // materialised page, so the source of the spill content is not this
+                    // list alone; left as a known gap rather than shipped unverified.
+                    for (var pi = 1; pi < tableContents.Count; pi++)
+                        LastOverflowPages.Add(tableContents[pi]);
+                }
+                else
+                    tableContents = table.BuildMultiPage(page, contentY);
                 builder.RestoreState();
                 page.AddContentStream(builder.Build());
                 if (tableContents.Count > 0) page.AddContentStream(tableContents[0]);
@@ -414,9 +465,9 @@ public class FloatingBox : BaseParagraph
                     data = mem.ToArray();
                     if (keepPos >= 0) image.ImageStream.Position = keepPos;
                 }
-                else if (!string.IsNullOrEmpty(image.File) && System.IO.File.Exists(image.File))
+                else
                 {
-                    data = System.IO.File.ReadAllBytes(image.File);
+                    data = image.ReadSourceBytes();
                 }
                 if (data is null) continue;
 
@@ -455,7 +506,105 @@ public class FloatingBox : BaseParagraph
 
         builder.RestoreState();
 
+        // What the box could not show continues on a fresh page, where it re-seats at the
+        // page's content top with the same width, height and chrome.
+        if (overflowLines.Count > 0 && Height > 0)
+            EmitContinuationPages(page, overflowLines, boxX, padLeft, padTop, padBottom);
+
         return builder.Build();
+    }
+
+    /// <summary>Draw the lines a fixed-height box overflowed onto as many continuation pages as
+    /// they need, each recorded in <see cref="LastOverflowPages"/>. The box re-seats under the
+    /// page's own top margin (the same continuation seat a breakable table inside a fixed-height
+    /// box uses) and keeps its background and border, so the continuation reads as the same box.</summary>
+    private void EmitContinuationPages(Page page,
+        List<(string Text, double FontSize, string FontRes, Color? Fill)> lines,
+        double boxX, double padLeft, double padTop, double padBottom)
+    {
+        var topMargin = page.PageInfo?.Margin?.Top ?? 0;
+        if (topMargin <= 0) topMargin = Margin?.Top ?? 0;
+        var contBoxY = page.Height - topMargin - Height;
+        var idx = 0;
+        var guard = 0;
+        while (idx < lines.Count && guard++ < 512)
+        {
+            var b = new ContentStreamBuilder();
+            b.SaveState();
+            if (BackgroundColor is not null)
+            {
+                b.SetFillColor(BackgroundColor);
+                b.Rectangle(boxX, contBoxY, Width, Height);
+                b.Fill();
+            }
+            if (Border is not null && Border.HasAnySide)
+                StrokeBorder(b, Border, boxX, contBoxY, Width, Height);
+            var y = contBoxY + Height - padTop;
+            var drewAny = false;
+            while (idx < lines.Count)
+            {
+                var (text, fs, fontRes, fill) = lines[idx];
+                y -= fs;
+                if (y < contBoxY + padBottom && drewAny) break;
+                if (y < contBoxY + padBottom && !drewAny) { idx++; continue; } // never loop on a line that cannot fit
+                if (fill is { } c) b.SetFillColor(c.R / 255.0, c.G / 255.0, c.B / 255.0);
+                b.BeginText();
+                b.SetFont(fontRes, fs);
+                b.MoveTextPosition(boxX + padLeft, y);
+                b.ShowText(text);
+                b.EndText();
+                drewAny = true;
+                idx++;
+            }
+            b.RestoreState();
+            LastOverflowPages.Add(b.Build());
+            if (!drewAny) break;
+        }
+    }
+
+    /// <summary>Positive per-em descent of a Standard-14 face (Helvetica: 0.207) —
+    /// the lift from a line box's bottom to the baseline drawn in it.</summary>
+    private static double DescentEm(string faceName)
+    {
+        var d = Aspose.Pdf.Text.Standard14Fonts.GetDescent(faceName);
+        return d < 0 ? -d / 1000.0 : d / 1000.0;
+    }
+
+    /// <summary>Stroke a box border around (x, y, w, h). A full box (all four
+    /// sides, whether named by Side or assigned one by one) is one rectangle
+    /// outset by half the stroke width on every side, so the stroke sits just
+    /// outside the filled area (measured 2026-08-23); partial
+    /// sides are individual edge lines on the box edge.</summary>
+    internal static void StrokeBorder(ContentStreamBuilder builder, BorderInfo border,
+        double x, double y, double w, double h)
+    {
+        // A side assigned its own GraphInfo strokes in that GraphInfo's colour
+        // and width; the BorderInfo's own colour/width cover the rest.
+        var styled = border.RawTop ?? border.RawBottom ?? border.RawLeft ?? border.RawRight;
+        var width = styled is { LineWidth: > 0 } ? styled.LineWidth : border.Width;
+        builder.SetLineWidth(width);
+        builder.SetStrokeColor(styled?.Color ?? border.Color);
+        var side = border.EffectiveSides;
+        if ((side & BorderSide.Box) == BorderSide.Box)
+        {
+            // The box border is emitted TOP-anchored with a negative
+            // height (re x, yTop, w, -h), outset by half the stroke width —
+            // same ink as a bottom-anchored rect, but operator-inspecting
+            // consumers see the top edge in Re.Y (probed 2026-08-28: a
+            // 100x100 absolute box strokes re 389.95 770.05 100.1 -100.1).
+            var half = width / 2;
+            builder.Rectangle(x - half, y + h + half, w + width, -(h + width));
+            builder.Stroke();
+            return;
+        }
+        if (side.HasFlag(BorderSide.Bottom))
+            builder.MoveTo(x, y).LineTo(x + w, y).Stroke();
+        if (side.HasFlag(BorderSide.Top))
+            builder.MoveTo(x, y + h).LineTo(x + w, y + h).Stroke();
+        if (side.HasFlag(BorderSide.Left))
+            builder.MoveTo(x, y).LineTo(x, y + h).Stroke();
+        if (side.HasFlag(BorderSide.Right))
+            builder.MoveTo(x + w, y).LineTo(x + w, y + h).Stroke();
     }
 
     private static string EnsureFontResource(Page page, string baseFontName)

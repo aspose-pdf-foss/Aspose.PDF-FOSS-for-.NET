@@ -131,7 +131,7 @@ internal static class FieldCalculateScript
 
     private static string Num(double d) => d.ToString("R", CultureInfo.InvariantCulture);
 
-    /// <summary>Format a computed number the way Acrobat/Aspose report a calculated
+    /// <summary>Format a computed number the way Acrobat reports a calculated
     /// field value: an integral result carries no decimals ("21", "2000"); otherwise
     /// trailing zeros are trimmed.</summary>
     internal static string FormatNumber(double result)

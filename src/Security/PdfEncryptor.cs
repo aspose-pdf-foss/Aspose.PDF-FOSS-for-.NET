@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Security;
 
@@ -70,7 +70,7 @@ internal sealed class PdfEncryptor
         int version, int revision, PdfDictionary encryptDict)
         => new(fileKey, algorithm, version, revision,
             System.Array.Empty<byte>(), System.Array.Empty<byte>(), 0,
-            CryptoRandom.GetBytes(16), prebuiltDict: encryptDict);
+            System.Security.Cryptography.RandomNumberGenerator.GetBytes(16), prebuiltDict: encryptDict);
 
     /// <summary>Create an encryptor driven by a custom security handler. The handler
     /// supplies the /O and /U values, the /Perms string and the file key; the /Encrypt
@@ -103,7 +103,7 @@ internal sealed class PdfEncryptor
 
         return new PdfEncryptor(handler.CalculateEncryptionKey(userPassword),
             CryptoAlgorithm.RC4x128, handler.Version, handler.Revision,
-            oValue, uValue, permissions, fileId ?? CryptoRandom.GetBytes(16),
+            oValue, uValue, permissions, fileId ?? System.Security.Cryptography.RandomNumberGenerator.GetBytes(16),
             permsValue: permsValue, prebuiltDict: dict, custom: handler);
     }
 
@@ -149,24 +149,24 @@ internal sealed class PdfEncryptor
     public static PdfEncryptor CreateAES256(string userPassword, string ownerPassword,
         int permissions = -4, byte[]? fileId = null)
     {
-        fileId ??= CryptoRandom.GetBytes(16);
+        fileId ??= System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
 
         // SASLprep (RFC 4013) the passwords, then UTF-8 encode and truncate to
         // 127 bytes (ISO 32000-2 §7.6.4.3.3 / algorithm 2.B). SASLprep makes
         // visually-equivalent Unicode passwords derive the same key.
         var userPwBytes = System.Text.Encoding.UTF8.GetBytes(
-            Engine.Security.Impl.Sasl.Stringprep.PrepareForKeyDerivation(userPassword));
+            Saslprep.SaslPrepProfile.PrepareForKeyDerivation(userPassword));
         if (userPwBytes.Length > 127) userPwBytes = userPwBytes[..127];
         var ownerPwBytes = System.Text.Encoding.UTF8.GetBytes(
-            Engine.Security.Impl.Sasl.Stringprep.PrepareForKeyDerivation(ownerPassword));
+            Saslprep.SaslPrepProfile.PrepareForKeyDerivation(ownerPassword));
         if (ownerPwBytes.Length > 127) ownerPwBytes = ownerPwBytes[..127];
 
         // Generate random 32-byte file encryption key (FEK)
-        var fek = CryptoRandom.GetBytes(32);
+        var fek = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
 
         // --- U value ---
-        var uValidationSalt = CryptoRandom.GetBytes(8);
-        var uKeySalt = CryptoRandom.GetBytes(8);
+        var uValidationSalt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
+        var uKeySalt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
 
         // U[0.32] = ComputeHashR6(pw, valSalt, [])
         var uHash = CryptoHelper.ComputeHashR6(userPwBytes, uValidationSalt, []);
@@ -181,8 +181,8 @@ internal sealed class PdfEncryptor
         var ueValue = CryptoHelper.EncryptAes256NoIv(ueKeyHash, fek);
 
         // --- O value ---
-        var oValidationSalt = CryptoRandom.GetBytes(8);
-        var oKeySalt = CryptoRandom.GetBytes(8);
+        var oValidationSalt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
+        var oKeySalt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
 
         // O[0.32] = ComputeHashR6(ownerPw, valSalt, U[0.48])
         var oHash = CryptoHelper.ComputeHashR6(ownerPwBytes, oValidationSalt, uValue);
@@ -212,7 +212,7 @@ internal sealed class PdfEncryptor
         permsBlock[10] = (byte)'d';
         permsBlock[11] = (byte)'b';
         // Bytes 12-15: random
-        var randomTail = CryptoRandom.GetBytes(4);
+        var randomTail = System.Security.Cryptography.RandomNumberGenerator.GetBytes(4);
         randomTail.CopyTo(permsBlock, 12);
 
         var permsValue = CryptoHelper.EncryptAes256Ecb(fek, permsBlock);
@@ -225,7 +225,7 @@ internal sealed class PdfEncryptor
     private static PdfEncryptor Create(CryptoAlgorithm algorithm, int version, int revision,
         int keyLength, string userPassword, string ownerPassword, int permissions, byte[]? fileId)
     {
-        fileId ??= CryptoRandom.GetBytes(16);
+        fileId ??= System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
 
         // Ensure required permission bits are set (spec says bits 7-8 + 13-32 must be 1 for R>=3)
         if (revision >= 3)
@@ -364,7 +364,7 @@ internal sealed class PdfEncryptor
 
     private static byte[] EncryptAesCbc(byte[] key, byte[] data)
     {
-        var iv = CryptoRandom.GetBytes(16);
+        var iv = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
         var aes = new AesCipher(key);
         var encrypted = aes.EncryptCbc(data, iv, pkcs7Padding: true);
 

@@ -22,7 +22,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
         /// kind produce a thin positional caret instead. <paramref name="diffsIDs"/> maps a
         /// diff-operation index to its change id so paired edits correlate across pages.</summary>
         internal List<EditContainer> FindEditedFragments(List<Fragment> fragments,
-            List<DiffOperation> diffOperations, Diff.Operation operation, Dictionary<int, int> diffsIDs)
+            List<DiffOperation> diffOperations, Operation operation, Dictionary<int, int> diffsIDs)
         {
             var containers = new List<EditContainer>();
             var starts = BuildFragmentOffsets(fragments, out var totalLength);
@@ -32,7 +32,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
             {
                 var diff = diffOperations[i];
                 var length = diff.Text?.Length ?? 0;
-                if (diff.Operation == Diff.Operation.Equal)
+                if (diff.Operation == Operation.Equal)
                 {
                     position += length;
                     continue;

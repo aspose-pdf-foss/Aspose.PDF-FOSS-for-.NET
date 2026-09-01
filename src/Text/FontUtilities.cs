@@ -31,7 +31,7 @@ public sealed class FontUtilities : Document.IDocumentFontUtilities
     /// <summary>
     /// Returns all fonts referenced in the document (across all pages).
     /// </summary>
-    public Font[] GetAllFonts()
+    public global::Aspose.Pdf.Text.Font[] GetAllFonts()
     {
         var reader = _document.Reader;
         // Dedup by physical font-object identity (object number), NOT by /BaseFont
@@ -42,7 +42,7 @@ public sealed class FontUtilities : Document.IDocumentFontUtilities
         // get a unique negative id and are always kept.
         var seenFonts = new HashSet<int>();
         var visitedXObjects = new HashSet<int>(); // cycle guard for nested form XObjects
-        var result = new List<Font>();
+        var result = new List<global::Aspose.Pdf.Text.Font>();
 
         void Collect(Aspose.Pdf.Core.PdfDictionary? resources)
         {
@@ -58,7 +58,7 @@ public sealed class FontUtilities : Document.IDocumentFontUtilities
                     if (fd is null) continue;
                     var id = entry is Aspose.Pdf.Core.PdfIndirectRef r ? r.ObjectNumber : -(result.Count + 1);
                     if (seenFonts.Add(id))
-                        result.Add(new Font(key, fd, reader));
+                        result.Add(new global::Aspose.Pdf.Text.Font(key, fd, reader));
                 }
             }
 

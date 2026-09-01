@@ -2,7 +2,7 @@ using System;
 
 namespace Aspose.Pdf.Comparison.Diff
 {
-    /// <summary>A single edit produced when diffing two texts: an <see cref="Diff.Operation"/>
+    /// <summary>A single edit produced when diffing two texts: an <see cref="Operation"/>
     /// (Equal / Delete / Insert) together with the run of text it applies to.</summary>
     public sealed class DiffOperation : IEquatable<DiffOperation>
     {

@@ -217,7 +217,7 @@ public partial class SoundAnnotation : MarkupAnnotation
 
     /// <summary>Sound annotations have no typed Visit overload on
     /// <see cref="AnnotationSelector"/>, so Accept here is a no-op kept for reflection
-    /// parity.</summary>
+    /// compatibility.</summary>
     public override void Accept(AnnotationSelector visitor) { _ = visitor; }
 }
 

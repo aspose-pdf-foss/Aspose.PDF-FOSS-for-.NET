@@ -29,6 +29,10 @@ public sealed class TextSegment
         }
     }
 
+    /// <summary>Set the segment text without the page write-back (the caller is
+    /// already writing the change to the page some other way).</summary>
+    internal void SetTextQuiet(string text) => _text = text;
+
     /// <summary>Rewrite THIS segment's show operator on the owning fragment's source
     /// page when the caller assigns new segment text — scoped to the segment's own
     /// position exactly like the fragment-level setter, so sibling occurrences stay
@@ -40,6 +44,7 @@ public sealed class TextSegment
     {
         var page = Owner?.SourcePage;
         if (page is null || string.IsNullOrEmpty(oldText) || oldText == newText) return;
+        if (Owner?.AttachedSegment is not null) return; // rewritten from state at save
         var emit = ArabicShaper.ContainsArabic(newText)
             ? ArabicShaper.ShapeForDisplay(newText)
             : newText;
@@ -61,7 +66,25 @@ public sealed class TextSegment
     }
 
     /// <summary>The position of this segment on the page.</summary>
-    public Position? Position { get; set; }
+    public Position? Position
+    {
+        get => _position;
+        set
+        {
+            _position = value;
+            // Assigning a position re-seats the run: the seat lift is captured again
+            // from the state the segment carries NOW, and stays frozen through later
+            // font or size changes (which only patch the run's face).
+            if (Owner is { AttachedSegment: not null } owner)
+                SeatLift = TextBuilder.SeatLiftFor(owner, this);
+        }
+    }
+    private Position? _position;
+
+    /// <summary>The descriptor descent the writer added to <see cref="Position"/> when
+    /// this segment was last seated, or null while it has never been seated. Frozen
+    /// until the segment is seated again — see <c>TextBuilder.SeatLiftFor</c>.</summary>
+    internal double? SeatLift { get; set; }
 
     public Position? BaselinePosition { get; set; }
 
@@ -281,6 +304,10 @@ public sealed class TextSegmentCollection : System.Collections.Generic.IEnumerab
         if (segment is null) throw new ArgumentNullException(nameof(segment));
         segment.Owner = Owner;
         _segments.Add(segment);
+        // Joining a fragment that is already on a page seats the segment now, with
+        // the state it carries at this moment (see TextSegment.SeatLift).
+        if (Owner is { AttachedSegment: not null } owner)
+            segment.SeatLift = TextBuilder.SeatLiftFor(owner, segment);
         Owner?.RefreshTextFromSegments();
     }
 
@@ -304,6 +331,17 @@ public sealed class TextSegmentCollection : System.Collections.Generic.IEnumerab
     {
         foreach (var seg in _segments) seg.Owner = null;
         _segments.Clear();
+        Owner?.RefreshTextFromSegments();
+    }
+
+    /// <summary>Remove the segment at the 1-based <paramref name="index"/>.</summary>
+    public void Delete(int index)
+    {
+        if (index < 1 || index > _segments.Count)
+            throw new IndexOutOfRangeException($"Index {index} out of range [1, {_segments.Count}].");
+        var seg = _segments[index - 1];
+        _segments.RemoveAt(index - 1);
+        seg.Owner = null;
         Owner?.RefreshTextFromSegments();
     }
 

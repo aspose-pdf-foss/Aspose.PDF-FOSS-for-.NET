@@ -54,7 +54,15 @@ var device = new TextDevice();
 using var ms = new MemoryStream();
 device.Process(doc.Pages[1], ms);
 string pageText = device.Encoding.GetString(ms.ToArray());
+
+// Or take the string directly (per page or for the whole document)
+string direct = device.Process(doc.Pages[1]);
+string all    = device.Process(doc);
 ```
+
+`TextDevice` also has a `Process(Page, string outputFileName)` overload and
+accepts a `TextExtractionOptions` in its constructor, so the Pure / Raw modes
+above apply to it as well.
 
 ## Searching text
 
@@ -100,6 +108,11 @@ var absorber = new TextFragmentAbsorber(@"\btotal\b", options);
 absorber.Visit(doc.Pages[1]);
 ```
 
+`TextSearchOptions` also exposes `ExcludeRectangles` (areas to skip),
+`LimitToPageBounds`, `SearchInAnnotations` (include annotation appearance
+text), `IgnoreShadowText`, and `IgnoreResourceFontErrors`. `CaseSensitive`
+defaults to `true`.
+
 ### Across all pages
 
 ```csharp
@@ -125,7 +138,10 @@ doc.Save("updated.pdf");
 
 ### Replace with style changes
 
-`TextState.ForegroundColor` is `Aspose.Pdf.Color`; use `Color.FromRgb(...)` factories.
+`TextState.ForegroundColor` is `Aspose.Pdf.Color`. `Color.FromRgb(r, g, b)`
+takes **0..1 doubles** (values above 1 are clamped); `Color.FromArgb(r, g, b)`
+takes 0..255 integers, and `Color.FromRgb(System.Drawing.Color)` converts a GDI
+colour.
 
 ```csharp
 var absorber = new TextFragmentAbsorber("DRAFT");
@@ -134,7 +150,7 @@ absorber.Visit(doc);
 foreach (var fragment in absorber.TextFragments)
 {
     fragment.Text = "FINAL";
-    fragment.TextState.ForegroundColor = Color.FromRgb(0, 128, 0);   // green
+    fragment.TextState.ForegroundColor = Color.FromRgb(0, 0.5, 0);   // green
     fragment.TextState.IsBold = true;
 }
 ```
@@ -185,8 +201,8 @@ s.FontName         = "Times-Roman";
 s.IsBold           = true;
 s.IsItalic         = true;
 s.IsUnderline      = true;
-s.ForegroundColor  = Color.FromRgb(255, 0, 0);    // red
-s.BackgroundColor  = Color.FromRgb(255, 255, 0);  // yellow highlight
+s.ForegroundColor  = Color.FromRgb(1, 0, 0);      // red
+s.BackgroundColor  = Color.FromRgb(1, 1, 0);      // yellow highlight
 s.CharacterSpacing = 1.5f;
 s.WordSpacing      = 3f;
 ```
@@ -227,8 +243,8 @@ new TextBuilder(doc.Pages[1]).AppendText(fragment);
 
 ## Notes on the absorbers
 
-- `TextAbsorber` produces line-sorted plain text per page (or across the document). Its `Text` property is `Trim()`-ed.
-- `TextFragmentAbsorber` returns a typed collection of `TextFragment` instances, each carrying `Text`, `Rectangle`, `Position`, `TextState`, `Page`, `Segments`. Best for find / replace flows.
+- `TextAbsorber` produces line-sorted plain text per page (or across the document). Its `Text` property has trailing line breaks removed; Raw mode also strips leading whitespace, while Pure mode keeps a first line's leading column padding.
+- `TextFragmentAbsorber` returns a `TextFragmentCollection` (`Count`, 1-based indexer) of `TextFragment` instances, each carrying `Text`, `Rectangle`, `Position`, `TextState`, `Page`, `Segments`. Best for find / replace flows. A `TextEditOptions` passed to the constructor controls what happens when the replacement text contains glyphs the original font lacks (`NoCharacterAction.ReplaceFonts` substitutes a covering face from the registered font sources).
 - `ParagraphAbsorber` groups text into sections and paragraphs based on layout.
 - `TableAbsorber` produces `AbsorbedTable` rows / cells from tabular content — see [Working with Tables](working-with-tables.md).
 - `ImagePlacementAbsorber` extracts placed images with their page-space rectangles.

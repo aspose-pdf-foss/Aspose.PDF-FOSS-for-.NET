@@ -106,6 +106,30 @@ namespace Aspose.Pdf
 
         /// <summary>The decoded appearance content stream bytes, base64-encoded.</summary>
         public string? Content { get; set; }
+
+        /// <summary>Image XObjects referenced by the appearance content (e.g. a
+        /// barcode field's pre-rendered bars) — captured so the round-trip
+        /// redraws them instead of losing every <c>Do</c> in the content.</summary>
+        public List<AppearanceImageData>? Images { get; set; }
+    }
+
+    /// <summary>One image XObject of a widget appearance's /Resources, captured
+    /// decoded (samples, not filtered bytes) for the JSON round-trip. Only
+    /// device-named colour spaces are captured; an appearance image with an
+    /// indirect/ICC space is skipped rather than exported half-described.</summary>
+    public sealed class AppearanceImageData
+    {
+        /// <summary>The /Resources/XObject resource name the content refers to.</summary>
+        public string? Name { get; set; }
+        public int Width { get; set; }
+        public int Height { get; set; }
+        public int BitsPerComponent { get; set; }
+        /// <summary>The colour-space NAME (DeviceGray / DeviceRGB / DeviceCMYK).</summary>
+        public string? ColorSpace { get; set; }
+        public bool? ImageMask { get; set; }
+        public double[]? Decode { get; set; }
+        /// <summary>The decoded image samples, base64-encoded.</summary>
+        public string? Data { get; set; }
     }
 
     /// <summary>
@@ -236,6 +260,43 @@ namespace Aspose.Pdf.Forms
             var fonts = field.Reader.ResolveDict(res?.Get("Font"));
             if (fonts is not null && fonts.Count > 0)
                 entry.Fonts = new List<string>(fonts.Keys);
+
+            var xobjects = field.Reader.ResolveDict(res?.Get("XObject"));
+            if (xobjects is not null)
+            {
+                foreach (var name in xobjects.Keys)
+                {
+                    if (field.Reader.ResolveStream(xobjects.Get(name)) is not { } img) continue;
+                    if (img.Dict.GetName("Subtype") != "Image") continue;
+                    // Only device-named colour spaces round-trip; an ICC/indexed
+                    // space would need its own object graph — skip those images.
+                    var cs = field.Reader.Resolve(img.Dict.Get("ColorSpace")) as PdfName;
+                    var isMask = field.Reader.Resolve(img.Dict.Get("ImageMask")) is PdfBoolean { Value: true };
+                    if (cs is null && !isMask) continue;
+                    var data = new AppearanceImageData
+                    {
+                        Name = name,
+                        Width = (int)img.Dict.GetInt("Width"),
+                        Height = (int)img.Dict.GetInt("Height"),
+                        BitsPerComponent = (int)img.Dict.GetInt("BitsPerComponent"),
+                        ColorSpace = cs?.Value,
+                        ImageMask = isMask ? true : null,
+                        Data = System.Convert.ToBase64String(field.Reader.DecodeStream(img)),
+                    };
+                    if (field.Reader.Resolve(img.Dict.Get("Decode")) is PdfArray dec && dec.Count > 0)
+                    {
+                        data.Decode = new double[dec.Count];
+                        for (var i = 0; i < dec.Count; i++)
+                            data.Decode[i] = field.Reader.Resolve(dec[i]) switch
+                            {
+                                PdfReal r => r.Value,
+                                PdfInteger n2 => n2.Value,
+                                _ => 0,
+                            };
+                    }
+                    (entry.Images ??= new List<AppearanceImageData>()).Add(data);
+                }
+            }
 
             return entry;
         }

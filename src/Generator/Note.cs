@@ -14,7 +14,7 @@ public sealed class Note
     /// <summary>Content passed here becomes the note's body paragraph;
     /// the reference marker stays auto-numbered unless <see cref="Text"/>
     /// is set (setting Text never replaces this body).</summary>
-    public Note(string content) { Paragraphs.Add(new TextFragment(content)); }
+    public Note(string content) { Paragraphs.Add(new TextFragment(content) { AutoNoteText = true }); }
 
     /// <summary>Custom reference-marker label. When unset, the marker is the
     /// footnote's sequential number.</summary>

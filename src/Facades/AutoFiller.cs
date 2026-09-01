@@ -158,11 +158,20 @@ public sealed class AutoFiller : ISaveableFacade, IDisposable
     {
         foreach (DataColumn col in table.Columns)
         {
-            var raw = row[col];
-            if (raw is null || raw == DBNull.Value) continue;
             var field = doc.Form.FindFieldOrNull(col.ColumnName);
             if (field is null) continue;
-            field.Value = Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture) ?? "";
+            // The row IS the record: a column the row carries no data for
+            // (DBNull — e.g. an element absent from the imported XML) sets the
+            // field to the empty string, exactly as row[col].ToString() reads it.
+            // Skipping it would leave the template's own value in a merged
+            // document that is supposed to describe this row alone.
+            // The cell's own ToString() — CURRENT culture, like every other DataTable
+            // consumer — is the value; a date column must read back the way the caller
+            // sees it in the table, not in a normalised invariant form.
+            var raw = row[col];
+            field.Value = raw is null || raw == DBNull.Value
+                ? string.Empty
+                : Convert.ToString(raw) ?? string.Empty;
         }
     }
 

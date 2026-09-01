@@ -34,6 +34,17 @@ internal static class BidiReorderer
     }
 
     /// <summary>
+    /// Logical-order text to the VISUAL (left-to-right drawing) order a PDF
+    /// producer stores it in. UAX #9 L2 is its own inverse on the resolved
+    /// levels — the same run flips that take a drawn string to logical order
+    /// take a logical string to drawn order — so the extraction reorderer
+    /// serves both ways. The writer stores an RTL replacement this way
+    /// ("1114ש42לום" is written ם ו ל 4 2 ש 1 1 1 4), which is what the
+    /// reader then extracts back as the logical string.
+    /// </summary>
+    public static string ToVisualIfRtl(string text) => ReorderIfNeeded(text);
+
+    /// <summary>
     /// Check if a string contains any RTL characters (Hebrew, Arabic, etc.).
     /// </summary>
     public static bool ContainsRtl(string text)

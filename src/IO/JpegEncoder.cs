@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 
 namespace Aspose.Pdf.IO;
 
@@ -403,8 +403,16 @@ internal static class JpegEncoderImpl
 
             data[off] = t0 + t1;
             data[off + 4] = t0 - t1;
-            data[off + 2] = t2 * 1.847759065022574 + t3 * 0.7653668647301796;
-            data[off + 6] = t3 * 1.847759065022574 - t2 * 0.7653668647301796;
+            // Even-part rotation, in the factored form the odd part below already follows:
+            // a shared (t2 + t3) term at 0.541196100, then one further multiply per output.
+            // Writing it as t2*1.847759 + t3*0.765367 instead put roughly 3.4x too much of t2
+            // into coefficient 2 and swapped the weights in coefficient 6, so those two
+            // coefficients came out far too large - large enough to run past the +/-1023 the
+            // baseline AC categories can code, where the clamp below then flattened them and
+            // left 8x8 ringing all round hard edges even at quality 100.
+            var e1 = (t2 + t3) * 0.541196100;
+            data[off + 2] = e1 + t3 * 0.765366865;
+            data[off + 6] = e1 - t2 * 1.847759065;
 
             // Odd part
             var z1 = d4 + d7;

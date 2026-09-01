@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Aspose.Pdf.Comparison.Diff.DiffOptimization;
 
 namespace Aspose.Pdf.Comparison.Diff
 {
@@ -12,7 +13,15 @@ namespace Aspose.Pdf.Comparison.Diff
         /// The returned edits rebuild the source via <see cref="DiffUtils.AssemblySourceText"/>
         /// and the destination via <see cref="DiffUtils.AssemblyDestinationText"/>.</summary>
         public List<DiffOperation> FindDiff(string? oldText, string? newText)
-            => Main(oldText ?? string.Empty, newText ?? string.Empty);
+        {
+            var diffs = Main(oldText ?? string.Empty, newText ?? string.Empty);
+            // The bisect emits edits in the order the middle snake exposes them, which leaves
+            // adjacent runs of one kind and equalities that could be absorbed. Callers get the
+            // canonical script, so it is merged and slid before it leaves.
+            new DiffOptimization.MergingOptimizer(EditOperationsOrder.DeleteFirst)
+                .Execute(diffs);
+            return diffs;
+        }
 
         private static List<DiffOperation> Main(string text1, string text2)
         {

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -46,8 +46,16 @@ public sealed class ExternalFontCache
             var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             if (!string.IsNullOrEmpty(home))
                 dirs.Add(Path.Combine(home, ".fonts"));
+            var xdgData = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+            if (!string.IsNullOrEmpty(xdgData))
+                dirs.Add(Path.Combine(xdgData, "fonts"));
+            else if (!string.IsNullOrEmpty(home))
+                dirs.Add(Path.Combine(home, ".local", "share", "fonts"));
         }
-        var existing = dirs.Where(d => !string.IsNullOrEmpty(d) && Directory.Exists(d)).ToArray();
+        var existing = dirs.Where(d => !string.IsNullOrEmpty(d) && Directory.Exists(d))
+            .SelectMany(SystemFontResolver.WithSubdirectories)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
         // Always return at least one entry so callers can index [0] on any platform.
         return existing.Length > 0 ? existing : new[] { Directory.GetCurrentDirectory() };
     }

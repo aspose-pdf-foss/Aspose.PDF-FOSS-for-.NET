@@ -32,10 +32,18 @@ doc.Save("output.pdf");
 
 Standard properties: `Title`, `Author`, `Subject`, `Keywords`, `Creator`,
 `Producer`, `Trapped`, `CreationDate`, `ModDate` (the date properties are
-`DateTime`; `CreationTimeZone` / `ModTimeZone` expose the offset).
+`DateTime`, `DateTime.MinValue` when absent; `CreationTimeZone` / `ModTimeZone`
+expose the offset as a `TimeSpan`).
+
+Text values that fit PDFDocEncoding / Latin-1 are written as such; any other
+text (`Œ`, CJK, …) is written as UTF-16BE with a byte-order mark, so it
+round-trips unchanged.
 
 > `ModDate` is auto-stamped to the current time on save unless you set it
-> yourself.
+> yourself. `Producer` is stamped with the library's own identity on every
+> save unless you assign it explicitly (through `Info.Producer` or the XMP
+> `pdf:Producer` property); `Creator` is defaulted the same way only when it is
+> empty.
 
 ### Custom info properties
 
@@ -51,6 +59,10 @@ foreach (var key in doc.Info.Keys)
 doc.Info.ClearCustomData();   // drop custom keys, keep Title/Author/…
 doc.Info.Clear();             // drop everything
 ```
+
+`Info.ContainsKey(key)`, `Info.Remove(key)`, `Info.Count` and
+`DocumentInfo.IsPredefinedKey(key)` round out the dictionary surface;
+`SetCustom` / `GetCustom` / `Add` are aliases of the indexer.
 
 ## XMP metadata
 
@@ -72,6 +84,10 @@ doc.Metadata["pdf:Keywords"] = new XmpValue("finance, q3");
 doc.Save("output.pdf");
 ```
 
+An array value (or a structured `XmpValue`) is stored as nested RDF and comes
+back as the same shape; scalars are stored as text and surface typed
+(`IsInteger`, `IsDouble`, `IsDateTime`) on read.
+
 Read safely (the indexer throws `KeyNotFoundException` for an absent key, so
 probe first):
 
@@ -79,6 +95,12 @@ probe first):
 if (doc.Metadata.TryGetValue("dc:title", out var title))
     Console.WriteLine(title);
 ```
+
+`Metadata` implements `IDictionary<string, XmpValue>` (`Keys`, `Values`,
+`Count`, `ContainsKey`, `Remove`, `Clear`, enumeration). `Document.HasMetadata`
+reports whether the file carries a packet at all; `Metadata.PdfAidPart` /
+`PdfAidConformance` read the PDF/A identification, and
+`SetPdfAidPart(part, conformance)` writes it.
 
 ### Custom namespaces
 
@@ -89,13 +111,35 @@ doc.Metadata.RegisterNamespaceUri("contoso", "http://contoso.com/ns/1.0/");
 doc.Metadata["contoso:project"] = new XmpValue("Phoenix");
 ```
 
-The common prefixes (`dc`, `pdf`, `xmp`) are registered out of the box.
+The common prefixes are registered out of the box: `rdf`, `xmp`, `dc`, `pdf`,
+`xmpMM`, `xmpRights`, `pdfaid`, `pdfuaid` and `pdfe`.
+`GetNamespaceUriByPrefix` / `GetPrefixByNamespaceUri` query the registry.
 
 ## Info vs XMP
 
 Both stores can coexist; XMP is the ISO-standard mechanism and is what PDF/A
-requires. When you need a value in both places, set it in each — the library
-does not automatically mirror `Info` ⇄ XMP.
+requires. The library keeps the two in step on save as follows:
+
+- **XMP → Info fill.** When an `/Info` entry is missing or empty and the packet
+  carries the equivalent property, the packet value is copied in:
+  `dc:title` → `Title`, `dc:description` → `Subject`, `dc:creator` → `Author`,
+  `pdf:Keywords` → `Keywords`, `xmp:CreatorTool` → `Creator`,
+  `pdf:Producer` → `Producer`. An existing `/Info` value is never overwritten
+  this way.
+- **Dates.** When the packet is being rewritten anyway and already carries
+  `xmp:ModifyDate`, it follows the freshly stamped `/ModDate`; a packet that was
+  not touched is left byte-identical.
+- **PDF 2.0 saves.** When the file is written as PDF 2.0 (a document created
+  with `new Document(PdfVersion.v_2_0)`, or converted with
+  `PdfFormat.v_2_0`), every documentary entry — `Title`, `Author`, `Subject`,
+  `Keywords`, `Producer`, `Creator`, `CreationDate`, `ModDate` — is mirrored
+  into the packet under the `xmp:` prefix, and the four descriptive text
+  entries (`Title`, `Author`, `Subject`, `Keywords`) are then removed from
+  `/Info`, as ISO 32000-2 deprecates them there. Dates and the producing
+  application stay in `/Info`.
+
+For any other value you want in both places (custom keys, `dc:` properties on
+a 1.x file), set it in each store.
 
 ## What's next
 

@@ -130,7 +130,10 @@ public class TableAbsorberTests
 
         var pdf = PdfBuilder.BuildWithTextContent(Encoding.ASCII.GetBytes(content.ToString()));
         using var doc = Document.Open(pdf);
-        var absorber = new TableAbsorber();
+        // The default absorber reads RULED tables only (a page of header and footer
+        // lines holds no table for it); text-aligned, borderless
+        // recognition is the flow engine's.
+        var absorber = new TableAbsorber { UseFlowEngine = true };
         absorber.Visit(doc.Pages[1]);
 
         // Should detect table via text heuristic

@@ -8,6 +8,11 @@ internal sealed class PdfLexer
     private byte[] _data;
     private long _pos;
 
+    /// <summary>True when the most recent Keyword token began directly after a
+    /// regular character (it was split off a fused lexeme like "24.5m" —
+    /// damaged-stream salvage, not an authored operator).</summary>
+    public bool LastKeywordFused { get; private set; }
+
     public PdfLexer(byte[] data)
     {
         _data = data;
@@ -368,6 +373,12 @@ internal sealed class PdfLexer
     private Token ReadKeywordOrBool()
     {
         var startPos = _pos;
+        // A keyword glued straight onto the previous lexeme ("24.5m" split into
+        // 24.5 + m) is salvage from a damaged stream, not an authored operator —
+        // consumers that validate operator shape (operand counts) must not treat
+        // it as the real thing. Whitespace/delimiter-separated keywords are authored.
+        LastKeywordFused = startPos > 0 && startPos <= _data.Length
+            && !IsWhitespace(_data[startPos - 1]) && !IsDelimiter(_data[startPos - 1]);
         var sb = new StringBuilder();
 
         while (_pos < _data.Length)

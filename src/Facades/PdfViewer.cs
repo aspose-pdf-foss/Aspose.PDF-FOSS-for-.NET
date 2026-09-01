@@ -143,7 +143,11 @@ public class PdfViewer : IFacade, System.IDisposable
         // Copy out of the stream-backed image: GDI+ requires the source stream
         // to outlive a Bitmap decoded from it, and callers own the result.
         using var decoded = new Bitmap(ms);
-        return new Bitmap(decoded);
+        var result = new Bitmap(decoded);
+        // The Bitmap(Image) copy resets DPI metadata to the screen default;
+        // restore the requested rasterisation resolution.
+        result.SetResolution(Resolution, Resolution);
+        return result;
     }
 
     /// <summary>Renders every page to a <see cref="Bitmap"/>; see
@@ -170,9 +174,41 @@ public class PdfViewer : IFacade, System.IDisposable
 
     public void PrintDocument() => ThrowPrintingNotSupported();
     public void PrintDocumentWithSettings(PrinterSettings printerSettings)
-    { _ = printerSettings; ThrowPrintingNotSupported(); }
+    {
+        // A print-TO-FILE job needs no spooler: the document a spooler would hand
+        // to "Microsoft Print to PDF" is reproduced directly — each requested
+        // copy of the page range lands in the target file as its own pages
+        // (2 copies of a 1-page document print as a 2-page PDF).
+        if (printerSettings is { PrintToFile: true } ps
+            && !string.IsNullOrEmpty(ps.PrintFileName)
+            && ps.PrintFileName.EndsWith(".pdf", System.StringComparison.OrdinalIgnoreCase))
+        {
+            EnsureBound();
+            using var outDoc = new Document();
+            var from = ps.FromPage > 0 ? ps.FromPage : 1;
+            var to = ps.ToPage >= from && ps.ToPage > 0 && ps.ToPage <= _document.Pages.Count
+                ? ps.ToPage : _document.Pages.Count;
+            var copies = System.Math.Max(1, ps.Copies);
+            for (var c = 0; c < copies; c++)
+                for (var p = from; p <= to; p++)
+                    outDoc.Pages.Add(_document.Pages[p]);
+            outDoc.Save(ps.PrintFileName);
+            return;
+        }
+        ThrowPrintingNotSupported();
+    }
     public void PrintDocumentWithSettings(PageSettings pageSettings, PrinterSettings printerSettings)
-    { _ = pageSettings; _ = printerSettings; ThrowPrintingNotSupported(); }
+    {
+        _ = pageSettings;
+        if (printerSettings is { PrintToFile: true }
+            && printerSettings.PrintFileName is { Length: > 0 } target
+            && target.EndsWith(".pdf", System.StringComparison.OrdinalIgnoreCase))
+        {
+            PrintDocumentWithSettings(printerSettings);
+            return;
+        }
+        ThrowPrintingNotSupported();
+    }
     public void PrintDocumentWithSetup() => ThrowPrintingNotSupported();
 
     public void PrintDocuments(Document[] documents)

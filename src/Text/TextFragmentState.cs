@@ -88,7 +88,15 @@ public class TextFragmentState : TextState
     public new Aspose.Pdf.Text.Font? Font
     {
         get => base.Font as Aspose.Pdf.Text.Font;
-        set => base.Font = value;
+        set
+        {
+            base.Font = value;
+            // An explicit-ReplaceFonts assignment on an absorbed fragment re-dresses
+            // the page run when the assigned face cannot cover the text (see
+            // TextFragment.RedressAfterExplicitFontAssignment). All other
+            // assignments stay state-only, as before.
+            if (value is not null) _fragment.RedressAfterExplicitFontAssignment();
+        }
     }
 
     /// <summary>When true, a rectangular border is drawn around the text

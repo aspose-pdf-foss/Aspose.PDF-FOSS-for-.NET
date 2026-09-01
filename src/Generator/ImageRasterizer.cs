@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using Aspose.Pdf.Converters;
 using Aspose.Pdf.Devices;
 
@@ -30,13 +30,13 @@ internal static class ImageRasterizer
     {
         var probe = RasterizeSvg(svgData, out var natW, out var natH);
         if (probe is null || natW <= 0 || natH <= 0) return probe;
-        if (!OperatingSystem.IsWindows()) return probe;
         const double pageW = 595.3, pageH = 841.9;
         var fit = System.Math.Min(pageW / natW, pageH / natH);
         var art = RasterizeSvgSized(svgData, natW * fit, natH * fit) ?? probe;
         try
         {
-            return ComposeOnTransparentCanvasWindows(art, pageW, pageH) ?? probe;
+            return ComposeOnCanvas(art, pageW, pageH, fitArtwork: false,
+                whiteIsTransparent: true) ?? probe;
         }
         catch
         {
@@ -44,29 +44,6 @@ internal static class ImageRasterizer
         }
     }
 
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static byte[]? ComposeOnTransparentCanvasWindows(byte[] art, double canvasWpt, double canvasHpt)
-    {
-        var canvasW = (int)System.Math.Round(canvasWpt * RasterDpi / 72.0);
-        var canvasH = (int)System.Math.Round(canvasHpt * RasterDpi / 72.0);
-        if (canvasW <= 0 || canvasH <= 0 || (long)canvasW * canvasH > 64_000_000)
-            return null;
-        using var srcMs = new MemoryStream(art);
-        using var src = new System.Drawing.Bitmap(srcMs);
-        // The page render bakes a white background in; the canvas must stay
-        // see-through outside the artwork so borders under the blit survive.
-        src.MakeTransparent(System.Drawing.Color.White);
-        using var canvas = new System.Drawing.Bitmap(canvasW, canvasH);
-        using (var g = System.Drawing.Graphics.FromImage(canvas))
-        {
-            g.Clear(System.Drawing.Color.Transparent);
-            g.DrawImage(src, (canvasW - src.Width) / 2, (canvasH - src.Height) / 2,
-                src.Width, src.Height);
-        }
-        using var outMs = new MemoryStream();
-        canvas.Save(outMs, System.Drawing.Imaging.ImageFormat.Png);
-        return outMs.ToArray();
-    }
 
     /// <summary>Rasterise SVG bytes to a PNG at an explicit viewport size in points,
     /// overriding any root width/height. The viewBox maps onto the forced viewport
@@ -100,13 +77,14 @@ internal static class ImageRasterizer
     /// (callers fall back to the plain raster). Windows-only compositing.</summary>
     public static byte[]? RasterizeSvgOnCanvas(byte[] svgData, double boxWpt, double boxHpt)
     {
-        if (!OperatingSystem.IsWindows() || boxWpt <= 0 || boxHpt <= 0)
+        if (boxWpt <= 0 || boxHpt <= 0)
             return RasterizeSvg(svgData);
         var art = RasterizeSvg(svgData, out var natW, out var natH);
         if (art is null || natW <= 0 || natH <= 0) return art;
         try
         {
-            return CompositeOnCanvasWindows(art, natW, natH, boxWpt, boxHpt) ?? art;
+            return ComposeOnCanvas(art, boxWpt, boxHpt, fitArtwork: true,
+                whiteIsTransparent: false, natW: natW, natH: natH) ?? art;
         }
         catch
         {
@@ -114,29 +92,67 @@ internal static class ImageRasterizer
         }
     }
 
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static byte[]? CompositeOnCanvasWindows(byte[] art, double natW, double natH,
-        double boxWpt, double boxHpt)
+
+    /// <summary>
+    /// Place a rasterised artwork on a transparent canvas of the given size in points.
+    /// Managed throughout: this used to be two System.Drawing routines, so off Windows
+    /// both callers fell back to the bare raster - the artwork filled its box edge to edge
+    /// instead of being letterboxed inside it, and the cell borders that should show
+    /// through the empty bands were covered over.
+    /// <paramref name="fitArtwork"/> scales the artwork to fit the canvas (aspect kept,
+    /// centred); without it the artwork is placed at its rendered size. 
+    /// <paramref name="whiteIsTransparent"/> drops the white background the page render
+    /// bakes in, so what sits under the canvas stays visible.
+    /// </summary>
+    private static byte[]? ComposeOnCanvas(byte[] art, double canvasWpt, double canvasHpt,
+        bool fitArtwork, bool whiteIsTransparent, double natW = 0, double natH = 0)
     {
-        var canvasW = (int)System.Math.Round(boxWpt * RasterDpi / 72.0);
-        var canvasH = (int)System.Math.Round(boxHpt * RasterDpi / 72.0);
+        var canvasW = (int)System.Math.Round(canvasWpt * RasterDpi / 72.0);
+        var canvasH = (int)System.Math.Round(canvasHpt * RasterDpi / 72.0);
         if (canvasW <= 0 || canvasH <= 0 || (long)canvasW * canvasH > 64_000_000)
             return null;
-        var fit = System.Math.Min(boxWpt / natW, boxHpt / natH);
-        var drawW = (int)System.Math.Round(natW * fit * RasterDpi / 72.0);
-        var drawH = (int)System.Math.Round(natH * fit * RasterDpi / 72.0);
-        using var srcMs = new MemoryStream(art);
-        using var src = new System.Drawing.Bitmap(srcMs);
-        using var canvas = new System.Drawing.Bitmap(canvasW, canvasH);
-        using (var g = System.Drawing.Graphics.FromImage(canvas))
+
+        var (srcPix, srcW, srcH, srcHasAlpha) = Facades.PdfFileMend.DecodePng(art);
+        if (srcW <= 0 || srcH <= 0 || srcPix.Length == 0) return null;
+        var srcComps = srcHasAlpha ? 4 : 3;
+        if (srcPix.Length < (long)srcW * srcH * srcComps) return null;
+
+        int drawW = srcW, drawH = srcH;
+        if (fitArtwork && natW > 0 && natH > 0)
         {
-            g.Clear(System.Drawing.Color.Transparent);
-            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-            g.DrawImage(src, (canvasW - drawW) / 2, (canvasH - drawH) / 2, drawW, drawH);
+            var fit = System.Math.Min(canvasWpt / natW, canvasHpt / natH);
+            drawW = (int)System.Math.Round(natW * fit * RasterDpi / 72.0);
+            drawH = (int)System.Math.Round(natH * fit * RasterDpi / 72.0);
         }
-        using var outMs = new MemoryStream();
-        canvas.Save(outMs, System.Drawing.Imaging.ImageFormat.Png);
-        return outMs.ToArray();
+        if (drawW <= 0 || drawH <= 0) return null;
+        var offX = (canvasW - drawW) / 2;
+        var offY = (canvasH - drawH) / 2;
+
+        var canvas = new byte[(long)canvasW * canvasH * 4];   // RGBA, cleared = transparent
+        for (var y = 0; y < drawH; y++)
+        {
+            var cy = offY + y;
+            if (cy < 0 || cy >= canvasH) continue;
+            // Nearest-neighbour source row/column: the artwork is rendered at 2x the base
+            // resolution already, so the resample is a mild reduction and the extra weight
+            // of a filtered scale is not worth the blur it puts on vector edges.
+            var sy = drawH == srcH ? y : (int)((long)y * srcH / drawH);
+            if (sy >= srcH) sy = srcH - 1;
+            for (var x = 0; x < drawW; x++)
+            {
+                var cx = offX + x;
+                if (cx < 0 || cx >= canvasW) continue;
+                var sx = drawW == srcW ? x : (int)((long)x * srcW / drawW);
+                if (sx >= srcW) sx = srcW - 1;
+                var si = (sy * srcW + sx) * srcComps;
+                byte r = srcPix[si], g = srcPix[si + 1], b = srcPix[si + 2];
+                byte a = srcComps == 4 ? srcPix[si + 3] : (byte)255;
+                if (whiteIsTransparent && r == 255 && g == 255 && b == 255) a = 0;
+                var di = (cy * canvasW + cx) * 4;
+                canvas[di] = r; canvas[di + 1] = g; canvas[di + 2] = b; canvas[di + 3] = a;
+            }
+        }
+        return IO.PngEncoder.Encode(canvas, canvasW, canvasH, colorType: 6);
     }
 
     /// <summary>Rasterise SVG bytes to a PNG and report the SVG viewport size in

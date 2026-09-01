@@ -72,4 +72,13 @@ public sealed class MarginInfo
 
     /// <summary>Shallow clone.</summary>
     public object Clone() => new MarginInfo(_left, _bottom, _right, _top);
+
+    /// <summary>A copy that keeps each side's user-set flag as it is (a generated
+    /// page inherits its source page's margins exactly as authored).</summary>
+    internal MarginInfo CloneWithFlags() => new()
+    {
+        _left = _left, _bottom = _bottom, _right = _right, _top = _top,
+        LeftTouched = LeftTouched, BottomTouched = BottomTouched,
+        RightTouched = RightTouched, TopTouched = TopTouched,
+    };
 }

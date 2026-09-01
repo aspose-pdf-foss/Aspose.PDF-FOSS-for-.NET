@@ -170,6 +170,29 @@ public class TextState
     /// first-line drop of one font size.</summary>
     internal bool LineSpacingSynthetic { get; set; }
 
+    /// <summary>Line pitch (points) the flow paginator reserved for a deferred
+    /// multi-line chunk. The generator advances embedded-face lines by the font
+    /// size alone (a 10 pt Arial Unicode paragraph pitches at 10, a 12 pt Arial
+    /// one at 12), so the writer must not fall back to its 1.2 em default.</summary>
+    internal double? FlowLinePitch { get; set; }
+
+    /// <summary>True when the fragment's lines are CSS line BOXES of
+    /// <c>FontSize + LineSpacing</c>: the first baseline on a page then seats at
+    /// half the surplus leading plus the face's ascent below the content top
+    /// (12 pt Arial on a 13.5 pt box: 0.05 + 10.86), instead of dropping by a
+    /// whole font size. Set by the in-page HtmlFragment renderer when the CALLER
+    /// declared the fragment's line spacing.</summary>
+    internal bool LineBoxSeat { get; set; }
+
+    /// <summary>True when the pitch is the CSS <c>line-height: normal</c> box the
+    /// FACE itself defines (its pixel-quantised win metrics), rather than a caller's
+    /// declared spacing: the first line's baseline seats half the box's surplus
+    /// leading plus the face's ascent below the box top — 12 pt Arial in a 13.5 pt
+    /// box sits 10.91 down — and the seat is expressed, like every other one the flow
+    /// computes, as the text rect's BOTTOM (a fragment Position, the face's descent
+    /// below that baseline). Set by the in-page HtmlFragment block renderer.</summary>
+    internal bool CssLineBoxSeat { get; set; }
+
     /// <summary>Raw font size from the Tf operator (before text matrix scaling).</summary>
     internal float RawFontSize { get; set; }
 
@@ -182,6 +205,13 @@ public class TextState
     /// <summary>Owner fragment — for fragment-level TextState, allows registration for save-time effects.</summary>
     internal TextFragment? OwnerFragment { get; set; }
 
+    /// <summary>True when this state belongs to an ATTACHED fragment — one a
+    /// TextBuilder append wrote into its own content-stream segment. Such a fragment is
+    /// written again from its state at save, so a property change here must NOT also
+    /// patch the operators: the two writers would fight over the same run.</summary>
+    private bool OwnerWrittenByBuilder =>
+        (OwnerSegment?.Owner ?? OwnerFragment) is { AttachedSegment: not null };
+
     private void ApplyFontSizeChange(double oldSize, double newSize)
     {
         // Segment-level state reaches its page via the owning fragment; a
@@ -189,7 +219,7 @@ public class TextState
         // fall back to it so absorbed fragments write the new size through
         // to the page content stream too.
         var page = OwnerSegment?.Owner?.SourcePage ?? OwnerFragment?.SourcePage;
-        if (page is null) return;
+        if (page is null || OwnerWrittenByBuilder) return;
         var text = OwnerSegment?.Text ?? OwnerFragment?.Text;
         if (string.IsNullOrEmpty(text)) return;
         var modifier = new TextStateModifier();
@@ -227,6 +257,7 @@ public class TextState
             // the same text at multiple positions doesn't all get coloured by
             // a single setter call (an X+Y-scoped pass runs first; a Y-only
             // pass keeps the historical reach when the X anchor finds nothing).
+            if (OwnerWrittenByBuilder) return;
             var page = OwnerSegment?.Owner?.SourcePage;
             var text = OwnerSegment?.Text;
             if (page is not null && !string.IsNullOrEmpty(text))
@@ -255,10 +286,13 @@ public class TextState
             {
                 var modifier = new TextStateModifier();
                 modifier.ModifyForegroundColor(pg, segText, c, y, x);
-                // X anchor missed (segment starting mid-run shifts the operator
-                // origin): fall back to the historical Y-only scope.
+                // X anchor missed — the segment starts mid-run, or an earlier replacement
+                // on the same line has already shifted it by its width delta. Keep the X
+                // anchor and take the NEAREST occurrence rather than dropping to a Y-only
+                // scope, which repaints the first occurrence on the line every time and so
+                // leaves the later ones (and only them) unrecoloured.
                 if (x.HasValue && !modifier.LastForegroundColorApplied)
-                    modifier.ModifyForegroundColor(pg, segText, c, y);
+                    modifier.ModifyForegroundColor(pg, segText, c, y, x, nearestX: true);
             }
         }
     }
@@ -285,7 +319,7 @@ public class TextState
             _backgroundColor = value;
             // When BackgroundColor is set on a segment obtained via TextFragmentAbsorber,
             // register the owning fragment for rectangle injection during save.
-            if (value is not null)
+            if (value is not null && !OwnerWrittenByBuilder)
             {
                 // Segment-level: register via segment's owner fragment
                 if (OwnerSegment?.Owner?.SourcePage is not null)
@@ -320,9 +354,48 @@ public class TextState
         }
         set
         {
+            var wasBold = IsBold;
+            var wasItalic = IsItalic;
             IsBold = (value & FontStyles.Bold) != 0;
             IsItalic = (value & FontStyles.Italic) != 0;
+            if (IsBold != wasBold || IsItalic != wasItalic)
+                ApplyFontStyleToSource();
         }
+    }
+
+    /// <summary>Re-show an ABSORBED run in the styled sibling of its own face, so setting
+    /// FontStyle on a fragment the absorber produced actually renders bold/italic. Storing
+    /// the flags alone left the property a silent no-op: the run kept being drawn with the
+    /// face already selected in the content stream. Routed through the same font-swap the
+    /// <see cref="Font"/> setter uses, so the change scopes to this run's own glyphs.
+    /// <para>A state that belongs to no page — a fragment being composed for the generator
+    /// or a TextBuilder append — keeps storing the flags only: those writers read the state
+    /// when they lay the text out, and patching operators here would fight them.</para>
+    /// </summary>
+    private void ApplyFontStyleToSource()
+    {
+        var page = OwnerSegment?.Owner?.SourcePage ?? OwnerFragment?.SourcePage;
+        var text = OwnerSegment?.Text ?? OwnerFragment?.Text;
+        if (page is null || string.IsNullOrEmpty(text) || OwnerWrittenByBuilder) return;
+        // The face the run is drawn in now, as a family name the repository can style:
+        // its /BaseFont with the subset tag and any existing style suffix removed.
+        var current = _font ?? OwnerSegment?.Owner?.TextState._font;
+        var family = FontRepository.FamilyOf(current?.FontName ?? current?.BaseFont ?? FontName);
+        if (string.IsNullOrEmpty(family)) return;
+        var wanted = FontStyles.Regular;
+        if (IsBold) wanted |= FontStyles.Bold;
+        if (IsItalic) wanted |= FontStyles.Italic;
+        var styled = FontRepository.TryFindFont(family!, wanted, ignoreCase: true);
+        // Only a face that carries a program can be embedded and shown; a repository miss
+        // (or a resolve back to the same unstyled file) leaves the run as it was.
+        if (styled?.SourceFontData is null) return;
+        try
+        {
+            new TextStateModifier().ModifyFont(page, text!, styled,
+                OwnerSegment?.Position?.YIndent ?? OwnerFragment?.PositionOrNull?.YIndent,
+                segmentScoped: OwnerSegment is not null);
+        }
+        catch { /* best-effort: leave the content unchanged if the rewrite fails */ }
     }
 
     /// <summary>Whether the text is underlined (alias for <see cref="IsUnderline"/>).</summary>
@@ -444,6 +517,13 @@ public class TextState
     /// clipping behaviour of glyph rendering.</summary>
     public TextRenderingMode RenderingMode { get; set; }
 
+    /// <summary>Stroke line width (the <c>w</c> operator) in effect for the run:
+    /// the pen a stroking <see cref="RenderingMode"/> outlines the glyphs with. An
+    /// absorbed run reports the width that was set when it was shown; a run written
+    /// by the generator carries the pen it was stroked with (a synthesised bold
+    /// weight strokes with a size-proportional pen). 1.0 is the PDF default.</summary>
+    public double LineWidth { get; set; } = 1.0;
+
     /// <summary>
     /// Whether this text fragment is invisible: rendering mode 3, or text that a
     /// LATER opaque filled rectangle fully covers (hidden-by-occlusion:
@@ -474,11 +554,18 @@ public class TextState
     /// Set by TextAbsorber/TextFragmentAbsorber during extraction.
     /// </summary>
     private Font? _font = FontInfo.DefaultHelvetica;
+    /// <summary>The band a font assignment drops an overflowing replaced line by, in
+    /// em of the fragment size — the same 1.10 em re-flow band the whole-paragraph
+    /// re-flow uses (probed: baseline 364.27 → 346.71 at
+    /// fs 15.96, an exact 1.10 × 15.96 = 17.556 pt drop).</summary>
+    private const double OverflowRelayPitchEm = 1.10;
+
     public Font? Font
     {
         get => _font;
         set
         {
+            var prevFont = _font;
             _font = value;
             if (value is null) return;
             // Mirror the assigned font's name into FontName so downstream code that
@@ -511,17 +598,52 @@ public class TextState
                 if (value.SourceFontData is null) return;
                 value.SetEmbeddedDefault(true);
                 value.SetSubsetDefault(true);
+                // The cached program follows the face: assigning a second font
+                // (Times, then Courier New) must not leave the writer measuring and
+                // embedding the first one.
+                FontData = value.SourceFontData;
             }
             // OwnerSegment is wired for segment-level state; a fragment-level
             // TextFragmentState wires OwnerFragment instead.
             var page = OwnerSegment?.Owner?.SourcePage ?? OwnerFragment?.SourcePage;
             var text = OwnerSegment?.Text ?? OwnerFragment?.Text;
-            if (page is null || string.IsNullOrEmpty(text)) return;
+            if (page is null || string.IsNullOrEmpty(text) || OwnerWrittenByBuilder) return;
+            // Assigning a face to a run that is ALREADY on a page rewrites that page
+            // there and then, so this assignment is the embedding: a face whose licence
+            // forbids it is refused here rather than at the save that never happens
+            // (a fragment the absorber produced throws on the assignment, a
+            // fragment not yet added to a page throws only on save).
+            if (value.SourceFontData is { } assigned)
+                FontData.RefuseEmbedding(assigned, page.Reader?.OwnerDocument);
+            // A fragment-level assignment that leaves the (already replaced) run wider
+            // than the sheet re-LAYS the source line instead of merely re-facing it:
+            // the line drops one re-flow band and the tail runs re-seat at the match x
+            // plus one source-face space, each keeping its own face (probed against the
+            // reference on the overflow family — see TextStateModifier.OverflowRelay).
+            // Gated on the ABSORBED rectangle having fit the sheet, so a line that
+            // always overflowed is never moved.
+            TextStateModifier.OverflowRelay? relay = null;
+            if (OwnerSegment is null && OwnerFragment is not null
+                && OwnerFragment.PositionOrNull is { } fragPos && FontSize > 0
+                && page.MediaBox is { URX: > 0 } media
+                && OwnerFragment.AbsorbedRectangle is { } srcRect && srcRect.URX <= media.URX)
+            {
+                double newW = 0;
+                try { newW = MeasureString(text!); } catch { }
+                if (newW > 0 && fragPos.XIndent + newW > media.URX)
+                {
+                    double spaceW;
+                    try { spaceW = prevFont?.MeasureString(" ", FontSize) ?? 0.25 * FontSize; }
+                    catch { spaceW = 0.25 * FontSize; }
+                    relay = new TextStateModifier.OverflowRelay(
+                        spaceW, OverflowRelayPitchEm * FontSize);
+                }
+            }
             try
             {
                 new TextStateModifier().ModifyFont(page, text!, value,
                     OwnerSegment?.Position?.YIndent ?? OwnerFragment?.PositionOrNull?.YIndent,
-                    segmentScoped: OwnerSegment is not null);
+                    segmentScoped: OwnerSegment is not null, relay: relay);
             }
             catch { /* best-effort: leave content unchanged if the rewrite fails */ }
 
@@ -543,7 +665,7 @@ public class TextState
     internal void SetReportedFont(string family)
     {
         Font? f = null;
-        try { f = FontRepository.FindFont(family); } catch { /* not installed */ }
+        try { f = FontRepository.TryFindFont(family); } catch { /* not installed */ }
         if (f is not null) _font = f;
         FontName = f?.FontName ?? family;
     }
@@ -635,6 +757,7 @@ public class TextState
         LineSpacing = other.LineSpacing;
         HorizontalAlignment = other.HorizontalAlignment;
         RenderingMode = other.RenderingMode;
+        LineWidth = other.LineWidth;
         _occluded = other._occluded; // hidden-by-occlusion capture (field: no setter side effects)
         StrokingColor = other.StrokingColor;
         TextRise = other.TextRise;

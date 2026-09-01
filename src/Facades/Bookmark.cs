@@ -45,8 +45,8 @@ public sealed class Bookmark
     /// <summary>Child bookmarks in the original outline tree.</summary>
     public Bookmarks ChildItems { get; set; } = new Bookmarks();
 
-    /// <summary>Singular alias for <see cref="ChildItems"/>. Some Aspose
-    /// .NET callers refer to the child collection as ChildItem (no s).</summary>
+    /// <summary>Singular alias for <see cref="ChildItems"/>. Some legacy
+    /// facade callers refer to the child collection as ChildItem (no s).</summary>
     public Bookmarks ChildItem
     {
         get => ChildItems;

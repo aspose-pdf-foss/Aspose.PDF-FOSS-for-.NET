@@ -60,7 +60,7 @@ public sealed class SimpleFontSubstitution : CustomFontSubstitutionBase
         if (originalFontSpecification is not null
             && string.Equals(originalFontSpecification.OriginalFontName, OriginalFontName, StringComparison.Ordinal))
         {
-            substitutionFont = FontRepository.FindFont(SubstitutionFontName);
+            substitutionFont = FontRepository.TryFindFont(SubstitutionFontName);
             return substitutionFont is not null;
         }
         substitutionFont = null;
@@ -83,7 +83,10 @@ public sealed class FontSubstitutionCollection : IReadOnlyCollection<FontSubstit
 
     public void Add(FontSubstitution fontSubstitution)
     {
-        if (fontSubstitution is null) throw new ArgumentNullException(nameof(fontSubstitution));
+        // A null add is ignored, matching Remove's null tolerance: a null entry could
+        // never substitute anything, and callers built against a wider API surface
+        // pass null where a substitution type exists there but not here.
+        if (fontSubstitution is null) return;
         _items.Add(fontSubstitution);
     }
 

@@ -5,6 +5,35 @@ are particularly handy for byte-array workflows and for the operations that
 the legacy Aspose.PDF API surface has historically grouped together (file
 editing, signing, form filling, content patching, ...).
 
+`PdfFileSanitization` repairs damaged files at the byte level so they open
+again. Bind a path, stream, or `Document`; `Recover()` runs the steps selected by
+`UseTrimTop` (drop bytes before the `%PDF-` header, default on), `UseTrimBottom`
+(drop bytes after the last `%%EOF`, default on) and `UseRebuildXrefAndTrailer`
+(rescan the objects and write a fresh cross-reference table and trailer, default
+off); each step is also callable on its own. `Log` lists the actions performed.
+
+```csharp
+using Aspose.Pdf.Facades;
+
+using var sanitizer = new PdfFileSanitization { UseRebuildXrefAndTrailer = true };
+sanitizer.BindPdf("damaged.pdf");
+sanitizer.Recover();
+sanitizer.Save("repaired.pdf");
+
+foreach (var line in sanitizer.Log)
+    Console.WriteLine(line);
+```
+
+Printing goes through `PdfViewer`. Spooler-backed printing (`PrintDocument`,
+`PrintDocumentWithSetup`, `PrintDocuments`, `PrintLargePdf`) throws
+`PlatformNotSupportedException`; `PrintDocumentWithSettings` with
+`PrinterSettings.PrintToFile` set and a `.pdf` `PrintFileName` writes the selected
+page range, once per copy, to that file. The `Aspose.Pdf.Printing` types need
+`System.Drawing.Common` on modern .NET, which the application must reference
+itself; `PrintingOptionalDependencyGuard.EnsureDependenciesAvailable()` turns a
+missing package into a `MissingOptionalDependencyException` whose message names the
+package and the version this build was validated with.
+
 ## `PdfFileEditor`
 
 Merge, split, extract, insert, and delete pages.
@@ -28,6 +57,14 @@ editor.Concatenate(
     new[] { "doc1.pdf", "doc2.pdf", "doc3.pdf" },
     "merged.pdf");
 ```
+
+Concatenation merges the inputs' outlines, page labels and AcroForm fields
+(`KeepFieldsUnique` renames colliding field names). Tagged inputs stay tagged:
+their structure trees are merged into the result, which keeps `/MarkInfo
+/Marked`, so a concatenation of PDF/UA documents remains PDF/UA. Stream and
+`Document[]` overloads exist alongside the byte-array and path ones, and every
+operation has a `Try*` twin that returns `false` and records `LastException`
+instead of throwing.
 
 ### Extract pages
 
@@ -164,6 +201,21 @@ foreach (var name in sig.GetSignNames())
                       $"covers whole={sig.IsCoversWholeDocument(name)}");
     Console.WriteLine($"  Signed at: {sig.GetDateTime(name)}");
 }
+```
+
+`RemoveSignature(name)` clears a signature's value and leaves the field in
+place; `RemoveSignature(name, removeField: true)` removes the whole field, and
+`RemoveSignatures()` clears every signature. Removing a certification (DocMDP)
+signature is refused. When the facade is bound to a `Document` rather than a
+file, the removal is applied to that live document as well, so saving or
+converting the document afterwards produces the unsigned result:
+
+```csharp
+using var doc = new Document("signed.pdf");
+var sig = new PdfFileSignature(doc);
+
+sig.RemoveSignature("Signature1");
+doc.Save("unsigned.pdf");         // the document itself no longer carries the signature
 ```
 
 For PKCS#7 signing flow, see
@@ -381,6 +433,33 @@ stripper.Strip("input.pdf", "stripped.pdf");
 
 ## `PdfConverter`
 
-`PdfConverter` is a small wrapper around `Document.Convert(...)` for batch
-PDF/A normalization runs. See [Optimization](optimization.md) for direct
-`Document.Convert` usage.
+`PdfConverter` renders pages to images through a forward-only cursor. Bind a
+document, call `DoConvert()`, then pull one image per page with
+`HasNextImage()` / `GetNextImage(...)`; `StartPage` / `EndPage` bound the range
+and `Resolution` sets the DPI. `GetNextImage` writes PNG by default and takes a
+`PdfConverterImageFormat` (`Png`, `Jpeg`, `Bmp`, `Tiff`, `Gif`) or a
+`System.Drawing.Imaging.ImageFormat`; `SaveAsTIFF` writes the whole range into
+one multi-page TIFF (with optional `TiffSettings`), and `SaveAsTIFFClassF`
+produces a fax-class TIFF. See [Rendering](rendering.md) for the `ImageDevice`
+family this builds on.
+
+```csharp
+using Aspose.Pdf.Devices;
+using Aspose.Pdf.Facades;
+
+using var converter = new PdfConverter { Resolution = new Resolution(150) };
+converter.BindPdf("document.pdf");
+converter.StartPage = 1;
+converter.EndPage   = 3;
+
+converter.DoConvert();
+
+int n = 1;
+while (converter.HasNextImage())
+    converter.GetNextImage($"page_{n++}.png", PdfConverterImageFormat.Png);
+
+converter.SaveAsTIFF("pages.tiff", new TiffSettings { Compression = CompressionType.LZW });
+```
+
+`MergeImages` / `MergeImagesAsTiff` combine already-rendered images;
+`MergeImages` is marked `[SupportedOSPlatform("windows")]`.

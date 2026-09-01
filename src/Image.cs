@@ -34,7 +34,7 @@ namespace Aspose.Pdf
 
         public ImageFilterType ImageFilterType { get; set; }
 
-        /// <summary>Optional in-memory pixel buffer (public-API parity).</summary>
+        /// <summary>Optional in-memory pixel buffer (public-API compatibility).</summary>
         public BitmapInfo BitmapInfo { get; set; }
 
         /// <summary>Source file format hint.</summary>
@@ -42,9 +42,14 @@ namespace Aspose.Pdf
 
         public override object Clone() => MemberwiseClone();
 
-        /// <summary>Read the source image bytes from the stream (rewound and
-        /// restored) or the file path; null when neither is available.</summary>
-        private byte[] ReadSourceBytes()
+        /// <summary>The source bytes behind this image: its <see cref="ImageStream"/>
+        /// (rewound and restored, so a second layout pass still sees the data), a local
+        /// <see cref="File"/>, or a remote one — <c>File</c> may name an http(s) URL,
+        /// which is fetched. Null when the source is unset or cannot be read.</summary>
+        /// <remarks>Every path that turns an Image paragraph into page content reads it
+        /// through here. They each used to inline the stream-or-local-file pair, which is
+        /// why a URL loaded in none of them.</remarks>
+        internal byte[] ReadSourceBytes()
         {
             if (ImageStream is not null)
             {
@@ -55,9 +60,60 @@ namespace Aspose.Pdf
                 if (pos >= 0) ImageStream.Position = pos;
                 return ms.ToArray();
             }
-            if (!string.IsNullOrEmpty(File) && System.IO.File.Exists(File))
-                return System.IO.File.ReadAllBytes(File);
-            return null;
+            if (string.IsNullOrEmpty(File)) return null;
+            if (IsRemote(File)) return FetchRemote(File);
+            return System.IO.File.Exists(File) ? System.IO.File.ReadAllBytes(File) : null;
+        }
+
+        /// <summary>True when <paramref name="source"/> names an http(s) URL rather than
+        /// a path. Scheme-checked on purpose: a Windows path parses as an absolute URI
+        /// too, under the <c>file</c> scheme.</summary>
+        internal static bool IsRemote(string source) =>
+            System.Uri.TryCreate(source, System.UriKind.Absolute, out var uri)
+            && (uri.Scheme == System.Uri.UriSchemeHttp || uri.Scheme == System.Uri.UriSchemeHttps);
+
+        // One shared client: a new HttpClient per fetch leaks sockets, and an image is
+        // commonly placed several times in one document.
+        private static readonly System.Net.Http.HttpClient Http =
+            new() { Timeout = System.TimeSpan.FromSeconds(100) };
+
+        // The bytes fetched for _cachedFor, so laying the same image out repeatedly - and
+        // measuring it before drawing it - costs ONE request. Keyed by the File value so
+        // re-pointing File refetches. A failed fetch caches null with its cause, which
+        // RemoteFailure reports at save time.
+        private string _cachedFor;
+        private byte[] _cachedBytes;
+        private System.Exception _cachedError;
+
+        private byte[] FetchRemote(string url)
+        {
+            if (string.Equals(_cachedFor, url, System.StringComparison.Ordinal))
+                return _cachedBytes;
+            _cachedFor = url;
+            _cachedError = null;
+            try
+            {
+                _cachedBytes = Http.GetByteArrayAsync(url).GetAwaiter().GetResult();
+            }
+            catch (System.Exception e)
+            {
+                // Never throw from here: this runs behind property getters (BitmapSize)
+                // and inside layout, where an unreachable host must degrade to "no
+                // image", not tear down the save. Save-time validation reports it.
+                _cachedBytes = null;
+                _cachedError = e;
+            }
+            return _cachedBytes;
+        }
+
+        /// <summary>The transport error from the last remote fetch of the CURRENT
+        /// <see cref="File"/>, or null when the source loaded (or was never remote).
+        /// Fetches once and remembers, so asking does not repeat the request.</summary>
+        internal System.Exception RemoteFailure()
+        {
+            if (string.IsNullOrEmpty(File) || !IsRemote(File)) return null;
+            FetchRemote(File);
+            return _cachedError;
         }
 
         /// <summary>Best-effort MIME type for a System.Drawing.Image; returns

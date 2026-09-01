@@ -67,6 +67,13 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
         return AddDict(dict);
     }
 
+    /// <summary>Add a link annotation with no action or destination.</summary>
+    internal Annotation AddBareLinkAnnotation(Rectangle rect)
+    {
+        var dict = AnnotationFactory.CreateBareLinkAnnotation(rect);
+        return AddDict(dict);
+    }
+
     /// <summary>Add a link annotation with a URI action.</summary>
     public Annotation AddLinkAnnotation(Rectangle rect, string uri)
     {
@@ -249,12 +256,22 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
                 ? Justification.Right
                 : Justification.Center;
         }
+        // A measure-bearing annotation's Measure DOM is configured field-by-field
+        // before the annotation joins the page, so this is where it serialises into
+        // the /Measure dictionary (and from there survives save and XFDF export).
+        if (annotation is LineAnnotation lineWithMeasure && lineWithMeasure.HasMeasure)
+            lineWithMeasure.Measure.WriteTo(annotation.Dict);
         // An ink annotation carries no viewer-synthesised fallback: without an /AP it
         // renders as nothing at all. Its stroke geometry, colour, cap style and border
         // width are all set on the object BEFORE it joins a page, so this is the point
         // where the face can be drawn from a complete state.
         if (annotation is InkAnnotation ink && _reader.ResolveDict(ink.Dict.Get("AP")) is null)
             ink.UpdateAppearances();
+        // A highlight's face (quad fills under the opacity graphics state) is
+        // likewise complete at add time; without an /AP the reloaded annotation
+        // has no NormalAppearance to walk.
+        if (annotation is HighlightAnnotation hl && _reader.ResolveDict(hl.Dict.Get("AP")) is null)
+            hl.UpdateAppearances();
         AddDict(annotation.Dict);
     }
 
@@ -344,7 +361,7 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
     }
 
     /// <summary>Remove every annotation from the collection (public-API
-    /// alias for <see cref="Clear"/>; kept for API parity).</summary>
+    /// alias for <see cref="Clear"/>; kept for API compatibility).</summary>
     public void Delete() => Clear();
 
     /// <summary>Remove the annotation at the given 1-based index.</summary>

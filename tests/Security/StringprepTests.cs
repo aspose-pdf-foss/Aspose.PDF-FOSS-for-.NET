@@ -1,5 +1,5 @@
-using System.Text;
-using Aspose.Pdf.Engine.Security.Impl.Sasl;
+﻿using System.Text;
+using Aspose.Pdf.Security.Saslprep;
 using Aspose.Pdf.Security;
 using Aspose.Pdf.Tests.Helpers;
 using Xunit;
@@ -7,9 +7,9 @@ using Xunit;
 namespace Aspose.Pdf.Tests.Security;
 
 /// <summary>
-/// SASLprep (RFC 4013) profile tests for the <c>Stringprep</c> implementation.
+/// SASLprep (RFC 4013) profile tests for <see cref="SaslPrepProfile"/>.
 /// Even-indexed cases feed the input through a UTF-8 stream
-/// (Stringprep(Stream)); odd-indexed cases use Stringprep(string), so the two
+/// (decoded from a UTF-8 stream); odd-indexed cases feed the string directly, so the two
 /// constructors are exercised in strict alternation.
 ///
 /// Inputs/outputs are built from explicit code points (encoding-proof). A null
@@ -54,18 +54,15 @@ public class StringprepTests
             var input = FromCodePoints(v.Input);
 
             // Even index → stream ctor (UTF-8), odd index → string ctor.
-            var stringprep = (i % 2 == 0)
-                ? new Stringprep(ToUtf8Stream(input))
-                : new Stringprep(input);
+            var text = (i % 2 == 0) ? FromUtf8Stream(ToUtf8Stream(input)) : input;
 
             if (v.Expected is null)
             {
-                Assert.Throws<StringprepException>(() => stringprep.Process());
+                Assert.Throws<SaslPrepRejectedException>(() => SaslPrepProfile.SaslPrep(text));
             }
             else
             {
-                stringprep.Process();
-                Assert.Equal(FromCodePoints(v.Expected), stringprep.Result);
+                Assert.Equal(FromCodePoints(v.Expected), SaslPrepProfile.SaslPrep(text));
             }
         }
     }
@@ -95,6 +92,13 @@ public class StringprepTests
         var sb = new StringBuilder(cps.Length);
         foreach (var cp in cps) sb.Append(char.ConvertFromUtf32(cp));
         return sb.ToString();
+    }
+
+    private static string FromUtf8Stream(Stream s)
+    {
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return Encoding.UTF8.GetString(ms.ToArray());
     }
 
     private static Stream ToUtf8Stream(string s)

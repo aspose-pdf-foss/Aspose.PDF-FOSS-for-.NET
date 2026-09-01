@@ -32,7 +32,7 @@ public class TaggedContentTests
         using var doc = Document.Open(data);
         var tc = doc.TaggedContent!;
         Assert.NotNull(tc.RootElement);
-        Assert.Equal("Document", tc.RootElement!.StructureType);
+        Assert.Equal("Document", tc.RootElement!.StructureType?.Tag);
     }
 
     [Fact]

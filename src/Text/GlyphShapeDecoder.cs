@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
@@ -32,7 +32,6 @@ internal static class GlyphShapeDecoder
     public static string? TryDecode(byte[] bytes, PdfDictionary fontDict, PdfReader reader)
     {
         if (bytes.Length == 0) return null;
-        if (!OperatingSystem.IsWindows()) return null; // reference shapes need GDI+
         var entry = GetEntry(fontDict, reader);
         if (entry?.Outlines is null) return null;
         lock (entry)
@@ -116,7 +115,7 @@ internal static class GlyphShapeClassifier
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" +
         ".,:;/()+-_@®&%!?'\"*=üäöÜÄÖß";
 
-    // Shapes whose OUTPUT differs from the reference character drawn:
+    // Shapes whose OUTPUT differs from the character actually drawn:
     // small filled bullet separators (disc or
     // diamond dingbats) classify as '®' (bate_map 0x3d→®) — register the
     // bullet shapes under that output so they decode accordingly.
@@ -133,13 +132,14 @@ internal static class GlyphShapeClassifier
 
     public static char? Classify(GlyphOutline outline, int unitsPerEm)
     {
-        if (!OperatingSystem.IsWindows()) return null;
         var refs = _refs;
         if (refs is null)
         {
             lock (_initLock)
             {
-                refs = _refs ??= BuildReferenceShapes();
+                refs = _refs ??= OperatingSystem.IsWindows()
+                    ? BuildReferenceShapes()
+                    : BuildReferenceShapesManaged();
             }
         }
         if (refs.Count == 0) return null;
@@ -317,6 +317,54 @@ internal static class GlyphShapeClassifier
             else { pts[(i + 1) % n] = end; i++; }
         }
         return result;
+    }
+
+    /// <summary>
+    /// The template shapes built from the font FILES instead of through GDI+, so glyph
+    /// recognition works away from Windows. Each candidate's outline goes through the very
+    /// same <see cref="RasterizeOutline"/> the subject glyph uses, which is a better
+    /// comparison than the GDI+ path gets: both sides are then filled by one rasteriser,
+    /// with identical grids and identical relative measures.
+    /// </summary>
+    private static List<RefShape> BuildReferenceShapesManaged()
+    {
+        var refs = new List<RefShape>();
+        foreach (var fontName in ReferenceFonts)
+        {
+            try
+            {
+                var bytes = SystemFontResolver.Resolve(fontName);
+                if (bytes is null || bytes.Length == 0) continue;
+                var parser = new GlyphOutlineParser(bytes);
+                if (parser.CMap.Count == 0) continue;
+
+                var pairs = new List<(char Shape, char Output)>();
+                foreach (var c in Candidates) pairs.Add((c, c));
+                pairs.AddRange(AliasCandidates);
+                foreach (var (shapeCh, ch) in pairs)
+                {
+                    if (!parser.CMap.TryGetValue(shapeCh, out var gid)) continue;
+                    if (parser.GetOutline(gid) is not { } outline) continue;
+                    var grid = RasterizeOutline(outline, out var emGrid,
+                        out var relH, out var relW, out var relBot, parser.UnitsPerEm);
+                    if (grid is null) continue;
+                    refs.Add(new RefShape
+                    {
+                        Ch = ch,
+                        Grid = grid,
+                        EmGrid = emGrid,
+                        RelH = relH,
+                        RelW = relW,
+                        RelBot = relBot,
+                    });
+                }
+            }
+            catch
+            {
+                // Face not installed or unreadable: skip this family.
+            }
+        }
+        return refs;
     }
 
     // ── Reference-shape construction (GDI+, Windows only) ────────────────

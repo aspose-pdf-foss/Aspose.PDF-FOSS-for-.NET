@@ -17,7 +17,7 @@ public class DocumentHocrTests
         </body></html>
         """;
 
-    [Fact]
+    [WindowsOnlyFact]
     public void Convert_CallBackGetHocr_OverlaysInvisibleText()
     {
         var pdf = PdfBuilder.BuildMinimal();
@@ -41,7 +41,7 @@ public class DocumentHocrTests
         Assert.Contains("World", absorber.Text);
     }
 
-    [Fact]
+    [WindowsOnlyFact]
     public void Convert_CallBackGetHocrWithPage_PassesPage()
     {
         var pdf = PdfBuilder.BuildMinimal();

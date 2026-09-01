@@ -100,17 +100,40 @@ internal static class TextPaginator
                 if (currentWidth + needed > effectiveMax && current.Length > 0)
                 {
                     // The inter-word space that precedes the overflowing word stays at
-                    // the end of the finished line (the
-                    // wrapped line keeps its trailing space before the break).
-                    lines.Add(sep ? current.ToString() + " " : current.ToString());
+                    // the end of the finished line when it still fits the width; a
+                    // space that would itself overflow is dropped with the break
+                    // (the generator's own output: "…elit," 243.42 wide on a 246 band
+                    // ends without its space, "…dolore " 235.67 keeps it).
+                    lines.Add(sep && currentWidth + spaceWidth <= effectiveMax
+                        ? current.ToString() + " " : current.ToString());
                     current.Clear();
                     currentWidth = 0;
-                    current.Append(word);
-                    currentWidth = wordWidth;
+                }
+                else if (sep) { current.Append(' '); currentWidth += spaceWidth; }
+                if (current.Length == 0 && wordWidth > effectiveMax && CharacterFillApplies(fontData))
+                {
+                    // A single token wider than the whole line is cut character by
+                    // character: each line takes the longest prefix that fits and
+                    // the remainder starts the next (an unbroken 3000-glyph segment
+                    // chain fills 69 full lines per page; a Chinese paragraph in
+                    // Arial Unicode MS breaks at the margin).
+                    var rest = word;
+                    while (rest.Length > 0)
+                    {
+                        effectiveMax = lines.Count == 0 ? maxWidth - firstLineIndent : maxWidth;
+                        var take = LongestFittingPrefix(rest, measurer, effectiveMax, out var pieceWidth);
+                        if (take >= rest.Length)
+                        {
+                            current.Append(rest);
+                            currentWidth = pieceWidth;
+                            break;
+                        }
+                        lines.Add(rest.Substring(0, take));
+                        rest = rest.Substring(take);
+                    }
                 }
                 else
                 {
-                    if (sep) { current.Append(' '); currentWidth += spaceWidth; }
                     current.Append(word);
                     currentWidth += wordWidth;
                 }
@@ -118,6 +141,50 @@ internal static class TextPaginator
             if (current.Length > 0) lines.Add(current.ToString());
         }
         return lines;
+    }
+
+    /// <summary>Whether an over-wide token is cut character by character for this
+    /// face: always in Standard-14 metric space and for a TrueType (glyf) outline
+    /// face; never for a CFF-outline (OTTO) face, whose over-wide lines the
+    /// generator leaves whole (a Source Han Serif paragraph extracts line for line
+    /// with its source, while an Arial Unicode MS one wraps at the margin).</summary>
+    private static bool CharacterFillApplies(FontData? fontData)
+    {
+        var d = fontData?.TtfData;
+        if (d is null) return true;
+        if (d.Length < 16) return false;
+        static uint Tag(byte[] b, int at) =>
+            (uint)(b[at] << 24 | b[at + 1] << 16 | b[at + 2] << 8 | b[at + 3]);
+        var tag = Tag(d, 0);
+        if (tag == 0x74746366) // 'ttcf': the first member face decides
+        {
+            var off = (int)Tag(d, 12);
+            if (off < 0 || off + 4 > d.Length) return false;
+            tag = Tag(d, off);
+        }
+        return tag == 0x00010000 || tag == 0x74727565; // sfnt 1.0 / 'true'
+    }
+
+    /// <summary>Number of leading characters of <paramref name="word"/> whose
+    /// summed advances stay within <paramref name="maxWidth"/> (at least one, so
+    /// an over-wide glyph still makes progress); <paramref name="width"/> is the
+    /// prefix's width.</summary>
+    private static int LongestFittingPrefix(string word, Func<string, double> measurer,
+        double maxWidth, out double width)
+    {
+        width = 0;
+        var take = 0;
+        while (take < word.Length)
+        {
+            // A surrogate pair is one glyph: it is measured and cut as a unit.
+            var len = char.IsHighSurrogate(word[take]) && take + 1 < word.Length
+                      && char.IsLowSurrogate(word[take + 1]) ? 2 : 1;
+            var cw = measurer(word.Substring(take, len));
+            if (take > 0 && width + cw > maxWidth) break;
+            width += cw;
+            take += len;
+        }
+        return take;
     }
 
     /// <summary>
@@ -140,14 +207,14 @@ internal static class TextPaginator
         var lastParagraph = paragraphs.Length - 1;
 
         // (content, width-without-trailing-space, lastLineOfParagraph, paragraphIndex)
-        var raw = new List<(string content, double width, bool lastInPara, int para)>();
+        var raw = new List<(string content, double width, bool lastInPara, int para, bool keptSpace)>();
         var globalLineCount = 0;
         for (var pi = 0; pi < paragraphs.Length; pi++)
         {
             var paragraph = paragraphs[pi];
             if (paragraph.Length == 0)
             {
-                raw.Add((string.Empty, 0, true, pi));
+                raw.Add((string.Empty, 0, true, pi, false));
                 globalLineCount++;
                 continue;
             }
@@ -155,6 +222,7 @@ internal static class TextPaginator
             var current = new StringBuilder();
             double currentWidth = 0;
             var paraLines = new List<(string, double)>();
+            var keptBreakSpace = new List<bool>();
             for (var wi = 0; wi < words.Length; wi++)
             {
                 var word = words[wi];
@@ -172,22 +240,43 @@ internal static class TextPaginator
                     ? maxWidth - firstLineIndent : maxWidth;
                 if (currentWidth + needed > effectiveMax && current.Length > 0)
                 {
+                    // Lock-step with WrapToWidth: the break space is reported only
+                    // when it fit the line.
+                    keptBreakSpace.Add(sep && currentWidth + spaceWidth <= effectiveMax);
                     paraLines.Add((current.ToString(), currentWidth));
                     current.Clear();
-                    current.Append(word);
-                    currentWidth = wordWidth;
+                    currentWidth = 0;
+                }
+                else if (sep) { current.Append(' '); currentWidth += spaceWidth; }
+                if (current.Length == 0 && wordWidth > effectiveMax && CharacterFillApplies(fontData))
+                {
+                    var rest = word;
+                    while (rest.Length > 0)
+                    {
+                        effectiveMax = globalLineCount == 0 && paraLines.Count == 0
+                            ? maxWidth - firstLineIndent : maxWidth;
+                        var take = LongestFittingPrefix(rest, measurer, effectiveMax, out var pieceWidth);
+                        if (take >= rest.Length)
+                        {
+                            current.Append(rest);
+                            currentWidth = pieceWidth;
+                            break;
+                        }
+                        keptBreakSpace.Add(false);
+                        paraLines.Add((rest.Substring(0, take), pieceWidth));
+                        rest = rest.Substring(take);
+                    }
                 }
                 else
                 {
-                    if (sep) { current.Append(' '); currentWidth += spaceWidth; }
                     current.Append(word);
                     currentWidth += wordWidth;
                 }
             }
-            if (current.Length > 0) paraLines.Add((current.ToString(), currentWidth));
+            if (current.Length > 0) { paraLines.Add((current.ToString(), currentWidth)); keptBreakSpace.Add(false); }
             for (var li = 0; li < paraLines.Count; li++)
             {
-                raw.Add((paraLines[li].Item1, paraLines[li].Item2, li == paraLines.Count - 1, pi));
+                raw.Add((paraLines[li].Item1, paraLines[li].Item2, li == paraLines.Count - 1, pi, keptBreakSpace[li]));
                 globalLineCount++;
             }
         }
@@ -204,7 +293,7 @@ internal static class TextPaginator
             // text ends -- a trailing space there is part of the paragraph and the
             // loop above already preserved it, so adding one here would report the
             // line one space too wide and break lock-step with WrapToWidth.
-            if (reason == 'M')
+            if (reason == 'M' && r.keptSpace)
                 result.Add((r.content + " ", r.width + spaceWidth, reason));
             else
                 result.Add((r.content, r.width, reason));

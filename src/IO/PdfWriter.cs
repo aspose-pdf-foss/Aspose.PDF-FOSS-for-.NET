@@ -313,9 +313,13 @@ internal sealed class PdfWriter
     {
         WriteRaw("[");
         var first = true;
+        PdfObject? prev = null;
         foreach (var item in array)
         {
-            if (!first) WriteRaw(" ");
+            // A name is self-delimiting, so a name that FOLLOWS a name needs no
+            // separator - the serialiser writes [/Indexed/DeviceRGB 255 ...]
+            // compact, and tests regex that exact shape.
+            if (!first && !(prev is PdfName && item is PdfName)) WriteRaw(" ");
             // PDF spec requires streams to be indirect objects; promote inline streams in arrays
             if (item is PdfStream embeddedStream)
             {
@@ -336,6 +340,7 @@ internal sealed class PdfWriter
                 WriteObject(item);
             }
             first = false;
+            prev = item;
         }
         WriteRaw("]");
     }
@@ -648,7 +653,18 @@ internal sealed class PdfWriter
         foreach (var off in _offsets.Values)
             if (off > maxOffset) maxOffset = off;
 
-        var w2 = ByteWidth(maxOffset);
+        // Field 2 of a TYPE-2 entry holds the containing object STREAM's number, so /W[1]
+        // must cover the largest such number as well as the largest byte offset — a small
+        // file that keeps large inherited object numbers (e.g. a 5 KB save carrying object
+        // 100003) otherwise writes the stream number truncated to the offset width.
+        var maxField2 = maxOffset;
+        if (compressedEntries is not null)
+        {
+            foreach (var (stm, _) in compressedEntries.Values)
+                if (stm > maxField2) maxField2 = stm;
+        }
+
+        var w2 = ByteWidth(maxField2);
         // For generation/index: typically small, but check compressed entries too
         long maxField3 = 65535; // free entry gen
         if (compressedEntries is not null)
