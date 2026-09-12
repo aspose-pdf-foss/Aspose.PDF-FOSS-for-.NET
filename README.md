@@ -2,7 +2,7 @@
 
 [![NuGet version](https://img.shields.io/nuget/v/Aspose.PDF.FOSS.svg)](https://www.nuget.org/packages/Aspose.PDF.FOSS/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![.NET](https://img.shields.io/badge/.NET-8.0-blue.svg)](src/Aspose.Pdf.Foss.csproj)
 
-[![Aspose.PDF FOSS for .NET](https://raw.githubusercontent.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/main/docs/media/banner-readme.png)](https://products.aspose.org/pdf/net/)
+[![Aspose.PDF FOSS for .NET](https://products.aspose.org/media/pdf/net/banner-readme.png)](https://products.aspose.org/pdf/net/)
 
 Aspose.PDF FOSS for .NET is a free, open-source PDF library for .NET 8+ that reads, creates,
 modifies, and converts PDF documents. It provides an Aspose.PDF-compatible API surface for common
@@ -14,6 +14,7 @@ unchanged.
 - [At a Glance](#at-a-glance)
 - [Key Capabilities](#key-capabilities)
 - [Installation](#installation)
+- [Dependencies](#dependencies)
 - [Quick Start](#quick-start)
 - [Additional Examples](#additional-examples)
 - [API Reference](#api-reference)
@@ -24,7 +25,50 @@ unchanged.
 
 ## At a Glance
 
-![Aspose.PDF FOSS for .NET at a glance](https://raw.githubusercontent.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/main/docs/media/at-a-glance.png)
+```mermaid
+flowchart TD
+  subgraph StartingPoints["Starting Points"]
+    direction TB
+    i1["An existing PDF document"]
+    i2["An existing HTML file"]
+    i3["An existing SVG file"]
+    i4["An existing Markdown file"]
+    i5["An existing TXT file"]
+  end
+  PRODUCT["Aspose.PDF FOSS for .NET"]
+  subgraph Capabilities["Core Capabilities"]
+    direction LR
+    subgraph capl[" "]
+      direction TB
+      c1["Document creation and editing"]
+      c2["Text extraction, search, and replace"]
+      c3["AcroForm fields: read, fill, and build"]
+      c4["Annotations and markup"]
+      c5["Encryption, permissions, and digital signatures"]
+    end
+    subgraph capr[" "]
+      direction TB
+      c6["Page-to-image rendering"]
+      c7["Format conversion (HTML, SVG, Markdown)"]
+      c8["Tagged PDF and accessibility structure"]
+      c9["High-level facade workflows"]
+    end
+  end
+  subgraph Outputs["Outputs"]
+    direction TB
+    o1["PDF document"]
+    o2["HTML"]
+    o3["SVG"]
+    o4["Markdown"]
+    o5["Plain text"]
+    o6["PNG image"]
+    o7["JPEG image"]
+    o8["BMP image"]
+    o9["GIF image"]
+    o10["TIFF image"]
+  end
+  StartingPoints --> PRODUCT --> Capabilities --> Outputs
+```
 
 ## Key Capabilities
 
@@ -38,17 +82,16 @@ unchanged.
   `TableAbsorber`; find and replace across pages — including cross-operator and ligature-aware
   spans — and build new text with `TextBuilder`, `TextFragment`, `TextSegment`, `TextStamp`, and
   `FormattedText`, with Bidi (RTL) support and AGL Unicode mapping.
-- Read, fill, and build AcroForm fields — text, checkbox, radio, choice, button, signature, date,
-  and rich text — through `Form`, `Field`, `FormFieldBuilder`, `FormEditor`, and `FormDataConverter`,
+- Read, fill, and build AcroForm fields — text, checkbox, radio, choice, button, signature, and
+  rich text — through `Form`, `Field`, `FormFieldBuilder`, `FormEditor`, and `FormDataConverter`,
   including field-level flatten and JSON/XFDF form-data import and export.
 - Add and edit every standard annotation type — link, text, free-text, highlight,
   square/circle/line/polyline, ink, stamp, popup, file attachment, screen, redaction, watermark,
   pre-press marks, and rich media — with appearance generation and flatten.
 - Encrypt and decrypt with RC4-40, RC4-128, AES-128, and AES-256, and sign documents with PKCS#7 /
   CMS detached signatures — including DocMDP certifying signatures — through `PdfFileSecurity`,
-  `PdfFileSignature`, `PdfSigner`, and `PdfCertificate`; signature verification checks the
-  certificate chain against the machine and per-user trust stores when `ValidationOptions` asks
-  for it; document permissions can be read and set directly on `Document`.
+  `PdfFileSignature`, `PdfSigner`, and `PdfCertificate`; document permissions can be read and set
+  directly on `Document`.
 - Render pages to PNG, JPEG, BMP, TIFF, or SVG with `PngDevice`, `JpegDevice`, `BmpDevice`,
   `TiffDevice`, and `SvgDevice` through the pluggable `IPageRenderer` (default
   `SoftwarePageRenderer`), with mesh shading types 4-7 (free-form and lattice-form Gouraud,
@@ -60,22 +103,20 @@ unchanged.
 - High-level, task-oriented facades cover common workflows: `PdfFileEditor` for
   concatenate/split/resize/extract, `PdfBookmarkEditor` for outline CRUD with XML/HTML export,
   `PdfContentEditor` for annotations/stamps/replace-text, `PdfFileStamp` for header/footer/
-  page-number stamping, `PdfFileSanitization` to repair a file too damaged to load (header/EOF
-  waste, broken cross-reference table), plus `PdfFileInfo`, `PdfFileMend`, `PdfAnnotationEditor`,
-  `PdfPageEditor`, `PdfConverter`, `PdfExtractor`, and `PdfViewer`.
+  page-number stamping, plus `PdfFileInfo`, `PdfFileMend`, `PdfAnnotationEditor`, `PdfPageEditor`,
+  `PdfConverter`, `PdfExtractor`, and `PdfViewer`.
 - Read an existing `/StructTreeRoot` tree and walk its `Aspose.Pdf.LogicalStructure` element
-  hierarchy, or build tagged content from scratch with `ITaggedContent`'s typed structure
-  elements — including the ruby and warichu inline elements and the `StructureTypeStandard`
-  role set — setting document language, title, alternate text, and marked content for
+  hierarchy, or build tagged content from scratch with `ITaggedContent`'s 37 typed structure
+  elements, setting document language, title, alternate text, and marked content for
   accessibility.
+- Extract tabular data and build tables with `Table`, `Row`, `Cell`, and `TableAbsorber`; draw
+  with `Graph`, `Rectangle`, `Circle`, `Ellipse`, `Arc`, `Line`, and `Curve`; and extract or place
+  images through `ImagePlacementAbsorber` and `XImageCollection`.
 - Compare two documents or two pages: `SideBySidePdfComparer` writes a result PDF that sets both
   versions side by side with deletions marked on the left and insertions on the right, with
   whitespace handling, comparison / exclusion areas, and marker colours set through
   `SideBySideComparisonOptions`; `GraphicalPdfComparer` diffs the rendered pixels of two pages
   (Windows only), and the `Aspose.Pdf.Comparison.Diff` model sits under both.
-- Extract tabular data and build tables with `Table`, `Row`, `Cell`, and `TableAbsorber`; draw
-  with `Graph`, `Rectangle`, `Circle`, `Ellipse`, `Arc`, `Line`, and `Curve`; and extract or place
-  images through `ImagePlacementAbsorber` and `XImageCollection`.
 
 ## Installation
 
@@ -83,13 +124,13 @@ This library publishes prebuilt binaries to NuGet as
 [`Aspose.PDF.FOSS`](https://www.nuget.org/packages/Aspose.PDF.FOSS/):
 
 ```bash
-dotnet add package Aspose.PDF.FOSS --version 26.9.0
+dotnet add package Aspose.PDF.FOSS --version 26.8.0
 ```
 
 Or with a `<PackageReference>`:
 
 ```xml
-<PackageReference Include="Aspose.PDF.FOSS" Version="26.9.0" />
+<PackageReference Include="Aspose.PDF.FOSS" Version="26.8.0" />
 ```
 
 The library targets **.NET 8.0** and pulls in one NuGet dependency, `System.Drawing.Common`
@@ -304,7 +345,7 @@ signer.Save("signed.pdf");
 The primary entry point is `Document`, which exposes its pages through `Document.Pages` (a
 `PageCollection` of `Page` objects), its interactive form through `Document.Form`, and its
 security surface through `PdfFileSecurity` and `PdfFileSignature`. The public API surface includes
-853 public types across 36 modules, summarized in the module-grouped tables below.
+881 public types across 37 modules, summarized in the module-grouped tables below.
 
 <details>
 <summary>View the Core API Surface</summary>
@@ -322,6 +363,7 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `DocumentInfo` | Represents the document information dictionary. |
 | `EmbeddedFileCollection` | Collection of embedded files in a document. |
 | `EncryptedPayload` | Wraps the /EP entry on an embedded-file file-spec — the encrypted-payload that signals a PDF 2.0 unencrypted-wrapper document. |
+| `EngineDocFacade` | Wrapper providing the small slice of engine-level state callers may set via `doc._engineDoc.X`. |
 | `ExtGStateValue` | One /ExtGState entry — name plus stroke/fill alpha factors. |
 | `FileParams` | Wraps the /Params dict on an embedded-file stream (PDF §7.11.3 Table 46). |
 | `FileSpecification` | Represents an embedded file specification (PDF §7.11.3). |
@@ -398,7 +440,6 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `GoToAction` | Class with 13 methods and 5 properties. |
 | `GoToRemoteAction` | Go-to-remote action — jumps to a destination in a different PDF file . |
 | `GoToURIAction` | Alias for UriAction, matching the public API name. |
-| `HideAction` | Hide action (/S /Hide, PDF 32000 §12.6.4.10): sets or clears the hidden flag of the annotations it targets. |
 | `ImportDataAction` | An import-data action (/S /ImportData): imports field data from the FDF/XFDF file identified by the action's /F file specification. |
 | `JavascriptAction` | Class with 8 methods and 3 properties. |
 | `LaunchAction` | Class with 9 methods and 4 properties. |
@@ -558,7 +599,6 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `ArtifactCollection` | Collection of artifacts on a page. |
 | `BackgroundArtifact` | Represents a background artifact (a coloured block or image painted behind page content). |
 | `HeaderArtifact` | Represents a header artifact — a page-level running head tagged Artifact /Subtype /Header (PDF 32000 §14.8.2.2). |
-| `PageCollectionExtensions` | Pagination stamping over a `PageCollection` (Bates numbering and similar page-set artifacts). |
 | `WatermarkArtifact` | Represents a watermark artifact that can be added to a PDF page. |
 
 #### Enumerations
@@ -567,6 +607,10 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 |---|---|
 | `ArtifactSubtype` | Enumerates artifact subtypes. |
 | `ArtifactType` | Enumerates artifact types as defined by PDF 32000 §14.8.2.2. |
+| `BatesNArtifact` | A Bates-numbering pagination artifact: a zero-padded running number with optional prefix and suffix. |
+| `PageCollectionExtension` | Pagination stamping over a PageCollection (Bates numbering etc.). |
+| `PaginationArtifact` | Base class for artifacts stamped across a page range by AddPagination — e.g. |
+| `Subset` | Which pages of a document a pagination artifact applies to. |
 
 ### Collections
 
@@ -604,13 +648,6 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 
 | Class | Description |
 |---|---|
-| `SideBySidePdfComparer` | Compares the text of two pages or two documents and writes a result PDF showing both versions side by side with the changes highlighted (deletions on the left page, insertions on the right). Static `Compare` overloads target a file path or a stream. |
-| `SideBySideComparisonOptions` | Options for the side-by-side comparer: whitespace `ComparisonMode`, `AdditionalChangeMarks`, `ExcludeTables`, per-side comparison and exclusion areas, and the `DeleteColor` / `InsertColor` markers. |
-| `SideBySideDocsComparisonResult` | Result of a document-level comparison: `HasChanges`, plus per-page `FirstDocChanges` / `SecondDocChanges` highlights and the per-page `FullChanges` edit sequences. |
-| `SideBySidePagesComparisonResult` | Result of a page-level comparison: `HasChanges`, the `FirstPageChanges` / `SecondPageChanges` highlights, and the `FullChanges` edit list. |
-| `EditContainer` | A single highlighted change in a side-by-side result: its `Id`, the `DiffOperation` it came from, and the `Rects` it covers on the page. |
-| `GraphicalPdfComparer` | Renders two pages and compares them pixel by pixel, with configurable `Resolution`, mark `Color`, and `Threshold`. Windows only — it hands back `System.Drawing` bitmaps. |
-| `ImagesDifference` | The pixel difference of two rendered pages: raw `Difference` / `Stride` / `Height`, the `SourceImage` and `GetDestinationImage()`, and `DifferenceToImage()`. Windows only. |
 | `DiffOperation` | A single edit produced when diffing two texts: an Operation (Equal / Delete / Insert) together with the run of text it applies to. |
 | `DiffUtils` | Text helpers used by the diff engine: common prefix/suffix extraction and re-assembly of the source / destination text from a list of DiffOperations. |
 | `MergingOptimizer` | Semantic clean-up pass: eliminates equalities that are no larger than the edits surrounding them (folding those short common runs back into the adjacent delete/insert), then re-merges the result into canonical form. |
@@ -627,9 +664,16 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 
 | Enumeration | Description |
 |---|---|
-| `ComparisonMode` | How the side-by-side comparer treats whitespace: `Normal` compares the extracted runs as-is, `IgnoreSpaces` compares only non-space characters, and `ParseSpaces` reconstructs inter-word spaces and line breaks from glyph geometry first. |
 | `EditOperationsOrder` | When a delete and an insert are emitted for the same position, which one an optimizer places first in the resulting operation sequence. |
 | `Operation` | The kind of edit a DiffOperation represents when diffing two texts: a run that is unchanged, deleted from the source, or inserted in the destination. |
+| `ComparisonMode` | How the side-by-side comparer treats whitespace when extracting the texts to diff. |
+| `EditContainer` | A single change found by the side-by-side comparison, bound to the page rectangles it covers. |
+| `GraphicalPdfComparer` | Compares two PDF pages/documents graphically by rendering them to rasters and highlighting the pixels that differ. |
+| `ImagesDifference` | Result of a graphical comparison of two rendered PDF pages: the first (source) page rasterised to a 24bpp bitmap, plus a per-pixel record of where the second (destination) page differs from it. |
+| `SideBySideComparisonOptions` | Options for SideBySidePdfComparer: whitespace handling, comparison/exclusion areas and the marker colours used in the output document. |
+| `SideBySideDocsComparisonResult` | Result of a document-level side-by-side comparison: per-page change lists plus the full per-page edit sequences. |
+| `SideBySidePagesComparisonResult` | Result of a page-level side-by-side comparison. |
+| `SideBySidePdfComparer` | Compares the text of two pages or documents and produces a result PDF that shows both versions side by side with the changes highlighted (deletions on the left page, insertions on the right). |
 
 ### Content
 
@@ -801,6 +845,7 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `FormPresentationMode` | How form fields are rendered (canonical Production / Editor split). |
 | `PageCoordinateType` | Which page-box the rendered image extents come from. |
 | `ShapeType` | Shape type for TIFF rendering. |
+| `ThumbnailDevice` | Renders PDF document pages into thumbnail PNG images. |
 
 ### Drawing
 
@@ -816,7 +861,6 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `GradientAxialShading` | Defines a linear (axial) gradient between two colors for use as a fill pattern. |
 | `Graph` | A graph container that holds drawable shapes and renders them to a content stream. |
 | `Line` | A line shape. |
-| `Path` | A shape composed of other shapes: the children's outlines join one path that is painted once with the parent's `GraphInfo`, so the region a line and two arcs enclose can be filled as a whole. |
 | `PatternColorSpace` | Pattern colour-space marker (Aspose.Pdf public surface). |
 | `Point-Drawing` | A 2D point (x, y). |
 | `Polygon` | A polygon shape (closed path with arbitrary vertices). |
@@ -854,20 +898,19 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | Class | Description |
 |---|---|
 | `CrashReportOptions` | Configures crash-report emission for GenerateCrashReport. |
-| `DeprecatedFeatureException` | Thrown when a mechanism ISO 32000-2 retires is used on a PDF 2.0 document — RC4 under the 2.0 encryption flag, a legacy security handler, or the raw-RSA / enveloping PKCS#7 signature subfilters. |
-| `EmptyValueException` | Thrown when an operation requires a value the caller left empty. |
-| `FontEmbeddingException` | Thrown when a font marked for embedding may not be written into the document (its licence flags forbid embedding). |
 | `FontNotFoundException` | Thrown when a requested font cannot be located (no system font with that name, no matching custom-font source, etc.). |
 | `IncorrectFontUsageException` | Thrown during text extraction when the content stream issues a text-showing operator (Tj/TJ/'/") while no font is set in the current graphics state — i.e. |
 | `InvalidFormTypeOperationException` | Thrown when an operation is attempted on the wrong form type (e.g. |
 | `InvalidPasswordException` | Thrown when a password-protected operation is attempted without supplying a valid password (e.g. |
 | `InvalidPdfFileFormatException` | Thrown when a stream cannot be opened as a PDF (bad header, truncated file, or otherwise unrecognisable as PDF). |
-| `MissingOptionalDependencyException` | Thrown when a feature needs an optional package the application has not referenced (e.g. System.Drawing.Common for printing); the message names what to install. |
 | `PdfException` | Represents errors that occur during PDF application execution. |
 | `PdfExceptionMessages` | Centralised message strings surfaced by the library's exceptions and security diagnostics. |
 | `PdfTextDecodingException` | Thrown when text content cannot be decoded — e.g. |
 | `UnsupportedFontTypeException` | Thrown when a file cannot be opened as a font because its format is not a supported font program (e.g. |
 | `ValidationIssue` | Represents a validation issue found in a PDF document. |
+| `BoundsOutOfRangeException` | Thrown when an element is inserted into a parent container whose bounds check mode is ThrowExceptionIfDoesNotFit and the element does not fit the container rectangle. |
+| `DeprecatedFeatureException` | Thrown when an operation requests a feature that the document's PDF version has deprecated — e.g. |
+| `SanitizationException` | Thrown when a document structure is recognised as a signature-forgery attack (e.g. |
 
 ### Facades
 
@@ -900,7 +943,6 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `PdfFileEditor` | Real-only additions to PdfFileEditor: exception-handling state, Try* wrappers around the existing working methods, and MemoryStream/file overloads for SplitToBulks/SplitToPages that wrap the real byte[] implementations already present in PdfFileEditor.cs. |
 | `PdfFileInfo` | Facade for accessing PDF document metadata and properties. |
 | `PdfFileMend` | Facade for adding text and images to existing PDF documents. |
-| `PdfFileSanitization` | Repairs damaged PDF files at the byte level so they open again: trims waste before `%PDF-` and after the final `%%EOF` and rebuilds a broken cross-reference table / trailer by re-scanning the indirect objects, without parsing the file into a `Document`. |
 | `PdfFileSecurity` | Facade for encrypting, decrypting, and changing passwords on PDF files. |
 | `PdfFileSignature` | Facade for signing and reading digital signatures in PDF documents. |
 | `PdfFileStamp` | Facade for adding stamps, page numbers, headers, footers, and watermarks. |
@@ -958,12 +1000,10 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 |---|---|
 | `AcroFormData` | Form-level AcroForm dictionary data surfaced by the form JSON export. |
 | `AppearanceEntry` | One state of a widget appearance variant (the body of an /AP/N, AP/D, or /AP/R entry). |
-| `AppearanceImageData` | One image XObject of a widget appearance's resources, captured for the form export. |
 | `ButtonField` | Push-button form field (FT=Btn with Pushbutton flag set). |
 | `CheckboxField` | Class with 26 methods and 84 properties. |
 | `ChoiceField` | Class with 25 methods and 89 properties. |
 | `ComboBoxField` | Combo box (drop-down) form field — a ChoiceField with the Combo flag set. |
-| `DateField` | A text field presenting a date with a popup JavaScript calendar. |
 | `DefaultResourcesData` | Form-level default resources (/DR) surfaced by the form JSON export. |
 | `DocMDPSignature` | Pairs a Signature (which carries the signing certificate) with the DocMDPAccessPermissions level a certifying signature will impose. |
 | `ExportFieldsToJsonOptions` | Options passed to ExportToJson. |
@@ -1008,6 +1048,9 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `ScalingReason` | When to scale the icon to fit its rectangle (/MK /IF /S). |
 | `SignDependentElementsRenderingModes` | How widgets dependent on signature appearance are rendered when the form is converted. |
 | `SubjectNameElements` | X.500 distinguished-name components rendered inside the visible signature appearance when UseDigitalSubjectFormat is set. |
+| `BarcodeField` | A Tx form field whose widget carries a /PMD (PaperMetaData) dictionary — an Acrobat paper-barcode field. |
+| `ExternalSignature` | A detached PKCS#7 signature configuration built around an already-loaded platform certificate — typically from the OS certificate store, a smartcard or an HSM — rather than a PFX file. |
+| `Symbology` | Barcode symbology carried by a barcode form field's /PMD (PaperMetaData) dictionary. |
 
 ### Functions
 
@@ -1052,7 +1095,7 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 |---|---|
 | `BorderCornerStyle` | Corner-rounding style for a Table's border box. |
 | `BorderSide` | Specifies which sides of a border to draw. |
-| `ColumnAdjustment` | How a Table sizes its columns. |
+| `ColumnAdjustment` | How a Table sizes its columns (API parity). |
 | `ParagraphPositioningMode` | How Left / Top are interpreted. |
 | `TableBroken` | TableBroken enum indicates how a table is split across pages, with values None, Vertical, VerticalInSamePage, and IsInNextPage. |
 
@@ -1177,11 +1220,7 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `PrivateElement` | Class with 11 methods and 13 properties. |
 | `QuoteElement` | Class with 11 methods and 13 properties. |
 | `ReferenceElement` | Class with 11 methods and 13 properties. |
-| `RubyChildElement` | Base for the ruby-annotation content elements (RB, RT, RP) that appear only inside a `RubyElement`. |
 | `RubyElement` | Class with 11 methods and 13 properties. |
-| `RubyRBElement` | Ruby base text (RB) content element. |
-| `RubyRPElement` | Ruby punctuation (RP) content element. |
-| `RubyRTElement` | Ruby annotation text (RT) content element. |
 | `SectElement` | SectElement provides methods such as AppendChild, SetTag, SetText, and Remove to build and manipulate structural elements within a PDF document. |
 | `SpanElement` | SpanElement methods such as AppendChild, SetTag, SetText, SetId, AdjustPosition, and ChangeParentElement let developers build and manipulate structured PDF content. |
 | `StructTreeRootElement` | The /StructTreeRoot wrapper at the top of the logical- structure tree. |
@@ -1191,8 +1230,6 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `StructureElementAttributes` | The attribute manager exposed by Attributes. |
 | `StructureTextState` | Text-state snapshot used to format inline structure-element runs. |
 | `StructureType` | A structure-type role (the /S entry value), exposed via S. |
-| `StructureTypeCategory` | Category of a standard structure type per ISO 32000-1 §14.8.4: grouping, block-level, inline-level or illustration. |
-| `StructureTypeStandard` | The PDF standard structure types (ISO 32000-1 Tables 333–337) as singletons, so `StructureElement.StructureType` compares by identity; `Tag` is the role name written to /S. |
 | `TOCElement` | Class with 11 methods and 13 properties. |
 | `TOCIElement` | Class with 11 methods and 13 properties. |
 | `TableElement` | Class with 14 methods and 31 properties. |
@@ -1202,10 +1239,7 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `TableTHElement` | Class with 11 methods and 23 properties. |
 | `TableTHeadElement` | Class with 12 methods and 13 properties. |
 | `TableTRElement` | Class with 13 methods and 23 properties. |
-| `WarichuChildElement` | Base for the warichu content elements (WT, WP) that appear only inside a `WarichuElement`. |
 | `WarichuElement` | Class with 11 methods and 13 properties. |
-| `WarichuWPElement` | Warichu punctuation (WP) content element. |
-| `WarichuWTElement` | Warichu text (WT) content element. |
 
 #### Interfaces
 
@@ -1219,13 +1253,15 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 |---|---|
 | `AttributeKey` | Standard tagged-PDF attribute keys (ISO 32000-1 §14.8.5). |
 | `AttributeOwnerStandard` | Standard owners of a tagged-PDF attribute set (the /O entry of an attribute object, ISO 32000-1 Table 348). |
+| `HeaderElementTextConflictException` | Thrown at save when a header element linked via LinkTocPageTitleToHeaderElement carries its own text that differs from the TOC page's TocInfo title — the two would render conflicting navigation titles. |
+| `TOCpageHasNoTitleException` | Thrown by LinkTocPageTitleToHeaderElement when the TOC page's TocInfo carries no title — the tagged-TOC navigation header must mirror an existing page title (PDF/UA-1 tagged TOC support). |
 
 ### Navigation
 
 | Class | Description |
 |---|---|
 | `DestinationArray` | Opaque wrapper around a PDF destination array, created by NamedDestination factory methods. |
-| `DestinationCollection` | Named-destination collection exposed as IEnumerable&lt;KeyValuePair&lt;string, object&gt;&gt; for API compatibility. |
+| `DestinationCollection` | Named-destination collection exposed as IEnumerable&lt;KeyValuePair&lt;string, object&gt;&gt; for Aspose.Pdf parity. |
 | `NamedDestination` | Represents a named destination in the document (PDF32000 §12.3.2.3). |
 | `NamedDestinationCollection` | Collection of named destinations in the document. |
 | `OutlineBuilder` | Builder for creating bookmarks (outlines) programmatically. |
@@ -1317,6 +1353,12 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `SaveFormat` | Save format enumeration. |
 | `SvgExternalImageType` | Image format used by the SVG embedded-image saver. |
 
+### PdfToMarkdown
+
+| Class | Description |
+|---|---|
+| `MarkdownSaveOptions` | Save options for the PDF to Markdown converter (`Document.Save(path, new MarkdownSaveOptions())`). |
+
 ### Printing
 
 | Class | Description |
@@ -1326,7 +1368,6 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `PaperSize` | The PaperSize class lets developers define custom page dimensions by specifying a name, width, and height. |
 | `PdfQueryPageSettingsEventArgs` | Event args supplied to PdfViewer.PdfQueryPageSettings. |
 | `PrinterSettings` | Printer-side settings (printer name, copies, range). |
-| `PrintingOptionalDependencyGuard` | Turns the bare `FileNotFoundException` a missing System.Drawing.Common raises at the first printing call into a `MissingOptionalDependencyException` naming the package to add. |
 | `StartEndPageEventArgs` | Event args raised by PdfViewer.StartPage / EndPage. |
 
 ### Security
@@ -1346,7 +1387,6 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `Sha3_512` | SHA3-512 (FIPS 202) — own Keccak implementation. |
 | `SignatureAlgorithmInfo` | Algorithm + digest + envelope-standard triple extracted from a PDF signature value. |
 | `SignatureAppearance` | Defines the visual appearance for a digital signature annotation. |
-| `SignatureLengthMismatchException` | Thrown when a produced signature does not fit the space reserved for /Contents because length estimation was skipped (`Signature.AvoidEstimatingSignatureLength`). |
 | `SignatureOptions` | Options for signing a PDF document. |
 | `ValidationOptions` | Tunes the verification policy used by Verify(SignatureName, ValidationOptions, out ValidationResult). |
 | `ValidationResult` | Verification outcome produced by Verify(SignatureName, ValidationOptions, out ValidationResult). |
@@ -1368,6 +1408,11 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `ValidationMethod` | Revocation-check protocol selector used by ValidationMethod. |
 | `ValidationMode` | How aggressively VerifySignature(string, ValidationOptions, out ValidationResult) reports problems. |
 | `ValidationStatus` | Outcome categories reported by Status. |
+| `HiddenDataSanitizationOptions` | Options controlling which categories of hidden or sensitive data HiddenDataSanitizer strips from a document. |
+| `HiddenDataSanitizer` | Strips hidden or sensitive data (annotations, JavaScript/actions, attachments, optional-content layers, form fields, metadata) from a document per the supplied HiddenDataSanitizationOptions. |
+| `TimestampAlgorithmInfo` | Algorithm info for an RFC 3161 document-timestamp signature (/SubFilter ETSI.RFC3161). |
+| `VerificationResult` | Result of a non-throwing signature verification (SignatureName, out VerificationResult)). |
+| `VerificationState` | Outcome of a signature verification. |
 
 ### Shading
 
@@ -1464,7 +1509,7 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `PageMarkup` | Represents the text markup of a single page, organized into sections. |
 | `ParagraphAbsorber` | Absorbs text from PDF pages and organizes it into sections and paragraphs. |
 | `ParagraphAbsorberOptions` | Options for ParagraphAbsorber controlling section detection thresholds. |
-| `PdfFontView` | Thin engine-font view behind `Font.iPdfFont`, kept for API compatibility. |
+| `PdfFontView` | Thin engine-font view used by Aspose.Pdf parity (Font.iPdfFont). |
 | `PhysicalTextSegment` | Physical (page-space) projection of an absorbed TextSegment. |
 | `Position` | The Position class can be used to specify X and Y indents for layout adjustments; its XIndent and YIndent properties are read‑only after construction. |
 | `RegexManager` | Global configuration for regular-expression text search (for example via TextFragmentAbsorber). |
@@ -1627,7 +1672,7 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 - **[How-to guides & FAQ](https://kb.aspose.org/pdf/net/)** — task-focused answers for common
   PDF-processing questions.
 - **[Full API reference](https://reference.aspose.org/pdf/net/)** — the complete, browsable
-  reference for all 915 public types (the API Reference section above covers the essentials).
+  reference for all 881 public types (the API Reference section above covers the essentials).
 - Found a bug or have a feature request?
   [Open an issue](https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/issues) on GitHub.
 
@@ -1666,13 +1711,10 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 - Format converters are limited to PDF, HTML, SVG, Markdown, and XML — DOCX, EPUB, MHT, XPS, PCL,
   LaTeX, DJVU, OFD, PostScript, and CGM conversion are not included.
 - `PdfViewer`'s `Print*` methods throw `PlatformNotSupportedException`; render to an image and
-  pass it to your own printing stack instead. The `Aspose.Pdf.Printing` settings types are
-  available, and a missing `System.Drawing.Common` package surfaces as a
-  `MissingOptionalDependencyException` that names the package to add.
-- Basic digital signatures (sign / verify, PKCS#1, PKCS#7, DocMDP, certifying) work, and
-  `ValidationOptions.CheckCertificateChain` is honoured (chain trust from the machine and
-  per-user stores); the rest of the validation surface — OCSP and CRL revocation checks,
-  network timestamping, custom remote-sign delegates — is stored but not active.
+  pass it to your own printing stack instead.
+- Basic digital signatures (sign / verify, PKCS#1, PKCS#7, DocMDP, certifying) work, but the
+  validation-options surface — `ValidationOptions`, `ValidationResult`, OCSP, network
+  timestamping, custom remote-sign delegates — is stored but not active.
 - Advanced `PdfFileEditor` features (`MakeNUp` imposition, `MakeBooklet` from a `Stream` with
   non-trivial margins, `ResizeContents` with custom imposition matrices) are accepted as input,
   but the save path emits a simplified layout.
