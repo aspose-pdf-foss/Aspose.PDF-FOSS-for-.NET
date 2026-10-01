@@ -2,7 +2,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf.Facades;
@@ -12,6 +11,9 @@ namespace Aspose.Pdf.Facades;
 /// </summary>
 public sealed class LineInfo
 {
+    /// <summary>Creates line parameters with defaults: visible, 1 point wide, no vertices.</summary>
+    public LineInfo() { }
+
     /// <summary>Vertex coordinates as flat array [x1,y1, x2,y2, .].</summary>
     public float[]? VerticeCoordinate { get; set; }
 

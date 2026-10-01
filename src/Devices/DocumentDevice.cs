@@ -3,7 +3,7 @@ namespace Aspose.Pdf.Devices;
 /// <summary>Abstract base for whole-document rendering devices. Concrete
 /// subclasses override <see cref="Process(Document, Stream)"/> to render
 /// every page; the page-range overload defaults to a sub-document
-/// extracted via <see cref="Document.ImportPages(Document, int[])"/>.</summary>
+/// extracted via <c>Document.ImportPages</c>.</summary>
 public abstract class DocumentDevice
 {
     /// <summary>Render every page of <paramref name="document"/> to

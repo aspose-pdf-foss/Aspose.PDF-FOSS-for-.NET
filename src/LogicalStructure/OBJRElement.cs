@@ -11,6 +11,9 @@ public sealed class OBJRElement : StructureElement
     internal OBJRElement() : base("OBJR") { }
     internal OBJRElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
 
+    /// <summary>The structure element whose content the referenced object is.</summary>
+    public StructureElement? ParentStructureElement => _parent;
+
     /// <summary>Record the referenced object's indirect reference under /Obj.</summary>
     internal void SetObj(PdfObject objRef) => _dict.Set("Obj", objRef);
 

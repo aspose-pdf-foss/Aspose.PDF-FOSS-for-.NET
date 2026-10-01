@@ -1,91 +1,54 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Text;
 
 internal sealed partial class FontMetrics
 {
-    private static FontMetrics BuildSimpleMetrics(PdfDictionary fontDict, PdfReader reader,
-        string normalizedBase, bool isStandard14)
+    private static FontMetrics BuildSimpleMetrics(PdfDictionary fontDict, PdfReader reader, string normalizedBase, bool isStandard14)
     {
-        var firstChar = (int)fontDict.GetInt("FirstChar", 0);
-        var lastChar = (int)fontDict.GetInt("LastChar", 255);
+        var sm = new SimpleMetricsState();
+        sm.fontDict = fontDict;
+        sm.reader = reader;
+        sm.normalizedBase = normalizedBase;
+        sm.isStandard14 = isStandard14;
+        sm.firstChar = (int)sm.fontDict.GetInt("FirstChar", 0);
+        sm.lastChar = (int)sm.fontDict.GetInt("LastChar", 255);
 
-        // Type 3 fonts express glyph widths in glyph space; they become text-space
-        // advances only after the horizontal component of /FontMatrix is applied
-        // (PDF 32000 §9.6.5). The shared advance formula divides the stored width
-        // by 1000, so pre-scale Type 3 widths by FontMatrix[0]·1000 to land in the
-        // same 1/1000-text-space unit the formula expects. Other simple fonts already
-        // store /Widths in 1/1000 units, so they keep a unit scale.
-        var isType3 = fontDict.GetName("Subtype") == "Type3";
-        double widthScale = 1.0;
-        if (isType3)
-        {
-            double fontMatrix0 = 0.001;
-            if (reader?.Resolve(fontDict.Get("FontMatrix")) is PdfArray fmArr && fmArr.Count >= 1)
-            {
-                fontMatrix0 = (reader.Resolve(fmArr[0]) ?? fmArr[0]) switch
-                {
-                    PdfInteger pi => pi.Value,
-                    PdfReal pr => pr.Value,
-                    _ => 0.001,
-                };
-            }
-            widthScale = fontMatrix0 * 1000.0;
-        }
+        sm.isType3 = sm.fontDict.GetName("Subtype") == "Type3";
+        sm.widthScale = 1.0;
+        ReadType3Metrics(sm);
 
-        int[]? widths = null;
-        // A /Widths entry written as a real is the face's own advance: a face drawn on
-        // a 2048-unit em has advances that are not whole 1000ths, and dropping the
-        // fraction shortens a re-measured paragraph by a fifth of a point. Keep those
-        // entries alongside the integer table, which every all-integer array — very
-        // nearly every real document — leaves exactly as it was.
-        Dictionary<int, double>? exactWidths = null;
-        var widthsObj = reader?.Resolve(fontDict.Get("Widths"));
-        if (widthsObj is PdfArray widthsArr && widthsArr.Count > 0)
+        sm.widths = null;
+        sm.exactWidths = null;
+        sm.widthsObj = sm.reader?.Resolve(sm.fontDict.Get("Widths"));
+        ReadWidthsArray(sm);
+
+        // A /Widths array that covers only part of the codes the text uses (a subset
+        // declaring FirstChar 32 .. LastChar 32 while its strings show letters) leaves
+        // every other code at the missing width - zero, so the text measures as nothing
+        // and lays out as a dot. The embedded program knows every code's advance: read
+        // the whole range from it and lay the declared widths over it.
+        if (sm.widths is not null && sm.reader is not null && sm.lastChar - sm.firstChar < 255
+            && ExtractEmbeddedTrueTypeWidths(sm.fontDict, sm.reader, 0, 255) is { } programWidths)
         {
-            widths = new int[widthsArr.Count];
-            for (var i = 0; i < widthsArr.Count; i++)
-            {
-                var w = reader?.Resolve(widthsArr[i]) ?? widthsArr[i];
-                if (!isType3 && w is PdfReal exact && exact.Value != System.Math.Floor(exact.Value))
-                    (exactWidths ??= new Dictionary<int, double>())[firstChar + i] = exact.Value;
-                if (isType3)
-                {
-                    double raw = w switch
-                    {
-                        PdfInteger pi => pi.Value,
-                        PdfReal pr => pr.Value,
-                        _ => 0,
-                    };
-                    widths[i] = (int)System.Math.Round(raw * widthScale);
-                }
-                else
-                {
-                    // Non-Type3 simple fonts: /Widths are already in 1/1000 text space.
-                    // An integer entry casts exactly as it always did; a real one rounds
-                    // to its nearest whole width rather than losing its fraction outright,
-                    // and the exact value above is what the extraction measure reads.
-                    widths[i] = w switch
-                    {
-                        PdfInteger pi => (int)pi.Value,
-                        PdfReal pr => (int)System.Math.Round(pr.Value),
-                        _ => 0,
-                    };
-                }
-            }
+            for (var code = sm.firstChar; code <= sm.lastChar && code - sm.firstChar < sm.widths.Length; code++)
+                if (code >= 0 && code < programWidths.Length) programWidths[code] = sm.widths[code - sm.firstChar];
+            sm.widths = programWidths;
+            sm.firstChar = 0;
+            sm.lastChar = 255;
         }
 
         // If no /Widths array, try to extract from embedded font program
-        if (widths is null && reader is not null)
+        if (sm.widths is null && sm.reader is not null)
         {
-            widths = ExtractEmbeddedTrueTypeWidths(fontDict, reader, firstChar, lastChar);
+            sm.widths = ExtractEmbeddedTrueTypeWidths(sm.fontDict, sm.reader, sm.firstChar, sm.lastChar);
         }
 
         // Try CFF (FontFile3) if TrueType extraction didn't yield results
-        if (widths is null && reader is not null)
+        if (sm.widths is null && sm.reader is not null)
         {
-            widths = ExtractEmbeddedCffWidths(fontDict, reader, firstChar, lastChar);
+            sm.widths = ExtractEmbeddedCffWidths(sm.fontDict, sm.reader, sm.firstChar, sm.lastChar);
         }
 
         // A non-embedded, non-Standard-14 simple font without /Widths: every code
@@ -94,29 +57,37 @@ internal sealed partial class FontMetrics
         // search/extraction) misfire on the phantom gaps. The BaseFont names a real
         // face; resolve it through the repository/system sources and take the
         // face's own advances, exactly as the producing layout measured them.
-        if (widths is null && !isStandard14)
+        if (sm.widths is null && !sm.isStandard14)
         {
-            widths = SystemFaceWidths(normalizedBase, firstChar, lastChar);
+            sm.widths = SystemFaceWidths(sm.normalizedBase, sm.firstChar, sm.lastChar);
         }
 
-        var defaultWidth = reader is not null ? GetMissingWidth(fontDict, reader) : 0;
-        if (defaultWidth == 0 && isStandard14)
-            defaultWidth = Standard14Fonts.GetDefaultWidth(normalizedBase);
-        if (defaultWidth == 0)
-            defaultWidth = 1000; // absolute fallback
+        sm.defaultWidth = sm.reader is not null ? GetMissingWidth(sm.fontDict, sm.reader) : 0;
+        if (sm.defaultWidth == 0 && sm.isStandard14)
+            sm.defaultWidth = Standard14Fonts.GetDefaultWidth(sm.normalizedBase);
+        if (sm.defaultWidth == 0)
+            sm.defaultWidth = 1000; // absolute fallback
 
-        var metrics = new FontMetrics(widths, firstChar, lastChar, null, defaultWidth,
-            normalizedBase, isStandard14, isCid: false);
-        metrics._cidWidthsExact = exactWidths;
-        // MacRoman-encoded Standard-14 fonts remap codes before the (WinAnsi-shaped)
-        // built-in width lookup — see MacRomanToWinAnsiCode.
-        var encObj = reader?.Resolve(fontDict.Get("Encoding")) ?? fontDict.Get("Encoding");
-        metrics._macRomanEncoding = encObj is PdfName encName
+        sm.metrics = new FontMetrics(sm.widths, sm.firstChar, sm.lastChar, null, sm.defaultWidth,
+            sm.normalizedBase, sm.isStandard14, isCid: false);
+        sm.metrics._cidWidthsExact = sm.exactWidths;
+        sm.encObj = sm.reader?.Resolve(sm.fontDict.Get("Encoding")) ?? sm.fontDict.Get("Encoding");
+        sm.metrics._macRomanEncoding = sm.encObj is PdfName encName
             ? encName.Value == "MacRomanEncoding"
-            : encObj is PdfDictionary encDict && encDict.GetName("BaseEncoding") == "MacRomanEncoding";
-        if (reader is not null)
-            PopulateDescriptorMetrics(metrics, fontDict, reader);
-        return metrics;
+            : sm.encObj is PdfDictionary encDict && encDict.GetName("BaseEncoding") == "MacRomanEncoding";
+        sm.metrics._standardEncoding = sm.encObj is null && TextAbsorber.IsStandardLatinType1(sm.fontDict)
+            && !HasEmbeddedProgram(sm.fontDict, sm.reader);
+        if (sm.reader is not null)
+            PopulateDescriptorMetrics(sm.metrics, sm.fontDict, sm.reader);
+        return sm.metrics;
+    }
+
+    /// <summary>Whether the font's descriptor carries a font program of any kind.</summary>
+    private static bool HasEmbeddedProgram(PdfDictionary fontDict, PdfReader? reader)
+    {
+        var descriptor = reader?.ResolveDict(fontDict.Get("FontDescriptor"));
+        return descriptor is not null && (descriptor.Get("FontFile") is not null
+            || descriptor.Get("FontFile2") is not null || descriptor.Get("FontFile3") is not null);
     }
 
     private static FontMetrics BuildCidMetrics(PdfDictionary fontDict, PdfReader reader,
@@ -367,56 +338,7 @@ internal sealed partial class FontMetrics
         var fontFileStream = reader.ResolveStream(descriptor.Get("FontFile2"));
         if (fontFileStream is not null)
         {
-            try
-            {
-                var fontData = reader.DecodeStream(fontFileStream);
-                var ttf = new TrueTypeParser(fontData);
-                ttf.Parse();
-                if (ttf.UnitsPerEm > 0 && ttf.Ascent > 0)
-                {
-                    var scale = 1000.0 / ttf.UnitsPerEm;
-                    // Use GDI+-style cell ascent for the text rectangle.
-                    // .NET uses em-height = usWinAscent + usWinDescent as the em square,
-                    // and cell ascent = usWinAscent scaled by (1000 / em-height-in-design-units).
-                    // Use GDI+-style cell ascent when usWin metrics define a significantly
-                    // larger em-square than upem (common in Calibri, Arial, etc. where
-                    // usWinAsc+usWinDesc > upem). This matches .NET's text rectangle.
-                    // For fonts where usWin metrics are close to upem, use hhea ascent
-                    // directly (standard upem scaling).
-                    var emDesignUnits = ttf.UsWinAscent + ttf.UsWinDescent;
-                    if (ttf.UsWinAscent > 0 && emDesignUnits > ttf.UnitsPerEm * 1.2)
-                    {
-                        metrics._ascent = (int)Math.Round(ttf.UsWinAscent * 1000.0 / emDesignUnits);
-                    }
-                    else
-                    {
-                        var lineGapHalf = ttf.LineGap > 0 ? ttf.LineGap / 2 : 0;
-                        metrics._ascent = (int)Math.Round((ttf.Ascent + lineGapHalf) * scale);
-                    }
-                    // Override descent from embedded TrueType only when the descriptor value
-                    // is clearly in non-standard units (|Descent| > 1000 in 1000-unit space).
-                    // E.g., Cambria: descriptor=-2463, sTypoDescender=-455 (2048 upem).
-                    // For fonts where the descriptor Descent is already in ~1000-unit range
-                    // (e.g., ArialMT Descent=-325), keep the descriptor value as-is.
-                    if (ttf.STypoDescender != 0 && Math.Abs(metrics._descent) > 1000)
-                        metrics._descent = ttf.STypoDescender * scale;
-
-                    // OS/2 usWinAscent + usWinDescent gives the visual line height.
-                    // Used for background rectangle sizing where the full cell height matters.
-                    if (ttf.UsWinAscent > 0)
-                        metrics._winLineHeight = (int)Math.Round((ttf.UsWinAscent + ttf.UsWinDescent) * scale);
-
-                    // Underline metrics from the post table
-                    if (ttf.UnderlinePosition != 0)
-                        metrics._underlinePosition = (int)Math.Round(ttf.UnderlinePosition * scale);
-                    if (ttf.UnderlineThickness != 0)
-                        metrics._underlineThickness = (int)Math.Round(ttf.UnderlineThickness * scale);
-                }
-            }
-            catch
-            {
-                // Fall back to descriptor values
-            }
+            ReadEmbeddedProgramMetrics(metrics, fontFileStream, reader);
         }
     }
 

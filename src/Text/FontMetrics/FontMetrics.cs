@@ -26,11 +26,40 @@ internal sealed partial class FontMetrics
     private readonly bool _isStandard14;
     private readonly bool _isCid;
 
+    /// <summary>True when the widths come from the built-in Standard-14 tables (Helvetica,
+    /// Times, Courier and their metric-compatible aliases).</summary>
+    internal bool IsStandard14 => _isStandard14;
+
     // The font's /Encoding (or /BaseEncoding) is MacRomanEncoding: the
     // Standard-14 width table is laid out by WinAnsi CODE, so a MacRoman code
     // must be remapped before the lookup (MacRoman 0xD0 is the endash, whose
     // WinAnsi slot 0xD0 holds Eth's 722 — 166/1000 em too wide per dash).
     private bool _macRomanEncoding;
+
+    // A standard Latin face that is not embedded and names no /Encoding shows its codes through
+    // its built-in StandardEncoding (PDF 32000 §9.6.6.1), where 0x27 and 0x60 are quoteright and
+    // quoteleft, not WinAnsi's quotesingle and grave: 222 and 222 units in Helvetica, not 191 and
+    // 333. A form's "PRODUCER'S SIGNATURE" pen ran 0.24 points short of the reference's print.
+    private bool _standardEncoding;
+
+    /// <summary>Whether codes 0x27 and 0x60 show StandardEncoding's typographic quotes.</summary>
+    internal bool ShowsStandardEncodingQuotes => _standardEncoding;
+
+    /// <summary>The WinAnsi code, which the Standard-14 width table is keyed by, of the glyph a
+    /// code shows through the font's encoding; -1 when WinAnsi has no such glyph.</summary>
+    private int WinAnsiLookupCode(int code) => _macRomanEncoding ? MacRomanToWinAnsiCode(code)
+        : _standardEncoding ? code switch
+        {
+            StandardQuoteRightCode => WinAnsiQuoteRightCode,
+            StandardQuoteLeftCode => WinAnsiQuoteLeftCode,
+            _ => code,
+        }
+        : code;
+
+    private const int StandardQuoteRightCode = 0x27;
+    private const int StandardQuoteLeftCode = 0x60;
+    private const int WinAnsiQuoteRightCode = 0x92;
+    private const int WinAnsiQuoteLeftCode = 0x91;
 
     // Embedded font program (FontFile2), for the lazy char->GID lookup that lets a
     // Unicode-text measure hit the subset's GID-keyed /W with the file's OWN advances.
@@ -197,7 +226,6 @@ internal sealed partial class FontMetrics
     }
 
     /// <summary>
-    /// <summary>
     /// The width explicitly listed in the CIDFont /W table for this CID, or null
     /// when the CID isn't in /W (so the caller can decide whether to use /DW or its
     /// own default rather than silently getting the default).
@@ -235,7 +263,7 @@ internal sealed partial class FontMetrics
         // takes the /DW default per PDF 32000 §9.7.4.3.
         if (_isStandard14 && !_isCid && _baseFontName is not null)
         {
-            var lookup = _macRomanEncoding ? MacRomanToWinAnsiCode(charCode) : charCode;
+            var lookup = WinAnsiLookupCode(charCode);
             if (lookup >= 0)
             {
                 var w = Standard14Fonts.GetWidth(_baseFontName, lookup);
@@ -288,7 +316,7 @@ internal sealed partial class FontMetrics
             return true;
         if (_isStandard14 && !_isCid && _baseFontName is not null)
         {
-            var lookup = _macRomanEncoding ? MacRomanToWinAnsiCode(charCode) : charCode;
+            var lookup = WinAnsiLookupCode(charCode);
             if (lookup >= 0 && Standard14Fonts.GetWidth(_baseFontName, lookup) >= 0)
                 return true;
         }
@@ -415,7 +443,11 @@ internal sealed partial class FontMetrics
         {
             foreach (var ch in text)
             {
-                var code = ch < 256 ? ch : '?';
+                // A Standard-14 face's widths are keyed by WinAnsi code: a character WinAnsi names past Latin-1 (a
+                // curly quote, a dash, a bullet) is measured by that code, not as the '?' standing for what a face lacks.
+                var code = ch < 256 ? ch
+                    : _isStandard14 && Aspose.Pdf.Content.ContentStreamBuilder.ToWinAnsi(ch) is var ansi && ansi < 256 ? ansi
+                    : '?';
                 total += GetWidth(code);
             }
         }
@@ -425,7 +457,7 @@ internal sealed partial class FontMetrics
 
     /// <summary>
     /// True when full-precision (unrounded) glyph advances are available from the
-    /// embedded font program, so <see cref="MeasureStringExact(string, double)"/>
+    /// embedded font program, so <c>MeasureStringExact</c>
     /// improves on the integer /W widths.
     /// </summary>
     public bool HasExactWidths => _cidWidthsExact is not null;
@@ -436,7 +468,7 @@ internal sealed partial class FontMetrics
     /// fractional value is available, so the result never diverges structurally from
     /// the integer path — it only restores the fractional part the /W array dropped.
     /// </summary>
-    private double GetWidthExact(int charCode)
+    internal double GetWidthExact(int charCode)
     {
         if (_cidWidthsExact is not null
             && _cidWidthsExact.TryGetValue(charCode, out var w))

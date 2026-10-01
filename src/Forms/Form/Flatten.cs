@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -14,27 +14,29 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     /// FlattenAllFields). <paramref name="flattenNonWidgets"/> also folds non-widget annotations
     /// (e.g. FreeText) into the page content so their FRM index lines up with /Annots — the facade
     /// FlattenAllFields does this; document/form flatten leaves them for the annotation path.</summary>
-    internal void Flatten(Document document, FlattenSettings? settings, int frmStartIndex,
-        bool flattenNonWidgets, bool skipInvisible = false, bool keepAcroFormDict = false)
+    internal void Flatten(Document document, FlattenSettings? settings, int frmStartIndex, bool flattenNonWidgets, bool skipInvisible = false, bool keepAcroFormDict = false)
     {
+        var fl = new FormFlattenState();
+        fl.document = document;
+        fl.settings = settings;
+        fl.frmStartIndex = frmStartIndex;
+        fl.flattenNonWidgets = flattenNonWidgets;
+        fl.skipInvisible = skipInvisible;
+        fl.keepAcroFormDict = keepAcroFormDict;
         // 0. A DYNAMIC XFA form (no AcroForm widgets — its fields live only in the
         //    XFA template) must first be folded to a standard AcroForm: paint the
         //    form onto real pages (replacing the viewer placeholder page) and
         //    materialise flat fields. A static XFA form keeps its widget path.
         if (IsXfa)
         {
-            var xfaAcro = document.Reader.ResolveDict(document.Catalog.Get("AcroForm"));
-            var xfaFields = xfaAcro is null ? null : document.Reader.Resolve(xfaAcro.Get("Fields")) as PdfArray;
+            var xfaAcro = fl.document.Reader.ResolveDict(fl.document.Catalog.Get("AcroForm"));
+            var xfaFields = xfaAcro is null ? null : fl.document.Reader.Resolve(xfaAcro.Get("Fields")) as PdfArray;
             if (xfaFields is null || xfaFields.Count == 0)
                 FlattenXfa();
         }
 
-        // 1. Force each field's appearance to reflect the current value.
-        //    The per-type GenerateAppearance short-circuits when /AP is present,
-        //    so for text/choice/check/button/radio fields we delete the existing
-        //    /AP and re-emit — that's the only way to capture an updated value.
-        var refresh = settings is null || settings.UpdateAppearances;
-        if (refresh)
+        fl.refresh = fl.settings is null || fl.settings.UpdateAppearances;
+        if (fl.refresh)
         {
             // Multiple Field wrappers can share the same underlying PdfDictionary
             // when _fields collects a field both directly from /AcroForm/Fields
@@ -53,115 +55,53 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             }
         }
 
-        // 2. Hoist /AcroForm/DR fonts into each page's /Resources so the
-        //    appearance Form-XObject's content stream (which references fonts by
-        //    AcroForm-DR alias like /Helv) still resolves after step 4 strips
-        //    the /AcroForm dict. /AP streams without their own /Resources
-        //    fall back to the page's resources per PDF 32000-2 § 8.10.
-        var acroForm = document.Reader.ResolveDict(document.Catalog.Get("AcroForm"));
-        var drFonts = document.Reader.ResolveDict(document.Reader.ResolveDict(acroForm?.Get("DR"))?.Get("Font"));
-        if (drFonts is not null)
+        fl.acroForm = fl.document.Reader.ResolveDict(fl.document.Catalog.Get("AcroForm"));
+        fl.drFonts = fl.document.Reader.ResolveDict(fl.document.Reader.ResolveDict(fl.acroForm?.Get("DR"))?.Get("Font"));
+        if (fl.drFonts is not null)
         {
-            foreach (var page in document.Pages)
-                HoistDrFontsIntoPageResources(page, drFonts, document.Reader);
+            foreach (var page in fl.document.Pages)
+                HoistDrFontsIntoPageResources(page, fl.drFonts, fl.document.Reader);
         }
 
-        var hideButtons = settings is { HideButtons: true };
-        // The PDF/A flatten stamps only widgets REACHABLE from the AcroForm /Fields
-        // tree (field dicts + their /Kids). An orphan widget annotation (left behind
-        // by a merge that deduplicated its field entry) gets no page-content fragment
-        // — PDF/A output does not stamp orphan widgets. The same set also
-        // dedupes a widget dict shared by several pages' /Annots.
-        System.Collections.Generic.HashSet<PdfDictionary>? fieldWidgets = null;
-        if (skipInvisible)
+        fl.hideButtons = fl.settings is { HideButtons: true };
+        fl.fieldWidgets = null;
+        if (fl.skipInvisible)
         {
-            fieldWidgets = new System.Collections.Generic.HashSet<PdfDictionary>(
+            fl.fieldWidgets = new System.Collections.Generic.HashSet<PdfDictionary>(
                 System.Collections.Generic.ReferenceEqualityComparer.Instance);
             void CollectFieldDicts(PdfArray arr, int depth)
             {
                 if (depth > 16) return;
                 foreach (var o in arr)
                 {
-                    if (document.Reader.ResolveDict(o) is not { } fd) continue;
-                    fieldWidgets.Add(fd);
-                    if (document.Reader.Resolve(fd.Get("Kids")) is PdfArray ka)
+                    if (fl.document.Reader.ResolveDict(o) is not { } fd) continue;
+                    fl.fieldWidgets.Add(fd);
+                    if (fl.document.Reader.Resolve(fd.Get("Kids")) is PdfArray ka)
                         CollectFieldDicts(ka, depth + 1);
                 }
             }
-            if (document.Reader.Resolve(acroForm?.Get("Fields")) is PdfArray topFields)
+            if (fl.document.Reader.Resolve(fl.acroForm?.Get("Fields")) is PdfArray topFields)
                 CollectFieldDicts(topFields, 0);
             // A document whose form lives only in page widgets (no /Fields entries)
             // has nothing to anchor the orphan filter — leave it inactive.
-            if (fieldWidgets.Count == 0) fieldWidgets = null;
+            if (fl.fieldWidgets.Count == 0) fl.fieldWidgets = null;
         }
-        foreach (var page in document.Pages)
+        foreach (var page in fl.document.Pages)
         {
-            // The facade flatten (flattenNonWidgets) consumes the page's WHOLE
-            // /Annots — probed: a sticky note and a highlight leave with the
-            // fields — so annotations carrying no /AP first get the appearance a
-            // viewer would synthesise (the same materialisation the save pass
-            // runs), and whatever still has none is dropped rather than kept.
-            if (flattenNonWidgets)
-                foreach (var ann in page.Annotations)
-                {
-                    if (document.Reader.ResolveDict(ann.Dict.Get("AP")) is not null) continue;
-                    var st = ann.Dict.GetName("Subtype");
-                    if (st is "Widget" or "Popup" or "Link" or null) continue;
-                    // A hidden annotation (/F bit 2) leaves without ink.
-                    if (((int)ann.Dict.GetInt("F") & 2) != 0) continue;
-                    try
-                    {
-                        // The synthesised set, op-measured: FreeText
-                        // writes its /DA text; a highlight fills its quad boxes under
-                        // its /CA; a strikeout is one rect-mid line; notes, shapes,
-                        // ink and stamps draw themselves. An UNDERLINE or SQUIGGLY
-                        // with no /AP draws NOTHING (both are dropped, with
-                        // or without quads), and so do carets and file attachments.
-                        if (ann is Aspose.Pdf.Annotations.FreeTextAnnotation freeText)
-                            freeText.GenerateAppearance();
-                        else if (ann is Aspose.Pdf.Annotations.LineAnnotation
-                                     or Aspose.Pdf.Annotations.PolygonAnnotation
-                                     or Aspose.Pdf.Annotations.PolylineAnnotation
-                                     or Aspose.Pdf.Annotations.SquareAnnotation
-                                     or Aspose.Pdf.Annotations.CircleAnnotation
-                                     or Aspose.Pdf.Annotations.TextAnnotation
-                                     or Aspose.Pdf.Annotations.InkAnnotation
-                                     or Aspose.Pdf.Annotations.HighlightAnnotation
-                                     or Aspose.Pdf.Annotations.StrikeOutAnnotation
-                                     or Aspose.Pdf.Annotations.StampAnnotation)
-                            ann.UpdateAppearances();
-                    }
-                    catch { /* an unsynthesisable appearance leaves the annotation to drop below */ }
-                }
-            FlattenFieldsOnPage(page, hideButtons, frmStartIndex, flattenNonWidgets, skipInvisible,
-                fieldWidgets, dropUnstamped: flattenNonWidgets);
+            if (!FlattenPageAnnotations(fl, page)) break;
         }
 
         // Remove AcroForm from catalog (the PDF/A flatten keeps the dict — emptied
         // below — so its /DR fonts survive for DefaultResources readers).
-        if (!keepAcroFormDict)
-            document.Catalog.Remove("AcroForm");
+        if (!fl.keepAcroFormDict)
+            fl.document.Catalog.Remove("AcroForm");
 
         // Empty the /Fields array on the (now-detached) AcroForm dict too: Count reads the
         // AcroForm's /Fields (this Form's cached _acroForm, or the catalog's) before falling
         // back to _fields, so without this a flattened form still reports its old field count.
         // The PDF/A flatten keeps VISIBLE signature fields (their widgets stayed in
         // /Annots above); everything else is dropped.
-        foreach (var af in new[] { acroForm, _acroForm })
-        {
-            if (af is null || !af.ContainsKey("Fields")) continue;
-            var keptFields = new PdfArray();
-            if (keepAcroFormDict && document.Reader.Resolve(af.Get("Fields")) is PdfArray oldFields)
-            {
-                foreach (var fRef in oldFields)
-                {
-                    var fd = document.Reader.ResolveDict(fRef);
-                    if (fd?.GetName("FT") == "Sig" && HasVisibleWidget(fd, document.Reader))
-                        keptFields.Add(fRef);
-                }
-            }
-            af.Set("Fields", keptFields);
-        }
+        PruneFlattenedAcroFormFields(fl);
 
         // Clear cached field list so Count reflects the flattened state
         _fields.Clear();
@@ -447,7 +387,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         sb.Append("<< /Root 1 0 R >>\n");
         sb.Append("%%EOF\n");
 
-        return Encoding.Latin1.GetBytes(sb.ToString());
+        return Compat.Latin1.GetBytes(sb.ToString());
     }
 
     /// <summary>
@@ -455,8 +395,8 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     /// </summary>
     public void ImportFdf(byte[] fdfData)
     {
-        var text = Encoding.Latin1.GetString(fdfData);
-        var pairs = ParseFdfFields(text);
+        var text = Compat.Latin1.GetString(fdfData);
+        var pairs = FdfFieldScanner.ReadFields(text);
         foreach (var (name, value) in pairs)
         {
             var field = FindFieldOrNull(name);
@@ -545,230 +485,6 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         return s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
     }
 
-    private static List<(string name, string value)> ParseFdfFields(string fdf)
-    {
-        // FDF /Fields is a tree: each entry has an optional /T (partial name),
-        // an optional /V (value), and an optional /Kids (child entries). The full
-        // field name of a leaf is the dotted join of /T values from the root.
-        // Acrobat exports hierarchical fields this way — e.g.
-        //   <</Kids[<</T(0)/V(01-09-2010)>> ...]/T(SA Datum Sollicitatie)>>
-        // resolves to "SA Datum Sollicitatie.0". A flat <</T(.)/V(.)>> scan would
-        // mistake the kids' partial names ("0".."6") for full names.
-        var result = new List<(string, string)>();
-        var fieldsIdx = fdf.IndexOf("/Fields", StringComparison.Ordinal);
-        if (fieldsIdx < 0) return result;
-        var pos = fdf.IndexOf('[', fieldsIdx);
-        if (pos < 0) return result;
-        pos++; // step past '['
-        ParseFdfFieldsArray(fdf, ref pos, parentPath: null, result);
-        return result;
-    }
-
-    private static void ParseFdfFieldsArray(string t, ref int pos, string? parentPath,
-        List<(string, string)> result)
-    {
-        while (pos < t.Length)
-        {
-            FdfSkipWS(t, ref pos);
-            if (pos >= t.Length) return;
-            if (t[pos] == ']') { pos++; return; }
-            if (pos + 1 < t.Length && t[pos] == '<' && t[pos + 1] == '<')
-            {
-                pos += 2;
-                ParseFdfFieldDict(t, ref pos, parentPath, result);
-            }
-            else
-            {
-                pos++; // tolerate stray bytes
-            }
-        }
-    }
-
-    private static void ParseFdfFieldDict(string t, ref int pos, string? parentPath,
-        List<(string, string)> result)
-    {
-        string? partialName = null;
-        string? value = null;
-        int kidsStart = -1;
-
-        while (pos < t.Length)
-        {
-            FdfSkipWS(t, ref pos);
-            if (pos >= t.Length) return;
-            if (pos + 1 < t.Length && t[pos] == '>' && t[pos + 1] == '>') { pos += 2; break; }
-            if (t[pos] != '/') { pos++; continue; }
-            pos++; // step past '/'
-            int kStart = pos;
-            while (pos < t.Length && !IsFdfDelimOrWS(t[pos])) pos++;
-            var key = t.Substring(kStart, pos - kStart);
-            FdfSkipWS(t, ref pos);
-            if (key == "T" && pos < t.Length && t[pos] == '(')
-                partialName = FdfReadStringLiteral(t, ref pos);
-            else if (key == "V")
-                value = FdfReadValue(t, ref pos);
-            else if (key == "Kids" && pos < t.Length && t[pos] == '[')
-            {
-                kidsStart = pos + 1; // remember; consume below
-                FdfSkipValue(t, ref pos);
-            }
-            else
-                FdfSkipValue(t, ref pos);
-        }
-
-        var fullPath = (parentPath, partialName) switch
-        {
-            (null, null) => null,
-            (null, _) => partialName,
-            (_, null) => parentPath,
-            _ => $"{parentPath}.{partialName}",
-        };
-
-        if (kidsStart >= 0)
-        {
-            int kp = kidsStart;
-            ParseFdfFieldsArray(t, ref kp, fullPath, result);
-        }
-        else if (fullPath is not null)
-        {
-            result.Add((fullPath, value ?? ""));
-        }
-    }
-
-    /// <summary>Read a /V value: either a string literal <c>(...)</c> or a name
-    /// object <c>/Off</c> (checkbox states). Returns the decoded text; the name
-    /// object's value is returned without the leading slash.</summary>
-    private static string? FdfReadValue(string t, ref int pos)
-    {
-        FdfSkipWS(t, ref pos);
-        if (pos >= t.Length) return null;
-        if (t[pos] == '(') return FdfReadStringLiteral(t, ref pos);
-        if (t[pos] == '/')
-        {
-            pos++; // step past '/'
-            int s = pos;
-            while (pos < t.Length && !IsFdfDelimOrWS(t[pos])) pos++;
-            return t.Substring(s, pos - s);
-        }
-        FdfSkipValue(t, ref pos);
-        return null;
-    }
-
-    private static void FdfSkipWS(string t, ref int pos)
-    {
-        while (pos < t.Length)
-        {
-            char c = t[pos];
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\0') pos++;
-            else if (c == '%') { while (pos < t.Length && t[pos] != '\n') pos++; }
-            else break;
-        }
-    }
-
-    private static bool IsFdfDelimOrWS(char c) =>
-        c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\0'
-        || c == '(' || c == ')' || c == '<' || c == '>' || c == '[' || c == ']'
-        || c == '/' || c == '%';
-
-    private static string FdfReadStringLiteral(string t, ref int pos)
-    {
-        pos++; // step past '('
-        var sb = new StringBuilder();
-        int depth = 1;
-        while (pos < t.Length && depth > 0)
-        {
-            char c = t[pos++];
-            if (c == '\\')
-            {
-                if (pos >= t.Length) break;
-                char esc = t[pos++];
-                switch (esc)
-                {
-                    case 'n': sb.Append('\n'); break;
-                    case 'r': sb.Append('\r'); break;
-                    case 't': sb.Append('\t'); break;
-                    case 'b': sb.Append('\b'); break;
-                    case 'f': sb.Append('\f'); break;
-                    case '(': sb.Append('('); break;
-                    case ')': sb.Append(')'); break;
-                    case '\\': sb.Append('\\'); break;
-                    case '\n': break;
-                    case '\r': if (pos < t.Length && t[pos] == '\n') pos++; break;
-                    case >= '0' and <= '7':
-                    {
-                        // Octal byte escape \d, \dd or \ddd.
-                        int v = esc - '0';
-                        for (var k = 0; k < 2 && pos < t.Length && t[pos] is >= '0' and <= '7'; k++)
-                            v = v * 8 + (t[pos++] - '0');
-                        sb.Append((char)(v & 0xFF));
-                        break;
-                    }
-                    default: sb.Append(esc); break;
-                }
-            }
-            else if (c == '(') { depth++; sb.Append(c); }
-            else if (c == ')') { depth--; if (depth > 0) sb.Append(c); }
-            else sb.Append(c);
-        }
-        // A UTF-16BE BOM marks a Unicode text string (PDF 32000 §7.9.2.2): the
-        // chars gathered above are raw BYTES (the FDF was Latin1-decoded), so
-        // fold byte pairs back into characters — Hebrew/CJK FDF values arrive
-        // this way and would otherwise import as mojibake.
-        if (sb.Length >= 2 && sb[0] == 'þ' && sb[1] == 'ÿ')
-        {
-            var chars = new StringBuilder((sb.Length - 2) / 2);
-            for (var i = 2; i + 1 < sb.Length; i += 2)
-                chars.Append((char)((sb[i] << 8) | sb[i + 1]));
-            return chars.ToString();
-        }
-        return sb.ToString();
-    }
-
-    private static void FdfSkipValue(string t, ref int pos)
-    {
-        FdfSkipWS(t, ref pos);
-        if (pos >= t.Length) return;
-        char c = t[pos];
-        if (c == '(') { FdfReadStringLiteral(t, ref pos); }
-        else if (c == '[') { FdfSkipArray(t, ref pos); }
-        else if (c == '<' && pos + 1 < t.Length && t[pos + 1] == '<') { FdfSkipDict(t, ref pos); }
-        else if (c == '<') { pos++; while (pos < t.Length && t[pos] != '>') pos++; if (pos < t.Length) pos++; }
-        else if (c == '/') { pos++; while (pos < t.Length && !IsFdfDelimOrWS(t[pos])) pos++; }
-        else { while (pos < t.Length && !IsFdfDelimOrWS(t[pos])) pos++; }
-    }
-
-    private static void FdfSkipArray(string t, ref int pos)
-    {
-        pos++; // step past '['
-        int depth = 1;
-        while (pos < t.Length && depth > 0)
-        {
-            FdfSkipWS(t, ref pos);
-            if (pos >= t.Length) return;
-            char c = t[pos];
-            if (c == '[') { depth++; pos++; }
-            else if (c == ']') { depth--; pos++; }
-            else if (c == '(') { FdfReadStringLiteral(t, ref pos); }
-            else if (c == '<' && pos + 1 < t.Length && t[pos + 1] == '<') { FdfSkipDict(t, ref pos); }
-            else pos++;
-        }
-    }
-
-    private static void FdfSkipDict(string t, ref int pos)
-    {
-        pos += 2; // step past '<<'
-        int depth = 1;
-        while (pos < t.Length && depth > 0)
-        {
-            FdfSkipWS(t, ref pos);
-            if (pos >= t.Length) return;
-            if (pos + 1 < t.Length && t[pos] == '<' && t[pos + 1] == '<') { depth++; pos += 2; }
-            else if (pos + 1 < t.Length && t[pos] == '>' && t[pos + 1] == '>') { depth--; pos += 2; }
-            else if (t[pos] == '(') { FdfReadStringLiteral(t, ref pos); }
-            else if (t[pos] == '[') { FdfSkipArray(t, ref pos); }
-            else pos++;
-        }
-    }
-
     /// <summary>True when the widget belongs to a push-button field — field type
     /// /Btn with the Pushbutton flag (Ff bit 17, value 1&lt;&lt;16) set. /FT and /Ff
     /// are inherited, so walk up the /Parent chain when the widget itself omits them.</summary>
@@ -789,125 +505,42 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         return ft == "Btn" && (ff & (1L << 16)) != 0;
     }
 
-    private void FlattenFieldsOnPage(Page page, bool hideButtons = false, int frmStartIndex = 0,
-        bool flattenNonWidgets = false, bool skipInvisible = false,
-        System.Collections.Generic.HashSet<PdfDictionary>? fieldWidgets = null,
-        bool dropUnstamped = false)
+    private void FlattenFieldsOnPage(Page page, bool hideButtons = false, int frmStartIndex = 0, bool flattenNonWidgets = false, bool skipInvisible = false, System.Collections.Generic.HashSet<PdfDictionary>? fieldWidgets = null, bool dropUnstamped = false)
     {
-        var reader = page.Reader;
-        var annotsObj = reader.Resolve(page.Dict.Get("Annots")) as PdfArray;
-        if (annotsObj is null) return;
+        var fp = new FlattenPageState();
+        fp.page = page;
+        fp.hideButtons = hideButtons;
+        fp.frmStartIndex = frmStartIndex;
+        fp.flattenNonWidgets = flattenNonWidgets;
+        fp.skipInvisible = skipInvisible;
+        fp.fieldWidgets = fieldWidgets;
+        fp.dropUnstamped = dropUnstamped;
+        fp.reader = fp.page.Reader;
+        fp.annotsObj = fp.reader.Resolve(fp.page.Dict.Get("Annots")) as PdfArray;
+        if (fp.annotsObj is null) return;
 
-        var remaining = new PdfArray();
-        var appendContent = new System.IO.MemoryStream();
-        // Flattened field appearances are registered as FRM{n} in /Annots order so a caller can
-        // look each one up by position. The base index is path-dependent:
-        // the document/form flatten numbers from FRM0, the facade FlattenAllFields from FRM1.
-        int frmCounter = frmStartIndex;
-        foreach (var annotRef in annotsObj)
+        fp.remaining = new PdfArray();
+        fp.appendContent = new System.IO.MemoryStream();
+        fp.frmCounter = fp.frmStartIndex;
+        foreach (var annotRef in fp.annotsObj)
         {
-            var annotDict = reader.ResolveDict(annotRef);
-            if (annotDict is null)
-            {
-                remaining.Add(annotRef);
-                continue;
-            }
-
-            var subtype = annotDict.GetName("Subtype");
-            // Merged field-widget dicts may omit /Subtype but still have field
-            // properties (/FT, /T, or /Parent pointing to a field hierarchy).
-            bool isWidget = subtype == "Widget"
-                || (subtype is null && (annotDict.ContainsKey("FT") || annotDict.ContainsKey("T")
-                    || annotDict.ContainsKey("Parent")));
-            // Form-field flatten (document/form) folds only widgets into the page content and
-            // leaves other annotation types (markup, line, link, …) for their own annotation
-            // path. FlattenAllFields (flattenNonWidgets) instead flattens every annotation with
-            // an appearance so the FRM{n} index lines up with the page /Annots order.
-            if (!isWidget && !flattenNonWidgets)
-            {
-                remaining.Add(annotRef);
-                continue;
-            }
-
-            // HideButtons: drop push-button widgets entirely (neither rendered
-            // into page content nor kept as an annotation) so the flattened
-            // output shows no buttons.
-            if (isWidget && hideButtons && IsPushButtonWidget(annotDict, reader))
-                continue;
-
-            // PDF/A flatten: hidden widgets (F bit 2) and push buttons are dropped
-            // without a page-content fragment; other widgets stamp regardless of
-            // the Print bit (a filled text field with F=0 still shows its value
-            // in the flattened output).
-            if (isWidget && skipInvisible)
-            {
-                var fFlags = annotDict.GetInt("F");
-                if ((fFlags & 2) != 0) continue;
-                if (IsPushButtonWidget(annotDict, reader)) continue;
-                // A visible signature widget is never folded into content: the
-                // signature field survives PDF/A conversion (hidden ones were
-                // dropped above).
-                var widgetFt = annotDict.GetName("FT")
-                    ?? reader.ResolveDict(annotDict.Get("Parent"))?.GetName("FT");
-                if (widgetFt == "Sig") { remaining.Add(annotRef); continue; }
-                if (fieldWidgets is not null && !fieldWidgets.Remove(annotDict)) continue;
-            }
-
-            // Build the content fragment that folds this widget's appearance into the page
-            // (registering it as FRM{n}). Null when the widget has no usable appearance — a
-            // widget is then dropped (orphan field), a non-widget kept in /Annots.
-            var fragment = BuildWidgetFlattenFragment(page.Dict, annotDict, reader, $"FRM{frmCounter}");
-            if (fragment is null)
-            {
-                // Flattening a PAGE consumes its whole /Annots array: an annotation that
-                // draws nothing still LEAVES, it is not left behind as live markup. The
-                // document/form flatten instead keeps non-widgets for the annotation path
-                // that runs after it.
-                if (!isWidget && !dropUnstamped) remaining.Add(annotRef);
-                continue;
-            }
-            frmCounter++;
-            var writer = new System.IO.StreamWriter(appendContent, System.Text.Encoding.ASCII, leaveOpen: true);
-            writer.Write(fragment);
-            writer.Flush();
+            FlattenAnnotation(fp, annotRef);
         }
 
         // Update page annotations (remove flattened widgets)
-        if (remaining.Count > 0)
-            page.Dict.Set("Annots", remaining);
+        if (fp.remaining.Count > 0)
+            fp.page.Dict.Set("Annots", fp.remaining);
         else
-            page.Dict.Remove("Annots");
+            fp.page.Dict.Remove("Annots");
 
         // Append the flattened content to the page. /Contents may be a single stream
         // OR an array of streams (PDF 32000-2 § 7.7.3.3) — Page.GetContentStreamBytes
         // concatenates the array case correctly; doing it inline only handled the
         // single-stream case, silently dropping the original page content for any
         // array-of-streams page.
-        if (appendContent.Length > 0)
+        if (fp.appendContent.Length > 0)
         {
-            var existingData = page.GetContentStreamBytes() ?? [];
-
-            // Bracket the original page content in a balanced q … Q before appending the
-            // flattened field fragments. A page content stream may leave the CTM in a
-            // non-default state — e.g. a leading global "0.12 0 0 0.12 0 0 cm" scale that
-            // is never wrapped in q/Q (some form authoring tools draw the whole page in an
-            // 8.33× coordinate space) — so appending fragments raw would draw every widget
-            // appearance through that leftover transform (scaled + shoved into a page
-            // corner). The outer q/Q restores the base CTM so each "q … cm /FRMn Do Q"
-            // fragment is placed at its true /Rect. Harmless when the page content is
-            // already clean (a no-op save/restore around it).
-            byte[] pre = existingData.Length > 0 ? Encoding.ASCII.GetBytes("q\n") : [];
-            byte[] mid = existingData.Length > 0 ? Encoding.ASCII.GetBytes("\nQ\n") : [];
-            var frag = appendContent.ToArray();
-
-            var combined = new byte[pre.Length + existingData.Length + mid.Length + frag.Length];
-            int off = 0;
-            pre.CopyTo(combined, off); off += pre.Length;
-            existingData.CopyTo(combined, off); off += existingData.Length;
-            mid.CopyTo(combined, off); off += mid.Length;
-            frag.CopyTo(combined, off);
-
-            page.SetContentStream(combined);
+            AppendFlattenedContent(fp);
         }
     }
 }

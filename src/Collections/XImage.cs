@@ -100,6 +100,26 @@ public class XImage : ImageXObject
         return new Metadata(xmp);
     }
 
+    /// <summary>A mask's pixels as 1-bit stencil samples, one row padded to a byte: luminance with alpha
+    /// composited over white, so transparent mask areas count as light (masked out).</summary>
+    private static byte[] StencilBits(int w, int h, Func<int, int, (byte r, byte g, byte b, byte a)> pixel)
+    {
+        var rowBytes = (w + 7) / 8;
+        var packed = new byte[rowBytes * h];
+        for (var y = 0; y < h; y++)
+        {
+            for (var x = 0; x < w; x++)
+            {
+                var p = pixel(x, y);
+                var a = p.a / 255.0;
+                var luma = (0.299 * p.r + 0.587 * p.g + 0.114 * p.b) * a + 255.0 * (1.0 - a);
+                if (luma >= 128.0)
+                    packed[y * rowBytes + (x >> 3)] |= (byte)(0x80 >> (x & 7));
+            }
+        }
+        return packed;
+    }
+
     /// <summary>Attach a stencil mask built from the given image stream. Dark mask
     /// pixels keep the corresponding image area painted; light pixels knock it out.
     /// Stored as a 1-bit /ImageMask stream in this image's /Mask entry (sample 1 =
@@ -112,31 +132,28 @@ public class XImage : ImageXObject
         ms.Position = 0;
         int w, h;
         byte[] packed;
-#pragma warning disable CA1416
-        using (var bmp = new System.Drawing.Bitmap(ms))
+        if (Compat.IsWindows())
         {
+#pragma warning disable CA1416
+            using var bmp = new System.Drawing.Bitmap(ms);
             w = bmp.Width; h = bmp.Height;
-            var rowBytes = (w + 7) / 8;
-            packed = new byte[rowBytes * h];
-            for (var y = 0; y < h; y++)
-            {
-                for (var x = 0; x < w; x++)
-                {
-                    var p = bmp.GetPixel(x, y);
-                    // Luminance with alpha composited over white — transparent mask
-                    // areas count as light (masked out).
-                    var a = p.A / 255.0;
-                    var luma = (0.299 * p.R + 0.587 * p.G + 0.114 * p.B) * a + 255.0 * (1.0 - a);
-                    if (luma >= 128.0)
-                        packed[y * rowBytes + (x >> 3)] |= (byte)(0x80 >> (x & 7));
-                }
-            }
-        }
+            packed = StencilBits(w, h, (x, y) => { var p = bmp.GetPixel(x, y); return (p.R, p.G, p.B, p.A); });
 #pragma warning restore CA1416
-        using var compressed = new MemoryStream();
-        using (var z = new System.IO.Compression.ZLibStream(compressed, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
-            z.Write(packed, 0, packed.Length);
-        var data = compressed.ToArray();
+        }
+        else
+        {
+            // Off Windows there is no GDI+: the library's own decoders read the mask.
+            var decoded = ImageStamp.DecodeRaster(ms.ToArray())
+                ?? throw new ArgumentException("The stencil mask is not an image the library can read (PNG, JPEG, GIF or TIFF).");
+            var (rgb, alpha, width, height) = decoded;
+            w = width; h = height;
+            packed = StencilBits(w, h, (x, y) =>
+            {
+                var i = y * width + x;
+                return (rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], alpha?[i] ?? (byte)255);
+            });
+        }
+        var data = IO.Filters.ManagedDeflater.DeflateZlib(packed);
         var dict = new PdfDictionary();
         dict.Set("Type", new PdfName("XObject"));
         dict.Set("Subtype", new PdfName("Image"));
@@ -345,7 +362,7 @@ public class XImage : ImageXObject
         // ran through System.Drawing, so away from Windows every such image stayed Rgb and a
         // caller counting greyscale pictures counted none. Only ever downgrade RGB->Grayscale.
         if (byName == ColorType.Rgb
-            && (OperatingSystem.IsWindows()
+            && (Compat.IsWindows()
                 ? DetectColorTypeByPixels()
                 : DetectColorTypeByPixelsManaged()) == ColorType.Grayscale)
             return ColorType.Grayscale;
@@ -365,7 +382,7 @@ public class XImage : ImageXObject
         for (var y = 0; y < h; y += stepY)
             for (var x = 0; x < w; x += stepX)
             {
-                getter(x, y, out var r, out var g, out var b);
+                var (r, g, b) = getter(x, y);
                 if (r != g || g != b) return ColorType.Rgb;
             }
         return ColorType.Grayscale;
@@ -452,7 +469,7 @@ public class XImage : ImageXObject
                 for (int y = 0; y < h; y++)
                     for (int x = 0; x < w; x++)
                     {
-                        getter(x, y, out var r, out var g, out var b);
+                        var (r, g, b) = getter(x, y);
                         int o = (y * w + x) * 4;
                         rgba[o] = r; rgba[o + 1] = g; rgba[o + 2] = b; rgba[o + 3] = 255;
                     }
@@ -561,7 +578,7 @@ public class XImage : ImageXObject
     {
         var needsUnicode = text.Any(c => c > 0xFF);
         if (!needsUnicode)
-            return new PdfString(System.Text.Encoding.Latin1.GetBytes(text));
+            return new PdfString(Compat.Latin1.GetBytes(text));
         var utf16 = System.Text.Encoding.BigEndianUnicode.GetBytes(text);
         var bytes = new byte[utf16.Length + 2];
         bytes[0] = 0xFE;
@@ -605,7 +622,7 @@ public class XImage : ImageXObject
         // followed by whitespace and the Do keyword, so substring names can't hit.
         foreach (var s in streams)
         {
-            var text = System.Text.Encoding.Latin1.GetString(reader.DecodeStream(s));
+            var text = Compat.Latin1.GetString(reader.DecodeStream(s));
             var idx = FindDoInvocation(text, imageName);
             if (idx < 0) continue;
             var doEnd = text.IndexOf("Do", idx, StringComparison.Ordinal) + 2;
@@ -614,7 +631,7 @@ public class XImage : ImageXObject
                 + text[idx..doEnd]
                 + "\nEMC"
                 + text[doEnd..];
-            s.ReplaceData(System.Text.Encoding.Latin1.GetBytes(rewritten));
+            s.ReplaceData(Compat.Latin1.GetBytes(rewritten));
             s.Dict.Remove("Filter");
             s.Dict.Remove("DecodeParms");
             s.Dict.Set("Length", new PdfInteger(rewritten.Length));

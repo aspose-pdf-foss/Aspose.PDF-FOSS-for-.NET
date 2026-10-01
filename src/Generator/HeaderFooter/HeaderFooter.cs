@@ -1,6 +1,5 @@
 ﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -11,6 +10,9 @@ namespace Aspose.Pdf;
 /// </summary>
 public sealed partial class HeaderFooter
 {
+    /// <summary>Creates an empty, centred header or footer in 10-point black Helvetica.</summary>
+    public HeaderFooter() { }
+
     /// <summary>The text content. Use '#' as a placeholder for the page number.</summary>
     public string Text { get; set; } = "";
 
@@ -47,9 +49,25 @@ public sealed partial class HeaderFooter
         {
             if (Text.Contains("$P")) return true;
             foreach (var p in Paragraphs)
+            {
                 if (p is TextFragment tf && tf.Text.Contains("$P")) return true;
+                if (p is Table t && TableUsesPageCount(t)) return true;
+            }
             return false;
         }
+    }
+
+    /// <summary>Whether any cell text of a band table (nested tables included) prints the page count.</summary>
+    private static bool TableUsesPageCount(Table table)
+    {
+        foreach (var row in table.Rows)
+            foreach (var cell in row.Cells)
+                foreach (var p in cell.Paragraphs)
+                {
+                    if (p is TextFragment tf && tf.Text.Contains("$P")) return true;
+                    if (p is Table nested && TableUsesPageCount(nested)) return true;
+                }
+        return false;
     }
 
     /// <summary>Whether content overflowing the header/footer area is clipped. Stored only.</summary>

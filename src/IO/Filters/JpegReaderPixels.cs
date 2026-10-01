@@ -1,4 +1,4 @@
-
+﻿
 namespace Aspose.Pdf.IO.Filters;
 
 internal static partial class JpegDecoder
@@ -26,13 +26,13 @@ internal static partial class JpegDecoder
         /// 3:1 again) and then horizontally, giving the 16ths the shifts below use, with
         /// libjpeg's asymmetric rounding constants (+8 / +7) preserved.
         /// </remarks>
-        private static byte[]? FancyUpsample(byte[] src, int srcWidth, int hRatio, int vRatio,
-            out int dstWidth)
+        private static (byte[]? result, int dstWidth) FancyUpsample(byte[] src, int srcWidth, int hRatio, int vRatio)
         {
+            int dstWidth = default;
             dstWidth = srcWidth * hRatio;
             var srcHeight = src.Length / Math.Max(1, srcWidth);
-            if (srcWidth <= 0 || srcHeight <= 0) return null;
-            if (hRatio != 2 || (vRatio != 1 && vRatio != 2)) return null;
+            if (srcWidth <= 0 || srcHeight <= 0) return (null, dstWidth);
+            if (hRatio != 2 || (vRatio != 1 && vRatio != 2)) return (null, dstWidth);
 
             var dstHeight = srcHeight * vRatio;
             var dst = new byte[dstWidth * dstHeight];
@@ -59,7 +59,7 @@ internal static partial class JpegDecoder
                         dst[d + 2 * last + 1] = src[s + last];
                     }
                 }
-                return dst;
+                return (dst, dstWidth);
             }
 
             // h2v2: vertical triangle filter into a column sum, then horizontal.
@@ -90,7 +90,7 @@ internal static partial class JpegDecoder
                     dst[d + 2 * last + 1] = (byte)((colSum[last] * 4 + 7) >> 4);
                 }
             }
-            return dst;
+            return (dst, dstWidth);
         }
 
         /// <summary>Colour-convert the per-component sample buffers (MCU-aligned)
@@ -108,8 +108,8 @@ internal static partial class JpegDecoder
             {
                 var c = _components[ci];
                 if (c.H == _maxH && c.V == _maxV) continue;
-                var expanded = FancyUpsample(buffers[ci], bufWidths[ci],
-                    _maxH / c.H, _maxV / c.V, out var newWidth);
+                if (ReplicateChroma) continue;
+                (var expanded, var newWidth) = FancyUpsample(buffers[ci], bufWidths[ci], _maxH / c.H, _maxV / c.V);
                 if (expanded is null) continue;
                 buffers[ci] = expanded;
                 bufWidths[ci] = newWidth;
@@ -147,133 +147,11 @@ internal static partial class JpegDecoder
             }
             else if (Components == 3)
             {
-                // A 3-channel JPEG is usually YCbCr, but Adobe images may store
-                // direct RGB. An APP14 marker with transform 0 means RGB (1 means
-                // YCbCr); with no marker, infer from the component IDs — 'R','G','B'
-                // (82,71,66) is direct RGB, otherwise assume YCbCr. Applying the
-                // YCbCr matrix to already-RGB samples flips colours (green->magenta).
-                bool ycbcr = _adobeTransform >= 0
-                    ? _adobeTransform != 0
-                    : !(_components[0].Id == 82 && _components[1].Id == 71 && _components[2].Id == 66);
-                Pixels = new byte[Width * Height * 3];
-                for (var y = 0; y < Height; y++)
-                {
-                    for (var x = 0; x < Width; x++)
-                    {
-                        // Upsample chroma components
-                        var sy0 = y * _components[0].V / _maxV;
-                        var sx0 = x * _components[0].H / _maxH;
-                        int yVal = buffers[0][sy0 * bufWidths[0] + sx0];
-
-                        var sy1 = y * _components[1].V / _maxV;
-                        var sx1 = x * _components[1].H / _maxH;
-                        int cb = buffers[1][sy1 * bufWidths[1] + sx1];
-
-                        var sy2 = y * _components[2].V / _maxV;
-                        var sx2 = x * _components[2].H / _maxH;
-                        int cr = buffers[2][sy2 * bufWidths[2] + sx2];
-
-                        var idx = (y * Width + x) * 3;
-                        if (!ycbcr)
-                        {
-                            // Samples are already R, G, B.
-                            Pixels[idx] = (byte)Clamp(yVal);
-                            Pixels[idx + 1] = (byte)Clamp(cb);
-                            Pixels[idx + 2] = (byte)Clamp(cr);
-                            continue;
-                        }
-
-                        // YCbCr to RGB — the IJG fixed-point math
-                        // (SCALEBITS=16, constants 1.40200/1.77200/0.34414/0.71414,
-                        // one rounding constant folded into the G sum). Float math
-                        // rounds a hair differently and lands ±1 off.
-                        var r = yVal + ((91881 * (cr - 128) + 32768) >> 16);
-                        var g = yVal + ((-22554 * (cb - 128) - 46802 * (cr - 128) + 32768) >> 16);
-                        var b = yVal + ((116130 * (cb - 128) + 32768) >> 16);
-
-                        Pixels[idx] = (byte)Clamp(r);
-                        Pixels[idx + 1] = (byte)Clamp(g);
-                        Pixels[idx + 2] = (byte)Clamp(b);
-                    }
-                }
+                ConvertYcbcrBuffersToPixels(buffers, bufWidths);
             }
             else if (Components == 4)
             {
-                // 4-component JPEG = CMYK or YCCK (Adobe). Convert to RGB here and
-                // report 3 components so every caller takes the uniform RGB path.
-                // YCCK (transform 2): the YCbCr triple decodes to the INVERTED C/M/Y
-                // (chR = 255-Cink …) while K is stored DIRECTLY, so display = (1-C)(1-K)
-                // becomes chR·(255-K)/255. Raw Adobe CMYK (transform 0) stores all four
-                // channels inverted, so the same product uses K directly: chR·K/255.
-                bool ycck = _adobeTransform == 2;
-                Pixels = new byte[Width * Height * 3];
-                for (var y = 0; y < Height; y++)
-                {
-                    for (var x = 0; x < Width; x++)
-                    {
-                        var sy0 = y * _components[0].V / _maxV;
-                        var sx0 = x * _components[0].H / _maxH;
-                        int s0 = buffers[0][sy0 * bufWidths[0] + sx0];
-
-                        var sy1 = y * _components[1].V / _maxV;
-                        var sx1 = x * _components[1].H / _maxH;
-                        int s1 = buffers[1][sy1 * bufWidths[1] + sx1];
-
-                        var sy2 = y * _components[2].V / _maxV;
-                        var sx2 = x * _components[2].H / _maxH;
-                        int s2 = buffers[2][sy2 * bufWidths[2] + sx2];
-
-                        var sy3 = y * _components[3].V / _maxV;
-                        var sx3 = x * _components[3].H / _maxH;
-                        int k = buffers[3][sy3 * bufWidths[3] + sx3];
-
-                        if (InvertCmyk && !ycck)
-                        {
-                            // /Decode [1 0 …]: the file stores Adobe-inverted CMYK
-                            // (255 = full ink); flip back to direct ink amounts before
-                            // the (1-C)(1-K) conversion below.
-                            s0 = 255 - s0; s1 = 255 - s1; s2 = 255 - s2; k = 255 - k;
-                        }
-
-                        int chR, chG, chB;
-                        if (ycck)
-                        {
-                            // Same fixed-point YCbCr math as the 3-component path.
-                            chR = Clamp(s0 + ((91881 * (s2 - 128) + 32768) >> 16));
-                            chG = Clamp(s0 + ((-22554 * (s1 - 128) - 46802 * (s2 - 128) + 32768) >> 16));
-                            chB = Clamp(s0 + ((116130 * (s1 - 128) + 32768) >> 16));
-                        }
-                        else
-                        {
-                            chR = s0; chG = s1; chB = s2;
-                        }
-
-                        int r, g, b;
-                        if (ycck)
-                        {
-                            r = chR * (255 - k) / 255;
-                            g = chG * (255 - k) / 255;
-                            b = chB * (255 - k) / 255;
-                        }
-                        else
-                        {
-                            // Raw CMYK (Adobe transform 0 or no APP14 marker): the scan samples
-                            // are ink amounts, so RGB = (1-C)(1-K). The earlier "Adobe ⇒ inverted
-                            // (C·K)" special case produced black headers on CMYK-JPEG logos
-                            // — the decoder already yields ink values, not the
-                            // inverted-stored values that formula assumed.
-                            r = (255 - chR) * (255 - k) / 255;
-                            g = (255 - chG) * (255 - k) / 255;
-                            b = (255 - chB) * (255 - k) / 255;
-                        }
-
-                        var idx = (y * Width + x) * 3;
-                        Pixels[idx] = (byte)r;
-                        Pixels[idx + 1] = (byte)g;
-                        Pixels[idx + 2] = (byte)b;
-                    }
-                }
-                Components = 3; // output buffer is RGB
+                ConvertCmykBuffersToPixels(buffers, bufWidths);
             }
         }
 
@@ -351,59 +229,7 @@ internal static partial class JpegDecoder
 
             // Pass 2: process rows, final descale to sample scale (caller adds the
             // +128 level shift and clamps, mirroring the IJG range limiter).
-            for (var r = 0; r < 8; r++)
-            {
-                var off = r * 8;
-                long z2 = ws[off + 2];
-                long z3 = ws[off + 6];
-                long z1 = (z2 + z3) * Fix_0_541196100;
-                var tmp2 = z1 + z3 * -Fix_1_847759065;
-                var tmp3 = z1 + z2 * Fix_0_765366865;
-
-                z2 = ws[off];
-                z3 = ws[off + 4];
-                var tmp0 = (z2 + z3) << ConstBits;
-                var tmp1 = (z2 - z3) << ConstBits;
-
-                var tmp10 = tmp0 + tmp3;
-                var tmp13 = tmp0 - tmp3;
-                var tmp11 = tmp1 + tmp2;
-                var tmp12 = tmp1 - tmp2;
-
-                long t0 = ws[off + 7];
-                long t1 = ws[off + 5];
-                long t2 = ws[off + 3];
-                long t3 = ws[off + 1];
-
-                z1 = t0 + t3;
-                z2 = t1 + t2;
-                z3 = t0 + t2;
-                var z4 = t1 + t3;
-                var z5 = (z3 + z4) * Fix_1_175875602;
-
-                t0 *= Fix_0_298631336;
-                t1 *= Fix_2_053119869;
-                t2 *= Fix_3_072711026;
-                t3 *= Fix_1_501321110;
-                z1 *= -Fix_0_899976223;
-                z2 *= -Fix_2_562915447;
-                z3 = z3 * -Fix_1_961570560 + z5;
-                z4 = z4 * -Fix_0_390180644 + z5;
-
-                t0 += z1 + z3;
-                t1 += z2 + z4;
-                t2 += z2 + z3;
-                t3 += z1 + z4;
-
-                block[off]     = Descale(tmp10 + t3, ConstBits + Pass1Bits + 3);
-                block[off + 7] = Descale(tmp10 - t3, ConstBits + Pass1Bits + 3);
-                block[off + 1] = Descale(tmp11 + t2, ConstBits + Pass1Bits + 3);
-                block[off + 6] = Descale(tmp11 - t2, ConstBits + Pass1Bits + 3);
-                block[off + 2] = Descale(tmp12 + t1, ConstBits + Pass1Bits + 3);
-                block[off + 5] = Descale(tmp12 - t1, ConstBits + Pass1Bits + 3);
-                block[off + 3] = Descale(tmp13 + t0, ConstBits + Pass1Bits + 3);
-                block[off + 4] = Descale(tmp13 - t0, ConstBits + Pass1Bits + 3);
-            }
+            IdctRows(block, ws);
         }
 
     }

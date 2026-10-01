@@ -1,7 +1,7 @@
 namespace Aspose.Pdf;
 
 /// <summary>
-/// Options passed to <see cref="Aspose.Pdf.Forms.Form.ExportToJson"/>.
+/// Options passed to <c>Form.ExportToJson</c>.
 /// </summary>
 public sealed class ExportFieldsToJsonOptions
 {

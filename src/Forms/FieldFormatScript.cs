@@ -27,7 +27,7 @@ internal static class FieldFormatScript
     {
         var script = ExtractFormatScript(fieldDict, reader);
         if (script is null) return rawValue;
-        return TryApply(script, rawValue, out var formatted) ? formatted : rawValue;
+        return TryApply(script, rawValue) is { } formatted ? formatted : rawValue;
     }
 
     /// <summary>Whether <paramref name="rawValue"/> is acceptable for the field's
@@ -42,7 +42,7 @@ internal static class FieldFormatScript
         if (reader is null || string.IsNullOrEmpty(rawValue)) return true;
         var script = ExtractFormatScript(fieldDict, reader);
         if (script is null || !IsBuiltInFormatter(script)) return true;
-        return TryApply(script, rawValue, out _);
+        return TryApply(script, rawValue) is not null;
     }
 
     private static bool IsBuiltInFormatter(string script)
@@ -71,47 +71,47 @@ internal static class FieldFormatScript
         return jsObj switch
         {
             PdfString s => s.ToText(),
-            PdfStream stream => System.Text.Encoding.Latin1.GetString(reader.DecodeStream(stream)),
+            PdfStream stream => Compat.Latin1.GetString(reader.DecodeStream(stream)),
             _ => null,
         };
     }
 
     /// <summary>Recognise the built-in Acrobat formatters and apply them.</summary>
-    internal static bool TryApply(string script, string rawValue, out string formatted)
+    internal static string? TryApply(string script, string rawValue)
     {
-        formatted = rawValue;
-        if (string.IsNullOrEmpty(script)) return false;
+        string formatted = rawValue;
+        if (string.IsNullOrEmpty(script)) return null;
 
         // AFDate_FormatEx("<pattern>") — most common date formatter.
         var date = Regex.Match(script, @"AFDate_FormatEx\s*\(\s*""([^""]*)""\s*\)");
         if (date.Success)
-            return TryFormatDate(date.Groups[1].Value, rawValue, out formatted);
+            return TryFormatDate(date.Groups[1].Value, rawValue);
 
         // AFDate_Format(idx) — index into Acrobat's built-in date format list.
         var dateIdx = Regex.Match(script, @"AFDate_Format\s*\(\s*(\d+)\s*\)");
         if (dateIdx.Success && int.TryParse(dateIdx.Groups[1].Value, out var di))
-            return TryFormatDate(BuiltInDatePattern(di), rawValue, out formatted);
+            return TryFormatDate(BuiltInDatePattern(di), rawValue);
 
         // AFTime_Format(idx) — index into the built-in time format list.
         var timeIdx = Regex.Match(script, @"AFTime_Format\s*\(\s*(\d+)\s*\)");
         if (timeIdx.Success && int.TryParse(timeIdx.Groups[1].Value, out var ti))
-            return TryFormatDate(BuiltInTimePattern(ti), rawValue, out formatted);
+            return TryFormatDate(BuiltInTimePattern(ti), rawValue);
 
         // AFNumber_Format(nDec, sepStyle, ...) — first two args drive the layout.
         var num = Regex.Match(script, @"AFNumber_Format\s*\(\s*(-?\d+)\s*,\s*(-?\d+)");
         if (num.Success
             && int.TryParse(num.Groups[1].Value, out var nDec)
             && int.TryParse(num.Groups[2].Value, out var sepStyle))
-            return TryFormatNumber(nDec, sepStyle, rawValue, out formatted);
+            return TryFormatNumber(nDec, sepStyle, rawValue);
 
         // AFPercent_Format(nDec, sepStyle)
         var pct = Regex.Match(script, @"AFPercent_Format\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)");
         if (pct.Success
             && int.TryParse(pct.Groups[1].Value, out var pDec)
             && int.TryParse(pct.Groups[2].Value, out var pSep))
-            return TryFormatPercent(pDec, pSep, rawValue, out formatted);
+            return TryFormatPercent(pDec, pSep, rawValue);
 
-        return false;
+        return null;
     }
 
     /// <summary>Acrobat's built-in date format strings indexed 0–6 (matches the
@@ -137,9 +137,9 @@ internal static class FieldFormatScript
         _ => "HH:MM",
     };
 
-    private static bool TryFormatDate(string acrobatPattern, string raw, out string formatted)
+    private static string? TryFormatDate(string acrobatPattern, string raw)
     {
-        formatted = raw;
+        string formatted = raw;
         // Acrobat uses lowercase "m/d/yy" etc.; .NET uses "M/d/yy" (uppercase month).
         // Map the patterns: m → M (month, no zero pad), mm → MM (zero-pad), d → d, dd → dd,
         // yy → yy, yyyy → yyyy, HH/MM/ss/tt all map directly.
@@ -158,7 +158,7 @@ internal static class FieldFormatScript
                 DateTimeStyles.AssumeLocal, out dt))
         {
             formatted = dt.ToString(netPattern, CultureInfo.InvariantCulture);
-            return true;
+            return formatted;
         }
 
         // Acrobat's util.scand is lenient: it ignores the literal separators, reads the
@@ -166,18 +166,16 @@ internal static class FieldFormatScript
         // field order (so "31 . 10 . 2023" against dd/MM/yyyy, and "31.10.2023 15:05:52"
         // against m/d/yy, both parse where a strict pattern match fails). This is the
         // path AFDate_FormatEx takes on a programmatic Value set.
-        if (TryScanDate(acrobatPattern, raw, netPattern, out formatted))
-            return true;
-        return false;
+        return TryScanDate(acrobatPattern, raw, netPattern);
     }
 
     /// <summary>Lenient date parse mirroring Acrobat's <c>util.scand</c>: pull the raw's
     /// numeric groups, assign them in order to the picture's day/month/year/hour/minute/second
     /// slots, swap day↔month when the month slot exceeds 12 (Acrobat's ambiguity resolution),
     /// then render with the .NET-equivalent pattern.</summary>
-    private static bool TryScanDate(string acrobatPattern, string raw, string netPattern, out string formatted)
+    private static string? TryScanDate(string acrobatPattern, string raw, string netPattern)
     {
-        formatted = raw;
+        string formatted = raw;
         // Ordered slot kinds from the picture's letter runs. 'm'(lower)=month; 'M'(upper)=
         // minute when the picture carries an hour token, else month (some authors write MM
         // for month in a pure date picture).
@@ -203,7 +201,7 @@ internal static class FieldFormatScript
         }
 
         var nums = Regex.Matches(raw, @"\d+");
-        if (slots.Count == 0 || nums.Count == 0) return false;
+        if (slots.Count == 0 || nums.Count == 0) return null;
 
         int day = 1, month = 1, year = DateTime.MinValue.Year, hour = 0, min = 0, sec = 0;
         bool haveDay = false, haveMonth = false, haveYear = false;
@@ -221,7 +219,7 @@ internal static class FieldFormatScript
                 case 's': sec = v; break;
             }
         }
-        if (!haveDay && !haveMonth && !haveYear) return false;
+        if (!haveDay && !haveMonth && !haveYear) return null;
 
         // Acrobat swaps day/month when the month slot is impossible (>12).
         if (haveMonth && month > 12 && haveDay && day <= 12)
@@ -229,7 +227,7 @@ internal static class FieldFormatScript
 
         if (year < 100) year += 2000;   // 2-digit year → current century
         if (month is < 1 or > 12 || day is < 1 or > 31 || year is < 1 or > 9999)
-            return false;
+            return null;
         // Clamp day to the month's length so 31 in a 30-day month still yields a date.
         int dim = DateTime.DaysInMonth(year, month);
         if (day > dim) day = dim;
@@ -237,9 +235,9 @@ internal static class FieldFormatScript
         {
             var dt2 = new DateTime(year, month, day, hour % 24, min % 60, sec % 60);
             formatted = dt2.ToString(netPattern, CultureInfo.InvariantCulture);
-            return true;
+            return formatted;
         }
-        catch { return false; }
+        catch { return null; }
     }
 
     private static string ConvertAcrobatDatePattern(string p)
@@ -277,24 +275,24 @@ internal static class FieldFormatScript
 
     /// <summary>AFNumber_Format: nDec = decimals, sepStyle = thousands/decimal separator pair.
     /// 0 = "1,234.56", 1 = "1234.56", 2 = "1.234,56", 3 = "1234,56".</summary>
-    private static bool TryFormatNumber(int nDec, int sepStyle, string raw, out string formatted)
+    private static string? TryFormatNumber(int nDec, int sepStyle, string raw)
     {
-        formatted = raw;
+        string formatted = raw;
         if (!double.TryParse(raw, NumberStyles.Float | NumberStyles.AllowThousands,
                 CultureInfo.InvariantCulture, out var v))
-            return false;
+            return null;
         formatted = FormatWithSeparators(v, nDec, sepStyle);
-        return true;
+        return formatted;
     }
 
-    private static bool TryFormatPercent(int nDec, int sepStyle, string raw, out string formatted)
+    private static string? TryFormatPercent(int nDec, int sepStyle, string raw)
     {
-        formatted = raw;
+        string formatted = raw;
         if (!double.TryParse(raw, NumberStyles.Float | NumberStyles.AllowThousands,
                 CultureInfo.InvariantCulture, out var v))
-            return false;
+            return null;
         formatted = FormatWithSeparators(v * 100.0, nDec, sepStyle) + "%";
-        return true;
+        return formatted;
     }
 
     private static string FormatWithSeparators(double value, int nDec, int sepStyle)

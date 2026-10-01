@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Core;
@@ -66,7 +66,7 @@ public sealed partial class Document
         // too. Off Windows every page would fail to materialise an Image and the loop
         // below would quietly return false, which reads as "nothing was recognised" - a
         // caller cannot tell that apart from the platform simply not having GDI+.
-        if (!OperatingSystem.IsWindows())
+        if (!Compat.IsWindows())
             throw new PlatformNotSupportedException(
                 "Document.Convert(CallBackGetHocr) hands each page to the callback as a "
                 + "System.Drawing.Image, which requires GDI+ and is available on Windows only.");
@@ -275,116 +275,70 @@ public sealed partial class Document
     /// on.</summary>
     internal static int OverlayHocrAsInvisibleText(Page page, string hocr, bool mendModel = false)
     {
-        if (string.IsNullOrWhiteSpace(hocr)) return 0;
-        var matches = HocrWordRegex.Matches(hocr);
-        if (matches.Count == 0) return 0;
+        var ho = new HocrOverlayState();
+        ho.page = page;
+        ho.hocr = hocr;
+        ho.mendModel = mendModel;
+        if (string.IsNullOrWhiteSpace(ho.hocr)) return 0;
+        ho.matches = HocrWordRegex.Matches(ho.hocr);
+        if (ho.matches.Count == 0) return 0;
 
-        var rect = page.GetPageRect(considerRotation: false);
-        var pageWidth = rect.Width;
-        var pageHeight = rect.Height;
-        if (pageWidth <= 0 || pageHeight <= 0) return 0;
+        ho.rect = ho.page.GetPageRect(considerRotation: false);
+        ho.pageWidth = ho.rect.Width;
+        ho.pageHeight = ho.rect.Height;
+        if (ho.pageWidth <= 0 || ho.pageHeight <= 0) return 0;
 
-        // The OCR raster the callback saw is the page image normalised UPRIGHT —
-        // its word boxes live in the page's VISUAL (rotated) space. Map the anchor
-        // into visual space, place each word there, then convert the point back to
-        // raw page coordinates and carry the page rotation in the text matrix.
-        var rotation = page.Rotate switch
+        ho.rotation = ho.page.Rotate switch
         {
             Rotation.on90 => 90,
             Rotation.on180 => 180,
             Rotation.on270 => 270,
             _ => 0,
         };
-        double xSum = rect.LLX + rect.URX, ySum = rect.LLY + rect.URY;
-        (double x, double y) RawToVisual(double x, double y) => rotation switch
-        {
-            90 => (y, xSum - x),
-            180 => (xSum - x, ySum - y),
-            270 => (ySum - y, x),
-            _ => (x, y),
-        };
-        (double x, double y) VisualToRaw(double x, double y) => rotation switch
-        {
-            90 => (xSum - y, x),
-            180 => (xSum - x, ySum - y),
-            270 => (y, ySum - x),
-            _ => (x, y),
-        };
+        ho.xSum = ho.rect.LLX + ho.rect.URX;
+        ho.ySum = ho.rect.LLY + ho.rect.URY;
+        ho.anchorRaw = ho.rect;
+        ho.dominant = ho.mendModel ? null : FindDominantImagePlacement(ho.page);
+        if (ho.dominant is not null && ho.dominant.Rectangle.Width > 1 && ho.dominant.Rectangle.Height > 1)
+            ho.anchorRaw = ho.dominant.Rectangle;
+        var (ax0, ay0) = RawToVisual(ho, ho.anchorRaw.LLX, ho.anchorRaw.LLY);
+        var (ax1, ay1) = RawToVisual(ho, ho.anchorRaw.URX, ho.anchorRaw.URY);
+        ho.anchorX = Math.Min(ax0, ax1);
+        ho.anchorY = Math.Min(ay0, ay1);
+        ho.anchorW = Math.Abs(ax1 - ax0);
+        ho.anchorH = Math.Abs(ay1 - ay0);
 
-        // Anchor the overlay to the scan image's placement rectangle: the OCR
-        // raster is the page's image, so hOCR pixel coordinates map into where
-        // that image is drawn (which may cover only part of the page — e.g. a
-        // photo at natural size). Pages without images map to the page box.
-        var anchorRaw = rect;
-        var dominant = mendModel ? null : FindDominantImagePlacement(page);
-        if (dominant is not null && dominant.Rectangle.Width > 1 && dominant.Rectangle.Height > 1)
-            anchorRaw = dominant.Rectangle;
-        var (ax0, ay0) = RawToVisual(anchorRaw.LLX, anchorRaw.LLY);
-        var (ax1, ay1) = RawToVisual(anchorRaw.URX, anchorRaw.URY);
-        double anchorX = Math.Min(ax0, ax1), anchorY = Math.Min(ay0, ay1);
-        double anchorW = Math.Abs(ax1 - ax0), anchorH = Math.Abs(ay1 - ay0);
-
-        // Prefer the OCR raster's true pixel dimensions from the ocr_page bbox.
-        // Fall back to the extent of the recognised words only when the page
-        // element is absent or malformed.
-        double imgW = 0, imgH = 0;
-        var pageMatch = HocrPageBBoxRegex.Match(hocr);
-        if (pageMatch.Success)
+        ho.imgW = 0;
+        ho.imgH = 0;
+        ho.pageMatch = HocrPageBBoxRegex.Match(ho.hocr);
+        if (ho.pageMatch.Success)
         {
-            int.TryParse(pageMatch.Groups[1].Value, out var pw);
-            int.TryParse(pageMatch.Groups[2].Value, out var ph);
-            imgW = pw; imgH = ph;
+            int.TryParse(ho.pageMatch.Groups[1].Value, out var pw);
+            int.TryParse(ho.pageMatch.Groups[2].Value, out var ph);
+            ho.imgW = pw; ho.imgH = ph;
         }
-        if (imgW <= 0 || imgH <= 0)
+        if (ho.imgW <= 0 || ho.imgH <= 0)
         {
             var maxX = 0; var maxY = 0;
-            foreach (Match m in matches)
+            foreach (Match m in ho.matches)
             {
                 if (int.TryParse(m.Groups[3].Value, out var x1) && x1 > maxX) maxX = x1;
                 if (int.TryParse(m.Groups[4].Value, out var y1) && y1 > maxY) maxY = y1;
             }
-            imgW = maxX > 0 ? maxX : 1;
-            imgH = maxY > 0 ? maxY : 1;
+            ho.imgW = maxX > 0 ? maxX : 1;
+            ho.imgH = maxY > 0 ? maxY : 1;
         }
 
-        var sx = anchorW / imgW;
-        var sy = anchorH / imgH;
+        ho.sx = ho.anchorW / ho.imgW;
+        ho.sy = ho.anchorH / ho.imgH;
 
-        // First pass: collect the words with their fitted font sizes. Word bottoms
-        // stay per-word (the extractor's vertical-gap rule needs the deepest-glyph
-        // bottoms to survive); the descent lift below is computed once for the page.
-        var words = new List<(double x, double bottom, int fontSize, string display, int line)>();
-        var lineId = 0;
-        foreach (Match m in HocrLineOrWordRegex.Matches(hocr))
-        {
-            if (m.Groups[1].Success) { lineId++; continue; } // ocr_line marker — geometric grouping
+        ho.words = new List<(double x, double bottom, int fontSize, string display, int line)>();
+        ho.lineId = 0;
+        CollectHocrWords(ho);
 
-            if (!int.TryParse(m.Groups[6].Value, out var bx0) ||
-                !int.TryParse(m.Groups[7].Value, out var by0) ||
-                !int.TryParse(m.Groups[8].Value, out var bx1) ||
-                !int.TryParse(m.Groups[9].Value, out var by1))
-                continue;
-            var raw = HocrInlineTagRegex.Replace(m.Groups[10].Value, string.Empty);
-            var word = System.Net.WebUtility.HtmlDecode(raw)?.Trim();
-            if (string.IsNullOrEmpty(word)) continue;
-
-            // Size each word to FILL its bbox width (not height): fontSize =
-            // round(bboxWidthPts / wordEmWidth), the same integer-per-word rule the
-            // OCR layout uses, so the extractor's dominant-font grid cell matches.
-            // Measure the FOLDED text so the rendered advance matches the box (the fi/fl
-            // fold changes glyph widths); otherwise a folded word overshoots into the next.
-            var display = FoldLigatures(word!);
-            var fontSize = WidthFitFontSize(display, (bx1 - bx0) * sx);
-            words.Add((anchorX + bx0 * sx, anchorY + anchorH - by1 * sy, fontSize, display, lineId));
-        }
-
-        // Per-LINE descent lift: every word of an OCR line shares its line's lift
-        // (the line's modal fitted size), so baselines inside a row stay level —
-        // the extractor's line grouping survives — while each row's glyph rect
-        // lands on the row's bbox bottom.
-        var lineLift = new Dictionary<int, double>();
-        if (!mendModel)
-        foreach (var lineGroup in System.Linq.Enumerable.GroupBy(words, w => w.line))
+        ho.lineLift = new Dictionary<int, double>();
+        if (!ho.mendModel)
+        foreach (var lineGroup in System.Linq.Enumerable.GroupBy(ho.words, w => w.line))
         {
             var counts = new Dictionary<int, int>();
             foreach (var w in lineGroup)
@@ -392,40 +346,13 @@ public sealed partial class Document
             var modal = 0; var best = 0;
             foreach (var kv in counts)
                 if (kv.Value > best || (kv.Value == best && kv.Key > modal)) { modal = kv.Key; best = kv.Value; }
-            lineLift[lineGroup.Key] = -Text.Standard14Fonts.GetDescent("Helvetica") * modal / 1000.0;
+            ho.lineLift[lineGroup.Key] = -Text.Standard14Fonts.GetDescent("Helvetica") * modal / 1000.0;
         }
 
-        // Per-word descent lift: the drawn baseline sits one descent ABOVE the
-        // word's bbox bottom, so the glyph rect (baseline minus descent) lands
-        // exactly ON the box bottom — the row position the OCR reported.
-        var tb = new TextBuilder(page);
-        var overlaid = 0;
-        foreach (var w in words)
-        {
-            // The word's visual-space anchor point (bbox bottom-left, y top-down in
-            // hOCR pixels). The baseline is stood ON the bbox bottom, lifted by the
-            // page's dominant Helvetica descent. The
-            // point is then converted back to raw page coordinates; the rotation is
-            // carried by the text matrix (TextState.Rotation) so the overlay reads
-            // upright on rotated pages.
-            var lift = mendModel
-                ? -Text.Standard14Fonts.GetDescent("Helvetica") * w.fontSize / 1000.0
-                : lineLift[w.line];
-            var (wx, wy) = VisualToRaw(w.x, w.bottom + lift);
-            tb.AppendText(new TextFragment(w.display, textState: new TextState
-            {
-                FontName = "Helvetica",
-                FontSize = (float)w.fontSize,
-                RenderingMode = TextRenderingMode.Invisible,
-                Rotation = rotation,
-                EmitStandard14Descriptor = true,
-            })
-            {
-                Position = new Position(wx, wy),
-            });
-            overlaid++;
-        }
-        return overlaid;
+        ho.tb = new TextBuilder(ho.page);
+        ho.overlaid = 0;
+        OverlayHocrWords(ho);
+        return ho.overlaid;
     }
 
     /// <summary>Fit a word to a target rendered width: fontSize = round(width /

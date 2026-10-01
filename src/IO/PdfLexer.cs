@@ -13,6 +13,22 @@ internal sealed class PdfLexer
     /// damaged-stream salvage, not an authored operator).</summary>
     public bool LastKeywordFused { get; private set; }
 
+    /// <summary>
+    /// Whether a lexeme with a number fused onto an operator is broken apart.
+    ///
+    /// The format says an operator runs to the next white space or delimiter, so
+    /// <c>m30</c> is ONE token and an unknown one. Real files carry the fused
+    /// form anyway, where a writer dropped a separator, and breaking it apart
+    /// recovers the page instead of losing the rest of the stream — which is why
+    /// this is on unless a caller says otherwise.
+    ///
+    /// ⚠ A caller reading strictly — validating a stream, or reproducing what
+    /// another reader answers — wants it off. The two readings disagree only on
+    /// input the format does not allow, and that is exactly the input a strict
+    /// reader is being asked about.
+    /// </summary>
+    public bool Salvaging { get; set; } = true;
+
     public PdfLexer(byte[] data)
     {
         _data = data;
@@ -276,43 +292,66 @@ internal sealed class PdfLexer
     {
         var startPos = _pos;
         _pos++; // skip /
-
-        var sb = new StringBuilder();
+        var start = _pos;
+        var escaped = false;
         while (_pos < _data.Length)
         {
             var b = _data[_pos];
             if (IsWhitespace(b) || IsDelimiter(b))
                 break;
+            if (b == '#') escaped = true;
+            _pos++;
+        }
+        // A name without a #xx escape is its own bytes; only an escaped one is rebuilt.
+        if (!escaped)
+            return Token.NameToken(Compat.Latin1.GetString(_data, (int)start, (int)(_pos - start)), startPos);
 
-            if (b == '#' && _pos + 2 < _data.Length)
+        var sb = new StringBuilder();
+        for (var i = start; i < _pos;)
+        {
+            var b = _data[i];
+            if (b == '#' && i + 2 < _data.Length)
             {
-                var hi = HexValue(_data[_pos + 1]);
-                var lo = HexValue(_data[_pos + 2]);
+                var hi = HexValue(_data[i + 1]);
+                var lo = HexValue(_data[i + 2]);
                 if (hi >= 0 && lo >= 0)
                 {
                     sb.Append((char)((hi << 4) | lo));
-                    _pos += 3;
+                    i += 3;
                     continue;
                 }
             }
-
             sb.Append((char)b);
-            _pos++;
+            i++;
         }
-
         return Token.NameToken(sb.ToString(), startPos);
     }
+
+    /// <summary>Significant digits a number is read exactly from its bytes with: the
+    /// mantissa stays below 2^53, so dividing by the (exact) power of ten rounds once,
+    /// to the same nearest double a decimal parse yields. Longer runs go through the parser.</summary>
+    private const int MaxExactDigits = 15;
+
+    private static readonly double[] PowersOfTen =
+    {
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11,
+        1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    };
 
     private Token ReadNumber()
     {
         var startPos = _pos;
-        var sb = new StringBuilder();
+        var negative = false;
         var hasDecimal = false;
+        var anyDigit = false;
+        var significant = 0;
+        var fractionDigits = 0;
+        long mantissa = 0;
 
         // Sign
         if (_pos < _data.Length && (_data[_pos] == '+' || _data[_pos] == '-'))
         {
-            sb.Append((char)_data[_pos]);
+            negative = _data[_pos] == '-';
             _pos++;
         }
 
@@ -321,13 +360,15 @@ internal sealed class PdfLexer
             var b = _data[_pos];
             if (b >= '0' && b <= '9')
             {
-                sb.Append((char)b);
+                anyDigit = true;
+                if (mantissa != 0 || b != '0') significant++;
+                if (significant <= MaxExactDigits) mantissa = mantissa * 10 + (b - '0');
+                if (hasDecimal) fractionDigits++;
                 _pos++;
             }
             else if (b == '.' && !hasDecimal)
             {
                 hasDecimal = true;
-                sb.Append('.');
                 _pos++;
             }
             else
@@ -335,6 +376,7 @@ internal sealed class PdfLexer
                 break;
             }
         }
+        var lexemeEnd = _pos;
 
         // A damaged stream can fuse two numbers into one lexeme ("100.1239200.456"
         // where a separator byte was overwritten, or "0.00-25614825" with an embedded
@@ -346,28 +388,79 @@ internal sealed class PdfLexer
                || (_data[_pos] >= '0' && _data[_pos] <= '9')))
             _pos++;
 
-        var text = sb.ToString();
-
         // Bare sign ("-" or "+") with no digits/decimal — treat as 0
-        if (text is "-" or "+")
+        if (!anyDigit && !hasDecimal)
             return Token.IntegerToken(0, startPos);
+        // "." alone (or "-." / "+.") is a bare decimal point — treat as 0.0
+        if (!anyDigit)
+            return Token.RealToken(0.0, startPos);
 
+        if (significant <= MaxExactDigits && fractionDigits < PowersOfTen.Length)
+        {
+            if (hasDecimal)
+            {
+                var real = mantissa / PowersOfTen[fractionDigits];
+                return Token.RealToken(negative ? -real : real, startPos);
+            }
+            return Token.IntegerToken(negative ? -mantissa : mantissa, startPos);
+        }
+
+        // Too many digits to read exactly: parse the lexeme's text.
+        var text = Compat.Latin1.GetString(_data, (int)startPos, (int)(lexemeEnd - startPos));
         if (hasDecimal)
         {
-            // "." alone (or "-." / "+.") is a bare decimal point — treat as 0.0
             if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
                 value = 0.0;
             return Token.RealToken(value, startPos);
         }
-        else
+        if (long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer))
+            return Token.IntegerToken(integer, startPos);
+        // Overflow or malformed — treat as 0
+        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var dvalue))
+            dvalue = 0.0;
+        return Token.RealToken(dvalue, startPos);
+    }
+
+    /// <summary>The words a lexer meets by the million - content operators and the file
+    /// structure keywords - resolved to one shared string each instead of a fresh one per
+    /// sighting. Keyed by the word's bytes packed little-endian with its length on top.</summary>
+    private static readonly Dictionary<long, string> KnownWords = BuildKnownWords();
+
+    private const int MaxPackedWordLength = 7;
+
+    private static Dictionary<long, string> BuildKnownWords()
+    {
+        var words = new[]
         {
-            if (long.TryParse(text, CultureInfo.InvariantCulture, out var value))
-                return Token.IntegerToken(value, startPos);
-            // Overflow or malformed — treat as 0
-            if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var dvalue))
-                dvalue = 0.0;
-            return Token.RealToken(dvalue, startPos);
+            "q", "Q", "cm", "w", "J", "j", "M", "d", "ri", "i", "gs",
+            "m", "l", "c", "v", "y", "h", "re",
+            "S", "s", "f", "F", "f*", "B", "B*", "b", "b*", "n", "W", "W*",
+            "BT", "ET", "Tc", "Tw", "Tz", "TL", "Tf", "Tr", "Ts", "Td", "TD", "Tm", "T*",
+            "Tj", "TJ", "'", "\"", "d0", "d1",
+            "CS", "cs", "SC", "SCN", "sc", "scn", "G", "g", "RG", "rg", "K", "k",
+            "sh", "BI", "ID", "EI", "Do", "MP", "DP", "BMC", "BDC", "EMC", "BX", "EX",
+            "true", "false", "null", "obj", "endobj", "stream", "xref", "trailer", "R",
+        };
+        var table = new Dictionary<long, string>(words.Length);
+        foreach (var word in words)
+        {
+            long key = 0;
+            for (var i = 0; i < word.Length; i++) key |= (long)(byte)word[i] << (8 * i);
+            table[key | ((long)word.Length << 56)] = word;
         }
+        return table;
+    }
+
+    private string WordAt(long start, int length)
+    {
+        if (length <= MaxPackedWordLength)
+        {
+            long key = 0;
+            for (var i = 0; i < length; i++) key |= (long)_data[start + i] << (8 * i);
+            if (KnownWords.TryGetValue(key | ((long)length << 56), out var known))
+                return known;
+        }
+        return Compat.Latin1.GetString(_data, (int)start, length);
     }
 
     private Token ReadKeywordOrBool()
@@ -379,7 +472,6 @@ internal sealed class PdfLexer
         // it as the real thing. Whitespace/delimiter-separated keywords are authored.
         LastKeywordFused = startPos > 0 && startPos <= _data.Length
             && !IsWhitespace(_data[startPos - 1]) && !IsDelimiter(_data[startPos - 1]);
-        var sb = new StringBuilder();
 
         while (_pos < _data.Length)
         {
@@ -390,25 +482,25 @@ internal sealed class PdfLexer
             // EXCEPT the Type 3 glyph operators d0/d1. Damaged streams fuse numbers
             // straight onto operators ("re9 w"); splitting here keeps the following
             // number a real token instead of producing an unknown "re9" keyword.
-            if (sb.Length > 0 && ((b >= '0' && b <= '9') || b == '.'))
+            var length = _pos - startPos;
+            if (Salvaging && length > 0 && ((b >= '0' && b <= '9') || b == '.'))
             {
-                var isD01 = sb.Length == 1 && sb[0] == 'd' && (b == '0' || b == '1')
+                var isD01 = length == 1 && _data[startPos] == 'd' && (b == '0' || b == '1')
                     && (_pos + 1 >= _data.Length
                         || IsWhitespace(_data[_pos + 1]) || IsDelimiter(_data[_pos + 1]));
                 if (!isD01)
                     break;
             }
-            sb.Append((char)b);
             _pos++;
         }
 
-        var word = sb.ToString();
-
+        var wordLength = (int)(_pos - startPos);
         // Safety: if no characters were consumed but we're not at EOF, the current byte is
         // a delimiter not handled by the outer switch (e.g. '}', ')' outside a string).
         // Advance past it to prevent an infinite loop.
-        if (word.Length == 0 && _pos < _data.Length)
+        if (wordLength == 0 && _pos < _data.Length)
             _pos++;
+        var word = wordLength == 0 ? string.Empty : WordAt(startPos, wordLength);
 
         return word switch
         {
@@ -506,7 +598,7 @@ internal sealed class PdfLexer
         return -1;
     }
 
-    private static bool IsWhitespace(byte b) =>
+    internal static bool IsWhitespace(byte b) =>
         b == ' ' || b == '\t' || b == '\r' || b == '\n' || b == '\0' || b == '\f';
 
     private static bool IsDelimiter(byte b) =>

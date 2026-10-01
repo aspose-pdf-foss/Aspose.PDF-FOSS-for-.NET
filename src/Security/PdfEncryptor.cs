@@ -70,7 +70,7 @@ internal sealed class PdfEncryptor
         int version, int revision, PdfDictionary encryptDict)
         => new(fileKey, algorithm, version, revision,
             System.Array.Empty<byte>(), System.Array.Empty<byte>(), 0,
-            System.Security.Cryptography.RandomNumberGenerator.GetBytes(16), prebuiltDict: encryptDict);
+            Compat.RandomBytes(16), prebuiltDict: encryptDict);
 
     /// <summary>Create an encryptor driven by a custom security handler. The handler
     /// supplies the /O and /U values, the /Perms string and the file key; the /Encrypt
@@ -103,9 +103,20 @@ internal sealed class PdfEncryptor
 
         return new PdfEncryptor(handler.CalculateEncryptionKey(userPassword),
             CryptoAlgorithm.RC4x128, handler.Version, handler.Revision,
-            oValue, uValue, permissions, fileId ?? System.Security.Cryptography.RandomNumberGenerator.GetBytes(16),
+            oValue, uValue, permissions, fileId ?? Compat.RandomBytes(16),
             permsValue: permsValue, prebuiltDict: dict, custom: handler);
     }
+
+    /// <summary>
+    /// Whether the document's metadata stream travels encrypted with everything
+    /// else. False leaves it in the clear, which the writer must honour, the key
+    /// derivation records from revision 4 on, and the dictionary states.
+    /// </summary>
+    public bool EncryptMetadata { get; private init; } = true;
+
+    /// <summary>Only embedded files are encrypted (the /EFF crypt filter): strings and every other
+    /// stream are written in the clear.</summary>
+    internal bool EmbeddedFilesOnly { get; set; }
 
     public byte[] OValue => _oValue;
     public byte[] UValue => _uValue;
@@ -138,18 +149,19 @@ internal sealed class PdfEncryptor
     /// Create an encryptor for AES 128-bit encryption.
     /// </summary>
     public static PdfEncryptor CreateAES128(string userPassword, string ownerPassword,
-        int permissions = -4, byte[]? fileId = null)
+        int permissions = -4, byte[]? fileId = null, bool encryptMetadata = true)
     {
-        return Create(CryptoAlgorithm.AESx128, 4, 4, 16, userPassword, ownerPassword, permissions, fileId);
+        return Create(CryptoAlgorithm.AESx128, 4, 4, 16, userPassword, ownerPassword, permissions, fileId,
+            encryptMetadata);
     }
 
     /// <summary>
     /// Create an encryptor for AES 256-bit encryption (V5/R6).
     /// </summary>
     public static PdfEncryptor CreateAES256(string userPassword, string ownerPassword,
-        int permissions = -4, byte[]? fileId = null)
+        int permissions = -4, byte[]? fileId = null, bool encryptMetadata = true)
     {
-        fileId ??= System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        fileId ??= Compat.RandomBytes(16);
 
         // SASLprep (RFC 4013) the passwords, then UTF-8 encode and truncate to
         // 127 bytes (ISO 32000-2 §7.6.4.3.3 / algorithm 2.B). SASLprep makes
@@ -162,11 +174,11 @@ internal sealed class PdfEncryptor
         if (ownerPwBytes.Length > 127) ownerPwBytes = ownerPwBytes[..127];
 
         // Generate random 32-byte file encryption key (FEK)
-        var fek = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        var fek = Compat.RandomBytes(32);
 
         // --- U value ---
-        var uValidationSalt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
-        var uKeySalt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
+        var uValidationSalt = Compat.RandomBytes(8);
+        var uKeySalt = Compat.RandomBytes(8);
 
         // U[0.32] = ComputeHashR6(pw, valSalt, [])
         var uHash = CryptoHelper.ComputeHashR6(userPwBytes, uValidationSalt, []);
@@ -181,8 +193,8 @@ internal sealed class PdfEncryptor
         var ueValue = CryptoHelper.EncryptAes256NoIv(ueKeyHash, fek);
 
         // --- O value ---
-        var oValidationSalt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
-        var oKeySalt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
+        var oValidationSalt = Compat.RandomBytes(8);
+        var oKeySalt = Compat.RandomBytes(8);
 
         // O[0.32] = ComputeHashR6(ownerPw, valSalt, U[0.48])
         var oHash = CryptoHelper.ComputeHashR6(ownerPwBytes, oValidationSalt, uValue);
@@ -207,25 +219,111 @@ internal sealed class PdfEncryptor
         permsBlock[5] = 0xFF;
         permsBlock[6] = 0xFF;
         permsBlock[7] = 0xFF;
-        permsBlock[8] = (byte)'T'; // EncryptMetadata = true
+        // The Perms block states the metadata choice too, and a reader checks it
+        // against the dictionary: 'T' for encrypted, 'F' for left in the clear.
+        permsBlock[8] = encryptMetadata ? (byte)'T' : (byte)'F';
         permsBlock[9] = (byte)'a';
         permsBlock[10] = (byte)'d';
         permsBlock[11] = (byte)'b';
         // Bytes 12-15: random
-        var randomTail = System.Security.Cryptography.RandomNumberGenerator.GetBytes(4);
+        var randomTail = Compat.RandomBytes(4);
         randomTail.CopyTo(permsBlock, 12);
 
         var permsValue = CryptoHelper.EncryptAes256Ecb(fek, permsBlock);
 
         return new PdfEncryptor(fek, CryptoAlgorithm.AESx256, 5, 6,
             oValue, uValue, permissions, fileId,
-            oeValue, ueValue, permsValue);
+            oeValue, ueValue, permsValue)
+        {
+            EncryptMetadata = encryptMetadata,
+        };
+    }
+
+    /// <summary>
+    /// Create a Standard-handler encryptor from password BYTES, at the version, revision and
+    /// key length given. Revisions 2 to 4 derive the key with algorithm 2 (RC4 or AES-128; a
+    /// revision-4 RC4 key names its cipher in the crypt filter); revision 5 hashes AES-256
+    /// passwords with plain SHA-256 (the Adobe extension level 3 form), revision 6 with the
+    /// iterated hash of ISO 32000-2. The passwords are used exactly as given. The permissions
+    /// are written as given: the caller has already set the bits the revision reserves.
+    /// </summary>
+    internal static PdfEncryptor CreateStandard(CryptoAlgorithm algorithm, int version, int revision, int keyLength,
+        byte[] userPassword, byte[] ownerPassword, int permissions, byte[] fileId, bool encryptMetadata)
+    {
+        userPassword ??= [];
+        ownerPassword ??= [];
+        if (algorithm != CryptoAlgorithm.AESx256)
+        {
+            var paddedUser = PadPassword(userPassword);
+            var paddedOwner = PadPassword(ownerPassword);
+            var oValue = ComputeOValue(paddedOwner, paddedUser, keyLength, revision);
+            var encKey = ComputeEncryptionKey(paddedUser, oValue, permissions, fileId, keyLength, revision, encryptMetadata);
+            var uValue = ComputeUValue(encKey, fileId, revision);
+            return new PdfEncryptor(encKey, algorithm, version, revision, oValue, uValue, permissions, fileId)
+            {
+                EncryptMetadata = encryptMetadata,
+            };
+        }
+
+        if (userPassword.Length > 127) userPassword = userPassword[..127];
+        if (ownerPassword.Length > 127) ownerPassword = ownerPassword[..127];
+        byte[] Hash(byte[] password, byte[] salt, byte[] userKey) => revision == 5
+            ? ShaDigest.Sha256(CryptoHelper.ConcatBytes(password, salt, userKey))
+            : CryptoHelper.ComputeHashR6(password, salt, userKey);
+
+        var fek = Compat.RandomBytes(32);
+        var uValidationSalt = Compat.RandomBytes(8);
+        var uKeySalt = Compat.RandomBytes(8);
+        var u = CryptoHelper.ConcatBytes(Hash(userPassword, uValidationSalt, []), uValidationSalt, uKeySalt);
+        var ue = CryptoHelper.EncryptAes256NoIv(Hash(userPassword, uKeySalt, []), fek);
+        var oValidationSalt = Compat.RandomBytes(8);
+        var oKeySalt = Compat.RandomBytes(8);
+        var o = CryptoHelper.ConcatBytes(Hash(ownerPassword, oValidationSalt, u), oValidationSalt, oKeySalt);
+        var oe = CryptoHelper.EncryptAes256NoIv(Hash(ownerPassword, oKeySalt, u), fek);
+
+        var permsBlock = new byte[16];
+        permsBlock[0] = (byte)(permissions & 0xFF);
+        permsBlock[1] = (byte)((permissions >> 8) & 0xFF);
+        permsBlock[2] = (byte)((permissions >> 16) & 0xFF);
+        permsBlock[3] = (byte)((permissions >> 24) & 0xFF);
+        permsBlock[4] = permsBlock[5] = permsBlock[6] = permsBlock[7] = 0xFF;
+        permsBlock[8] = encryptMetadata ? (byte)'T' : (byte)'F';
+        permsBlock[9] = (byte)'a';
+        permsBlock[10] = (byte)'d';
+        permsBlock[11] = (byte)'b';
+        Compat.RandomBytes(4).CopyTo(permsBlock, 12);
+        var perms = CryptoHelper.EncryptAes256Ecb(fek, permsBlock);
+
+        return new PdfEncryptor(fek, CryptoAlgorithm.AESx256, version, revision, o, u, permissions, fileId, oe, ue, perms)
+        {
+            EncryptMetadata = encryptMetadata,
+        };
+    }
+
+    /// <summary>The key objects are encrypted with (the file key before per-object mixing).</summary>
+    internal byte[] FileKey => _encryptionKey;
+    /// <summary>The /OE value of an AES-256 encryptor; null below revision 5.</summary>
+    internal byte[]? OEValue => _oeValue;
+    /// <summary>The /UE value of an AES-256 encryptor; null below revision 5.</summary>
+    internal byte[]? UEValue => _ueValue;
+    /// <summary>The /Perms value of an AES-256 encryptor; null below revision 5.</summary>
+    internal byte[]? PermsValue => _permsValue;
+
+    /// <summary>A password padded or cut to 32 bytes with the standard padding (algorithm 2 step a).</summary>
+    private static byte[] PadPassword(byte[] password)
+    {
+        var result = new byte[32];
+        var len = Math.Min(password.Length, 32);
+        password.AsSpan(0, len).CopyTo(result);
+        PasswordPadding.AsSpan(0, 32 - len).CopyTo(result.AsSpan(len));
+        return result;
     }
 
     private static PdfEncryptor Create(CryptoAlgorithm algorithm, int version, int revision,
-        int keyLength, string userPassword, string ownerPassword, int permissions, byte[]? fileId)
+        int keyLength, string userPassword, string ownerPassword, int permissions, byte[]? fileId,
+        bool encryptMetadata = true)
     {
-        fileId ??= System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        fileId ??= Compat.RandomBytes(16);
 
         // Ensure required permission bits are set (spec says bits 7-8 + 13-32 must be 1 for R>=3)
         if (revision >= 3)
@@ -238,12 +336,16 @@ internal sealed class PdfEncryptor
         var oValue = ComputeOValue(paddedOwner, paddedUser, keyLength, revision);
 
         // Compute encryption key (Algorithm 2)
-        var encKey = ComputeEncryptionKey(paddedUser, oValue, permissions, fileId, keyLength, revision);
+        var encKey = ComputeEncryptionKey(paddedUser, oValue, permissions, fileId, keyLength, revision,
+            encryptMetadata);
 
         // Compute U value (Algorithm 4/5)
         var uValue = ComputeUValue(encKey, fileId, revision);
 
-        return new PdfEncryptor(encKey, algorithm, version, revision, oValue, uValue, permissions, fileId);
+        return new PdfEncryptor(encKey, algorithm, version, revision, oValue, uValue, permissions, fileId)
+        {
+            EncryptMetadata = encryptMetadata,
+        };
     }
 
     /// <summary>
@@ -259,12 +361,15 @@ internal sealed class PdfEncryptor
         dict.Set("V", new PdfInteger(_version));
         dict.Set("R", new PdfInteger(_revision));
         dict.Set("P", new PdfInteger(_permissions));
+        // Written only to say NO: true is the default, and a document that
+        // encrypts its metadata says nothing about it.
+        if (!EncryptMetadata) dict.Set("EncryptMetadata", PdfBoolean.False);
         dict.Set("O", new PdfString(_oValue, isHex: true));
         dict.Set("U", new PdfString(_uValue, isHex: true));
 
-        if (_version == 5)
+        if (_version >= 5)
         {
-            // AES-256 (V5/R6)
+            // AES-256: CBC (V5/R5-R6) or GCM (V6/R7, ISO/TS 32003)
             dict.Set("Length", new PdfInteger(256));
 
             dict.Set("OE", new PdfString(_oeValue!, isHex: true));
@@ -277,7 +382,7 @@ internal sealed class PdfEncryptor
             var cfDict = new PdfDictionary();
             var stdCF = new PdfDictionary();
             stdCF.Set("Type", new PdfName("CryptFilter"));
-            stdCF.Set("CFM", new PdfName("AESV3"));
+            stdCF.Set("CFM", new PdfName(_version == 6 ? "AESV4" : "AESV3"));
             stdCF.Set("Length", new PdfInteger(32));
             cfDict.Set("StdCF", stdCF);
             dict.Set("CF", cfDict);
@@ -327,8 +432,8 @@ internal sealed class PdfEncryptor
 
     private byte[] DeriveObjectKey(int objectNumber, int generation)
     {
-        // V5 (AES-256): use the file encryption key directly — no per-object derivation
-        if (_version == 5)
+        // V5/V6 (AES-256): use the file encryption key directly — no per-object derivation
+        if (_version >= 5)
             return _encryptionKey;
 
         var isAes = _algorithm == CryptoAlgorithm.AESx128;
@@ -353,6 +458,7 @@ internal sealed class PdfEncryptor
 
     private byte[] EncryptData(byte[] data, byte[] key)
     {
+        if (_version == 6) return AesGcmCipher.EncryptObject(key, data);
         if (_algorithm is CryptoAlgorithm.AESx128 or CryptoAlgorithm.AESx256)
         {
             return EncryptAesCbc(key, data);
@@ -364,7 +470,7 @@ internal sealed class PdfEncryptor
 
     private static byte[] EncryptAesCbc(byte[] key, byte[] data)
     {
-        var iv = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        var iv = Compat.RandomBytes(16);
         var aes = new AesCipher(key);
         var encrypted = aes.EncryptCbc(data, iv, pkcs7Padding: true);
 
@@ -385,7 +491,7 @@ internal sealed class PdfEncryptor
             PasswordPadding.AsSpan(0, 32).CopyTo(result);
             return result;
         }
-        var pwBytes = System.Text.Encoding.Latin1.GetBytes(password);
+        var pwBytes = Compat.Latin1.GetBytes(password);
         var len = Math.Min(pwBytes.Length, 32);
         pwBytes.AsSpan(0, len).CopyTo(result);
         PasswordPadding.AsSpan(0, 32 - len).CopyTo(result.AsSpan(len));
@@ -417,7 +523,8 @@ internal sealed class PdfEncryptor
     }
 
     private static byte[] ComputeEncryptionKey(byte[] paddedUser, byte[] oValue,
-        int permissions, byte[] fileId, int keyLength, int revision)
+        int permissions, byte[] fileId, int keyLength, int revision,
+        bool encryptMetadata = true)
     {
         var md5 = new Md5Digest();
         md5.Update(paddedUser, 0, paddedUser.Length);
@@ -426,6 +533,16 @@ internal sealed class PdfEncryptor
         var pBytes = BitConverter.GetBytes(permissions);
         md5.Update(pBytes, 0, 4);
         md5.Update(fileId, 0, fileId.Length);
+
+        // ISO 32000-1 algorithm 2 step (f): from revision 4 on, a document that
+        // leaves its metadata in the clear feeds four 0xFF bytes into the key, so
+        // the key itself records the choice and a reader that disagrees derives
+        // the wrong one.
+        if (revision >= 4 && !encryptMetadata)
+        {
+            var clearMetadataMarker = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+            md5.Update(clearMetadataMarker, 0, clearMetadataMarker.Length);
+        }
 
         var hash = md5.Finish();
 

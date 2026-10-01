@@ -7,6 +7,7 @@ namespace Aspose.Pdf;
 /// </summary>
 public sealed class Id
 {
+    /// <summary>Creates a file identifier from its two parts; a <c>null</c> part becomes an empty string.</summary>
     public Id(string original, string modified)
     {
         Original = original ?? string.Empty;
@@ -14,5 +15,6 @@ public sealed class Id
     }
 
     public string Original { get; }
+    /// <summary>Gets the second /ID entry, which identifies this particular version of the file.</summary>
     public string Modified { get; }
 }

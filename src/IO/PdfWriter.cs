@@ -1,5 +1,4 @@
-using System.Globalization;
-using System.IO.Compression;
+﻿using System.Globalization;
 using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.Security;
@@ -9,9 +8,10 @@ namespace Aspose.Pdf.IO;
 /// <summary>
 /// Serializes PdfObject hierarchy to PDF byte output.
 /// </summary>
-internal sealed class PdfWriter
+internal sealed partial class PdfWriter
 {
-    private readonly Stream _output;
+    // The file being written; swapped for a scratch buffer while an object is measured.
+    private Stream _output;
     private readonly Dictionary<int, long> _offsets = new();
     private int _nextObjNum = 1;
     private readonly PdfEncryptor? _encryptor;
@@ -100,6 +100,19 @@ internal sealed class PdfWriter
         _excludedFromEncryption.Add(objectNumber);
     }
 
+    private readonly HashSet<int> _keptDirect = new();
+
+    /// <summary>Keep an object out of object streams: it is written as a plain
+    /// indirect object even when <see cref="UseObjectStreams"/> would pack it.
+    /// The document information dictionary asks for this -- its dates change on
+    /// every save, and packed into a compressed stream a changed digit changes the
+    /// deflated length, so two saves of one document a second apart would differ in
+    /// size by the compressor's whim; written direct, a date is as long as the last.</summary>
+    public void KeepOutOfObjectStreams(int objectNumber)
+    {
+        _keptDirect.Add(objectNumber);
+    }
+
     public void WriteHeader(string version = "1.4")
     {
         WriteRaw($"%PDF-{version}\n");
@@ -123,7 +136,7 @@ internal sealed class PdfWriter
         // When object streams are enabled, defer eligible non-stream objects
         var hasInline = ContainsInlineStream(obj);
         if (UseObjectStreams && obj is not PdfStream && !_excludedFromEncryption.Contains(objNum)
-            && !hasInline)
+            && !_keptDirect.Contains(objNum) && !hasInline)
         {
             var serialized = SerializeObject(obj);
             if (serialized.Length <= MaxObjectSizeForObjStm)
@@ -141,9 +154,18 @@ internal sealed class PdfWriter
         WriteRaw("\nendobj\n");
         _currentObjectNumber = -1;
 
-        // Flush promoted inline streams and cycle-promoted dicts iteratively to avoid
-        // stack overflow on large PDFs. Writing a deferred object may itself promote
-        // more streams/dicts; the loop picks those up until both queues drain.
+        FlushDeferredObjects();
+        return objNum;
+    }
+
+    /// <summary>Write the streams and dictionaries promoted to indirect objects while
+    /// writing (or measuring) other objects. Iterative rather than recursive to avoid a
+    /// stack overflow on large PDFs; writing a deferred object may itself promote more,
+    /// and the loop picks those up until both queues drain. Also called before the
+    /// cross-reference section, because a promotion made while measuring an object for
+    /// an object stream has no later write to flush it.</summary>
+    private void FlushDeferredObjects()
+    {
         while (_deferredStreams.Count > 0 || _deferredDicts.Count > 0)
         {
             while (_deferredStreams.Count > 0)
@@ -172,8 +194,6 @@ internal sealed class PdfWriter
                 _currentObjectNumber = -1;
             }
         }
-
-        return objNum;
     }
 
     /// <summary>
@@ -204,6 +224,13 @@ internal sealed class PdfWriter
         {
         switch (obj)
         {
+            // ⚠ Through UNTOUCHED, and first. Raw bytes are the one kind that is
+            // not a value: whatever they say is what the file gets, which is
+            // what a content stream's operators and a reserved run of spaces
+            // both need. Formatting them as anything writes something else.
+            case PdfRaw raw:
+                WriteBytes(raw.Bytes);
+                break;
             case PdfNull:
                 WriteRaw("null");
                 break;
@@ -251,12 +278,12 @@ internal sealed class PdfWriter
 
     private void WriteString(PdfString str)
     {
-        if (ShouldEncrypt)
+        if (ShouldEncrypt && !_encryptor!.EmbeddedFilesOnly)
         {
             // Encrypt the string value and always write as hex (encrypted bytes may contain parens)
             var encrypted = _encryptor!.EncryptString(str.Value, _currentObjectNumber, 0);
             WriteRaw("<");
-            WriteRaw(Convert.ToHexString(encrypted));
+            WriteRaw(Compat.ToHexString(encrypted));
             WriteRaw(">");
             return;
         }
@@ -264,7 +291,7 @@ internal sealed class PdfWriter
         if (str.IsHex)
         {
             WriteRaw("<");
-            WriteRaw(Convert.ToHexString(str.Value));
+            WriteRaw(Compat.ToHexString(str.Value));
             WriteRaw(">");
         }
         else
@@ -309,7 +336,11 @@ internal sealed class PdfWriter
         }
     }
 
-    private void WriteArray(PdfArray array)
+    /// <summary>Write an array. With <paramref name="promoteDicts"/> every inline dictionary
+    /// item becomes its own indirect object: a page's /Annots holds annotation objects, never
+    /// inline dictionaries, so an annotation keeps an object number that a later incremental
+    /// update (and a signature-coverage walk over it) can address.</summary>
+    private void WriteArray(PdfArray array, bool promoteDicts = false)
     {
         WriteRaw("[");
         var first = true;
@@ -331,9 +362,9 @@ internal sealed class PdfWriter
                 }
                 WriteObject(new PdfIndirectRef(streamObjNum, 0));
             }
-            else if (item is PdfDictionary sharedDict && TryPromoteSharedDict(sharedDict, out var arrDictNum))
+            else if (item is PdfDictionary itemDict && (promoteDicts || TryPromoteSharedDict(itemDict) is not null))
             {
-                WriteObject(new PdfIndirectRef(arrDictNum, 0));
+                WriteObject(new PdfIndirectRef(PromoteDict(itemDict), 0));
             }
             else
             {
@@ -383,10 +414,14 @@ internal sealed class PdfWriter
                 WriteRaw(" "); // indirect ref begins with a digit, so a separator is required
                 WriteObject(new PdfIndirectRef(streamObjNum, 0));
             }
-            else if (val is PdfDictionary sharedDict && TryPromoteSharedDict(sharedDict, out var valDictNum))
+            else if (val is PdfDictionary sharedDict && TryPromoteSharedDict(sharedDict) is { } valDictNum)
             {
                 WriteRaw(" "); // indirect ref begins with a digit, so a separator is required
                 WriteObject(new PdfIndirectRef(valDictNum, 0));
+            }
+            else if (key == AnnotsKey && val is PdfArray annots)
+            {
+                WriteArray(annots, promoteDicts: true);
             }
             else
             {
@@ -457,19 +492,32 @@ internal sealed class PdfWriter
     /// indirect object number (allocating and queueing it for deferred writing on first use)
     /// and return that number so the caller can emit a reference instead of an inline copy.
     /// </summary>
-    private bool TryPromoteSharedDict(PdfDictionary dict, out int objNum)
+    private int? TryPromoteSharedDict(PdfDictionary dict)
     {
-        if (_promotedDicts.TryGetValue(dict, out objNum)) return true;
+        int objNum = default;
+        if (_promotedDicts.TryGetValue(dict, out objNum)) return objNum;
         if (_sharedDicts.Contains(dict))
         {
-            objNum = _nextObjNum++;
-            _promotedDicts[dict] = objNum;
-            _deferredDicts.Enqueue((objNum, dict));
-            return true;
+            objNum = PromoteDict(dict);
+            return objNum;
         }
         objNum = 0;
-        return false;
+        return null;
     }
+
+    /// <summary>The dictionary's promoted object number, allocated and queued for the
+    /// deferred write on first use.</summary>
+    private int PromoteDict(PdfDictionary dict)
+    {
+        if (_promotedDicts.TryGetValue(dict, out var objNum)) return objNum;
+        objNum = _nextObjNum++;
+        _promotedDicts[dict] = objNum;
+        _deferredDicts.Enqueue((objNum, dict));
+        return objNum;
+    }
+
+    /// <summary>The page key whose array items are always written as indirect objects.</summary>
+    private const string AnnotsKey = "Annots";
 
     private void WriteStream(PdfStream stream)
     {
@@ -523,8 +571,8 @@ internal sealed class PdfWriter
                 dict.Remove("Filter");
         }
 
-        // Encrypt after compression but before writing
-        if (ShouldEncrypt)
+        // Encrypt after compression but before writing (embedded files alone when only they are)
+        if (ShouldEncrypt && (!_encryptor!.EmbeddedFilesOnly || dict.GetName("Type") == "EmbeddedFile"))
         {
             data = _encryptor!.EncryptStream(data, _currentObjectNumber, 0);
         }
@@ -553,6 +601,7 @@ internal sealed class PdfWriter
     /// </summary>
     public void WriteXRefAndTrailer(PdfDictionary trailerEntries)
     {
+        FlushDeferredObjects();
         if (UseObjectStreams)
         {
             // Object streams require xref streams (type-2 entries)
@@ -624,133 +673,55 @@ internal sealed class PdfWriter
     /// </summary>
     /// <param name="trailerEntries">Trailer entries (/Root, /Info, /ID, etc.)</param>
     /// <param name="compressedEntries">Map of objNum → (streamObjNum, indexInStream) for type-2 entries</param>
-    private void WriteXRefStreamCore(PdfDictionary trailerEntries,
-        Dictionary<int, (int streamObjNum, int indexInStream)>? compressedEntries)
+    private void WriteXRefStreamCore(PdfDictionary trailerEntries, Dictionary<int, (int streamObjNum, int indexInStream)>? compressedEntries)
     {
-        // The xref stream object gets its own object number
-        var xrefObjNum = AllocateObjectNumber();
-        var xrefOffset = _output.Position;
+        var xw = new XRefStreamWriteState();
+        xw.trailerEntries = trailerEntries;
+        xw.compressedEntries = compressedEntries;
+        PlanXRefStreamLayout(xw);
+        xw.w3 = ByteWidth(xw.maxField3);
 
-        // Find the range of object numbers
-        var maxObjNum = 0;
-        foreach (var num in _offsets.Keys)
-            if (num > maxObjNum) maxObjNum = num;
-
-        if (compressedEntries is not null)
-        {
-            foreach (var num in compressedEntries.Keys)
-                if (num > maxObjNum) maxObjNum = num;
-        }
-
-        // The xref stream itself is an object, so include it in the range
-        if (xrefObjNum > maxObjNum) maxObjNum = xrefObjNum;
-
-        var size = maxObjNum + 1;
-
-        // Determine field widths: type=1 byte, offset needs enough bytes for max offset,
-        // gen/index needs enough bytes
-        var maxOffset = xrefOffset; // xref stream position is the largest offset
-        foreach (var off in _offsets.Values)
-            if (off > maxOffset) maxOffset = off;
-
-        // Field 2 of a TYPE-2 entry holds the containing object STREAM's number, so /W[1]
-        // must cover the largest such number as well as the largest byte offset — a small
-        // file that keeps large inherited object numbers (e.g. a 5 KB save carrying object
-        // 100003) otherwise writes the stream number truncated to the offset width.
-        var maxField2 = maxOffset;
-        if (compressedEntries is not null)
-        {
-            foreach (var (stm, _) in compressedEntries.Values)
-                if (stm > maxField2) maxField2 = stm;
-        }
-
-        var w2 = ByteWidth(maxField2);
-        // For generation/index: typically small, but check compressed entries too
-        long maxField3 = 65535; // free entry gen
-        if (compressedEntries is not null)
-        {
-            foreach (var (_, idx) in compressedEntries.Values)
-                if (idx > maxField3) maxField3 = idx;
-        }
-        var w3 = ByteWidth(maxField3);
-
-        // Build binary xref data
-        // Entry layout: [type:1] [field2:w2] [field3:w3]
-        var entrySize = 1 + w2 + w3;
-        var streamData = new byte[size * entrySize];
+        xw.entrySize = 1 + xw.w2 + xw.w3;
+        xw.streamData = new byte[xw.size * xw.entrySize];
 
         // Object 0: free entry (type=0, next free=0, gen=65535)
-        streamData[0] = 0; // type 0
-        WriteField(streamData, 1, w2, 0); // next free obj
-        WriteField(streamData, 1 + w2, w3, 65535); // gen
+        xw.streamData[0] = 0; // type 0
+        WriteField(xw.streamData, 1, xw.w2, 0); // next free obj
+        WriteField(xw.streamData, 1 + xw.w2, xw.w3, 65535); // gen
 
-        for (var i = 1; i < size; i++)
-        {
-            var pos = i * entrySize;
+        WriteXRefStreamEntries(xw);
 
-            if (compressedEntries is not null && compressedEntries.TryGetValue(i, out var compressed))
-            {
-                // Type 2: compressed in object stream
-                streamData[pos] = 2;
-                WriteField(streamData, pos + 1, w2, compressed.streamObjNum);
-                WriteField(streamData, pos + 1 + w2, w3, compressed.indexInStream);
-            }
-            else if (_offsets.TryGetValue(i, out var offset))
-            {
-                // Type 1: uncompressed
-                streamData[pos] = 1;
-                WriteField(streamData, pos + 1, w2, offset);
-                WriteField(streamData, pos + 1 + w2, w3, 0); // gen 0
-            }
-            else if (i == xrefObjNum)
-            {
-                // The xref stream object itself — type 1
-                streamData[pos] = 1;
-                WriteField(streamData, pos + 1, w2, xrefOffset);
-                WriteField(streamData, pos + 1 + w2, w3, 0);
-            }
-            else
-            {
-                // Free entry
-                streamData[pos] = 0;
-                WriteField(streamData, pos + 1, w2, 0);
-                WriteField(streamData, pos + 1 + w2, w3, 65535);
-            }
-        }
+        xw.compressedData = Compress(xw.streamData);
 
-        // Compress the xref stream data
-        var compressedData = Compress(streamData);
-
-        // Build the xref stream dictionary (which also serves as the trailer)
-        var xrefDict = new PdfDictionary();
-        xrefDict.Set("Type", new PdfName("XRef"));
-        xrefDict.Set("Size", new PdfInteger(size));
-        var wArray = new PdfArray();
-        wArray.Add(new PdfInteger(1));
-        wArray.Add(new PdfInteger(w2));
-        wArray.Add(new PdfInteger(w3));
-        xrefDict.Set("W", wArray);
-        xrefDict.Set("Filter", new PdfName("FlateDecode"));
-        xrefDict.Set("Length", new PdfInteger(compressedData.Length));
+        xw.xrefDict = new PdfDictionary();
+        xw.xrefDict.Set("Type", new PdfName("XRef"));
+        xw.xrefDict.Set("Size", new PdfInteger(xw.size));
+        xw.wArray = new PdfArray();
+        xw.wArray.Add(new PdfInteger(1));
+        xw.wArray.Add(new PdfInteger(xw.w2));
+        xw.wArray.Add(new PdfInteger(xw.w3));
+        xw.xrefDict.Set("W", xw.wArray);
+        xw.xrefDict.Set("Filter", new PdfName("FlateDecode"));
+        xw.xrefDict.Set("Length", new PdfInteger(xw.compressedData.Length));
 
         // Copy trailer entries into the xref stream dict
-        foreach (var key in trailerEntries.Keys)
+        foreach (var key in xw.trailerEntries.Keys)
         {
             if (key is "Size" or "Type" or "W" or "Filter" or "Length") continue;
-            var val = trailerEntries.Get(key);
-            if (val is not null) xrefDict.Set(key, val);
+            var val = xw.trailerEntries.Get(key);
+            if (val is not null) xw.xrefDict.Set(key, val);
         }
 
         // Write the xref stream as an indirect object
-        _currentObjectNumber = xrefObjNum;
-        WriteRaw($"{xrefObjNum} 0 obj\n");
-        WriteDictionary(xrefDict);
+        _currentObjectNumber = xw.xrefObjNum;
+        WriteRaw($"{xw.xrefObjNum} 0 obj\n");
+        WriteDictionary(xw.xrefDict);
         WriteRaw("\nstream\n");
-        _output.Write(compressedData);
+        _output.Write(xw.compressedData);
         WriteRaw("\nendstream\nendobj\n");
         _currentObjectNumber = -1;
 
-        WriteRaw($"startxref\n{xrefOffset}\n%%EOF\n");
+        WriteRaw($"startxref\n{xw.xrefOffset}\n%%EOF\n");
     }
 
     /// <summary>
@@ -758,19 +729,20 @@ internal sealed class PdfWriter
     /// </summary>
     private void WriteObjectStreamsAndXRefStream(PdfDictionary trailerEntries)
     {
-        // Collect eligible objects: non-stream, non-encrypted, small enough, no inline streams
-        var eligible = new List<int>();
+        var ow = new ObjectStreamWriteState();
+        ow.trailerEntries = trailerEntries;
+        ow.eligible = new List<int>();
         foreach (var (objNum, obj) in _allObjects)
         {
             if (obj is PdfStream) continue; // Streams cannot go in ObjStm
-            if (_excludedFromEncryption.Contains(objNum)) continue;
+            if (_excludedFromEncryption.Contains(objNum) || _keptDirect.Contains(objNum)) continue;
             if (ContainsInlineStream(obj)) continue; // Dicts with inline streams need promotion
 
             // Check serialized size
             var serialized = SerializeObject(obj);
             if (serialized.Length > MaxObjectSizeForObjStm) continue;
 
-            eligible.Add(objNum);
+            ow.eligible.Add(objNum);
         }
 
         // Pack in a deterministic order (ascending object number) rather than the order
@@ -779,12 +751,12 @@ internal sealed class PdfWriter
         // byte-stable — re-saving an already-saved file reproduces the same ObjStm instead
         // of a re-ordered (and differently-compressed) one. Sequential object
         // numbers also tend to group related objects, which compresses slightly better.
-        eligible.Sort();
+        ow.eligible.Sort();
 
-        if (eligible.Count == 0)
+        if (ow.eligible.Count == 0)
         {
             // No eligible objects — just write xref stream without object streams
-            WriteXRefStream(trailerEntries);
+            WriteXRefStream(ow.trailerEntries);
             return;
         }
 
@@ -794,78 +766,22 @@ internal sealed class PdfWriter
         // build the compressed entries map. The standalone objects are already written,
         // but we'll remove their offsets for ones going into ObjStm.
 
-        // Build groups of eligible objects (up to MaxObjectsPerStream per group)
-        var compressedEntries = new Dictionary<int, (int streamObjNum, int indexInStream)>();
-        var groups = new List<List<int>>();
-        for (var i = 0; i < eligible.Count; i += MaxObjectsPerStream)
+        ow.compressedEntries = new Dictionary<int, (int streamObjNum, int indexInStream)>();
+        ow.groups = new List<List<int>>();
+        for (var i = 0; i < ow.eligible.Count; i += MaxObjectsPerStream)
         {
-            var count = Math.Min(MaxObjectsPerStream, eligible.Count - i);
-            groups.Add(eligible.GetRange(i, count));
+            var count = Math.Min(MaxObjectsPerStream, ow.eligible.Count - i);
+            ow.groups.Add(ow.eligible.GetRange(i, count));
         }
 
         // Write each group as an ObjStm
-        foreach (var group in groups)
+        foreach (var group in ow.groups)
         {
-            var objStmNum = AllocateObjectNumber();
-
-            // Build the object stream content:
-            // Header: N pairs of "objNum offset\n"
-            // Body: serialized objects at those offsets
-            var headerBuilder = new StringBuilder();
-            var bodyBuilder = new MemoryStream();
-            var offsets = new List<int>();
-
-            foreach (var objNum in group)
-            {
-                var obj = _allObjects[objNum];
-                var serialized = SerializeObject(obj);
-                offsets.Add((int)bodyBuilder.Position);
-                headerBuilder.Append($"{objNum} {bodyBuilder.Position} ");
-                bodyBuilder.Write(serialized);
-                bodyBuilder.WriteByte((byte)' '); // separator between objects
-            }
-
-            var headerBytes = Encoding.ASCII.GetBytes(headerBuilder.ToString());
-            var bodyBytes = bodyBuilder.ToArray();
-
-            // Combine header + body
-            var combined = new byte[headerBytes.Length + bodyBytes.Length];
-            headerBytes.CopyTo(combined, 0);
-            bodyBytes.CopyTo(combined, headerBytes.Length);
-
-            // Compress with FlateDecode
-            var compressed = Compress(combined);
-
-            // Build ObjStm dictionary
-            var objStmDict = new PdfDictionary();
-            objStmDict.Set("Type", new PdfName("ObjStm"));
-            objStmDict.Set("N", new PdfInteger(group.Count));
-            objStmDict.Set("First", new PdfInteger(headerBytes.Length));
-            objStmDict.Set("Filter", new PdfName("FlateDecode"));
-            objStmDict.Set("Length", new PdfInteger(compressed.Length));
-
-            // Write the ObjStm as a regular indirect object
-            var objStmOffset = _output.Position;
-            _offsets[objStmNum] = objStmOffset;
-
-            _currentObjectNumber = objStmNum;
-            WriteRaw($"{objStmNum} 0 obj\n");
-            WriteDictionary(objStmDict);
-            WriteRaw("\nstream\n");
-            _output.Write(compressed);
-            WriteRaw("\nendstream\nendobj\n");
-            _currentObjectNumber = -1;
-
-            // Record compressed entries and remove standalone offsets
-            for (var i = 0; i < group.Count; i++)
-            {
-                compressedEntries[group[i]] = (objStmNum, i);
-                _offsets.Remove(group[i]); // Remove from standalone offsets
-            }
+            WriteObjectStreamGroup(ow, group);
         }
 
         // Write xref stream with the compressed entries
-        WriteXRefStreamCore(trailerEntries, compressedEntries);
+        WriteXRefStreamCore(ow.trailerEntries, ow.compressedEntries);
     }
 
     /// <summary>
@@ -906,12 +822,29 @@ internal sealed class PdfWriter
     /// <summary>
     /// Serialize a PdfObject to bytes (for measuring size and packing into ObjStm).
     /// </summary>
+    /// <summary>The object's serialised bytes, written by THIS writer into a scratch
+    /// buffer so that a stream or dictionary promoted to an indirect object during the
+    /// measurement keeps its number and its place in the deferred queue - a throwaway
+    /// writer would allocate the number in its own space and never write the object,
+    /// leaving a dangling reference. Strings are not encrypted here: an object inside an
+    /// object stream is protected by the stream's own encryption.</summary>
     private byte[] SerializeObject(PdfObject obj)
     {
-        using var ms = new MemoryStream();
-        var tempWriter = new PdfWriter(ms);
-        tempWriter.WriteObject(obj);
-        return ms.ToArray();
+        var file = _output;
+        var objectNumber = _currentObjectNumber;
+        using var scratch = new MemoryStream();
+        _output = scratch;
+        _currentObjectNumber = -1;
+        try
+        {
+            WriteObject(obj);
+        }
+        finally
+        {
+            _output = file;
+            _currentObjectNumber = objectNumber;
+        }
+        return scratch.ToArray();
     }
 
     /// <summary>
@@ -941,15 +874,16 @@ internal sealed class PdfWriter
     private void WriteRaw(string text) =>
         _output.Write(Encoding.ASCII.GetBytes(text));
 
-    private static byte[] Compress(byte[] data)
-    {
-        using var ms = new MemoryStream();
-        using (var zlib = new ZLibStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
-        {
-            zlib.Write(data);
-        }
-        return ms.ToArray();
-    }
+    /// <summary>
+    /// Bytes straight to the file, encoded by nothing.
+    ///
+    /// ⚠⚠ NOT WriteRaw. That takes a string and encodes it as ASCII, which
+    /// replaces every byte above 127 with a question mark — silently, and only
+    /// in the documents that happen to contain one.
+    /// </summary>
+    private void WriteBytes(byte[] bytes) => _output.Write(bytes);
+
+    private static byte[] Compress(byte[] data) => Filters.ManagedDeflater.DeflateZlib(data, Filters.DeflateLevel.Best);
 
     private static PdfDictionary CloneDictionary(PdfDictionary source)
     {

@@ -90,25 +90,54 @@ public sealed partial class Form
         return count;
     }
 
+    // The decoded template, remembered against the stream it came from: the XFA walk
+    // asks for the template once per field, and inflating a large template for every
+    // field made a dynamic form's conversion take seconds. A replaced template (a
+    // different stream object, or SetXfaTemplateXml) is decoded afresh.
+    private PdfStream? _xfaTemplateSource;
+    private string? _xfaTemplateXml;
+    private XmlDocument? _xfaTemplateDoc;
+
+    /// <summary>The template parsed once, for the walks that only read it - the field
+    /// value resolution parsed the whole template again for every field.</summary>
+    internal XmlDocument? GetXfaTemplateDocument()
+    {
+        var xml = GetXfaTemplateXml();
+        if (xml is null) return null;
+        if (_xfaTemplateDoc is null)
+        {
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+            _xfaTemplateDoc = doc;
+        }
+        return _xfaTemplateDoc;
+    }
+
     internal string? GetXfaTemplateXml()
     {
-        var reader = _reader ?? OwnerDocument?.Reader;
-        if (reader is null) return null;
-        var catalog = reader.Catalog;
-        var acroForm = reader.ResolveDict(catalog.Get("AcroForm"));
-        if (acroForm is null) return null;
-        var xfaObj = reader.Resolve(acroForm.Get("XFA"));
-        if (xfaObj is PdfArray arr)
+        var stream = FindXfaTemplateStream(out var reader);
+        if (stream is null || reader is null) return null;
+        if (!ReferenceEquals(stream, _xfaTemplateSource))
         {
-            for (int i = 0; i < arr.Count - 1; i += 2)
-            {
-                if (arr[i] is PdfString s && Encoding.Latin1.GetString(s.Value) == "template")
-                {
-                    var stream = reader.Resolve(arr[i + 1]) as PdfStream;
-                    if (stream is not null)
-                        return Encoding.UTF8.GetString(reader.DecodeStream(stream));
-                }
-            }
+            _xfaTemplateXml = Encoding.UTF8.GetString(reader.DecodeStream(stream));
+            _xfaTemplateDoc = null;
+            _xfaTemplateSource = stream;
+        }
+        return _xfaTemplateXml;
+    }
+
+    private PdfStream? FindXfaTemplateStream(out PdfReader? reader)
+    {
+        reader = _reader ?? OwnerDocument?.Reader;
+        if (reader is null) return null;
+        var acroForm = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
+        if (acroForm is null) return null;
+        if (reader.Resolve(acroForm.Get("XFA")) is not PdfArray arr) return null;
+        for (int i = 0; i < arr.Count - 1; i += 2)
+        {
+            if (arr[i] is PdfString s && Compat.Latin1.GetString(s.Value) == "template"
+                && reader.Resolve(arr[i + 1]) is PdfStream stream)
+                return stream;
         }
         return null;
     }
@@ -120,6 +149,9 @@ public sealed partial class Form
     /// a decoder.</summary>
     internal void SetXfaTemplateXml(string xml)
     {
+        _xfaTemplateSource = null;
+        _xfaTemplateXml = null;
+        _xfaTemplateDoc = null;
         var reader = _reader ?? OwnerDocument?.Reader;
         if (reader is null) return;
         var acroForm = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
@@ -129,7 +161,7 @@ public sealed partial class Form
         {
             for (int i = 0; i < arr.Count - 1; i += 2)
             {
-                if (arr[i] is PdfString s && Encoding.Latin1.GetString(s.Value) == "template")
+                if (arr[i] is PdfString s && Compat.Latin1.GetString(s.Value) == "template")
                 {
                     if (reader.Resolve(arr[i + 1]) is PdfStream stream)
                     {
@@ -518,7 +550,7 @@ public sealed partial class Form
         }
 
         if (sb.Length == 0) return;
-        page.SetContentStream(Encoding.Latin1.GetBytes(sb.ToString()));
+        page.SetContentStream(Compat.Latin1.GetBytes(sb.ToString()));
         page.ResetContentsCache();
     }
 

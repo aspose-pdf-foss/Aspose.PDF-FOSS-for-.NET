@@ -195,6 +195,10 @@ internal static partial class SvgToPdfConverter
         return true;
     }
 
+    /// <summary>Marks a stroke-width that a style sheet or style attribute set, as opposed to the
+    /// presentation attribute: the two read differently at zero (see the shape renderer).</summary>
+    private const string StrokeWidthFromStyle = "stroke-width:source";
+
     private static readonly string[] PresentationAttrs =
     {
         "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
@@ -232,7 +236,10 @@ internal static partial class SvgToPdfConverter
             matched.Sort((a, b) => a.Spec != b.Spec ? a.Spec - b.Spec : a.Order - b.Order);
             foreach (var (_, _, props) in matched)
                 foreach (var kv in props)
+                {
                     style[kv.Key] = kv.Value;
+                    if (kv.Key == "stroke-width") style[StrokeWidthFromStyle] = "1";
+                }
         }
 
         // 3. inline style attribute (highest)
@@ -245,7 +252,11 @@ internal static partial class SvgToPdfConverter
                 if (idx <= 0) continue;
                 var name = decl[..idx].Trim().ToLowerInvariant();
                 var value = decl[(idx + 1)..].Trim();
-                if (name.Length > 0 && value.Length > 0) style[name] = value;
+                if (name.Length > 0 && value.Length > 0)
+                {
+                    style[name] = value;
+                    if (name == "stroke-width") style[StrokeWidthFromStyle] = "1";
+                }
             }
         }
 

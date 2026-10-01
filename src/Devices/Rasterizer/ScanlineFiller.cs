@@ -7,7 +7,7 @@
 /// matches GDI+'s rasterization for the Template-PNG visual regressions.
 /// Supports both even-odd and non-zero winding fill rules.
 /// </summary>
-internal static class ScanlineFiller
+internal static partial class ScanlineFiller
 {
     // Each output row is split into this many sub-scanlines. Each sub-scanline
     // contributes 1/SubSamples of the total per-pixel coverage. 4 matches the
@@ -20,105 +20,57 @@ internal static class ScanlineFiller
     /// in the mask is skipped — this enforces a previously-installed <c>W</c>/<c>W*</c>
     /// clipping path on the fill.
     /// </summary>
-    public static void Fill(EdgeTable edgeTable, byte[] pixels, int pixelW, int pixelH,
-        byte r, byte g, byte b, byte a, bool evenOdd, byte[]? clipMask = null, string blendMode = "Normal",
-        bool knockout = false, byte[]? softMask = null)
+    public static void Fill(EdgeTable edgeTable, byte[] pixels, int pixelW, int pixelH, byte r, byte g, byte b, byte a, bool evenOdd, byte[]? clipMask = null, string blendMode = "Normal", bool knockout = false, byte[]? softMask = null)
     {
-        var edges = edgeTable.Edges;
+        var sf = new ScanlineFillState();
+        sf.edgeTable = edgeTable;
+        sf.pixels = pixels;
+        sf.pixelW = pixelW;
+        sf.pixelH = pixelH;
+        sf.r = r;
+        sf.g = g;
+        sf.b = b;
+        sf.a = a;
+        sf.evenOdd = evenOdd;
+        sf.clipMask = clipMask;
+        sf.blendMode = blendMode;
+        sf.knockout = knockout;
+        sf.softMask = softMask;
+        var edges = sf.edgeTable.Edges;
         if (edges.Count == 0) return;
 
-        // Sort edges by YMin so we can sweep an active-edge window row-by-row.
+        // Sort edges by YMin so we can sweep an sf.active-edge window row-by-row.
         // Without this, each row's inner loop scans the full edge list, which is
         // O(|edges| × rows) and dominates rendering time on clip-heavy pages.
-        var sorted = new Edge[edges.Count];
-        for (var i = 0; i < edges.Count; i++) sorted[i] = edges[i];
-        Array.Sort(sorted, static (a, b) => a.YMin.CompareTo(b.YMin));
+        sf.sorted = new Edge[edges.Count];
+        for (var i = 0; i < edges.Count; i++) sf.sorted[i] = edges[i];
+        Array.Sort(sf.sorted, static (a, b) => a.YMin.CompareTo(b.YMin));
 
         // Polygon's integer-pixel vertical extent. Floor/ceiling outward so sub-pixel
-        // strokes that barely enter row (y-1) or (y+1) still get their partial coverage.
+        // strokes that barely enter row (y-1) or (y+1) still get their partial sf.coverage.
         double yMaxD = double.MinValue;
         foreach (var e in edges) if (e.YMax > yMaxD) yMaxD = e.YMax;
-        var yStart = Math.Max(0, (int)Math.Floor(sorted[0].YMin));
-        var yEnd = Math.Min(pixelH, (int)Math.Ceiling(yMaxD));
+        var yStart = Math.Max(0, (int)Math.Floor(sf.sorted[0].YMin));
+        var yEnd = Math.Min(sf.pixelH, (int)Math.Ceiling(yMaxD));
         if (yStart >= yEnd) return;
 
-        // Per-row coverage accumulator. Each pixel collects contributions from up to
+        // Per-row sf.coverage accumulator. Each pixel collects contributions from up to
         // SubSamples sub-scanlines, each sub-scanline contributing [0, 255] (horizontal
-        // area coverage). Final alpha = accumulator / SubSamples, capped at 255.
-        var coverage = new int[pixelW];
-        var hits = new List<EdgeHit>(Math.Min(edges.Count, 64));
-        var active = new List<Edge>(Math.Min(edges.Count, 64));
-        int pending = 0;
+        // area sf.coverage). Final alpha = accumulator / SubSamples, capped at 255.
+        sf.coverage = new int[sf.pixelW];
+        sf.hits = new List<EdgeHit>(Math.Min(edges.Count, 64));
+        sf.active = new List<Edge>(Math.Min(edges.Count, 64));
+        sf.pending = 0;
 
-        // Track the pixel-column range that actually has coverage on this row so the
+        // Track the pixel-column range that actually has sf.coverage on this row so the
         // blender only iterates over the polygon's footprint — not the full page width.
         // Saves ~60% of blend time on small shapes (short-line glyphs etc.).
-        int rowXMin = int.MaxValue, rowXMax = int.MinValue;
-        int maxTouchedX = -1; // columns that still hold stale coverage from last row
+        sf.rowXMin = int.MaxValue; sf.rowXMax = int.MinValue;
+        sf.maxTouchedX = -1; // columns that still hold stale sf.coverage from last row
 
         for (var y = yStart; y < yEnd; y++)
         {
-            // Clear only the columns we touched last row (not the full pixelW).
-            if (maxTouchedX >= 0)
-            {
-                Array.Clear(coverage, rowXMin, Math.Min(maxTouchedX - rowXMin + 1, coverage.Length - rowXMin));
-                maxTouchedX = -1;
-            }
-            rowXMin = int.MaxValue; rowXMax = int.MinValue;
-
-            // Admit edges that become active somewhere inside this row's SubSamples range.
-            // Row's latest subY is y + (SubSamples - 0.5) / SubSamples ≤ y + 1.
-            while (pending < sorted.Length && sorted[pending].YMin < y + 1)
-                active.Add(sorted[pending++]);
-            // Retire edges whose YMax has already passed this row. Swap-and-pop avoids
-            // the O(n) shift of List.RemoveAt, keeping the full sweep linear in |edges|
-            // instead of quadratic on polygons with many simultaneously-active edges.
-            for (var i = active.Count - 1; i >= 0; i--)
-            {
-                if (active[i].YMax <= y)
-                {
-                    var last = active.Count - 1;
-                    if (i != last) active[i] = active[last];
-                    active.RemoveAt(last);
-                }
-            }
-
-            for (var s = 0; s < SubSamples; s++)
-            {
-                // Sample at the centre of each sub-scanline slice so a rectangle spanning
-                // y ∈ [32.5, 33.5] contributes to rows 32 AND 33 instead of collapsing
-                // into one row at full opacity.
-                var subY = y + (s + 0.5) / SubSamples;
-
-                hits.Clear();
-                foreach (var e in active)
-                {
-                    if (e.YMin <= subY && subY < e.YMax)
-                    {
-                        var x = e.XAtYMin + (subY - e.YMin) * e.InvSlope;
-                        hits.Add(new EdgeHit(x, e.Direction));
-                    }
-                }
-                if (hits.Count < 2) continue;
-                hits.Sort(static (p, q) => p.X.CompareTo(q.X));
-
-                // The outermost hits bound this sub-sample's coverage. Clip to [0, pixelW).
-                var xLo = Math.Max(0, (int)hits[0].X);
-                var xHi = Math.Min(pixelW - 1, (int)hits[hits.Count - 1].X + 1);
-                if (xLo < rowXMin) rowXMin = xLo;
-                if (xHi > rowXMax) rowXMax = xHi;
-
-                if (evenOdd)
-                    AccumulateEvenOdd(hits, coverage, pixelW);
-                else
-                    AccumulateNonZero(hits, coverage, pixelW);
-            }
-
-            if (rowXMax >= rowXMin)
-            {
-                maxTouchedX = rowXMax;
-                BlendRowCoverageRange(pixels, pixelW, y, coverage, rowXMin, rowXMax, r, g, b, a, clipMask, blendMode, knockout, softMask);
-            }
+            FillScanlineRow(sf, y);
         }
     }
 
@@ -126,9 +78,7 @@ internal static class ScanlineFiller
     /// Blend only columns in [<paramref name="xMin"/>, <paramref name="xMax"/>] — the
     /// polygon's per-row x footprint — rather than scanning every pixel in the row.
     /// </summary>
-    private static void BlendRowCoverageRange(byte[] pixels, int pixelW, int y, int[] coverage,
-        int xMin, int xMax, byte r, byte g, byte b, byte a, byte[]? clipMask, string blendMode = "Normal",
-        bool knockout = false, byte[]? softMask = null)
+    private static void BlendRowCoverageRange(byte[] pixels, int pixelW, int y, int[] coverage, int xMin, int xMax, byte r, byte g, byte b, byte a, byte[]? clipMask, string blendMode = "Normal", bool knockout = false, byte[]? softMask = null)
     {
         if (xMin < 0) xMin = 0;
         if (xMax >= pixelW) xMax = pixelW - 1;
@@ -178,8 +128,8 @@ internal static class ScanlineFiller
             var backdropA = pixels[idx + 3];
             if (mode != BlendMode.Normal)
             {
-                BlendModes.Blend(mode, pixels[idx], pixels[idx + 1], pixels[idx + 2],
-                    ir, ig, ib, out sR, out sG, out sB);
+                (sR, sG, sB) = BlendModes.Blend(mode, pixels[idx], pixels[idx + 1], pixels[idx + 2],
+                    ir, ig, ib);
                 // PDF 32000 §11.3.6: Cs' = (1 - ab)*Cs + ab*B(Cb, Cs) - the blend applies
                 // only in proportion to how much backdrop is actually there. A group
                 // scratch starts TRANSPARENT and its empty pixels still carry RGB zero,
@@ -307,7 +257,7 @@ internal static class ScanlineFiller
         byte r, byte g, byte b, byte a, double lineWidth, byte[]? clipMask = null,
         string blendMode = "Normal", bool knockout = false, byte[]? softMask = null)
     {
-        HintAxisAlignedStroke(ref x0, ref y0, ref x1, ref y1, ref lineWidth);
+        (x0, y0, x1, y1, lineWidth) = HintAxisAlignedStroke(x0, y0, x1, y1, lineWidth);
 
         var hw = lineWidth * 0.5;
         // Clamp to 0.5 so a zero-width line still appears as a single-pixel-wide band
@@ -349,17 +299,18 @@ internal static class ScanlineFiller
     /// pixels, quantised down to a clean single device pixel). Non-axis-aligned or
     /// non-~1px strokes pass through unchanged; the rule applies to width=1 only.
     /// </summary>
-    private static void HintAxisAlignedStroke(ref double x0, ref double y0,
-        ref double x1, ref double y1, ref double lineWidth)
+    /// <returns>The stroke's endpoints and width, snapped when it is a one-pixel axis-aligned line; unchanged otherwise.</returns>
+    private static (double x0, double y0, double x1, double y1, double lineWidth) HintAxisAlignedStroke(double x0, double y0,
+        double x1, double y1, double lineWidth)
     {
         var roundedW = (int)Math.Round(lineWidth);
-        if (roundedW != 1) return;
+        if (roundedW != 1) return (x0, y0, x1, y1, lineWidth);
 
         var dxAbs = Math.Abs(x1 - x0);
         var dyAbs = Math.Abs(y1 - y0);
         var isHorizontal = dyAbs < 0.001 && dxAbs > 0.001;
         var isVertical = dxAbs < 0.001 && dyAbs > 0.001;
-        if (!isHorizontal && !isVertical) return;
+        if (!isHorizontal && !isVertical) return (x0, y0, x1, y1, lineWidth);
 
         var pos = isHorizontal ? y0 : x0;
         var shifted = pos + lineWidth * 0.5;
@@ -370,17 +321,9 @@ internal static class ScanlineFiller
         const double snapBand = 0.24; // just below 0.25 — excludes the midway case
         var newPos = Math.Abs(shifted - snapCandidate) < snapBand ? snapCandidate : shifted;
 
-        if (isHorizontal)
-        {
-            y0 = newPos;
-            y1 = newPos;
-        }
-        else
-        {
-            x0 = newPos;
-            x1 = newPos;
-        }
-        lineWidth = 1.0;
+        return isHorizontal
+            ? (x0, newPos, x1, newPos, 1.0)
+            : (newPos, y0, newPos, y1, 1.0);
     }
 
     // ── Fill accumulators ───────────────────────────────────────────────────────

@@ -26,7 +26,7 @@ internal static class FieldCalculateScript
     {
         var script = ExtractCalculateScript(fieldDict, reader);
         if (script is null) return null;
-        if (!TryEvaluate(script, name => ResolveNumber(name, reader, new HashSet<string>()), out var result))
+        if (TryEvaluate(script, name => ResolveNumber(name, reader, new HashSet<string>())) is not { } result)
             return null;
         return FormatNumber(result);
     }
@@ -41,16 +41,16 @@ internal static class FieldCalculateScript
         return js switch
         {
             PdfString s => s.ToText(),
-            PdfStream stream => System.Text.Encoding.Latin1.GetString(reader.DecodeStream(stream)),
+            PdfStream stream => Compat.Latin1.GetString(reader.DecodeStream(stream)),
             _ => null,
         };
     }
 
     /// <summary>Evaluate a calculate script given a numeric field-value resolver.</summary>
-    internal static bool TryEvaluate(string script, Func<string, double> getNum, out double result)
+    internal static double? TryEvaluate(string script, Func<string, double> getNum)
     {
-        result = 0;
-        if (string.IsNullOrEmpty(script)) return false;
+        double result = 0;
+        if (string.IsNullOrEmpty(script)) return null;
 
         // AFSimple_Calculate("OP", new Array("a","b",…))  or  ("OP", ["a","b"])
         var simple = Regex.Match(script,
@@ -60,10 +60,10 @@ internal static class FieldCalculateScript
         {
             var op = simple.Groups[1].Value.ToUpperInvariant();
             var names = Regex.Matches(simple.Groups[2].Value, @"""([^""]*)""")
-                             .Select(m => m.Groups[1].Value).ToList();
+                             .Cast<Match>().Select(m => m.Groups[1].Value).ToList();
             var vals = names.Select(getNum).ToList();
             result = Aggregate(op, vals);
-            return true;
+            return result;
         }
 
         // Variable declarations: var X = AFMakeNumber(this.getField("F").value)
@@ -88,10 +88,10 @@ internal static class FieldCalculateScript
         {
             var expr = ev.Groups[1].Value.Trim();
             if (expr.Length == 0 || expr == "\"\"" || expr == "''") continue;
-            if (TryEvalExpression(expr, getNum, vars, out result)) return true;
+            if (TryEvalExpression(expr, getNum, vars) is { } value) return value;
         }
 
-        return false;
+        return null;
     }
 
     private static double Aggregate(string op, List<double> vals)
@@ -111,10 +111,9 @@ internal static class FieldCalculateScript
     /// <summary>Substitute <c>AFMakeNumber(this.getField("X").value)</c> /
     /// <c>getField("X").value</c> occurrences and any declared variables with their
     /// numeric values, then evaluate the arithmetic.</summary>
-    private static bool TryEvalExpression(string expr, Func<string, double> getNum,
-        Dictionary<string, double> vars, out double result)
+    private static double? TryEvalExpression(string expr, Func<string, double> getNum,
+        Dictionary<string, double> vars)
     {
-        result = 0;
         // AFMakeNumber(this.getField("X").value)  and  this.getField("X").value
         expr = Regex.Replace(expr, @"AFMakeNumber\s*\(\s*(?:this\.)?getField\s*\(\s*""([^""]*)""\s*\)\s*\.\s*value\s*\)",
             m => Num(getNum(m.Groups[1].Value)));
@@ -125,8 +124,8 @@ internal static class FieldCalculateScript
         foreach (var kv in vars.OrderByDescending(k => k.Key.Length))
             expr = Regex.Replace(expr, @"\b" + Regex.Escape(kv.Key) + @"\b", Num(kv.Value));
         // Bail if any unresolved identifiers remain (unsupported script shape).
-        if (Regex.IsMatch(expr, @"[A-Za-z_]")) return false;
-        return ArithmeticEvaluator.TryEval(expr, out result);
+        if (Regex.IsMatch(expr, @"[A-Za-z_]")) return null;
+        return ArithmeticEvaluator.TryEval(expr);
     }
 
     private static string Num(double d) => d.ToString("R", CultureInfo.InvariantCulture);
@@ -152,7 +151,7 @@ internal static class FieldCalculateScript
             if (dict is null) return 0;
             var calc = ExtractCalculateScript(dict, reader);
             if (calc is not null &&
-                TryEvaluate(calc, n => ResolveNumber(n, reader, visiting), out var r))
+                TryEvaluate(calc, n => ResolveNumber(n, reader, visiting)) is { } r)
                 return r;
             return ParseNumber(ReadRawValue(dict, reader));
         }
@@ -211,76 +210,90 @@ internal static class FieldCalculateScript
 /// expressions produced after field-reference substitution in a calculate script.</summary>
 internal static class ArithmeticEvaluator
 {
-    internal static bool TryEval(string expr, out double result)
+    internal static double? TryEval(string expr)
     {
-        result = 0;
+        double result = 0;
         try
         {
-            int pos = 0;
-            var v = ParseExpr(expr, ref pos);
-            SkipWs(expr, ref pos);
-            if (pos != expr.Length) return false;
+            var parser = new Parser(expr);
+            var v = parser.ParseExpr();
+            parser.SkipWs();
+            if (!parser.AtEnd) return null;
             result = v;
-            return !double.IsNaN(v) && !double.IsInfinity(v);
+            return (!double.IsNaN(v) && !double.IsInfinity(v)) ? result : null;
         }
-        catch { return false; }
+        catch { return null; }
     }
 
-    private static double ParseExpr(string s, ref int p) // + and -
+    /// <summary>One recursive-descent pass over an expression: the text and the cursor into it.</summary>
+    private sealed class Parser
     {
-        var v = ParseTerm(s, ref p);
-        while (true)
+        private readonly string _s;
+        private int _p;
+
+        public Parser(string s)
         {
-            SkipWs(s, ref p);
-            if (p < s.Length && (s[p] == '+' || s[p] == '-'))
+            _s = s;
+        }
+
+        public bool AtEnd => _p == _s.Length;
+
+        public double ParseExpr() // + and -
+        {
+            var v = ParseTerm();
+            while (true)
             {
-                var op = s[p++];
-                var rhs = ParseTerm(s, ref p);
-                v = op == '+' ? v + rhs : v - rhs;
+                SkipWs();
+                if (_p < _s.Length && (_s[_p] == '+' || _s[_p] == '-'))
+                {
+                    var op = _s[_p++];
+                    var rhs = ParseTerm();
+                    v = op == '+' ? v + rhs : v - rhs;
+                }
+                else break;
             }
-            else break;
-        }
-        return v;
-    }
-
-    private static double ParseTerm(string s, ref int p) // * and /
-    {
-        var v = ParseFactor(s, ref p);
-        while (true)
-        {
-            SkipWs(s, ref p);
-            if (p < s.Length && (s[p] == '*' || s[p] == '/'))
-            {
-                var op = s[p++];
-                var rhs = ParseFactor(s, ref p);
-                v = op == '*' ? v * rhs : v / rhs;
-            }
-            else break;
-        }
-        return v;
-    }
-
-    private static double ParseFactor(string s, ref int p)
-    {
-        SkipWs(s, ref p);
-        if (p < s.Length && s[p] == '(')
-        {
-            p++;
-            var v = ParseExpr(s, ref p);
-            SkipWs(s, ref p);
-            if (p < s.Length && s[p] == ')') p++;
             return v;
         }
-        if (p < s.Length && (s[p] == '+' || s[p] == '-'))
-        {
-            var op = s[p++];
-            var v = ParseFactor(s, ref p);
-            return op == '-' ? -v : v;
-        }
-        int start = p;
-        while (p < s.Length && (char.IsDigit(s[p]) || s[p] == '.')) p++;
-        return double.Parse(s.Substring(start, p - start), CultureInfo.InvariantCulture);
-    }
 
-    private static void SkipWs(string s, ref int p) { while (p < s.Length && char.IsWhiteSpace(s[p])) p++; }
+        private double ParseTerm() // * and /
+        {
+            var v = ParseFactor();
+            while (true)
+            {
+                SkipWs();
+                if (_p < _s.Length && (_s[_p] == '*' || _s[_p] == '/'))
+                {
+                    var op = _s[_p++];
+                    var rhs = ParseFactor();
+                    v = op == '*' ? v * rhs : v / rhs;
+                }
+                else break;
+            }
+            return v;
+        }
+
+        private double ParseFactor()
+        {
+            SkipWs();
+            if (_p < _s.Length && _s[_p] == '(')
+            {
+                _p++;
+                var v = ParseExpr();
+                SkipWs();
+                if (_p < _s.Length && _s[_p] == ')') _p++;
+                return v;
+            }
+            if (_p < _s.Length && (_s[_p] == '+' || _s[_p] == '-'))
+            {
+                var op = _s[_p++];
+                var v = ParseFactor();
+                return op == '-' ? -v : v;
+            }
+            int start = _p;
+            while (_p < _s.Length && (char.IsDigit(_s[_p]) || _s[_p] == '.')) _p++;
+            return double.Parse(_s.Substring(start, _p - start), CultureInfo.InvariantCulture);
+        }
+
+        public void SkipWs() { while (_p < _s.Length && char.IsWhiteSpace(_s[_p])) _p++; }
+    }
 }

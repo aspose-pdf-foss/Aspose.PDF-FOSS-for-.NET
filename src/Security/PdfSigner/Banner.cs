@@ -19,21 +19,34 @@ namespace Aspose.Pdf.Security;
 /// face is a Type0/Identity-H CIDFontType2 with the program embedded — Arial for latin
 /// text, MS Gothic as soon as a character needs it.
 /// </remarks>
+/// <summary>Which metadata labels a caller-shaped appearance keeps even when their
+/// value is empty.</summary>
+internal sealed record BannerLabels(bool Reason, bool Location, bool Contact);
+
 internal static class SignatureBanner
 {
     /// <summary>Lines the banner draws, in order. A line whose value is empty is
-    /// dropped, so a signature with no reason shows no "Reason:" row.</summary>
+    /// dropped, so a signature with no reason shows no "Reason:" row - unless the caller
+    /// shaped the appearance (<paramref name="labels"/>), which keeps every label it did
+    /// not switch off ("Reason: " with nothing after it). Under a shaped appearance the
+    /// date carries its UTC offset only when it is a local wall-clock time: a date the
+    /// caller set outright shows bare (measured: an explicit 2022-01-01 prints
+    /// "Date: 2022.01.01 00:00:00", the signing moment "... +03:00"). The plain banner
+    /// keeps the offset on every date - the templates of the era it is measured against
+    /// carry it.</summary>
     internal static List<string> Lines(string? signerName, DateTime signDate,
-        string? reason, string? location, string? contact)
+        string? reason, string? location, string? contact, BannerLabels? labels = null)
     {
         var lines = new List<string>();
         if (!string.IsNullOrEmpty(signerName))
             lines.Add($"Digitally signed by '{signerName}'");
         if (signDate.Kind == DateTimeKind.Utc) signDate = signDate.ToLocalTime();
-        lines.Add("Date: " + signDate.ToString("yyyy.MM.dd HH:mm:ss zzz", CultureInfo.InvariantCulture));
-        if (!string.IsNullOrEmpty(reason)) lines.Add($"Reason: {reason}");
-        if (!string.IsNullOrEmpty(location)) lines.Add($"Location: {location}");
-        if (!string.IsNullOrEmpty(contact)) lines.Add($"Contact: {contact}");
+        var bareDate = labels is not null && signDate.Kind != DateTimeKind.Local;
+        var dateFormat = bareDate ? "yyyy.MM.dd HH:mm:ss" : "yyyy.MM.dd HH:mm:ss zzz";
+        lines.Add("Date: " + signDate.ToString(dateFormat, CultureInfo.InvariantCulture));
+        if (!string.IsNullOrEmpty(reason) || labels is { Reason: true }) lines.Add($"Reason: {reason}");
+        if (!string.IsNullOrEmpty(location) || labels is { Location: true }) lines.Add($"Location: {location}");
+        if (!string.IsNullOrEmpty(contact) || labels is { Contact: true }) lines.Add($"Contact: {contact}");
         return lines;
     }
 
@@ -62,7 +75,7 @@ internal static class SignatureBanner
             // would answer a Han character with whichever script face it reaches first.
             var gothic = Aspose.Pdf.Text.SystemFontResolver.Resolve("MS Gothic");
             if (gothic is { Length: > 12 }) return (gothic, "MSGothic");
-            if (Aspose.Pdf.Stamps.TextStamp.TryResolveCjkTtf(all) is { } cjk)
+            if (TextStamp.TryResolveCjkTtf(all) is { } cjk)
                 return (cjk.ttf, cjk.name.Replace(" ", ""));
         }
         var arial = Aspose.Pdf.Text.SystemFontResolver.Resolve("Arial");
@@ -151,6 +164,117 @@ internal static class SignatureBanner
     /// and outer wrappers nested around the text.</summary>
     internal static PdfDictionary Wrapper(string invokeName, int targetObj,
         double w, double h, string? ownName)
+        => Wrapper(new[] { (invokeName, targetObj) }, w, h, ownName);
+
+    /// <summary>A form XObject that invokes each named child in turn, every one at the
+    /// identity — the /FRM frame draws the picture layer (/n0) under the text layer
+    /// (/n2) this way.</summary>
+    internal static PdfDictionary Wrapper(IReadOnlyList<(string Name, int Obj)> invokes,
+        double w, double h, string? ownName)
+    {
+        var dict = FormShell(w, h, ownName);
+        var xobj = new PdfDictionary();
+        var sb = new StringBuilder();
+        foreach (var (name, obj) in invokes)
+        {
+            xobj.Set(name, new PdfIndirectRef(obj, 0));
+            sb.Append("q\n1 0 0 1 0 0 cm\n/").Append(name).Append(" Do\nQ\n");
+        }
+        var res = new PdfDictionary();
+        res.Set("XObject", xobj);
+        dict.Set("Resources", res);
+        var content = Encoding.ASCII.GetBytes(sb.ToString());
+        dict.Set("Length", new PdfInteger(content.Length));
+        dict.Set("__StreamData", new PdfString(content));
+        return dict;
+    }
+
+    /// <summary>The picture layer of a signature: the caller's graphic as an image
+    /// XObject stretched over the whole box (the reference fills the box, it does not
+    /// keep the picture's aspect), invoked by a /n0 form. Returns the form's object
+    /// number, or null when the bytes are no picture this writer can carry.</summary>
+    internal static int? PictureForm(byte[] picture, double w, double h, ref int nextObj,
+        List<(int Num, PdfDictionary Dict, bool IsStream)> objects)
+    {
+        if (PictureXObject(picture) is not { } image) return null;
+        var imageObj = nextObj++;
+        objects.Add((imageObj, image, true));
+
+        var n0 = FormShell(w, h, "n0");
+        var xobj = new PdfDictionary();
+        xobj.Set("Im0", new PdfIndirectRef(imageObj, 0));
+        var res = new PdfDictionary();
+        res.Set("XObject", xobj);
+        n0.Set("Resources", res);
+        var inv = CultureInfo.InvariantCulture;
+        var content = Encoding.ASCII.GetBytes(string.Format(inv, "q\n{0:0.##} 0 0 {1:0.##} 0 0 cm\n/Im0 Do\nQ\n", w, h));
+        n0.Set("Length", new PdfInteger(content.Length));
+        n0.Set("__StreamData", new PdfString(content));
+        var n0Obj = nextObj++;
+        objects.Add((n0Obj, n0, true));
+        return n0Obj;
+    }
+
+    /// <summary>The image XObject behind the picture layer: a JPEG travels verbatim
+    /// under DCTDecode (so the picture a reader extracts is the caller's own file);
+    /// anything else is decoded and carried as flate RGB samples.</summary>
+    private static PdfDictionary? PictureXObject(byte[] picture)
+    {
+        var dict = new PdfDictionary();
+        dict.Set("Type", new PdfName("XObject"));
+        dict.Set("Subtype", new PdfName("Image"));
+        dict.Set("BitsPerComponent", new PdfInteger(8));
+        if (picture.Length > 2 && picture[0] == 0xFF && picture[1] == 0xD8
+            && ImageXObject.TryParseJpegSize(picture) is { } jpeg)
+        {
+            dict.Set("Width", new PdfInteger(jpeg.width));
+            dict.Set("Height", new PdfInteger(jpeg.height));
+            dict.Set("ColorSpace", new PdfName(jpeg.nf switch { 1 => "DeviceGray", 4 => "DeviceCMYK", _ => "DeviceRGB" }));
+            dict.Set("Filter", new PdfName("DCTDecode"));
+            dict.Set("Length", new PdfInteger(picture.Length));
+            dict.Set("__StreamData", new PdfString(picture));
+            return dict;
+        }
+        if (DecodeRgb(picture) is not var (rgb, width, height)) return null;
+        var packed = PdfSigner.DeflateBytes(rgb);
+        dict.Set("Width", new PdfInteger(width));
+        dict.Set("Height", new PdfInteger(height));
+        dict.Set("ColorSpace", new PdfName("DeviceRGB"));
+        dict.Set("Filter", new PdfName("FlateDecode"));
+        dict.Set("Length", new PdfInteger(packed.Length));
+        dict.Set("__StreamData", new PdfString(packed));
+        return dict;
+    }
+
+    /// <summary>A non-JPEG picture as packed RGB rows, through the platform decoder;
+    /// null where there is none (off Windows) or the bytes are no picture.</summary>
+    private static (byte[] Rgb, int Width, int Height)? DecodeRgb(byte[] picture)
+    {
+        if (!Compat.IsWindows()) return null;
+        try
+        {
+#pragma warning disable CA1416
+            using var ms = new System.IO.MemoryStream(picture);
+            using var src = System.Drawing.Image.FromStream(ms, useEmbeddedColorManagement: false, validateImageData: false);
+            using var bmp = new System.Drawing.Bitmap(src);
+            var w = bmp.Width; var h = bmp.Height;
+            var rgb = new byte[w * h * 3];
+            var i = 0;
+            for (var y = 0; y < h; y++)
+                for (var x = 0; x < w; x++)
+                {
+                    var c = bmp.GetPixel(x, y);
+                    rgb[i++] = c.R; rgb[i++] = c.G; rgb[i++] = c.B;
+                }
+            return (rgb, w, h);
+#pragma warning restore CA1416
+        }
+        catch { return null; }
+    }
+
+    /// <summary>The dictionary every form of the appearance starts from: a unit-matrix
+    /// form over the box, named when it is one of the reference's named layers.</summary>
+    private static PdfDictionary FormShell(double w, double h, string? ownName)
     {
         var dict = new PdfDictionary();
         dict.Set("Type", new PdfName("XObject"));
@@ -164,14 +288,6 @@ internal static class SignatureBanner
         foreach (var v in new double[] { 1, 0, 0, 1, 0, 0 }) matrix.Add(new PdfReal(v));
         dict.Set("Matrix", matrix);
         if (ownName is not null) dict.Set("Name", new PdfName(ownName));
-        var xobj = new PdfDictionary();
-        xobj.Set(invokeName, new PdfIndirectRef(targetObj, 0));
-        var res = new PdfDictionary();
-        res.Set("XObject", xobj);
-        dict.Set("Resources", res);
-        var content = Encoding.ASCII.GetBytes($"q\n1 0 0 1 0 0 cm\n/{invokeName} Do\nQ\n");
-        dict.Set("Length", new PdfInteger(content.Length));
-        dict.Set("__StreamData", new PdfString(content));
         return dict;
     }
 

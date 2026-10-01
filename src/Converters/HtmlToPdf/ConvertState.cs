@@ -75,6 +75,8 @@ private sealed class ConvertState
     // box offsets and fieldset frames (probed: content x 129 = 90 + the 2px
     // margin + 50px padding, frames 0.75 gray at the body's 70% content box).
     public bool fieldsetDoc;
+    /// <summary>The UA serif flow's fieldset: a legend-bearing fieldset frames its content at the content width.</summary>
+    public bool uaFieldsetBoxes;
     // Content streams of floated (align="left") tables, prepended to their pages after
     // the flow pass so float text leads the content order (floats paint first).
     public List<(Page page, byte[] ops)> floatFirstOps = null!;
@@ -84,7 +86,11 @@ private sealed class ConvertState
     // at the close over [top, cursor]. A legend leading the box pins the
     // frame's top under its own baseline. Table segments parse separately,
     // so they take the LIVE indent below.
-    public Stack<(Page page, double topY)> fsStack = null!;
+    public Stack<(Page page, double topY, double gapX0, double gapX1)> fsStack = null!;
+    // Container background boxes: BgSpan markers bracket each one; the fill is PREPENDED at
+    // the close over [top, cursor] so the content it wraps draws on top of it.
+    public Stack<(Page page, double topY, Color fill, double widthPt, double widthFrac,
+        double padTop, double padBottom, double padLeft)> bgSpanStack = null!;
     // Open height floors: the flow cursor and page where a sized container
     // opened (see Block.HeightFloorStart).
     public Stack<(double Y, Page P)> heightFloorStack = null!;
@@ -94,6 +100,8 @@ private sealed class ConvertState
     // vintage corpus keeps the dropped-margin top its templates pinned
     // (the era wall the first-block arm's comment records).
     public bool html5BareUa;
+    /// <summary>An html5 doctype (with or without a stylesheet): the current-era top model, the first block's margin max-collapsing with the body inset.</summary>
+    public bool html5Doctype;
     public double marginBottom;
     public double marginLeft;
     public double marginRight;
@@ -109,6 +117,10 @@ private sealed class ConvertState
     // the public API idiom for "zero margins", distinct from the untouched
     // default that gets the renderer's fallback margins.
     public bool marginsExplicit;
+
+    /// <summary>The sheet grew from a declared body width, so its final width is the ink
+    /// measure rather than the fitted band that opened it (see GrowSheetToInk).</summary>
+    public bool grewSheetFromBodyWidth;
     public bool mozEmailDoc;
     public System.Collections.Generic.HashSet<Block>? msoKeepWithImage;
     public double pageHeight;
@@ -200,6 +212,8 @@ private sealed class ConvertState
     // ink-widen rule below encodes). Resolved against the body's own declared
     // font size, the em a browser would use.
     public double bodyMarginLeftPt;
+    /// <summary>The body rule AUTHORED its margin (as opposed to keeping the UA default one).</summary>
+    public bool bodyMarginAuthored;
     // …its page face (the body rule's first installed family) carries the
     // inter-table <br/> line boxes.
     public string? elementGridFace;
@@ -247,10 +261,15 @@ private sealed class ConvertState
     // the metric table renderer owns those, so they neither disqualify the
     // UA flow nor make the document "authored-family" (cssRealFamily below).
     public bool cssLayoutFree;
-    // A document with no markup at all (a plain-text file fed through
-    // HtmlLoadOptions) has nothing to disqualify it: it renders in pure UA
-    // defaults exactly like a font-family-free <html><body> document.
-    public bool tagFreeDoc;
+    // Diagnostics for ASPOSE_TRACE_PROFILE: the rule that ended the layout-free flow and the
+    // rule whose real family disqualified the UA flow.
+    public string? cssLayoutFreeBrokenBy;
+    /// <summary>Every rule that ended the flow, when ASPOSE_TRACE_PROFILE collects them all (diagnostics only).</summary>
+    public List<string>? cssLayoutFreeBreakers;
+    // The markup with its script and style bodies removed (lazily, for the class-presence test:
+    // a script's `class="suggestions"` template is no element on the sheet).
+    public string? htmlSansScripts;
+    public string? cssRealFamilyBy;
     // A caller who zeroes BOTH side margins on the default PageInfo authored an
     // edge-to-edge sheet: such a document keeps the UA flow WITH its tables (the
     // metric table renderer draws them as real grids) — the table exclusion below
@@ -272,6 +291,14 @@ private sealed class ConvertState
     // 13.5 with the UA paragraph margins, in Arial). Such a document rides
     // the UA flow with the body face as its metric/run face.
     public string? uaBodyFace;
+    // …and the size that body states beside it, when the document has no sheet (0 = the UA root)
+    public double uaBodyFontPt;
+    // …and that the two were read off the body TAG's own style attribute: that attribute is the flow's typography, not an inline run face
+    public bool uaBodyFaceFromAttr;
+    // The sheet is scoped under the body's own class (`<body class="X">`, rules rooted at `.X`)
+    public bool bodyClassSheet;
+    // The body's own RIGHT margin in the UA flow: the UA 8 px unless the body tag states one
+    public double bodyMarginRightPt;
     // The absolute-span LEDGER: a table-less stylesheet whose ONLY
     // layout-authoring properties lay label/value columns — display:block
     // rows, margin-left labels, position:absolute+left value columns,
@@ -332,17 +359,50 @@ private sealed class ConvertState
     // and only when a table genuinely overflows, so normal-width conversions are unchanged.
     public double availContentW;
     public double widestTable;
+    /// <summary>The chrome of the cell the widest DECLARED table stands in - its host grid's
+    /// border-spacing and cell padding - which the nested grid's ink starts past (probed: a 600 px
+    /// grid in a cellpadding=10 cell pages 96 + 7.5 + 450 + 90).</summary>
+    public double declaredTableHostChromePt;
+    /// <summary>The widest table's left chrome - its border-spacing and cell padding - which its
+    /// ink starts past (probed: a 2.50 cm cellspacing grid pages 96 + 70.87 + 0.75 + its content + 90).</summary>
+    public double widestTableChromePt;
+    /// <summary>The widest table's column count, the chrome between two of its columns, the ink
+    /// past its last column (its frame, where it draws one) and the advance a control in its last
+    /// column carries past its box: a grid at its min floors inks its left chrome + Σ floors +
+    /// (n − 1) × the column gap + the trailing chrome − that advance (probed: six min-floor columns
+    /// page 1623.11 = 96 + 2.25 + Σ + 5 × 3 + 90; four unsized inputs 680.42; a border=1 grid 1354.39).</summary>
+    public int widestTableCols;
+    public double widestTableColGapPt;
+    public double widestTableTrailPt;
+    public double widestTableTrailingPt;
     // …or a <pre>-grown grid (the phantom surplus column): its sheet grows to
     // the longest pre line and the content seats at the UA top margin.
     public bool preGrownGridDoc;
+    /// <summary>The furthest right edge (points, from the baseline content origin) any
+    /// `position:absolute`/`fixed` element's own declared box reaches, walking its chain of
+    /// positioned ancestors (see ApplyAbsolutePositionResolve). Measured
+    /// against the reference: only a `left`-anchored box (at any point in
+    /// the chain) can push this past the content width; a chain that is `right`-anchored at
+    /// every level never does, however deep the nesting. Zero when nothing in the document
+    /// resolves this way.</summary>
+    public double absMaxResolvedRightPt;
     // The widest table's natural is the UA-serif percent-grid floor sum -
     // the sheet then follows the ink-widen model.
     public bool widestIsPctMin;
+    /// <summary>…and that floor is one row's demand (a spanning nowrap line): the sheet adds the
+    /// grid's lead and trail chrome, not the gaps between the columns the line runs across.</summary>
+    public bool widestIsRowDemand;
     // A table that DECLARES an absolute width: read off the MARKUP, not the
     // block list — the metric flow lays its tables out through the table
     // renderer, so they never become table blocks and the natural-width
     // probe above never sees them. Percent widths never widen.
     public double declaredTableW;
+    /// <summary>The widest declared table's cellspacing (pt) and whether it paints a frame to its
+    /// box edge: what its ink ends at, for the UA sheet estimate.</summary>
+    public double declaredTableSpacingPt;
+    public bool declaredTableFramed;
+    /// <summary>…and whether a class styles it (class chrome carries ink past the declared box).</summary>
+    public bool declaredTableClassed;
     public double collapseTableW;
     // A `table { width: Npx }` ELEMENT rule sizes every grid on the page the
     // same way a width attribute sizes one table. Tracked apart from the

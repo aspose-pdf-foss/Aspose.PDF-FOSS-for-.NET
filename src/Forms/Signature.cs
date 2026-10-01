@@ -1,3 +1,4 @@
+using System;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
@@ -16,14 +17,19 @@ public class Signature
     /// or null when this Signature represents a parsed read-only signature.</summary>
     internal Security.PdfCertificate? Certificate { get; set; }
 
+    /// <summary>Creates a signature configuration with no signing certificate.</summary>
     public Signature() { }
 
+    /// <summary>Creates a signature configuration that signs with the certificate and private key loaded from a PFX
+    /// file and its password. An empty path loads no certificate.</summary>
     public Signature(string pfx, string password)
     {
         if (!string.IsNullOrEmpty(pfx))
             Certificate = Security.PdfCertificate.FromPfx(pfx, password ?? string.Empty);
     }
 
+    /// <summary>Creates a signature configuration that signs with the certificate and private key read from a PFX
+    /// stream and its password. A seekable stream is read from its start.</summary>
     public Signature(Stream pfx, string password)
     {
         if (pfx is null) return;
@@ -36,10 +42,20 @@ public class Signature
         Certificate = Security.PdfCertificate.FromPfx(ms.ToArray(), password ?? string.Empty);
     }
 
+    /// <summary>Gets or sets the signer name (the /Name entry). When set before signing it replaces the certificate
+    /// common name; on a loaded signature it holds the stored name. Defaults to an empty string.</summary>
     public string Authority { get; set; } = string.Empty;
+    /// <summary>Gets or sets the signer contact information written to, or read from, the signature dictionary.
+    /// Defaults to an empty string.</summary>
     public string ContactInfo { get; set; } = string.Empty;
+    /// <summary>Gets or sets the signing location written to, or read from, the signature dictionary. Defaults to an
+    /// empty string.</summary>
     public string Location { get; set; } = string.Empty;
+    /// <summary>Gets or sets the reason for signing written to, or read from, the signature dictionary. Defaults to
+    /// an empty string.</summary>
     public string Reason { get; set; } = string.Empty;
+    /// <summary>Gets or sets the signing time (the /M entry). When left unset, signing uses the current time; on a
+    /// loaded signature it holds the stored time.</summary>
     public DateTime Date { get; set; }
 
     /// <summary>FOSS-only long[] backing of the underlying signature's
@@ -92,6 +108,8 @@ public class Signature
     /// pick from the /SubFilter.</summary>
     internal DigestHashAlgorithm RequestedDigest { get; set; } = DigestHashAlgorithm.Auto;
 
+    /// <summary>Gets or sets whether signing also embeds the signer certificate in a Document Security Store
+    /// (/DSS) so the signature stays verifiable later. Defaults to false.</summary>
     public bool UseLtv { get; set; }
 
     /// <summary>When true, the signer skips the byte-range estimation pass and
@@ -131,6 +149,101 @@ public class Signature
         return Security.PdfSigner.Verify(_sourceDocumentBytes, FieldName);
     }
 
+    /// <summary>Non-throwing verification: the verdict - valid, invalid, or undefined when
+    /// the signature's structure is a recognised forgery - lands in
+    /// <paramref name="verificationResult"/>; the return says whether a verdict was reached.</summary>
+    public bool TryVerify(out Security.VerificationResult verificationResult)
+    {
+        if (_sourceDocumentBytes is null || FieldName is null)
+        {
+            verificationResult = Security.VerificationResult.Undefined("The signature was not read from a document.");
+            return false;
+        }
+        var forgery = DetectForgery(_sourceDocumentBytes.Length);
+        if (forgery is not null)
+        {
+            verificationResult = Security.VerificationResult.Compromised(forgery);
+            return false;
+        }
+        try
+        {
+            verificationResult = Verify()
+                ? Security.VerificationResult.Valid()
+                : Security.VerificationResult.Invalid($"Signature '{FieldName}' failed cryptographic verification.");
+            return true;
+        }
+        catch (Exception e)
+        {
+            verificationResult = Security.VerificationResult.Undefined(e.Message, e);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Detect a Universal Signature Forgery (USF) or Signature Wrapping Attack (SWA) on this signature.
+    /// A signature whose CMS envelope (/Contents) is absent/empty, or whose
+    /// /ByteRange is absent or malformed, is a forgery — verifiers that skip
+    /// validation for such structures would wrongly report it as valid. Returns
+    /// a description of the forgery, or <c>null</c> when the signature is sound.
+    /// </summary>
+    internal string? DetectForgery(long fileLength)
+    {
+        var sig = this;
+        var signName = FieldName;
+
+        const string usf = "Universal Signature Forgery";
+
+        // Absent/empty CMS envelope or absent/malformed byte range.
+        if (sig.ByteRangeRaw is null || sig.ByteRangeRaw.Length < 4
+            || sig.ContentsRaw is null || sig.ContentsRaw.Length == 0)
+        {
+            return $"Signature '{signName}' is compromised by USF ({usf}): " +
+                   "its /Contents or /ByteRange is missing, empty, or malformed.";
+        }
+
+        // A hollow CMS envelope: /Contents is present and well-formed hex, but
+        // every byte is zero. Real envelopes zero-pad only the tail after the
+        // DER structure; an all-zero envelope holds no signature at all, and a
+        // verifier that trusts the padding would report it valid.
+        var contents = sig.ContentsRaw;
+        var allZero = true;
+        for (var i = 0; i < contents.Length; i++)
+        {
+            if (contents[i] != 0) { allZero = false; break; }
+        }
+        if (allZero)
+        {
+            return $"Signature '{signName}' is compromised by USF ({usf}): " +
+                   "its /Contents holds no signature data.";
+        }
+
+        // A fabricated /ByteRange whose covered region extends beyond the end of
+        // the file (or starts before it): the signed range cannot be honoured, so
+        // the signature validates nothing. A sound range never reaches past EOF.
+        var br = sig.ByteRangeRaw;
+        if (br[0] < 0 || br[1] < 0 || br[2] < 0 || br[3] < 0
+            || br[2] + br[3] > fileLength || br[0] + br[1] > br[2])
+        {
+            return $"Signature '{signName}' is compromised by USF ({usf}): " +
+                   "its /ByteRange does not correspond to the document.";
+        }
+
+        // SWA (Signature Wrapping Attack): the /ByteRange and /Contents are
+        // structurally valid, but the unsigned gap between the two signed ranges
+        // (which must hold only the /Contents hex string <…>) is larger than that
+        // hex string. The surplus unsigned bytes hide injected objects the
+        // signature does not cover. On-disk hex length = 2·bytes + 2 delimiters;
+        // a small slack absorbs optional whitespace around the delimiters.
+        var gap = br[2] - (br[0] + br[1]);
+        var contentsHexLen = 2L * sig.ContentsRaw.Length + 2;
+        if (gap - contentsHexLen > 128)
+        {
+            return $"Signature '{signName}' is compromised by SWA (Signature Wrapping Attack): " +
+                   "the /ByteRange leaves unsigned content in the /Contents gap.";
+        }
+        return null;
+    }
+
     /// <summary>Verify with explicit options + a result DTO. Real — runs
     /// the cryptographic-bytes check on the loaded source PDF; revocation
     /// (OCSP/CRL) not implemented so Strict + non-Auto method reports
@@ -156,7 +269,7 @@ public class Signature
                 var certDer = Aspose.Pdf.Security.CmsParser.GetFirstCertificateDer(ContentsRaw);
                 var signerCert = certDer is null
                     ? null
-                    : new System.Security.Cryptography.X509Certificates.X509Certificate2(certDer);
+                    : Compat.LoadCertificate(certDer);
                 if (signerCert is null
                     || !signerCert.Thumbprint.Equals(publicKeyCertificate.Thumbprint,
                         System.StringComparison.OrdinalIgnoreCase))
@@ -210,7 +323,7 @@ public class Signature
     }
 
     /// <summary>Source bytes the signature was loaded from — set by
-    /// <see cref="EnumerateSignatures"/> so <see cref="Verify"/> has the
+    /// <see cref="EnumerateSignatures"/> so <c>Verify</c> has the
     /// original byte stream to hash against.</summary>
     internal byte[]? _sourceDocumentBytes;
 
@@ -335,6 +448,8 @@ public class Signature
     }
 }
 
+/// <summary>A PKCS#1 signature configuration. Signing with it requires an RSA key; a loaded
+/// <c>adbe.x509.rsa_sha1</c> signature reads back as this type.</summary>
 public class PKCS1 : Signature
 {
     /// <summary>The signature appearance image bytes, when constructed from
@@ -342,8 +457,11 @@ public class PKCS1 : Signature
     /// writer to draw the image inside the signature widget.</summary>
     internal byte[]? AppearanceImage { get; private set; }
 
+    /// <summary>Creates a PKCS#1 signature configuration with no signing certificate.</summary>
     public PKCS1() { }
+    /// <summary>Creates a PKCS#1 signature configuration from a PFX file and its password.</summary>
     public PKCS1(string pfx, string password) : base(pfx, password) { }
+    /// <summary>Creates a PKCS#1 signature configuration from a PFX stream and its password.</summary>
     public PKCS1(Stream pfx, string password) : base(pfx, password) { }
 
     /// <summary>Construct a PKCS#1 signature configuration whose visible
@@ -359,10 +477,15 @@ public class PKCS1 : Signature
     }
 }
 
+/// <summary>A PKCS#7 signature configuration. <c>PdfFileSignature</c> signs it with the <c>adbe.pkcs7.sha1</c>
+/// handler, and a loaded signature using that handler reads back as this type.</summary>
 public class PKCS7 : Signature
 {
+    /// <summary>Creates a PKCS#7 signature configuration with no signing certificate.</summary>
     public PKCS7() { }
+    /// <summary>Creates a PKCS#7 signature configuration from a PFX file and its password.</summary>
     public PKCS7(string pfx, string password) : base(pfx, password) { }
+    /// <summary>Creates a PKCS#7 signature configuration from a PFX stream and its password.</summary>
     public PKCS7(Stream pfx, string password) : base(pfx, password) { }
 }
 
@@ -372,8 +495,11 @@ public class PKCS7 : Signature
 /// only in name — it documents caller intent to produce a detached envelope.</summary>
 public class PKCS7Detached : Signature
 {
+    /// <summary>Creates a detached PKCS#7 signature configuration with no signing certificate.</summary>
     public PKCS7Detached() { }
+    /// <summary>Creates a detached PKCS#7 signature configuration from a PFX file and its password.</summary>
     public PKCS7Detached(string pfx, string password) : base(pfx, password) { }
+    /// <summary>Creates a detached PKCS#7 signature configuration from a PFX stream and its password.</summary>
     public PKCS7Detached(Stream pfx, string password) : base(pfx, password) { }
 
     /// <summary>Sign with an explicitly chosen message digest rather than the
@@ -385,6 +511,8 @@ public class PKCS7Detached : Signature
         RequestedDigest = digestHashAlgorithm;
     }
 
+    /// <summary>Creates a detached PKCS#7 signature configuration from a PFX stream and its password, signing with
+    /// the given message digest. <c>DigestHashAlgorithm.Auto</c> keeps the default (SHA-256).</summary>
     public PKCS7Detached(Stream pfx, string password, DigestHashAlgorithm digestHashAlgorithm)
         : base(pfx, password)
     {
@@ -453,10 +581,7 @@ public class ExternalSignature : Signature
         Detached = detached;
         if (string.IsNullOrEmpty(base64Certificate))
             throw new System.ArgumentNullException(nameof(base64Certificate));
-#pragma warning disable SYSLIB0057 // X509Certificate2(byte[]) still works on .NET 8; loader API is .NET 9+
-        Certificate = new System.Security.Cryptography.X509Certificates.X509Certificate2(
-            System.Convert.FromBase64String(base64Certificate));
-#pragma warning restore SYSLIB0057
+        Certificate = Compat.LoadCertificate(System.Convert.FromBase64String(base64Certificate));
         base.Certificate = Security.PdfCertificate.FromX509(Certificate);
     }
 }

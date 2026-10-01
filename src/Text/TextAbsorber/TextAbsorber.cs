@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -338,90 +338,25 @@ public sealed partial class TextAbsorber
     /// </summary>
     public void Visit(Page page)
     {
-        if (page is null) throw new ArgumentNullException("page", "Page can't be null");
-        var reader = GetReader(page);
-        var contentStreams = GetContentStreams(page, reader);
+        var pv = new PageVisitState();
+        pv.page = page;
+        if (pv.page is null) throw new ArgumentNullException("page", "Page can't be null");
+        pv.reader = GetReader(pv.page);
+        pv.contentStreams = GetContentStreams(pv.page, pv.reader);
 
         // Pages joined through repeated Visit calls separate with a line
         // break — page N+1's first row never continues page N's last row.
         if (_text.Length > 0 && _text[^1] != '\n')
             _text.Append("\r\n");
 
-        // Track starting positions for this page
-        var textStart = _text.Length;
-        var yStart = _lineYPositions.Count;
-        _currentLineY = double.NaN;
-        _currentLineCmTy = 0;
-        _currentLineEffFs = double.NaN;
-        _currentLineIsRotated = false;
-        _currentLineDescent = 0.2;
-        _currentLineDevY = double.NaN;
-        _currentLineRowX = double.NaN;
-        _rowXLineOffset = -1;
-        _textShowingOpCount = 0;
-        _currentPageNumber = page.Number;
+        ResetPageVisitState(pv);
 
-        // Pure mode: size the per-page character grid up front (see the column-model note
-        // on the fields). Raw and MemorySaving modes keep the single-space-per-gap
-        // behaviour (cellWidth 0) — MemorySaving output separates
-        // column-gapped runs with ONE space, never grid pads.
-        var pureLayout = ExtractionOptions?.FormattingMode is not TextExtractionOptions.TextFormattingMode.Raw
-            and not TextExtractionOptions.TextFormattingMode.MemorySaving;
-        // Line-end glyph-space masking only applies where TrimTrailingLineSpaces
-        // runs (full-page Pure); Raw keeps whitespace verbatim and rect-clipped
-        // extraction keeps clipped-run edges untouched.
-        _maskEolShowSpaces = pureLayout && TextSearchOptions?.Rectangle is null;
-        _breaksAfterLastGlyph = 0;
-        _lastBreakPos = _text.Length;
-        _lastShowStart = -1;
-        _lastShowEnd = -1;
-        _pageHeightForRows = page.Height;
-        _pageHasRotatedText = false;
-        // The grid anchors at coordinate x = 0 regardless of the MediaBox
-        // (a shifted MediaBox does not move the column
-        // boundaries); content at negative X can't occupy a column at all
-        // and is dropped from Pure output (see the show-op guard).
-        _pageGridOriginX = 0;
-        (_pageCellWidth, _pageCellCeil, _pageMinX, _pageDominantFs, _pageRotDominant) = pureLayout
-            ? EstimatePageGrid(contentStreams, page.Dict, reader,
-                ExtractionOptions?.ScaleFactor ?? 1.0)
-            : (0, 0, double.NaN, 0, false);
-        // A clip rectangle re-anchors extraction to the window, not the page:
-        // page-absolute columns/leading pads don't apply (the
-        // rect-clipped output starts lines at the window edge).
-        if (TextSearchOptions?.Rectangle is not null)
-        {
-            _pageMinX = double.NaN;
-            // Rect-clipped extraction uses the exact ceiled-bucket cell (see
-            // EstimatePageGrid note).
-            if (_pageCellCeil > 0) _pageCellWidth = _pageCellCeil;
-        }
-        // The caller's rectangle is in VIEWER coordinates (the page as displayed,
-        // after /Rotate); content-stream positions are in media coordinates. Map
-        // the window through the inverse page rotation so the filters compare
-        // like with like.
-        _effectiveSearchRect = MapViewerRectToMedia(TextSearchOptions?.Rectangle, page);
-        _lineStartPageX = double.NaN;
-        _lineStartTextOffset = _text.Length;
-        _sawIntraLineGapSpaces = false;
-        _collectOcrRuns = pureLayout;
-        _ocrRuns.Clear();
-        _type3SpanRuns = 0;
-        _pageLineStarts.Clear();
-        _pageRunSpans.Clear();
-
-        // A page's content streams concatenate into ONE logical stream sharing one
-        // graphics/text state (ISO 32000-1 §7.8.2). Parsing them separately reset the
-        // whole text matrix at every boundary — a producer that splits mid-text-object
-        // (Acrobat touch-up) had its post-boundary lines tracked at raw Td offsets
-        // (tmY ≈ −1.2 instead of the page Y), so the search-rectangle and page-bounds
-        // filters dropped them. Join with newline separators and parse once.
-        var combined = CombineContentStreams(contentStreams);
-        ExtractTextFromContentStream(combined, page.Dict, reader);
+        pv.combined = CombineContentStreams(pv.contentStreams);
+        ExtractTextFromContentStream(pv.combined, pv.page.Dict, pv.reader);
 
         // A page that is an hOCR searchable overlay (many invisible single-word blocks)
         // is rebuilt on a page-absolute grid instead of the streaming per-word lines.
-        if (_collectOcrRuns && RebuildOcrOverlayPage(textStart))
+        if (_collectOcrRuns && RebuildOcrOverlayPage(pv.textStart))
         {
             // The rebuild replaced the streamed text (with any masked spaces in it);
             // its grid rows have no trailing textless advances to replay.
@@ -433,47 +368,7 @@ public sealed partial class TextAbsorber
         // rect-clipped window pads too — against its OWN observed minX (the
         // reference emits "  Western Cherokee" for the x=42 rows of a window
         // whose leftmost kept line starts at x=36; probed).
-        if (pureLayout)
-            InsertLeadingGridSpaces(textStart);
-
-        // The page end closes the final line the way a streaming break would:
-        // a single trailing space GLYPH in its show is typographic content and
-        // gets the same sentinel protection from the trailing trim below.
-        MaskTrailingShowSpaces();
-
-        // Sort this page's text lines by visual order (Y coordinate, top to bottom)
-        SortLinesByY(textStart, yStart);
-
-        // Pure mode lays lines on the character grid but never leaves padding at a
-        // line's right edge: Pure output has no trailing spaces on
-        // any line (a trailing space fragment drawn at the row's far right would
-        // otherwise leave one). Raw mode keeps source whitespace verbatim, and
-        // rect-clipped extraction keeps clipped-run edges (the windowed
-        // output ends lines with the source spaces).
-        if (pureLayout && TextSearchOptions?.Rectangle is null)
-            TrimTrailingLineSpaces(textStart);
-        // Unmask the real glyph spaces the trim was steered around, and record
-        // the page's trailing textless advances (a show op after the last break
-        // means the page ends in glyphs — nothing to replay).
-        RestoreEolShowSpaces(textStart);
-        TrailingBlankRows = _lastShowEnd < 0 || _lastShowEnd > _lastBreakPos
-            ? 0 : _breaksAfterLastGlyph;
-
-        // Diagnostic: a page that draws only images/graphics has no text-showing
-        // operators. When the caller opted into error logging, surface this as a
-        // recorded extraction error.
-        if ((TextSearchOptions?.LogTextExtractionErrors ?? false) && _textShowingOpCount == 0)
-        {
-            const string msg = "Text showing operators aren't found on the page.";
-            Errors.Add(new TextExtractionError
-            {
-                PageIndex = page.Number,
-                Message = msg,
-                Description = msg,
-                Summary = msg,
-                Location = new TextExtractionErrorLocation { PageNumber = page.Number },
-            });
-        }
+        FinishPageVisit(pv);
     }
 
     // Glue threshold: two words are joined with no space when the gap between the
@@ -495,77 +390,58 @@ public sealed partial class TextAbsorber
     /// </summary>
     private bool RebuildOcrOverlayPage(int textStart)
     {
+        var oo = new OcrOverlayState();
+        oo.textStart = textStart;
         // Only an OCR searchable overlay qualifies: many runs, and the invisible runs
         // must be essentially ALL of the page's text (a normal page with a little
         // invisible text must keep its streamed, visible-text output).
         if (GridDebug)
-            Console.Error.WriteLine($"[ocr] runs={_ocrRuns.Count} shows={_textShowingOpCount} textLen={_text.Length - textStart}");
+            Console.Error.WriteLine($"[ocr] runs={_ocrRuns.Count} shows={_textShowingOpCount} textLen={_text.Length - oo.textStart}");
         if (_ocrRuns.Count < 25) return false;
         if (_ocrRuns.Count < 0.9 * Math.Max(_ocrRuns.Count, _textShowingOpCount)) return false;
 
-        // Group runs into visual lines. Runs are taken top-to-bottom; one joins the
-        // current line when its baseline is within a font-relative tolerance of the
-        // line's top run — so a giant glyph (a "/" many times the text size) still
-        // joins its line, while the next text line, a full leading below, does not.
-        var ordered = new List<(string text, double x, double y, double fs, double width)>(_ocrRuns);
-        ordered.Sort((a, b) =>
+        oo.ordered = new List<(string text, double x, double y, double fs, double width)>(_ocrRuns);
+        oo.ordered.Sort((a, b) =>
         {
             var cy = b.y.CompareTo(a.y); // top of page first
             return cy != 0 ? cy : a.x.CompareTo(b.x);
         });
-        var lines = new List<List<(string text, double x, double fs, double width, double y)>>();
-        foreach (var r in ordered)
+        oo.lines = new List<List<(string text, double x, double fs, double width, double y)>>();
+        foreach (var r in oo.ordered)
         {
-            if (lines.Count > 0)
-            {
-                // Tolerance scales with the INCOMING run's own font: a big glyph (a "/")
-                // reaches up to join a small-text line, but a small word will not reach up
-                // to a big-font line above it (which would merge two distinct rows).
-                var cur = lines[^1];
-                if (cur[0].y - r.y < 0.4 * r.fs)
-                {
-                    cur.Add((r.text, r.x, r.fs, r.width, r.y));
-                    continue;
-                }
-            }
-            lines.Add(new List<(string, double, double, double, double)> { (r.text, r.x, r.fs, r.width, r.y) });
+            CollectOverlayRegion(oo, r);
         }
-        if (lines.Count < 3) return false;
+        if (oo.lines.Count < 3) return false;
 
-        // Per line: baseline = median glyph baseline; bottom = deepest glyph (lowest y).
-        var baseline = new double[lines.Count];
-        var bottom = new double[lines.Count];
-        for (int li = 0; li < lines.Count; li++)
+        oo.baseline = new double[oo.lines.Count];
+        oo.bottom = new double[oo.lines.Count];
+        for (int li = 0; li < oo.lines.Count; li++)
         {
-            var ys = new List<double>(lines[li].Count);
-            foreach (var w in lines[li]) ys.Add(w.y);
-            ys.Sort();
-            baseline[li] = ys[ys.Count / 2];
-            bottom[li] = ys[0]; // smallest page-space y = deepest point
+            EmitOverlayLine(oo, li);
         }
 
-        // Grid geometry: cell from the dominant-by-char font size; origin at leftmost run.
-        double minX = double.MaxValue;
-        var charByFs = new Dictionary<int, int>();
+        oo.minX = double.MaxValue;
+        oo.charByFs = new Dictionary<int, int>();
         foreach (var r in _ocrRuns)
         {
-            if (r.x < minX) minX = r.x;
+            if (r.x < oo.minX) oo.minX = r.x;
             int f = (int)Math.Round(r.fs);
-            charByFs.TryGetValue(f, out var c);
-            charByFs[f] = c + r.text.Length;
+            oo.charByFs.TryGetValue(f, out var c);
+            oo.charByFs[f] = c + r.text.Length;
         }
-        int fdom = 0, bestChars = -1;
-        foreach (var kv in charByFs)
-            if (kv.Value > bestChars || (kv.Value == bestChars && kv.Key < fdom))
-            { bestChars = kv.Value; fdom = kv.Key; }
-        double cell = 0.6 * (fdom - 2);
-        if (cell <= 0) return false;
+        oo.fdom = 0;
+        oo.bestChars = -1;
+        foreach (var kv in oo.charByFs)
+            if (kv.Value > oo.bestChars || (kv.Value == oo.bestChars && kv.Key < oo.fdom))
+            { oo.bestChars = kv.Value; oo.fdom = kv.Key; }
+        oo.cell = 0.6 * (oo.fdom - 2);
+        if (oo.cell <= 0) return false;
 
-        var sb = new StringBuilder();
-        for (int li = 0; li < lines.Count; li++)
+        oo.sb = new StringBuilder();
+        for (int li = 0; li < oo.lines.Count; li++)
         {
-            var ws = new List<(string text, double x, double fs, double width)>(lines[li].Count);
-            foreach (var w in lines[li]) ws.Add((w.text, w.x, w.fs, w.width));
+            var ws = new List<(string text, double x, double fs, double width)>(oo.lines[li].Count);
+            foreach (var w in oo.lines[li]) ws.Add((w.text, w.x, w.fs, w.width));
             ws.Sort((a, b) => a.x.CompareTo(b.x));
             if (li > 0)
             {
@@ -574,7 +450,7 @@ public sealed partial class TextAbsorber
                 // push the following line apart without affecting the line above it. Blank
                 // rows scale with the smallest baseline-sitting font on this line (unit =
                 // 2× that size), capped at 2; dashes are centred, not baseline glyphs.
-                double gap = bottom[li - 1] - baseline[li];
+                double gap = oo.bottom[li - 1] - oo.baseline[li];
                 double fsMin = double.MaxValue;
                 foreach (var w in ws)
                     if (w.fs > 0 && w.fs < fsMin && !IsDashOnly(w.text)) fsMin = w.fs;
@@ -583,15 +459,15 @@ public sealed partial class TextAbsorber
                 int blanks = 0;
                 if (fsMin is > 0 and < double.MaxValue)
                     blanks = Math.Min(2, Math.Max(0, (int)Math.Ceiling(gap / (2.0 * fsMin)) - 1));
-                for (int k = 0; k <= blanks; k++) sb.Append("\r\n");
+                for (int k = 0; k <= blanks; k++) oo.sb.Append("\r\n");
             }
-            RenderOcrLine(sb, ws, minX, cell);
+            RenderOcrLine(oo.sb, ws, oo.minX, oo.cell);
         }
 
         // Replace this page's streamed segment with the reconstruction (keeping any
         // earlier pages' text intact for multi-page documents).
-        _text.Remove(textStart, _text.Length - textStart);
-        _text.Append(sb);
+        _text.Remove(oo.textStart, _text.Length - oo.textStart);
+        _text.Append(oo.sb);
         _anyReconstructed = true;
         return true;
     }

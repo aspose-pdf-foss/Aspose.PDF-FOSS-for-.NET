@@ -53,8 +53,10 @@ public sealed class MarginInfo
     /// MarginInfo is authored as a whole — its untouched sides are deliberate zeros.</summary>
     internal bool HtmlPerSideDefaults { get; set; }
 
+    /// <summary>Creates margins of 0 on every side. Sides left unset may fall back to the surrounding defaults (for example the page's margins).</summary>
     public MarginInfo() { }
 
+    /// <summary>Creates margins with the given left, bottom, right and top values in points (1/72 inch); all four sides count as explicitly set.</summary>
     public MarginInfo(double left, double bottom, double right, double top)
     {
         _left = left; _bottom = bottom; _right = right; _top = top;

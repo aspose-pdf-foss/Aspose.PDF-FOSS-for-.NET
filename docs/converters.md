@@ -8,7 +8,7 @@ Supported formats:
 | Direction | Formats                                                      |
 |-----------|--------------------------------------------------------------|
 | Output    | PDF, HTML, Markdown, SVG, XML (tagged structure), plain text |
-| Input     | PDF, HTML, Markdown, SVG, XML, plain text                    |
+| Input     | PDF, HTML, Markdown, SVG, XML, plain text, PostScript / EPS  |
 
 PDF output may target the PDF/A profile via `Document.Convert(...)` (see
 [Optimization](optimization.md)).
@@ -19,6 +19,11 @@ minus `Svg`, and minus `Html` — an HTML stream target needs the
 `Save(stream, HtmlSaveOptions)` overload. Any other `SaveFormat` value throws
 `NotSupportedException`. Plain text loads through `Document(path,
 TxtLoadOptions)`; XML loads through `Document.BindXml(...)`.
+
+The static `Document.Convert(source, loadOptions, destination, saveOptions)`
+(file paths or streams on either side) loads and saves in one call:
+`HtmlSaveOptions` writes HTML, `MarkdownSaveOptions` Markdown, and any other
+save options PDF.
 
 ## PDF to HTML
 
@@ -78,17 +83,24 @@ selectable text layer and everything is inlined as `data:` URIs.
 
 ### `HtmlSaveOptions`
 
-The HTML writer emits absolute-positioned text, keeps link annotations as
-anchor tags, and applies all styling inline on the elements. The string-returning
-converter methods inline images as base64 `data:` URIs; the file save
-externalises them as described above. Of the configuration fields, the writer
-consults `ExplicitListOfSavedPages`, `SplitIntoPages`, `DocumentType`, `Title`,
-`RasterImagesSavingMode`, `PartsEmbeddingMode`, `FontSavingMode`,
-`CssClassNamesPrefix`, `SpecialFolderForAllImages`, `LettersPositioningMethod`,
-`HtmlMarkupGenerationMode`, `CustomResourceSavingStrategy` and
-`CustomHtmlSavingStrategy`. The remaining fields (`FixedLayout`,
-`SaveTransparentTexts`, `SplitCssIntoPages`, `RenderTextAsImage`, etc.) are
-accepted for API compatibility but are not consulted.
+The HTML writer emits absolute-positioned text and keeps link annotations as
+anchor tags. The string-returning converter methods apply all styling inline
+on the elements and inline images as base64 `data:` URIs; the file save
+writes a stylesheet and externalises images as described above. Of the
+configuration fields, the writer consults `ExplicitListOfSavedPages`,
+`SplitIntoPages`, `SplitCssIntoPages`, `DocumentType`, `Title`,
+`RasterImagesSavingMode`, `PartsEmbeddingMode`, `ImageResolution` (the DPI of
+page-background rasters), `FontSavingMode`, `DefaultFontName`,
+`ExcludeFontNameList`, `FontEncodingStrategy`, `CssClassNamesPrefix`,
+`SpecialFolderForAllImages`, `LettersPositioningMethod`,
+`HtmlMarkupGenerationMode`, `SaveTransparentTexts`,
+`TrySaveTextUnderliningAndStrikeoutingInCss`, `UseZOrder`,
+`ConvertMarkedContentToLayers` (optional-content layers as nested boxes) and
+the callbacks `CustomResourceSavingStrategy`, `CustomHtmlSavingStrategy`,
+`CustomCssSavingStrategy`, `CustomStrategyOfCssUrlCreation` and
+`CustomProgressHandler`. The remaining fields (`FixedLayout`,
+`RenderTextAsImage`, `SaveFullFont`, `PageMarginIfAny`, etc.) are accepted for
+API compatibility but are not consulted.
 
 ```csharp
 var options = new HtmlSaveOptions
@@ -127,8 +139,10 @@ with backslash separators (`Images\logo.png`) is resolved correctly on Linux
 and macOS as well. Further options: `PageInfo` (page size and margins),
 `IsRenderToSinglePage`, `IsEmbedFonts`, `InputEncoding`, `HtmlMediaType`
 (`Print` by default, or `Screen`), `IsPriorityCssPageRule`,
-`PageLayoutOption`, `CustomLoaderOfExternalResources` and
-`ExternalResourcesCredentials`.
+`PageLayoutOption` and `CustomLoaderOfExternalResources`.
+`CreateLogicalStructure = true` also builds a structure tree that mirrors the
+HTML elements (headings, paragraphs, lists, figures, links).
+`ExternalResourcesCredentials` is accepted but not consulted.
 
 ## PDF to Markdown
 
@@ -169,9 +183,13 @@ var converter = new PdfToMarkdownConverter(options);
 string md = converter.SaveAsMarkdown(doc);
 ```
 
-`Document.Save(path, new MarkdownSaveOptions())` is the alternative entry
-point; its `ResourcesDirectoryName` names the image folder next to the output
-and `UseImageHtmlTag` switches image references to `<img>` tags.
+`Document.Save(path, new MarkdownSaveOptions())` (`Aspose.Pdf.PdfToMarkdown`)
+is the alternative entry point; its `ResourcesDirectoryName` names the image
+folder next to the output, `UseImageHtmlTag` switches image references to
+`<img>` tags, `AreaToExtract` limits the conversion to a page rectangle and
+`ExtractVectorGraphics` also writes vector drawings as image resources.
+`RecognizeBullets` and `RelativeHorizontalProximity` are accepted but not
+consulted.
 
 ## Markdown to PDF
 
@@ -236,6 +254,12 @@ converter.SavePageToFile(doc, pageNumber: 1, "page1.svg");
 converter.SaveAllPagesToFiles(doc, directory: "svg_out", prefix: "page");
 ```
 
+`doc.Save("out.svg", new SvgSaveOptions())` writes the first page to the
+given path and each further page N beside it as `out_N.svg`;
+`CompressOutputToZipArchive = true` packs them into one ZIP file instead.
+Images are embedded as `data:` URIs unless `CustomStrategyOfEmbeddedImagesSaving`
+is set — the callback receives each image and returns the `href` to write.
+
 ## SVG to PDF
 
 ```csharp
@@ -259,6 +283,46 @@ compatibility but are not currently consulted.
 var options = new SvgLoadOptions();
 
 using var doc = Document.Open("drawing.svg", options);
+doc.Save("drawing.pdf");
+```
+
+## PostScript to PDF
+
+PostScript and Encapsulated PostScript files are read by an interpreter that runs
+the program and records what it paints:
+
+```csharp
+using Aspose.Pdf;
+
+using var doc = new Document("figure.eps", new PsLoadOptions());
+doc.Save("figure.pdf");
+```
+
+### `PsLoadOptions`
+
+`FontsFolders` names the folders searched for the font programs the source asks
+for: a face among the Standard 14 is referenced by name, any other face is
+outlined from the program found in those folders, and a face that cannot be
+found paints no text. A PostScript error ends the program, and the page keeps
+whatever it had painted up to that point. `SuppressErrors` and
+`ConvertFontsToTTF` are accepted for API compatibility but are not currently
+consulted.
+
+The interpreter covers the language core, paths, clipping, transformations,
+colour and tint transforms, sampled images, user paths, forms, tiling
+patterns, character paths, Type 3 fonts, composite fonts (escape and 8/8
+mapping), and text in both the standard faces and any face supplied through
+`FontsFolders`. Smooth shading through `shfill` paints nothing, and the
+raster-device controls (halftones, screens, transfer functions) are accepted
+and ignored.
+
+```csharp
+var options = new PsLoadOptions
+{
+    FontsFolders = new[] { @"C:\Fonts\Type1" },
+};
+
+using var doc = new Document("drawing.ps", options);
 doc.Save("drawing.pdf");
 ```
 

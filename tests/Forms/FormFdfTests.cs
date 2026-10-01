@@ -13,7 +13,7 @@ public class FormFdfTests
         using var doc = Document.Open(pdf);
 
         var fdfBytes = doc.Form!.ExportFdf();
-        var fdf = Encoding.Latin1.GetString(fdfBytes);
+        var fdf = Compat.Latin1.GetString(fdfBytes);
 
         Assert.Contains("%FDF-1.2", fdf);
         Assert.Contains("/T (Name)", fdf);
@@ -28,7 +28,7 @@ public class FormFdfTests
         using var doc = Document.Open(pdf);
 
         var fdf = "%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [\n  << /T (Name) /V (Jane) >>\n] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
-        doc.Form!.ImportFdf(Encoding.Latin1.GetBytes(fdf));
+        doc.Form!.ImportFdf(Compat.Latin1.GetBytes(fdf));
 
         var field = doc.Form.FindByName("Name");
         Assert.NotNull(field);
@@ -119,7 +119,7 @@ public class FormFdfTests
         using var doc = Document.Open(pdf);
 
         var fdf = "%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [\n  << /T (NonExistent) /V (value) >>\n] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
-        doc.Form!.ImportFdf(Encoding.Latin1.GetBytes(fdf));
+        doc.Form!.ImportFdf(Compat.Latin1.GetBytes(fdf));
 
         // Original value should be unchanged
         Assert.Equal("John", doc.Form.FindByName("Name")!.Value);
@@ -133,7 +133,7 @@ public class FormFdfTests
         doc.Form!.FindByName("Name")!.Value = "John (Jr)";
 
         var fdfBytes = doc.Form.ExportFdf();
-        var fdf = Encoding.Latin1.GetString(fdfBytes);
+        var fdf = Compat.Latin1.GetString(fdfBytes);
 
         Assert.Contains("/V (John \\(Jr\\))", fdf);
     }

@@ -18,144 +18,66 @@ internal static partial class XmlBinding
     /// IsInLineParagraph flag and an attached FootNote. Returns null for a
     /// text-less fragment unless <paramref name="includeEmpty"/> — inside the
     /// styled flow an empty fragment is a deliberate blank line.</summary>
-    private static TextFragment? BuildPageFragment(Document document, XmlNode fragNode, XmlDefaults defaults,
-        string textPrefix = "", bool includeEmpty = false)
+    private static TextFragment? BuildPageFragment(Document document, XmlNode fragNode, XmlDefaults defaults, string textPrefix = "", bool includeEmpty = false)
     {
-        RegisterSegmentIds(document, fragNode);
-        var id = GetId(fragNode);
+        var pf = new PageFragmentBuildState();
+        pf.document = document;
+        pf.fragNode = fragNode;
+        pf.defaults = defaults;
+        pf.textPrefix = textPrefix;
+        pf.includeEmpty = includeEmpty;
+        RegisterSegmentIds(pf.document, pf.fragNode);
+        pf.id = GetId(pf.fragNode);
 
-        var tf = new TextFragment { XmlGeneratorModel = true };
+        pf.tf = new TextFragment { XmlGeneratorModel = true };
 
-        // Fragment-level styling: the <TextState> child of the fragment (also the
-        // shape wrapping the segments — a template may nest <TextSegment> INSIDE the
-        // state element), FontSize/HorizontalAlignment attributes on the
-        // fragment itself, and the document DefaultTextState as the fallback.
-        // A fragment-level <TextState> element REPLACES the document defaults
-        // wholesale — unspecified properties fall back to the schema defaults
-        // (10 pt, Helvetica, black, no leading), NOT to the DefaultTextState
-        // (under a 9 pt / LineSpacing 4 document default,
-        // colour-only fragment states render 10 pt bodies on a bare 10 pt pitch,
-        // and the 20 pt title's leading blank line is 10 pt tall). A fragment
-        // with NO TextState of its own takes the document defaults (e.g.
-        // 12 pt + 4 leading bodies).
-        var hasFragState = false;
-        foreach (XmlNode child in fragNode.ChildNodes)
-            if (child.NodeType == XmlNodeType.Element && child.LocalName == "TextState"
-                && !HasElementChild(child, "TextSegment"))
-            { hasFragState = true; break; }
-
-        var fragState = hasFragState
-            ? new XmlTextStyle { FontSize = 10, FontSizeSet = true }
-            : new XmlTextStyle
-            {
-                FontSize = defaults.FontSize > 0 ? defaults.FontSize : 10,
-                FontSizeSet = true, // a page fragment always resolves a concrete size
-                FontName = defaults.FontName,
-                Foreground = defaults.Foreground,
-            };
-        TabStops? tabStops = null;
-        MarginInfo? margin = null;
-        foreach (XmlNode child in fragNode.ChildNodes)
-        {
-            if (child.NodeType != XmlNodeType.Element) continue;
-            switch (child.LocalName)
-            {
-                case "TextState":
-                    // A TextState WRAPPING segments styles only
-                    // those segments — it must not bleed into the fragment level.
-                    if (!HasElementChild(child, "TextSegment"))
-                        ReadXmlTextStyle(child, fragState, segmentNested: false);
-                    tabStops ??= ParseTabStops(child);
-                    break;
-                case "Margin":
-                    margin = ParseMargin(child);
-                    break;
-            }
-        }
+        pf.hasFragState = false;
+        ResolveFragmentState(pf);
+        pf.tabStops = null;
+        pf.margin = null;
+        ReadFragmentStyleAndMargin(pf);
         // NOTE: a FontSize ATTRIBUTE on <TextFragment> is not schema — the
         // binder ignores it (FontSize="8" cells
         // render at the 10 pt default); only a nested <TextState> sizes text.
-        if (ParseHAlign(GetAttr(fragNode, "HorizontalAlignment")) is { } ha)
-            tf.HorizontalAlignment = ha;
-        if (string.Equals(GetAttr(fragNode, "IsInLineParagraph"), "true", StringComparison.OrdinalIgnoreCase))
-            tf.IsInLineParagraph = true;
+        if (ParseHAlign(GetAttr(pf.fragNode, "HorizontalAlignment")) is { } ha)
+            pf.tf.HorizontalAlignment = ha;
+        if (string.Equals(GetAttr(pf.fragNode, "IsInLineParagraph"), "true", StringComparison.OrdinalIgnoreCase))
+            pf.tf.IsInLineParagraph = true;
 
-        tf.TabStops = tabStops;
-        tf.Margin = margin ?? new MarginInfo();
-        ApplyXmlStyle(tf.TextState, fragState);
+        pf.tf.TabStops = pf.tabStops;
+        pf.tf.Margin = pf.margin ?? new MarginInfo();
+        ApplyXmlStyle(pf.tf.TextState, pf.fragState);
         // The document leading only reaches fragments WITHOUT their own
         // TextState (see the replacement rule above); a fragment state may still
         // declare its own LineSpacing, applied by ApplyXmlStyle.
-        if (!hasFragState && defaults.LineSpacing > 0)
-            tf.TextState.LineSpacing = (float)defaults.LineSpacing;
+        if (!pf.hasFragState && pf.defaults.LineSpacing > 0)
+            pf.tf.TextState.LineSpacing = (float)pf.defaults.LineSpacing;
 
         // Segments, in document order. Two authored shapes:
         //   <TextSegment>…(<TextState/>)…</TextSegment>       — state nested in segment
         //   <TextState …><TextSegment>…</TextSegment></TextState> — state wraps segments
-        if (!string.IsNullOrEmpty(textPrefix))
-            AddXmlSegment(tf, textPrefix, fragState);
-        var any = false;
-        var authoredSegments = 0;
-        foreach (XmlNode child in fragNode.ChildNodes)
-        {
-            if (child.NodeType != XmlNodeType.Element) continue;
-            if (child.LocalName == "TextSegment")
-            {
-                authoredSegments++;
-                any |= AddXmlSegmentFromNode(tf, child, fragState);
-            }
-            else if (child.LocalName == "TextState")
-            {
-                foreach (XmlNode wrapped in child.ChildNodes)
-                {
-                    if (wrapped.NodeType != XmlNodeType.Element || wrapped.LocalName != "TextSegment") continue;
-                    authoredSegments++;
-                    var wrapStyle = fragState.Clone();
-                    ReadXmlTextStyle(child, wrapStyle, segmentNested: false);
-                    any |= AddXmlSegmentFromNode(tf, wrapped, wrapStyle);
-                }
-            }
-        }
+        if (!string.IsNullOrEmpty(pf.textPrefix))
+            AddXmlSegment(pf.tf, pf.textPrefix, pf.fragState);
+        pf.any = false;
+        pf.authoredSegments = 0;
+        ReadFragmentSegments(pf);
         // A fragment authored without any segment is a shell that takes no room;
         // one whose only segment is empty still stands one default line tall.
-        tf.XmlEmptyShell = authoredSegments == 0 && string.IsNullOrEmpty(textPrefix);
+        pf.tf.XmlEmptyShell = pf.authoredSegments == 0 && string.IsNullOrEmpty(pf.textPrefix);
 
         // A nested <FootNote>: custom marker label from <Text Text="…"/> plus the
         // note body's own styled fragments (inline joins included) — rendered as
         // a superscript reference at the anchor and a page-bottom band.
-        foreach (XmlNode child in fragNode.ChildNodes)
-        {
-            if (child.NodeType != XmlNodeType.Element || child.LocalName != "FootNote") continue;
-            var note = new Note();
-            foreach (XmlNode fnChild in child.ChildNodes)
-            {
-                if (fnChild.NodeType != XmlNodeType.Element) continue;
-                switch (fnChild.LocalName)
-                {
-                    case "Text":
-                        note.Text = GetAttr(fnChild, "Text");
-                        break;
-                    case "TextFragment":
-                        // Empty fragments stay (as XmlEmptyShell): the note's last
-                        // one closes the note with an empty line in the band.
-                        if (BuildPageFragment(document, fnChild, defaults, includeEmpty: true) is { } noteFrag)
-                            note.Paragraphs.Add(noteFrag);
-                        break;
-                }
-            }
-            if (note.Text is not null || note.Paragraphs.Count > 0)
-                tf.FootNote = note;
-            break;
-        }
+        ReadFragmentFootNote(pf);
 
-        if (id is not null)
+        if (pf.id is not null)
         {
-            tf.Id = id;
-            document.RegisterXmlObject(id, tf);
+            pf.tf.Id = pf.id;
+            pf.document.RegisterXmlObject(pf.id, pf.tf);
         }
-        if (!any && string.IsNullOrEmpty(textPrefix) && !includeEmpty && tf.FootNote is null)
+        if (!pf.any && string.IsNullOrEmpty(pf.textPrefix) && !pf.includeEmpty && pf.tf.FootNote is null)
             return null; // a text-less fragment produces no layout
-        return tf;
+        return pf.tf;
     }
 
     /// <summary>One segment from its <c>&lt;TextSegment&gt;</c> node: verbatim text

@@ -57,6 +57,7 @@ internal static partial class Jbig2Decoder
     private sealed class SegmentHeader
     {
         public int Number;
+        public int HeaderStart;
         public int Type;
         public int[] ReferredTo = [];
         public int PageAssoc;
@@ -79,6 +80,11 @@ internal static partial class Jbig2Decoder
         // Symbol library — keyed by symbol-dictionary segment number; value is the exported symbols
         // in order. Text regions reference these by segment number via their ReferredTo list.
         private readonly Dictionary<int, Jbig2Bitmap[]> _symbolDicts = new();
+        // While analysing (see Analyze): the placements of each text region, by segment number,
+        // and the one being decoded.
+        internal Dictionary<int, Jbig2TextRegionPlacements>? Captures;
+        internal Dictionary<int, Jbig2RegionBitmap>? GenericCaptures;
+        private Jbig2TextRegionPlacements? _capturing;
 
         public DecodeContext(byte[] data) => _data = data;
 
@@ -120,7 +126,7 @@ internal static partial class Jbig2Decoder
 
             while (pos < _data.Length - 6)
             {
-                if (!TryParseSegmentHeader(ref pos, out var hdr))
+                if (TryParseSegmentHeader(pos) is not { } hdr)
                     break;
                 result.Add(hdr);
                 pos = hdr.DataStart + hdr.DataLength;
@@ -129,28 +135,29 @@ internal static partial class Jbig2Decoder
             return result;
         }
 
-        private bool TryParseSegmentHeader(ref int pos, out SegmentHeader hdr)
+        private SegmentHeader? TryParseSegmentHeader(int pos)
         {
-            hdr = new SegmentHeader();
-            if (pos + 6 > _data.Length) return false;
+            SegmentHeader hdr = new SegmentHeader();
+            hdr.HeaderStart = pos;
+            if (pos + 6 > _data.Length) return null;
 
             // 4-byte segment number
             hdr.Number = ReadInt32BE(_data, pos);
             pos += 4;
 
-            if (pos >= _data.Length) return false;
+            if (pos >= _data.Length) return null;
             var flags = _data[pos++];
             hdr.Type = flags & 0x3F;
             var pageAssocSize = (flags & 0x40) != 0 ? 4 : 1;
 
             // Referred-to-segment count + retention flags
-            if (pos >= _data.Length) return false;
+            if (pos >= _data.Length) return null;
             var refFlags = _data[pos++];
             var refCount = (refFlags >> 5) & 0x07;
             if (refCount == 7)
             {
                 // Long form: 4-byte count + retain flags
-                if (pos + 3 > _data.Length) return false;
+                if (pos + 3 > _data.Length) return null;
                 refCount = ((refFlags & 0x1F) << 24) |
                            (_data[pos] << 16) | (_data[pos + 1] << 8) | _data[pos + 2];
                 pos += 3;
@@ -168,7 +175,7 @@ internal static partial class Jbig2Decoder
             hdr.ReferredTo = new int[Math.Max(0, refCount)];
             for (var i = 0; i < refCount; i++)
             {
-                if (pos + refByteSize > _data.Length) return false;
+                if (pos + refByteSize > _data.Length) return null;
                 hdr.ReferredTo[i] = ReadIntBE(_data, pos, refByteSize);
                 pos += refByteSize;
             }
@@ -176,18 +183,18 @@ internal static partial class Jbig2Decoder
             // Page association
             if (pageAssocSize == 4)
             {
-                if (pos + 4 > _data.Length) return false;
+                if (pos + 4 > _data.Length) return null;
                 hdr.PageAssoc = ReadInt32BE(_data, pos);
                 pos += 4;
             }
             else
             {
-                if (pos >= _data.Length) return false;
+                if (pos >= _data.Length) return null;
                 hdr.PageAssoc = _data[pos++];
             }
 
             // Segment data length
-            if (pos + 4 > _data.Length) return false;
+            if (pos + 4 > _data.Length) return null;
             hdr.DataLength = ReadInt32BE(_data, pos);
             pos += 4;
             if (hdr.DataLength == -1) hdr.DataLength = _data.Length - pos;
@@ -195,7 +202,7 @@ internal static partial class Jbig2Decoder
                 hdr.DataLength = _data.Length - pos;
 
             hdr.DataStart = pos;
-            return true;
+            return hdr;
         }
 
         private void ProcessSegment(SegmentHeader hdr)
@@ -265,7 +272,7 @@ internal static partial class Jbig2Decoder
             _pageBitmap = new byte[_pageRowBytes * _pageHeight];
 
             if ((pageFlags & 0x04) != 0) // default pixel = 1
-                Array.Fill(_pageBitmap, (byte)0xFF);
+                Compat.Fill(_pageBitmap, (byte)0xFF);
         }
 
         // ────────────────────────────────────────────────────────────────────
@@ -424,7 +431,7 @@ internal static partial class Jbig2Decoder
             Height = height;
             RowBytes = (width + 7) / 8;
             Data = new byte[RowBytes * height];
-            if (defaultPixel) Array.Fill(Data, (byte)0xFF);
+            if (defaultPixel) Compat.Fill(Data, (byte)0xFF);
         }
 
         public Jbig2Bitmap(int width, int height, int rowBytes, byte[] data)
@@ -609,11 +616,10 @@ internal static partial class Jbig2Decoder
             }
         }
 
-        /// <summary>Decode one value. Returns false for the OOB symbol (or on a
+        /// <summary>Decode one value. Returns null for the OOB symbol (or on a
         /// code that matches no line — treated as end-of-data).</summary>
-        public bool Decode(HuffBitReader r, out int value)
+        public int? Decode(HuffBitReader r)
         {
-            value = 0;
             var code = 0;
             for (var len = 1; len <= 32; len++)
             {
@@ -622,17 +628,12 @@ internal static partial class Jbig2Decoder
                 {
                     if (_lines[i].PrefLen != len || _codes[i] != code) continue;
                     var line = _lines[i];
-                    if (line.IsOob) return false;
-                    if (line.IsLower)
-                    {
-                        value = line.RangeLow - r.ReadBits(line.RangeLen);
-                        return true;
-                    }
-                    value = line.RangeLow + r.ReadBits(line.RangeLen);
-                    return true;
+                    if (line.IsOob) return null;
+                    if (line.IsLower) return line.RangeLow - r.ReadBits(line.RangeLen);
+                    return line.RangeLow + r.ReadBits(line.RangeLen);
                 }
             }
-            return false;
+            return null;
         }
     }
 

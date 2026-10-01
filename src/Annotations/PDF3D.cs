@@ -21,8 +21,10 @@ public sealed class PDF3DContent
 {
     private byte[] _bytes = System.Array.Empty<byte>();
 
+    /// <summary>Creates empty 3D content; load data with <c>Load</c>, <c>LoadAsPRC</c> or <c>LoadAsU3D</c>.</summary>
     public PDF3DContent() { }
 
+    /// <summary>Creates 3D content from the file at <c>filename</c> (for example a .u3d or .prc file).</summary>
     public PDF3DContent(string filename)
     {
         Load(filename);
@@ -42,6 +44,7 @@ public sealed class PDF3DContent
     public byte[] GetAsByteArray() => (byte[])_bytes.Clone();
     public Stream GetAsStream() => new MemoryStream(_bytes, writable: false);
 
+    /// <summary>Reads the 3D data from the file at <c>filename</c> and takes the format from its extension. An empty name does nothing.</summary>
     public void Load(string filename)
     {
         if (string.IsNullOrEmpty(filename)) return;
@@ -104,14 +107,17 @@ public enum LightingSchemeType
 /// Stored only.</summary>
 public sealed class PDF3DLightingScheme
 {
+    /// <summary>Creates a lighting scheme of the given type.</summary>
     public PDF3DLightingScheme(LightingSchemeType type) { Type = type; }
 
+    /// <summary>Creates a lighting scheme from its type name (for example "Day" or "CAD", case-insensitive); an unknown name gives <c>Artwork</c>.</summary>
     public PDF3DLightingScheme(string typeName)
     {
         if (System.Enum.TryParse<LightingSchemeType>(typeName, ignoreCase: true, out var t))
             Type = t;
     }
 
+    /// <summary>Gets the lighting scheme type.</summary>
     public LightingSchemeType Type { get; }
 
     public static readonly PDF3DLightingScheme Artwork = new(LightingSchemeType.Artwork);
@@ -158,8 +164,10 @@ public sealed class PDF3DRenderMode
     private Color? _faceColor;
     private Color? _auxColor;
 
+    /// <summary>Creates a render mode of the given type.</summary>
     public PDF3DRenderMode(RenderModeType subtype) { Type = subtype; }
 
+    /// <summary>Creates a render mode from its type name (for example "Wireframe", case-insensitive); an unknown name gives <c>Solid</c>.</summary>
     public PDF3DRenderMode(string typeName)
     {
         // The PDF-spec subtype spells it "TransparentWireframe"; the public
@@ -170,6 +178,7 @@ public sealed class PDF3DRenderMode
             Type = t;
     }
 
+    /// <summary>Gets the render mode type.</summary>
     public RenderModeType Type { get; }
 
     public static readonly PDF3DRenderMode Solid = new(RenderModeType.Solid);
@@ -263,6 +272,7 @@ public sealed class PDF3DCrossSectionArray
 /// shape). Stored only.</summary>
 public sealed class PDF3DView
 {
+    /// <summary>Creates a view named <c>viewName</c> that copies the camera, background, lighting scheme and render mode of <c>view</c>.</summary>
     public PDF3DView(Document doc, PDF3DView view, string viewName)
     {
         _ = doc;
@@ -277,6 +287,7 @@ public sealed class PDF3DView
         ViewName = viewName ?? string.Empty;
     }
 
+    /// <summary>Creates a view named <c>viewName</c> with the given camera-to-world matrix and camera orbit distance.</summary>
     public PDF3DView(Document doc, Matrix3D cameraPosition, double cameraOrbit, string viewName)
     {
         _ = doc;
@@ -289,7 +300,9 @@ public sealed class PDF3DView
     public double CameraOrbit { get; set; }
     public Matrix3D? CameraPosition { get; set; }
     public PDF3DCrossSectionArray CrossSectionsArray { get; } = new PDF3DCrossSectionArray(null!);
+    /// <summary>Gets or sets the lighting scheme of this view, or null when not set.</summary>
     public PDF3DLightingScheme? LightingScheme { get; set; }
+    /// <summary>Gets or sets the render mode of this view, or null when not set.</summary>
     public PDF3DRenderMode? RenderMode { get; set; }
     public string ViewName { get; set; } = string.Empty;
 
@@ -310,16 +323,19 @@ public sealed class PDF3DViewArray
 
     internal PDF3DViewArray() { }
 
+    /// <summary>Gets the number of views in the collection.</summary>
     public int Count => _items.Count;
 
     // This collection is exposed as 1-based (the first view
     // is [1]), so indexed read-backs line up with insertion positions.
+    /// <summary>Gets or sets the view at the 1-based <c>index</c>.</summary>
     public PDF3DView this[int index]
     {
         get => _items[index - 1];
         set => _items[index - 1] = value;
     }
 
+    /// <summary>Adds <c>view</c> to the end of the collection.</summary>
     public void Add(PDF3DView view) => _items.Add(view);
     public void RemoveAll() => _items.Clear();
 
@@ -333,12 +349,14 @@ public sealed class PDF3DViewArray
 /// (public-API shape). Stored only.</summary>
 public sealed class PDF3DArtwork
 {
+    /// <summary>Creates 3D artwork from the given 3D content.</summary>
     public PDF3DArtwork(Document doc, PDF3DContent content)
     {
         _ = doc;
         Content = content;
     }
 
+    /// <summary>Creates 3D artwork from the given 3D content with the given lighting scheme and render mode.</summary>
     public PDF3DArtwork(Document doc, PDF3DContent content,
         PDF3DLightingScheme lightingScheme, PDF3DRenderMode renderMode)
         : this(doc, content)
@@ -347,9 +365,13 @@ public sealed class PDF3DArtwork
         RenderMode = renderMode;
     }
 
+    /// <summary>Gets or sets the 3D model data of the artwork.</summary>
     public PDF3DContent? Content { get; set; }
+    /// <summary>Gets or sets the lighting scheme of the artwork, or null when not set.</summary>
     public PDF3DLightingScheme? LightingScheme { get; set; }
+    /// <summary>Gets or sets the render mode of the artwork, or null when not set.</summary>
     public PDF3DRenderMode? RenderMode { get; set; }
+    /// <summary>Gets the views of the artwork.</summary>
     public PDF3DViewArray ViewArray { get; } = new PDF3DViewArray();
 
     private PDF3DStream? _pdf3dStream;

@@ -16,7 +16,7 @@ namespace Aspose.Pdf.Text;
 /// (callothersubr 0/1/2) is rendered as two cubic Béziers through the spec's
 /// 6 control points + 1 endpoint, matching Adobe TN #5040 §5.2.
 /// </summary>
-internal sealed class Type1GlyphSource : IGlyphOutlineSource
+internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
 {
     private readonly byte[][] _charStringsByGid;
     private readonly string?[] _namesByGid;
@@ -56,7 +56,7 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
             : FindEncryptedEnd(data, headerEnd);
         if (encryptedEnd <= headerEnd) return null;
 
-        var header = Encoding.Latin1.GetString(data, 0, headerEnd);
+        var header = Compat.Latin1.GetString(data, 0, headerEnd);
         var encrypted = ExtractEexecBytes(data, headerEnd, encryptedEnd);
         if (encrypted is null || encrypted.Length < 8) return null;
 
@@ -146,6 +146,7 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
         NameToGid.TryGetValue(name, out var gid) ? _charStringsByGid[gid] : null;
 
     internal int LenIV => _lenIV;
+
     internal double ScaleToEm => _scaleToEm;
 
     // ── Header scanning ──────────────────────────────────────────────────
@@ -263,7 +264,7 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
 
     private static int ParseLenIV(byte[] plain)
     {
-        var s = Encoding.Latin1.GetString(plain);
+        var s = Compat.Latin1.GetString(plain);
         var idx = s.IndexOf("/lenIV", StringComparison.Ordinal);
         if (idx < 0) return 4;
         var p = idx + "/lenIV".Length;
@@ -272,7 +273,7 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
         var start = p;
         while (p < s.Length && char.IsDigit(s[p])) p++;
         if (p == start) return 4;
-        return int.TryParse(s.AsSpan(start, p - start), out var v) ? v : 4;
+        return Compat.TryParseInt32(s.AsSpan(start, p - start), out var v) ? v : 4;
     }
 
     /// <summary>Parse the /Subrs array. Each entry has the shape
@@ -280,7 +281,7 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
     private static byte[]?[] ParseSubrs(byte[] plain, int lenIV)
     {
         // Locate the "/Subrs N array" line.
-        var s = Encoding.Latin1.GetString(plain);
+        var s = Compat.Latin1.GetString(plain);
         var idx = s.IndexOf("/Subrs", StringComparison.Ordinal);
         if (idx < 0) return Array.Empty<byte[]?>();
         // Bytes-based scanning from here on; PostScript strings can carry binary
@@ -305,9 +306,9 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
             // then "NP" or "noaccess put".
             var cursor = dupAt + 3;
             cursor = SkipWhitespace(plain, cursor);
-            cursor = ParseInt(plain, cursor, out var subIdx);
+            (cursor, var subIdx) = ParseInt(plain, cursor);
             cursor = SkipWhitespace(plain, cursor);
-            cursor = ParseInt(plain, cursor, out var subLen);
+            (cursor, var subLen) = ParseInt(plain, cursor);
             cursor = SkipWhitespace(plain, cursor);
             // "RD" or "-|" — both 2 ASCII chars; skip until the single whitespace
             // that precedes the binary payload.
@@ -329,7 +330,7 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
 
     private static (Dictionary<string, byte[]>, List<string>) ParseCharStrings(byte[] plain, int lenIV)
     {
-        var s = Encoding.Latin1.GetString(plain);
+        var s = Compat.Latin1.GetString(plain);
         var idx = s.IndexOf("/CharStrings", StringComparison.Ordinal);
         var dict = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         var ordering = new List<string>();
@@ -353,11 +354,10 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
             p++; // past '/'
             var nameStart = p;
             while (p < plain.Length && !IsAsciiWhite(plain[p])) p++;
-            var name = Encoding.Latin1.GetString(plain, nameStart, p - nameStart);
+            var name = Compat.Latin1.GetString(plain, nameStart, p - nameStart);
             // Skip whitespace.
             p = SkipWhitespace(plain, p);
-            // Read length.
-            p = ParseInt(plain, p, out var charLen);
+            (p, var charLen) = ParseInt(plain, p);
             p = SkipWhitespace(plain, p);
             // Skip "RD" or "-|".
             p = SkipToken(plain, p);
@@ -413,8 +413,9 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
         return p;
     }
 
-    private static int ParseInt(byte[] data, int p, out int value)
+    private static (int result, int value) ParseInt(byte[] data, int p)
     {
+        int value = default;
         value = 0;
         var sign = 1;
         if (p < data.Length && (data[p] == '+' || data[p] == '-'))
@@ -430,7 +431,7 @@ internal sealed class Type1GlyphSource : IGlyphOutlineSource
         }
         if (!any) value = -1;
         else value *= sign;
-        return p;
+        return (p, value);
     }
 
     private static int IndexOf(byte[] hay, byte[] needle, int start)
@@ -985,7 +986,12 @@ internal static class Type1StandardEncoding
         S(0xC1, "grave"); S(0xC2, "acute"); S(0xC3, "circumflex"); S(0xC4, "tilde");
         S(0xC5, "macron"); S(0xC6, "breve"); S(0xC7, "dotaccent"); S(0xC8, "dieresis");
         S(0xCA, "ring"); S(0xCB, "cedilla"); S(0xCD, "hungarumlaut"); S(0xCE, "ogonek");
-        S(0xCF, "caron"); S(0xE1, "AE"); S(0xE3, "ordfeminine"); S(0xE8, "Lslash");
+        // 0xD0 is the em dash, and it was missing: the table stepped from the
+        // caron at 0xCF straight to AE at 0xE1. StandardEncoding puts emdash
+        // there (Adobe, Type 1 built-in), so a Type 1 font showing one had no
+        // name for its own code.
+        S(0xCF, "caron"); S(0xD0, "emdash"); S(0xE1, "AE");
+        S(0xE3, "ordfeminine"); S(0xE8, "Lslash");
         S(0xE9, "Oslash"); S(0xEA, "OE"); S(0xEB, "ordmasculine"); S(0xF1, "ae");
         S(0xF5, "dotlessi"); S(0xF8, "lslash"); S(0xF9, "oslash"); S(0xFA, "oe");
         S(0xFB, "germandbls");

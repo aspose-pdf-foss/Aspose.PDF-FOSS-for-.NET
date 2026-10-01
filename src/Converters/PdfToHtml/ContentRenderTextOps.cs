@@ -20,6 +20,7 @@ public sealed partial class PdfToHtmlConverter
             var ok = pc.Count == text.Length;
             if (!ok && pc.Count > 0 && DecodeAligned(ct, s, text) is { } al)
             { pc = al.perChar; pcodes = al.perCode; ok = pc.Count == text.Length; }
+            text = FoldZeroWidthSpaces(text, ok ? pc : null, ok ? pcodes : null);
             ShowRun(ct, ct.fonts, ct.sb, ct.pageHeight, ct.pageWidth, ct.saveTransparentTexts, ct.emCompensation, ct.textOnly, ct.styleReg, ct.classNamer, ct.linkTargets, ct.rotReg, ct.pageLLX, ct.yTopRef, ct.zCounter, ct.pageTurnedOver, text, adv, ext, ok ? pc : null, ok ? pcodes : null);
             if (!double.IsNaN(adv))
             { ct.tm.Concat(1, 0, 0, 1, adv, 0); ct.tx = ct.tm.E; ct.ty = ct.tm.F; }
@@ -104,7 +105,8 @@ public sealed partial class PdfToHtmlConverter
                 if (pcOk)
                     foreach (var e2 in tjChars)
                         if (double.IsNaN(e2.pen)) { pcOk = false; break; }
-                ShowRun(ct, ct.fonts, ct.sb, ct.pageHeight, ct.pageWidth, ct.saveTransparentTexts, ct.emCompensation, ct.textOnly, ct.styleReg, ct.classNamer, ct.linkTargets, ct.rotReg, ct.pageLLX, ct.yTopRef, ct.zCounter, ct.pageTurnedOver, tjText.ToString(), tjAdv, tjExt,
+                var tjRun = FoldZeroWidthSpaces(tjText.ToString(), pcOk ? tjChars : null, pcOk ? tjCodes : null);
+                ShowRun(ct, ct.fonts, ct.sb, ct.pageHeight, ct.pageWidth, ct.saveTransparentTexts, ct.emCompensation, ct.textOnly, ct.styleReg, ct.classNamer, ct.linkTargets, ct.rotReg, ct.pageLLX, ct.yTopRef, ct.zCounter, ct.pageTurnedOver, tjRun, tjAdv, tjExt,
                     pcOk ? tjChars : null, pcOk ? tjCodes : null);
             }
             if (!double.IsNaN(tjAdv))
@@ -129,6 +131,7 @@ public sealed partial class PdfToHtmlConverter
             var qok = qc.Count == text.Length;
             if (!qok && qc.Count > 0 && DecodeAligned(ct, qs, text) is { } alq)
             { qc = alq.perChar; qcodes = alq.perCode; qok = qc.Count == text.Length; }
+            text = FoldZeroWidthSpaces(text, qok ? qc : null, qok ? qcodes : null);
             ShowRun(ct, ct.fonts, ct.sb, ct.pageHeight, ct.pageWidth, ct.saveTransparentTexts, ct.emCompensation, ct.textOnly, ct.styleReg, ct.classNamer, ct.linkTargets, ct.rotReg, ct.pageLLX, ct.yTopRef, ct.zCounter, ct.pageTurnedOver, text, adv, ext, qok ? qc : null, qok ? qcodes : null);
             if (!double.IsNaN(adv))
             { ct.tm.Concat(1, 0, 0, 1, adv, 0); ct.tx = ct.tm.E; ct.ty = ct.tm.F; }

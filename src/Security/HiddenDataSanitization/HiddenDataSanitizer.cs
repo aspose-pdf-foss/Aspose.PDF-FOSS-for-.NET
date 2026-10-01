@@ -95,6 +95,8 @@ public sealed class HiddenDataSanitizer
     public void Sanitize(Document document)
     {
         if (document is null) throw new ArgumentNullException(nameof(document));
+        // What is removed must not survive in an earlier revision: the document is saved whole.
+        document.MustRewriteWhole = true;
 
         if (_options.FlattenForms) FlattenForms(document);
         if (_options.FlattenLayers) FlattenLayers(document);
@@ -177,6 +179,8 @@ public sealed class HiddenDataSanitizer
 
     private static void RemoveAnnotations(Document document)
     {
+        // The removed annotations - and what they held - are left out of the saved file.
+        document.Reader.MayHaveOrphansOnSave = true;
         foreach (var page in document.Pages)
             page.Annotations.Delete();
     }
@@ -203,35 +207,28 @@ public sealed class HiddenDataSanitizer
         var reader = document.Reader;
         var catalog = document.Catalog;
 
-        // Document-level open action + additional actions.
+        // Document-level open action and named JavaScript (/Names /JavaScript).
         catalog.Remove("OpenAction");
-        catalog.Remove("AA");
-
-        // Document-level named JavaScript (/Names /JavaScript).
         if (reader.ResolveDict(catalog.Get("Names")) is PdfDictionary names)
             names.Remove("JavaScript");
 
-        foreach (var page in document.Pages)
+        // Every additional-actions entry - document, pages, annotations, form fields - and the
+        // action of every annotation and bookmark. /A elsewhere is no action (a structure
+        // element's /A holds its attributes), so it stays.
+        foreach (var dict in Dictionaries(document))
         {
-            // Page additional actions.
-            page.Dict.Remove("AA");
-
-            // Annotation actions (/A action + /AA additional actions).
-            if (reader.Resolve(page.Dict.Get("Annots")) is PdfArray annots)
-            {
-                foreach (var item in annots)
-                {
-                    if (reader.ResolveDict(item) is not PdfDictionary annot) continue;
-                    annot.Remove("A");
-                    annot.Remove("AA");
-                }
-            }
+            dict.Remove("AA");
+            if (dict.GetName("Type") == "Annot" || dict.ContainsKey("Subtype") && dict.ContainsKey("Rect")
+                || dict.ContainsKey("Title") && dict.ContainsKey("Parent"))
+                dict.Remove("A");
         }
     }
 
     private static void RemoveAttachments(Document document)
     {
         var reader = document.Reader;
+        // The removed files are left out of the saved file, not only unlisted.
+        reader.MayHaveOrphansOnSave = true;
         var catalog = document.Catalog;
 
         // Name-tree attachments (/Names /EmbeddedFiles) and catalog associated files.
@@ -256,14 +253,49 @@ public sealed class HiddenDataSanitizer
         }
     }
 
+    /// <summary>Remove the document information (title, author, custom entries...) and every XMP
+    /// packet - the document's, and those of pages, images, fonts and forms.</summary>
     private static void RemoveMetadata(Document document)
-        => document.Catalog.Remove("Metadata");
+    {
+        foreach (var dict in Dictionaries(document)) dict.Remove("Metadata");
+        document.Info.Clear();
+    }
 
     private static void RemoveSearchIndexAndPrivateInfo(Document document)
     {
-        var catalog = document.Catalog;
-        // Full-text search index and PieceInfo private application data.
-        catalog.Remove("PieceInfo");
-        catalog.Remove("SpiderInfo");
+        // The full-text search index, and the private application data of every object that
+        // carries some (the catalog, pages, forms...).
+        document.Catalog.Remove("SpiderInfo");
+        foreach (var dict in Dictionaries(document)) dict.Remove("PieceInfo");
+    }
+
+    /// <summary>Every dictionary reachable from the trailer, each once (a stream by its
+    /// dictionary). Each is handed out before the walk goes into it, so an entry removed from it
+    /// is not walked.</summary>
+    private static IEnumerable<PdfDictionary> Dictionaries(Document document)
+    {
+        var reader = document.Reader;
+        // What a walk takes out is no longer reachable: the save leaves it out of the file.
+        reader.MayHaveOrphansOnSave = true;
+        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        var pending = new Stack<PdfObject>();
+        pending.Push(reader.Trailer);
+        while (pending.Count > 0)
+        {
+            switch (reader.Resolve(pending.Pop()))
+            {
+                case PdfDictionary dict when seen.Add(dict):
+                    yield return dict;
+                    foreach (var key in dict.Keys.ToList()) pending.Push(dict.Get(key)!);
+                    break;
+                case PdfStream stream when seen.Add(stream):
+                    yield return stream.Dict;
+                    foreach (var key in stream.Dict.Keys.ToList()) pending.Push(stream.Dict.Get(key)!);
+                    break;
+                case PdfArray array when seen.Add(array):
+                    foreach (var item in array) pending.Push(item);
+                    break;
+            }
+        }
     }
 }

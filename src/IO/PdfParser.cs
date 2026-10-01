@@ -13,6 +13,15 @@ internal sealed class PdfParser
     /// </summary>
     public Func<int, long>? LengthResolver { get; set; }
 
+    /// <summary>
+    /// Whether a file may be read against what it says about itself.
+    ///
+    /// A lenient read repairs a stream whose declared length disagrees with its
+    /// own "endstream"; a strict one takes the file at its word and reads
+    /// exactly the bytes it declared.
+    /// </summary>
+    public bool Lenient { get; set; } = true;
+
     public PdfParser(byte[] data)
     {
         _data = data;
@@ -97,6 +106,15 @@ internal sealed class PdfParser
         }
     }
 
+    /// <summary>
+    /// The rest of an array whose "[" has already been read.
+    ///
+    /// For a caller driving the lexer itself: by the time it knows it is holding
+    /// an array the opening bracket is gone, so parsing the whole value is no
+    /// longer open to it.
+    /// </summary>
+    public PdfArray ParseArrayBody() => ParseArray();
+
     private PdfArray ParseArray()
     {
         var array = new PdfArray();
@@ -110,7 +128,15 @@ internal sealed class PdfParser
         return array;
     }
 
-    private PdfObject ParseDictionaryOrStream()
+    /// <summary>
+    /// The rest of a dictionary whose "&lt;&lt;" has already been read.
+    ///
+    /// Stops at the matching "&gt;&gt;" and goes no further. Whether a stream
+    /// follows the dictionary is the caller's question, not this one's -- the
+    /// two are separate things in the file and a caller that wants only the
+    /// dictionary must be able to stop between them.
+    /// </summary>
+    public PdfDictionary ParseDictionaryBody()
     {
         var dict = new PdfDictionary();
 
@@ -127,6 +153,13 @@ internal sealed class PdfParser
             var value = ParseObject();
             dict.Set(keyToken.StringValue!, value);
         }
+
+        return dict;
+    }
+
+    private PdfObject ParseDictionaryOrStream()
+    {
+        var dict = ParseDictionaryBody();
 
         // Check if followed by stream keyword
         var savedPos = _lexer.Position;
@@ -181,8 +214,27 @@ internal sealed class PdfParser
             if (MatchKeyword(checkPos, "endstream"u8))
                 _lexer.Position = checkPos + 9;
             else
-                // endstream not adjacent to declared length — scan forward from declared end to position lexer
+            {
+                // The declared number disagrees with the stream's own "endstream",
+                // so the keyword is what bounds the data. This holds both ways:
+                //
+                //  - A number that runs PAST the keyword (a writer that counted
+                //    into the next object) would swallow the objects that follow,
+                //    and an unclosed string in that overrun eats the rest of the
+                //    page.
+                //  - A number that stops SHORT of it drops bytes the file
+                //    plainly contains, which cuts a content stream off in the
+                //    middle of an operator and loses everything after it.
+                //
+                // Trusting the keyword is also what the readers a file is likely
+                // to have been written for do, so a file that renders elsewhere
+                // renders here. A reader told not to be lenient keeps the
+                // declared number, since disbelieving it is a repair.
+                var firstEnd = IndexOfEndstream(pos);
+                if (Lenient && firstEnd >= 0) return ScanForEndstream(pos);
+                // endstream not adjacent to declared length - scan forward from declared end to position lexer
                 _lexer.Position = ScanForEndstreamPosition(pos + lengthValue);
+            }
             return result;
         }
 
@@ -203,6 +255,15 @@ internal sealed class PdfParser
                 return i + needle.Length;
         }
         return startPos;
+    }
+
+    /// <summary>The offset of the first "endstream" at or after <paramref name="startPos"/>, -1 when none.</summary>
+    private long IndexOfEndstream(long startPos)
+    {
+        var needle = "endstream"u8;
+        for (var i = startPos; i <= _data.Length - needle.Length; i++)
+            if (MatchKeyword(i, needle)) return i;
+        return -1;
     }
 
     private byte[] ScanForEndstream(long startPos)

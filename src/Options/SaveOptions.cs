@@ -10,8 +10,15 @@ using Aspose.Pdf.Facades;
 
 namespace Aspose.Pdf
 {
+    /// <summary>
+    /// Base class for the options passed to <c>Document.Save</c>. A plain instance, or any subclass the save
+    /// method does not recognise, saves the document as PDF.
+    /// </summary>
     public class SaveOptions
     {
+        /// <summary>Creates save options with default settings (the document is saved as PDF).</summary>
+        public SaveOptions() { }
+
         public enum NodeLevelResourceType
         {
             Font = 0,
@@ -106,8 +113,12 @@ namespace Aspose.Pdf
         public virtual SaveFormat SaveFormat => SaveFormat.Pdf;
     }
 
+    /// <summary>Base class for options that control how a non-PDF source (HTML, SVG, Markdown and so on) is loaded and converted into a PDF document.</summary>
     public class LoadOptions
     {
+        /// <summary>Creates load options with default settings.</summary>
+        public LoadOptions() { }
+
         /// <summary>Warning handler invoked while loading the source document.</summary>
         public IWarningCallback WarningHandler { get; set; }
 
@@ -141,8 +152,15 @@ namespace Aspose.Pdf
         public delegate ResourceLoadingResult ResourceLoadingStrategy(string resourceURI);
     }
 
+    /// <summary>
+    /// Options for saving a document as PDF. When <c>DefaultFontName</c> is set, fonts that cannot be resolved are
+    /// replaced by that font before the file is written.
+    /// </summary>
     public class PdfSaveOptions : SaveOptions
     {
+        /// <summary>Creates PDF save options with no default font and no temporary path.</summary>
+        public PdfSaveOptions() { }
+
         /// <summary>Default font used when an embedded font cannot be resolved. Stored only.</summary>
         public string DefaultFontName { get; set; }
 
@@ -150,8 +168,14 @@ namespace Aspose.Pdf
         public string TempPath { get; set; }
     }
 
+    /// <summary>
+    /// Common base class for save options of conversions to other formats, such as HTML and SVG.
+    /// </summary>
     public class UnifiedSaveOptions : SaveOptions
     {
+        /// <summary>Creates unified save options with default settings.</summary>
+        public UnifiedSaveOptions() { }
+
         public bool ExtractOcrSublayerOnly { get; set; }
         public bool IsMultiThreading;
         public bool TryMergeAdjacentSameBackgroundImages;
@@ -179,8 +203,15 @@ namespace Aspose.Pdf
         ResultPageSaved,
     }
 
+    /// <summary>
+    /// Options for saving a document as SVG. Saving to a file writes page 1 to the given path and page N to
+    /// <c>&lt;name&gt;_N.svg</c> beside it; saving to a stream writes only page 1.
+    /// </summary>
     public class SvgSaveOptions : UnifiedSaveOptions
     {
+        /// <summary>Creates SVG save options with default settings (separate SVG files, not a zip archive).</summary>
+        public SvgSaveOptions() { }
+
         public bool CompressOutputToZipArchive;
         public bool TreatTargetFileNameAsDirectory;
         public bool ScaleToPixels;

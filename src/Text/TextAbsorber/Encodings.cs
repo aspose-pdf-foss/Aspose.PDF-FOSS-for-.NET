@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Core;
@@ -195,19 +196,32 @@ public sealed partial class TextAbsorber
         [170] = '\u2122', // trade mark sign
         [171] = '\u00B4', // acute accent
         [172] = '\u00A8', // diaeresis
+        [173] = '\u2260', // not equal to
         [174] = '\u00C6', // AE
         [175] = '\u00D8', // O with stroke
+        [176] = '\u221E', // infinity
         [177] = '\u00B1', // plus-minus sign
+        [178] = '\u2264', // less-than or equal to
+        [179] = '\u2265', // greater-than or equal to
         [180] = '\u00A5', // yen sign
         [181] = '\u00B5', // micro sign
+        [182] = '\u2202', // partial differential
+        [183] = '\u2211', // n-ary summation
+        [184] = '\u220F', // n-ary product
+        [185] = '\u03C0', // greek small letter pi
+        [186] = '\u222B', // integral
         [187] = '\u00AA', // feminine ordinal indicator
         [188] = '\u00BA', // masculine ordinal indicator
+        [189] = '\u03A9', // greek capital letter omega
         [190] = '\u00E6', // ae
         [191] = '\u00F8', // o with stroke
         [192] = '\u00BF', // inverted question mark
         [193] = '\u00A1', // inverted exclamation mark
         [194] = '\u00AC', // not sign
+        [195] = '\u221A', // square root
         [196] = '\u0192', // f with hook
+        [197] = '\u2248', // almost equal to
+        [198] = '\u2206', // increment
         [199] = '\u00AB', // left-pointing double angle quotation mark
         [200] = '\u00BB', // right-pointing double angle quotation mark
         [201] = '\u2026', // horizontal ellipsis
@@ -215,8 +229,8 @@ public sealed partial class TextAbsorber
         [203] = '\u00C0', // A with grave
         [204] = '\u00C3', // A with tilde
         [205] = '\u00D5', // O with tilde
-        [206] = '\u0152', // OE ligature
-        [207] = '\u0153', // oe ligature
+        [206] = '\u0152', // latin capital ligature oe
+        [207] = '\u0153', // latin small ligature oe
         [208] = '\u2013', // en dash
         [209] = '\u2014', // em dash
         [210] = '\u201C', // left double quotation mark
@@ -225,475 +239,162 @@ public sealed partial class TextAbsorber
         [213] = '\u2019', // right single quotation mark
         [214] = '\u00F7', // division sign
         [215] = '\u25CA', // lozenge
-        [218] = '\u00FF', // y with diaeresis
-        [219] = '\u0178', // Y with diaeresis
-        [220] = '\u2044', // fraction slash
-        [222] = '\uFB01', // fi ligature
-        [223] = '\uFB02', // fl ligature
-        [226] = '\u00AE', // registered sign (alt)
-        [227] = '\u00A9', // copyright sign (alt)
-        [228] = '\u2122', // trade mark sign (alt)
-        [229] = '\u00B4', // acute accent (alt)
-        [230] = '\u00A8', // diaeresis (alt)
-        [232] = '\u00C8', // E with grave
-        [233] = '\u00CA', // E with circumflex
-        [234] = '\u00CB', // E with diaeresis
-        [235] = '\u00CC', // I with grave
-        [236] = '\u00CD', // I with acute
-        [237] = '\u00CE', // I with circumflex
-        [238] = '\u00CF', // I with diaeresis
+        [216] = '\u00FF', // y with diaeresis
+        [217] = '\u0178', // Y with diaeresis
+        [218] = '\u2044', // fraction slash
+        [219] = '\u20AC', // euro sign
+        [220] = '\u2039', // single left-pointing angle quotation mark
+        [221] = '\u203A', // single right-pointing angle quotation mark
+        [222] = '\uFB01', // latin small ligature fi
+        [223] = '\uFB02', // latin small ligature fl
+        [224] = '\u2021', // double dagger
+        [225] = '\u00B7', // middle dot
+        [226] = '\u201A', // single low-9 quotation mark
+        [227] = '\u201E', // double low-9 quotation mark
+        [228] = '\u2030', // per mille sign
+        [229] = '\u00C2', // A with circumflex
+        [230] = '\u00CA', // E with circumflex
+        [231] = '\u00C1', // A with acute
+        [232] = '\u00CB', // E with diaeresis
+        [233] = '\u00C8', // E with grave
+        [234] = '\u00CD', // I with acute
+        [235] = '\u00CE', // I with circumflex
+        [236] = '\u00CF', // I with diaeresis
+        [237] = '\u00CC', // I with grave
+        [238] = '\u00D3', // O with acute
+        [239] = '\u00D4', // O with circumflex
+        [240] = '\uF8FF', // apple logo
         [241] = '\u00D2', // O with grave
-        [242] = '\u00D3', // O with acute
-        [243] = '\u00D4', // O with circumflex
-        [245] = '\u00D2', // O with grave (alt)
-        [246] = '\u00DA', // U with acute
-        [247] = '\u00DB', // U with circumflex
-        [248] = '\u00D9', // U with grave
-        [249] = '\u0131', // dotless i
-        [250] = '\u02C6', // modifier letter circumflex accent
-        [251] = '\u02DC', // small tilde
-        [252] = '\u00AF', // macron
-        [253] = '\u02D8', // breve
-        [254] = '\u02D9', // dot above
-        [255] = '\u02DA', // ring above
+        [242] = '\u00DA', // U with acute
+        [243] = '\u00DB', // U with circumflex
+        [244] = '\u00D9', // U with grave
+        [245] = '\u0131', // dotless i
+        [246] = '\u02C6', // modifier letter circumflex accent
+        [247] = '\u02DC', // small tilde
+        [248] = '\u00AF', // macron
+        [249] = '\u02D8', // breve
+        [250] = '\u02D9', // dot above
+        [251] = '\u02DA', // ring above
+        [252] = '\u00B8', // cedilla
+        [253] = '\u02DD', // double acute accent
+        [254] = '\u02DB', // ogonek
+        [255] = '\u02C7', // caron
     };
 
     // ────────────────────────────────────────────────────────────────────────
-    // Adobe Glyph List (core subset) — glyph name to Unicode mapping
+    // Adobe Glyph List -- glyph name to Unicode, and its reverse
     // ────────────────────────────────────────────────────────────────────────
-    internal static readonly Dictionary<string, string> GlyphNameToUnicode = new(StringComparer.Ordinal)
+
+    // The list has no entry for PDF's synthetic glyphs, or for the eleven short
+    // names ("a1".."a11") a ZapfDingbats font still uses to name its own pictures.
+    // Added to the reverse table only where the list left the codepoint
+    // unclaimed -- four of these (0x000D, 0x25A1, 0x260E, 0x261E) already have
+    // an Adobe name, and that name stays the preferred one.
+    //
+    // Declared ahead of GlyphNameToUnicode/UnicodeToGlyphName below: C# runs
+    // field initializers in source order, and those two call this array (and
+    // the pin beneath it) while building their own value.
+    private static readonly (string Name, string Unicode)[] NonAdobeGlyphNames =
     {
-        // ASCII printable characters
-        ["space"] = "\u0020",
-        ["exclam"] = "\u0021",
-        ["quotedbl"] = "\u0022",
-        ["numbersign"] = "\u0023",
-        ["dollar"] = "\u0024",
-        ["percent"] = "\u0025",
-        ["ampersand"] = "\u0026",
-        ["quotesingle"] = "\u0027",
-        ["parenleft"] = "\u0028",
-        ["parenright"] = "\u0029",
-        ["asterisk"] = "\u002A",
-        ["plus"] = "\u002B",
-        ["comma"] = "\u002C",
-        ["hyphen"] = "\u002D",
-        ["period"] = "\u002E",
-        ["slash"] = "\u002F",
-        ["zero"] = "\u0030",
-        ["one"] = "\u0031",
-        ["two"] = "\u0032",
-        ["three"] = "\u0033",
-        ["four"] = "\u0034",
-        ["five"] = "\u0035",
-        ["six"] = "\u0036",
-        ["seven"] = "\u0037",
-        ["eight"] = "\u0038",
-        ["nine"] = "\u0039",
-        ["colon"] = "\u003A",
-        ["semicolon"] = "\u003B",
-        ["less"] = "\u003C",
-        ["equal"] = "\u003D",
-        ["greater"] = "\u003E",
-        ["question"] = "\u003F",
-        ["at"] = "\u0040",
-        ["A"] = "\u0041",
-        ["B"] = "\u0042",
-        ["C"] = "\u0043",
-        ["D"] = "\u0044",
-        ["E"] = "\u0045",
-        ["F"] = "\u0046",
-        ["G"] = "\u0047",
-        ["H"] = "\u0048",
-        ["I"] = "\u0049",
-        ["J"] = "\u004A",
-        ["K"] = "\u004B",
-        ["L"] = "\u004C",
-        ["M"] = "\u004D",
-        ["N"] = "\u004E",
-        ["O"] = "\u004F",
-        ["P"] = "\u0050",
-        ["Q"] = "\u0051",
-        ["R"] = "\u0052",
-        ["S"] = "\u0053",
-        ["T"] = "\u0054",
-        ["U"] = "\u0055",
-        ["V"] = "\u0056",
-        ["W"] = "\u0057",
-        ["X"] = "\u0058",
-        ["Y"] = "\u0059",
-        ["Z"] = "\u005A",
-        ["bracketleft"] = "\u005B",
-        ["backslash"] = "\u005C",
-        ["bracketright"] = "\u005D",
-        ["asciicircum"] = "\u005E",
-        ["underscore"] = "\u005F",
-        ["grave"] = "\u0060",
-        ["a"] = "\u0061",
-        ["b"] = "\u0062",
-        ["c"] = "\u0063",
-        ["d"] = "\u0064",
-        ["e"] = "\u0065",
-        ["f"] = "\u0066",
-        ["g"] = "\u0067",
-        ["h"] = "\u0068",
-        ["i"] = "\u0069",
-        ["j"] = "\u006A",
-        ["k"] = "\u006B",
-        ["l"] = "\u006C",
-        ["m"] = "\u006D",
-        ["n"] = "\u006E",
-        ["o"] = "\u006F",
-        ["p"] = "\u0070",
-        ["q"] = "\u0071",
-        ["r"] = "\u0072",
-        ["s"] = "\u0073",
-        ["t"] = "\u0074",
-        ["u"] = "\u0075",
-        ["v"] = "\u0076",
-        ["w"] = "\u0077",
-        ["x"] = "\u0078",
-        ["y"] = "\u0079",
-        ["z"] = "\u007A",
-        ["braceleft"] = "\u007B",
-        ["bar"] = "\u007C",
-        ["braceright"] = "\u007D",
-        ["asciitilde"] = "\u007E",
-
-        // Common punctuation and symbols
-        ["bullet"] = "\u2022",
-        ["endash"] = "\u2013",
-        ["emdash"] = "\u2014",
-        ["quoteleft"] = "\u2018",
-        ["quoteright"] = "\u2019",
-        ["quotedblleft"] = "\u201C",
-        ["quotedblright"] = "\u201D",
-        ["quotesinglbase"] = "\u201A",
-        ["quotedblbase"] = "\u201E",
-        ["dagger"] = "\u2020",
-        ["daggerdbl"] = "\u2021",
-        ["ellipsis"] = "\u2026",
-        ["perthousand"] = "\u2030",
-        ["guilsinglleft"] = "\u2039",
-        ["guilsinglright"] = "\u203A",
-        ["trademark"] = "\u2122",
-        ["minus"] = "\u2212",
-        ["Euro"] = "\u20AC",
-
-        // Latin-1 supplement
-        ["exclamdown"] = "\u00A1",
-        ["cent"] = "\u00A2",
-        ["sterling"] = "\u00A3",
-        ["currency"] = "\u00A4",
-        ["yen"] = "\u00A5",
-        ["brokenbar"] = "\u00A6",
-        ["section"] = "\u00A7",
-        ["dieresis"] = "\u00A8",
-        ["copyright"] = "\u00A9",
-        ["ordfeminine"] = "\u00AA",
-        ["guillemotleft"] = "\u00AB",
-        ["logicalnot"] = "\u00AC",
-        ["registered"] = "\u00AE",
-        ["macron"] = "\u00AF",
-        ["degree"] = "\u00B0",
-        ["plusminus"] = "\u00B1",
-        ["twosuperior"] = "\u00B2",
-        ["threesuperior"] = "\u00B3",
-        ["acute"] = "\u00B4",
-        ["mu"] = "\u00B5",
-        ["paragraph"] = "\u00B6",
-        ["periodcentered"] = "\u00B7",
-        ["cedilla"] = "\u00B8",
-        ["onesuperior"] = "\u00B9",
-        ["ordmasculine"] = "\u00BA",
-        ["guillemotright"] = "\u00BB",
-        ["onequarter"] = "\u00BC",
-        ["onehalf"] = "\u00BD",
-        ["threequarters"] = "\u00BE",
-        ["questiondown"] = "\u00BF",
-
-        // Accented uppercase
-        ["Agrave"] = "\u00C0",
-        ["Aacute"] = "\u00C1",
-        ["Acircumflex"] = "\u00C2",
-        ["Atilde"] = "\u00C3",
-        ["Adieresis"] = "\u00C4",
-        ["Aring"] = "\u00C5",
-        ["AE"] = "\u00C6",
-        ["Ccedilla"] = "\u00C7",
-        ["Egrave"] = "\u00C8",
-        ["Eacute"] = "\u00C9",
-        ["Ecircumflex"] = "\u00CA",
-        ["Edieresis"] = "\u00CB",
-        ["Igrave"] = "\u00CC",
-        ["Iacute"] = "\u00CD",
-        ["Icircumflex"] = "\u00CE",
-        ["Idieresis"] = "\u00CF",
-        ["Eth"] = "\u00D0",
-        ["Ntilde"] = "\u00D1",
-        ["Ograve"] = "\u00D2",
-        ["Oacute"] = "\u00D3",
-        ["Ocircumflex"] = "\u00D4",
-        ["Otilde"] = "\u00D5",
-        ["Odieresis"] = "\u00D6",
-        ["multiply"] = "\u00D7",
-        ["Oslash"] = "\u00D8",
-        ["Ugrave"] = "\u00D9",
-        ["Uacute"] = "\u00DA",
-        ["Ucircumflex"] = "\u00DB",
-        ["Udieresis"] = "\u00DC",
-        ["Yacute"] = "\u00DD",
-        ["Thorn"] = "\u00DE",
-        ["germandbls"] = "\u00DF",
-
-        // Accented lowercase
-        ["agrave"] = "\u00E0",
-        ["aacute"] = "\u00E1",
-        ["acircumflex"] = "\u00E2",
-        ["atilde"] = "\u00E3",
-        ["adieresis"] = "\u00E4",
-        ["aring"] = "\u00E5",
-        ["ae"] = "\u00E6",
-        ["ccedilla"] = "\u00E7",
-        ["egrave"] = "\u00E8",
-        ["eacute"] = "\u00E9",
-        ["ecircumflex"] = "\u00EA",
-        ["edieresis"] = "\u00EB",
-        ["igrave"] = "\u00EC",
-        ["iacute"] = "\u00ED",
-        ["icircumflex"] = "\u00EE",
-        ["idieresis"] = "\u00EF",
-        ["eth"] = "\u00F0",
-        ["ntilde"] = "\u00F1",
-        ["ograve"] = "\u00F2",
-        ["oacute"] = "\u00F3",
-        ["ocircumflex"] = "\u00F4",
-        ["otilde"] = "\u00F5",
-        ["odieresis"] = "\u00F6",
-        ["divide"] = "\u00F7",
-        ["oslash"] = "\u00F8",
-        ["ugrave"] = "\u00F9",
-        ["uacute"] = "\u00FA",
-        ["ucircumflex"] = "\u00FB",
-        ["udieresis"] = "\u00FC",
-        ["yacute"] = "\u00FD",
-        ["thorn"] = "\u00FE",
-        ["ydieresis"] = "\u00FF",
-
-        // Latin Extended-A
-        ["Amacron"] = "\u0100", ["amacron"] = "\u0101",
-        ["Abreve"] = "\u0102", ["abreve"] = "\u0103",
-        ["Aogonek"] = "\u0104", ["aogonek"] = "\u0105",
-        ["Cacute"] = "\u0106", ["cacute"] = "\u0107",
-        ["Ccircumflex"] = "\u0108", ["ccircumflex"] = "\u0109",
-        ["Cdotaccent"] = "\u010A", ["cdotaccent"] = "\u010B",
-        ["Ccaron"] = "\u010C", ["ccaron"] = "\u010D",
-        ["Dcaron"] = "\u010E", ["dcaron"] = "\u010F",
-        ["Dcroat"] = "\u0110", ["dcroat"] = "\u0111",
-        ["Emacron"] = "\u0112", ["emacron"] = "\u0113",
-        ["Ebreve"] = "\u0114", ["ebreve"] = "\u0115",
-        ["Edotaccent"] = "\u0116", ["edotaccent"] = "\u0117",
-        ["Eogonek"] = "\u0118", ["eogonek"] = "\u0119",
-        ["Ecaron"] = "\u011A", ["ecaron"] = "\u011B",
-        ["Gcircumflex"] = "\u011C", ["gcircumflex"] = "\u011D",
-        ["Gbreve"] = "\u011E", ["gbreve"] = "\u011F",
-        ["Gdotaccent"] = "\u0120", ["gdotaccent"] = "\u0121",
-        ["Gcommaaccent"] = "\u0122", ["gcommaaccent"] = "\u0123",
-        ["Hcircumflex"] = "\u0124", ["hcircumflex"] = "\u0125",
-        ["Hbar"] = "\u0126", ["hbar"] = "\u0127",
-        ["Itilde"] = "\u0128", ["itilde"] = "\u0129",
-        ["Imacron"] = "\u012A", ["imacron"] = "\u012B",
-        ["Ibreve"] = "\u012C", ["ibreve"] = "\u012D",
-        ["Iogonek"] = "\u012E", ["iogonek"] = "\u012F",
-        ["Idotaccent"] = "\u0130", ["dotlessi"] = "\u0131",
-        ["IJ"] = "\u0132", ["ij"] = "\u0133",
-        ["Jcircumflex"] = "\u0134", ["jcircumflex"] = "\u0135",
-        ["Kcommaaccent"] = "\u0136", ["kcommaaccent"] = "\u0137",
-        ["kgreenlandic"] = "\u0138",
-        ["Lacute"] = "\u0139", ["lacute"] = "\u013A",
-        ["Lcommaaccent"] = "\u013B", ["lcommaaccent"] = "\u013C",
-        ["Lcaron"] = "\u013D", ["lcaron"] = "\u013E",
-        ["Ldot"] = "\u013F", ["ldot"] = "\u0140",
-        ["Lslash"] = "\u0141", ["lslash"] = "\u0142",
-        ["Nacute"] = "\u0143", ["nacute"] = "\u0144",
-        ["Ncommaaccent"] = "\u0145", ["ncommaaccent"] = "\u0146",
-        ["Ncaron"] = "\u0147", ["ncaron"] = "\u0148",
-        ["napostrophe"] = "\u0149",
-        ["Eng"] = "\u014A", ["eng"] = "\u014B",
-        ["Omacron"] = "\u014C", ["omacron"] = "\u014D",
-        ["Obreve"] = "\u014E", ["obreve"] = "\u014F",
-        ["Ohungarumlaut"] = "\u0150", ["ohungarumlaut"] = "\u0151",
-        ["OE"] = "\u0152", ["oe"] = "\u0153",
-        ["Racute"] = "\u0154", ["racute"] = "\u0155",
-        ["Rcommaaccent"] = "\u0156", ["rcommaaccent"] = "\u0157",
-        ["Rcaron"] = "\u0158", ["rcaron"] = "\u0159",
-        ["Sacute"] = "\u015A", ["sacute"] = "\u015B",
-        ["Scircumflex"] = "\u015C", ["scircumflex"] = "\u015D",
-        ["Scedilla"] = "\u015E", ["scedilla"] = "\u015F",
-        ["Scaron"] = "\u0160", ["scaron"] = "\u0161",
-        ["Tcommaaccent"] = "\u0162", ["tcommaaccent"] = "\u0163",
-        ["Tcaron"] = "\u0164", ["tcaron"] = "\u0165",
-        ["Tbar"] = "\u0166", ["tbar"] = "\u0167",
-        ["Utilde"] = "\u0168", ["utilde"] = "\u0169",
-        ["Umacron"] = "\u016A", ["umacron"] = "\u016B",
-        ["Ubreve"] = "\u016C", ["ubreve"] = "\u016D",
-        ["Uring"] = "\u016E", ["uring"] = "\u016F",
-        ["Uhungarumlaut"] = "\u0170", ["uhungarumlaut"] = "\u0171",
-        ["Uogonek"] = "\u0172", ["uogonek"] = "\u0173",
-        ["Wcircumflex"] = "\u0174", ["wcircumflex"] = "\u0175",
-        ["Ycircumflex"] = "\u0176", ["ycircumflex"] = "\u0177",
-        ["Ydieresis"] = "\u0178",
-        ["Zacute"] = "\u0179", ["zacute"] = "\u017A",
-        ["Zdotaccent"] = "\u017B", ["zdotaccent"] = "\u017C",
-        ["Zcaron"] = "\u017D", ["zcaron"] = "\u017E",
-        ["longs"] = "\u017F",
-
-        // Latin Extended-B
-        ["florin"] = "\u0192",
-        ["Aringacute"] = "\u01FA", ["aringacute"] = "\u01FB",
-        ["AEacute"] = "\u01FC", ["aeacute"] = "\u01FD",
-
-        // Spacing Modifier Letters
-        ["circumflex"] = "\u02C6", ["caron"] = "\u02C7",
-        ["breve"] = "\u02D8", ["dotaccent"] = "\u02D9",
-        ["ring"] = "\u02DA", ["ogonek"] = "\u02DB",
-        ["tilde"] = "\u02DC", ["hungarumlaut"] = "\u02DD",
-
-        // Greek
-        ["Alpha"] = "\u0391", ["Beta"] = "\u0392", ["Gamma"] = "\u0393", ["Delta"] = "\u0394",
-        ["Epsilon"] = "\u0395", ["Zeta"] = "\u0396", ["Eta"] = "\u0397", ["Theta"] = "\u0398",
-        ["Iota"] = "\u0399", ["Kappa"] = "\u039A", ["Lambda"] = "\u039B", ["Mu"] = "\u039C",
-        ["Nu"] = "\u039D", ["Xi"] = "\u039E", ["Omicron"] = "\u039F", ["Pi"] = "\u03A0",
-        ["Rho"] = "\u03A1", ["Sigma"] = "\u03A3", ["Tau"] = "\u03A4", ["Upsilon"] = "\u03A5",
-        ["Phi"] = "\u03A6", ["Chi"] = "\u03A7", ["Psi"] = "\u03A8", ["Omega"] = "\u03A9",
-        ["alpha"] = "\u03B1", ["beta"] = "\u03B2", ["gamma"] = "\u03B3", ["delta"] = "\u03B4",
-        ["epsilon"] = "\u03B5", ["zeta"] = "\u03B6", ["eta"] = "\u03B7", ["theta"] = "\u03B8",
-        ["iota"] = "\u03B9", ["kappa"] = "\u03BA", ["lambda"] = "\u03BB",
-        ["nu"] = "\u03BD", ["xi"] = "\u03BE", ["omicron"] = "\u03BF", ["pi"] = "\u03C0",
-        ["rho"] = "\u03C1", ["sigma"] = "\u03C3", ["tau"] = "\u03C4", ["upsilon"] = "\u03C5",
-        ["phi"] = "\u03C6", ["chi"] = "\u03C7", ["psi"] = "\u03C8", ["omega"] = "\u03C9",
-        ["sigma1"] = "\u03C2", ["theta1"] = "\u03D1", ["Upsilon1"] = "\u03D2",
-        ["phi1"] = "\u03D5", ["omega1"] = "\u03D6",
-        // Greek with tonos / dialytika (modern Greek, AGL standard names)
-        ["Alphatonos"] = "\u0386", ["Epsilontonos"] = "\u0388",
-        ["Etatonos"] = "\u0389", ["Iotatonos"] = "\u038A",
-        ["Omicrontonos"] = "\u038C", ["Upsilontonos"] = "\u038E",
-        ["Omegatonos"] = "\u038F",
-        ["Iotadieresis"] = "\u03AA", ["Upsilondieresis"] = "\u03AB",
-        ["alphatonos"] = "\u03AC", ["epsilontonos"] = "\u03AD",
-        ["etatonos"] = "\u03AE", ["iotatonos"] = "\u03AF",
-        ["upsilondieresistonos"] = "\u03B0",
-        ["iotadieresis"] = "\u03CA", ["upsilondieresis"] = "\u03CB",
-        ["omicrontonos"] = "\u03CC", ["upsilontonos"] = "\u03CD",
-        ["omegatonos"] = "\u03CE",
-        ["iotadieresistonos"] = "\u0390",
-
-        // Cyrillic (afii series)
-        ["afii10017"] = "\u0410", ["afii10018"] = "\u0411", ["afii10019"] = "\u0412", ["afii10020"] = "\u0413",
-        ["afii10021"] = "\u0414", ["afii10022"] = "\u0415", ["afii10023"] = "\u0401", ["afii10024"] = "\u0416",
-        ["afii10025"] = "\u0417", ["afii10026"] = "\u0418", ["afii10027"] = "\u0419", ["afii10028"] = "\u041A",
-        ["afii10029"] = "\u041B", ["afii10030"] = "\u041C", ["afii10031"] = "\u041D", ["afii10032"] = "\u041E",
-        ["afii10033"] = "\u041F", ["afii10034"] = "\u0420", ["afii10035"] = "\u0421", ["afii10036"] = "\u0422",
-        ["afii10037"] = "\u0423", ["afii10038"] = "\u0424", ["afii10039"] = "\u0425", ["afii10040"] = "\u0426",
-        ["afii10041"] = "\u0427", ["afii10042"] = "\u0428", ["afii10043"] = "\u0429", ["afii10044"] = "\u042A",
-        ["afii10045"] = "\u042B", ["afii10046"] = "\u042C", ["afii10047"] = "\u042D", ["afii10048"] = "\u042E",
-        ["afii10049"] = "\u042F",
-        ["afii10065"] = "\u0430", ["afii10066"] = "\u0431", ["afii10067"] = "\u0432", ["afii10068"] = "\u0433",
-        ["afii10069"] = "\u0434", ["afii10070"] = "\u0435", ["afii10071"] = "\u0451", ["afii10072"] = "\u0436",
-        ["afii10073"] = "\u0437", ["afii10074"] = "\u0438", ["afii10075"] = "\u0439", ["afii10076"] = "\u043A",
-        ["afii10077"] = "\u043B", ["afii10078"] = "\u043C", ["afii10079"] = "\u043D", ["afii10080"] = "\u043E",
-        ["afii10081"] = "\u043F", ["afii10082"] = "\u0440", ["afii10083"] = "\u0441", ["afii10084"] = "\u0442",
-        ["afii10085"] = "\u0443", ["afii10086"] = "\u0444", ["afii10087"] = "\u0445", ["afii10088"] = "\u0446",
-        ["afii10089"] = "\u0447", ["afii10090"] = "\u0448", ["afii10091"] = "\u0449", ["afii10092"] = "\u044A",
-        ["afii10093"] = "\u044B", ["afii10094"] = "\u044C", ["afii10095"] = "\u044D", ["afii10096"] = "\u044E",
-        ["afii10097"] = "\u044F",
-        // Additional Cyrillic (Bulgarian, Serbian, Ukrainian)
-        ["afii10050"] = "\u0490", ["afii10098"] = "\u0491",
-        ["afii10051"] = "\u0402", ["afii10099"] = "\u0452",
-        ["afii10052"] = "\u0403", ["afii10100"] = "\u0453",
-        ["afii10053"] = "\u0404", ["afii10101"] = "\u0454",
-        ["afii10054"] = "\u0405", ["afii10102"] = "\u0455",
-        ["afii10055"] = "\u0406", ["afii10103"] = "\u0456",
-        ["afii10056"] = "\u0407", ["afii10104"] = "\u0457",
-        ["afii10057"] = "\u0408", ["afii10105"] = "\u0458",
-        ["afii10058"] = "\u0409", ["afii10106"] = "\u0459",
-        ["afii10059"] = "\u040A", ["afii10107"] = "\u045A",
-        ["afii10060"] = "\u040B", ["afii10108"] = "\u045B",
-        ["afii10061"] = "\u040C", ["afii10109"] = "\u045C",
-        ["afii10062"] = "\u040E", ["afii10110"] = "\u045E",
-        ["afii10145"] = "\u040F", ["afii10193"] = "\u045F",
-        ["afii10146"] = "\u0462", ["afii10194"] = "\u0463",
-        ["afii10147"] = "\u0472", ["afii10195"] = "\u0473",
-        ["afii10148"] = "\u0474", ["afii10196"] = "\u0475",
-
-        // General Punctuation & Typography
-        ["afii00208"] = "\u2015",
-        ["onedotenleader"] = "\u2024", ["twodotenleader"] = "\u2025",
-        ["minute"] = "\u2032", ["second"] = "\u2033",
-        ["sfthyphen"] = "\u00AD",
-
-        // Mathematical \u2014 common operators and relations
-        ["radical"] = "\u221A", ["infinity"] = "\u221E", ["integral"] = "\u222B",
-        ["approxequal"] = "\u2248", ["notequal"] = "\u2260",
-        ["lessequal"] = "\u2264", ["greaterequal"] = "\u2265",
-        ["partialdiff"] = "\u2202", ["summation"] = "\u2211",
-        ["product"] = "\u220F", ["lozenge"] = "\u25CA",
-        ["middot"] = "\u00B7",
-        // Set-theory and additional math (Adobe Glyph List standard names)
-        ["universal"] = "\u2200", ["existential"] = "\u2203",
-        ["element"] = "\u2208", ["notelement"] = "\u2209",
-        ["suchthat"] = "\u220B",
-        ["minus"] = "\u2212", ["plusminus"] = "\u00B1", ["multiply"] = "\u00D7", ["divide"] = "\u00F7",
-        ["asteriskmath"] = "\u2217", ["proportional"] = "\u221D",
-        ["angle"] = "\u2220", ["logicaland"] = "\u2227", ["logicalor"] = "\u2228",
-        ["intersection"] = "\u2229", ["union"] = "\u222A",
-        ["therefore"] = "\u2234", ["similar"] = "\u223C",
-        ["congruent"] = "\u2245", ["equivalence"] = "\u2261",
-        ["propersubset"] = "\u2282", ["propersuperset"] = "\u2283",
-        ["notsubset"] = "\u2284",
-        ["reflexsubset"] = "\u2286", ["reflexsuperset"] = "\u2287",
-        ["perpendicular"] = "\u22A5",
-        ["dotmath"] = "\u22C5", ["bullet"] = "\u2022",
-        // Arrows (single)
-        ["arrowleft"] = "\u2190", ["arrowup"] = "\u2191",
-        ["arrowright"] = "\u2192", ["arrowdown"] = "\u2193",
-        ["arrowboth"] = "\u2194", ["arrowupdn"] = "\u2195",
-        ["arrowupdnbse"] = "\u21A8",
-        ["carriagereturn"] = "\u21B5",
-        // Arrows (double)
-        ["arrowdblleft"] = "\u21D0", ["arrowdblup"] = "\u21D1",
-        ["arrowdblright"] = "\u21D2", ["arrowdbldown"] = "\u21D3",
-        ["arrowdblboth"] = "\u21D4",
-
-        // Currency
-        ["euro"] = "\u20AC", ["afii08941"] = "\u20AC",
-
-        // Ligatures
-        ["fi"] = "\uFB01", ["fl"] = "\uFB02",
-        ["ff"] = "\uFB00", ["ffi"] = "\uFB03", ["ffl"] = "\uFB04",
-
-        // Letterlike Symbols
-        ["afii61664"] = "\u200B", ["afii301"] = "\u200E", ["afii299"] = "\u200F",
-        ["numero"] = "\u2116", ["estimated"] = "\u212E",
-
-        // Box drawing / Geometric
-        ["square"] = "\u25A1", ["triagup"] = "\u25B2", ["triagrt"] = "\u25BA",
-        ["triagdn"] = "\u25BC", ["triaglf"] = "\u25C4",
-
-        // Dingbats (common)
-        ["a1"] = "\u2701", ["a2"] = "\u2702", ["a3"] = "\u2703", ["a4"] = "\u2704",
-        ["a5"] = "\u260E", ["a6"] = "\u2706", ["a7"] = "\u2707", ["a8"] = "\u2708",
-        ["a9"] = "\u2709", ["a10"] = "\u261B", ["a11"] = "\u261E",
-
-        // Miscellaneous
-        ["notdef"] = "\uFFFD", [".notdef"] = "\uFFFD",
-        ["null"] = "\u0000", ["CR"] = "\u000D",
-
-        // Additional common glyphs
-        ["nbspace"] = "\u00A0", ["nonbreakingspace"] = "\u00A0",
-        ["softhyphen"] = "\u00AD",
-        ["fraction"] = "\u2044",
+        (".notdef", "\uFFFD"), ("notdef", "\uFFFD"), ("null", "\u0000"), ("CR", "\u000D"),
+        ("square", "\u25A1"),
+        ("a1", "\u2701"), ("a2", "\u2702"), ("a3", "\u2703"), ("a4", "\u2704"),
+        ("a5", "\u260E"), ("a6", "\u2706"), ("a7", "\u2707"), ("a8", "\u2708"),
+        ("a9", "\u2709"), ("a10", "\u261B"), ("a11", "\u261E"),
     };
+
+    // The resource is Adobe's 2.0 list (2002) with its own older 1.2 list
+    // (1998) appended after it, and a name the two disagree about takes the
+    // LATER entry's answer -- see LoadGlyphNames. For "mu" that answer is
+    // U+03BC GREEK SMALL LETTER MU, the 1.2 reading; the current 2.0 standard
+    // names "mu" the micro sign, U+00B5, and pins it here rather than letting
+    // the appended list quietly override the current standard.
+    private const string GlyphNamePinnedToAdobe2_0 = "mu";
+    private const string GlyphNamePinnedToAdobe2_0Unicode = "\u00B5";
+
+    private static readonly (Dictionary<string, string> Combined, Dictionary<string, string> AdobeOnly) GlyphNames = LoadGlyphNames();
+    private static readonly (Dictionary<int, string> Combined, Dictionary<int, string> AdobeOnly) UnicodeNames = BuildUnicodeToGlyphName();
+
+    /// <summary>Every glyph name this engine resolves: Adobe's list plus the
+    /// PDF-synthetic names beside it (.notdef, a1..a11, ...). Used by the
+    /// engine's own other consumers (CffGlyphSource, FontInfo, the PostScript
+    /// converter); a caller wanting Adobe's OWN list, and nothing more, reads
+    /// AdobeGlyphNameToUnicode instead.</summary>
+    internal static Dictionary<string, string> GlyphNameToUnicode => GlyphNames.Combined;
+    internal static Dictionary<int, string> UnicodeToGlyphName => UnicodeNames.Combined;
+
+    /// <summary>Adobe's list alone (the 2.0 list with its 1.2 supplement read
+    /// on top, "mu" pinned back to 2.0) -- no PDF-synthetic names added: the
+    /// list a caller reporting Adobe's own names, or their count, answers
+    /// from; those extra names are this engine's own, not the format's.</summary>
+    internal static Dictionary<string, string> AdobeGlyphNameToUnicode => GlyphNames.AdobeOnly;
+    internal static Dictionary<int, string> AdobeUnicodeToGlyphName => UnicodeNames.AdobeOnly;
+
+    private static (Dictionary<string, string>, Dictionary<string, string>) LoadGlyphNames()
+    {
+        var map = new Dictionary<string, string>(4300, StringComparer.Ordinal);
+        foreach (var (name, codepoint) in ReadAdobeGlyphList())
+            map[name] = char.ConvertFromUtf32(codepoint);
+        map[GlyphNamePinnedToAdobe2_0] = GlyphNamePinnedToAdobe2_0Unicode;
+        var adobeOnly = new Dictionary<string, string>(map, StringComparer.Ordinal);
+        foreach (var (name, unicode) in NonAdobeGlyphNames) map[name] = unicode;
+        return (map, adobeOnly);
+    }
+
+    // The list maps more than one name to some codepoints (12 letters cover a
+    // Hebrew base and its point, for instance, and several AFII cross-reference
+    // names duplicate a plainer one). The LAST name the list gives a codepoint
+    // wins here, plainly, because the list itself has no other opinion to
+    // defer to, and its own 1.2 supplement is written to be read the same way.
+    // The "mu" pin above is a NAME-side exception; it does not touch this
+    // table, so U+00B5 and U+03BC both still answer "mu" in reverse, which is
+    // what the unmodified list already says for each of them on its own.
+    private static (Dictionary<int, string>, Dictionary<int, string>) BuildUnicodeToGlyphName()
+    {
+        var map = new Dictionary<int, string>(3700);
+        foreach (var (name, codepoint) in ReadAdobeGlyphList())
+            map[codepoint] = name;
+        var adobeOnly = new Dictionary<int, string>(map);
+        foreach (var (name, unicode) in NonAdobeGlyphNames)
+        {
+            var codepoint = char.ConvertToUtf32(unicode, 0);
+            if (!map.ContainsKey(codepoint)) map[codepoint] = name;
+        }
+        return (map, adobeOnly);
+    }
+
+    private static IEnumerable<(string Name, int Codepoint)> ReadAdobeGlyphList()
+    {
+        var assembly = typeof(TextAbsorber).Assembly;
+        using var stream = assembly.GetManifestResourceStream("Aspose.Pdf.Text.Resources.AdobeGlyphList.txt")
+            ?? throw new InvalidOperationException("Adobe Glyph List resource is missing");
+        using var reader = new StreamReader(stream);
+
+        string? line;
+        while ((line = reader.ReadLine()) != null)
+        {
+            if (line.Length == 0 || line[0] == '#') continue;
+
+            var cells = line.Split(';');
+            if (cells.Length < 2) continue;
+
+            var points = cells[1].Split(' ');
+            if (points.Length != 1) continue;
+
+            if (int.TryParse(points[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var codepoint))
+                yield return (cells[0], codepoint);
+        }
+    }
+
+    /// <summary>The character the Symbol face's code stands for, or nul when its
+    /// encoding leaves the code undefined.</summary>
+    internal static char SymbolCharacter(byte code) =>
+        SymbolEncoding.TryGetValue(code, out var ch) ? ch : ' ';
+
+    /// <summary>The character the ZapfDingbats face's code stands for, or nul when its
+    /// encoding leaves the code undefined.</summary>
+    internal static char DingbatCharacter(byte code) =>
+        ZapfDingbatsEncoding.TryGetValue(code, out var ch) ? ch : ' ';
 
     // ────────────────────────────────────────────────────────────────────────
     // Symbol font encoding — full 189-entry table

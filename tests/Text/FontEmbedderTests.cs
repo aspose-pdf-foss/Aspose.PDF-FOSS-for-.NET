@@ -139,7 +139,7 @@ public class FontEmbedderTests
 
         // Find the font dictionary by searching new objects
         // Just check the bytes contain "Widths" and non-zero width values
-        var pdfStr = System.Text.Encoding.Latin1.GetString(saved);
+        var pdfStr = Compat.Latin1.GetString(saved);
         Assert.Contains("/Widths", pdfStr);
         Assert.Contains("/FontDescriptor", pdfStr);
     }

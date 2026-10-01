@@ -1,6 +1,5 @@
-using Aspose.Pdf.Content;
+﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using System.Globalization;
 
 namespace Aspose.Pdf.Text;
@@ -29,6 +28,9 @@ public sealed partial class TextParagraph
     // with their actual glyph advances instead of being substituted by Helvetica.
     private readonly Dictionary<byte[], GlyphOutlineParser?> _glyphParsers =
         new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>Creates an empty paragraph with no lines.</summary>
+    public TextParagraph() { }
 
     /// <summary>Resolve (and cache) the glyph-outline parser for a text state's
     /// embedded TrueType data, or null when there is none / it fails to parse.</summary>
@@ -417,46 +419,25 @@ public sealed partial class TextParagraph
     /// Returns a list of lines, each a left-to-right list of (text, TextState)
     /// chunks. <paramref name="maxWidth"/> &gt; 0 enables word-wrap.
     /// </summary>
-    private List<List<(string text, TextState ts)>> BuildVisualLines(
-        double maxWidth, TextFormattingOptions.WordWrapMode wrapMode)
+    private List<List<(string text, TextState ts)>> BuildVisualLines(double maxWidth, TextFormattingOptions.WordWrapMode wrapMode)
     {
-        bool wrap = wrapMode != TextFormattingOptions.WordWrapMode.NoWrap && maxWidth > 0;
-        var result = new List<List<(string, TextState)>>();
+        var vl = new VisualLinesState();
+        vl.maxWidth = maxWidth;
+        vl.wrapMode = wrapMode;
+        vl.wrap = wrapMode != TextFormattingOptions.WordWrapMode.NoWrap && maxWidth > 0;
+        vl.result = new List<List<(string, TextState)>>();
         _visualLineFragments.Clear();
-        TextFragment? current = null;
-        void Emit(List<(string, TextState)> line) { result.Add(line); _visualLineFragments.Add(current!); }
-
-        // Emit a single run (one TextState) as one-or-more visual lines via the
-        // historical per-run wrap, which also handles discretionary hyphenation.
-        void AddSingleRun(TextState ts, string runText)
-        {
-            if (wrap)
-            {
-                foreach (var hardLine in runText.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
-                    foreach (var wl in WrapText(hardLine, ts.Font, ts.FontSize, maxWidth, wrapMode))
-                        Emit(new List<(string, TextState)> { (wl, ts) });
-            }
-            else
-            {
-                // Even with wrapping off (NoWrap / no clip width), an explicit hard
-                // newline (\r, \n, \r\n) in the run text is a line break — split on it
-                // so a replacement string that embeds Environment.NewLine renders on
-                // multiple lines instead of one run.
-                foreach (var hardLine in runText.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
-                    Emit(new List<(string, TextState)> { (hardLine, ts) });
-            }
-        }
-
+        vl.current = null;
         foreach (var fragment in _lines)
         {
-            current = fragment;
+            vl.current = fragment;
             // A fragment built from constructor text seeds a single segment whose
             // own TextState can lag later edits to fragment.TextState, so when the
             // fragment carries no explicitly-added segments (Count <= 1) the
             // fragment-level TextState is authoritative.
             if (fragment.Segments.Count <= 1)
             {
-                AddSingleRun(fragment.TextState, fragment.Text ?? string.Empty);
+                AddSingleRun(vl, fragment.TextState, fragment.Text ?? string.Empty);
                 continue;
             }
 
@@ -471,7 +452,7 @@ public sealed partial class TextParagraph
             if (realSegs.Count <= 1)
             {
                 var seg = realSegs.Count == 1 ? realSegs[0] : null;
-                AddSingleRun(seg?.TextState ?? fragment.TextState, seg?.Text ?? fragment.Text ?? string.Empty);
+                AddSingleRun(vl, seg?.TextState ?? fragment.TextState, seg?.Text ?? fragment.Text ?? string.Empty);
                 continue;
             }
 
@@ -495,7 +476,7 @@ public sealed partial class TextParagraph
             // Empty fragment still yields one (empty) visual line for clip-height parity.
             if (logical.Length == 0)
             {
-                Emit(new List<(string, TextState)> { (string.Empty, fragment.TextState) });
+                Emit(vl, new List<(string, TextState)> { (string.Empty, fragment.TextState) });
                 continue;
             }
 
@@ -506,7 +487,7 @@ public sealed partial class TextParagraph
             {
                 int nl = logical.IndexOf('\n', pos);
                 int hardEnd = nl < 0 ? logical.Length : nl;
-                if (wrap) WrapRange(logical, charTs, pos, hardEnd, maxWidth, ranges);
+                if (vl.wrap) WrapRange(logical, charTs, pos, hardEnd, vl.maxWidth, ranges);
                 else ranges.Add((pos, hardEnd - pos));
                 if (nl < 0) break;
                 pos = nl + 1;
@@ -514,10 +495,10 @@ public sealed partial class TextParagraph
             }
 
             foreach (var (start, len) in ranges)
-                Emit(BuildChunks(logical, charTs, start, len, fragment.TextState));
+                Emit(vl, BuildChunks(logical, charTs, start, len, fragment.TextState));
         }
 
-        return result;
+        return vl.result;
     }
 
     /// <summary>Split a char range into consecutive same-TextState chunks for

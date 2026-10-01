@@ -132,10 +132,13 @@ public sealed class ActionCollection : IEnumerable<PdfAction>
         RebuildActionChain();
     }
 
+    /// <summary>Returns true when <c>item</c> is in the collection.</summary>
     public bool Contains(PdfAction item) => _actions.Contains(item);
 
+    /// <summary>Copies the actions into <c>array</c>, starting at the 0-based position <c>index</c>.</summary>
     public void CopyTo(PdfAction[] array, int index) => _actions.CopyTo(array, index);
 
+    /// <summary>Removes <c>item</c> from the collection and rebuilds the action chain of the owner; returns true when it was removed.</summary>
     public bool Remove(PdfAction item)
     {
         if (item is null) return false;
@@ -144,6 +147,7 @@ public sealed class ActionCollection : IEnumerable<PdfAction>
         return removed;
     }
 
+    /// <summary>Removes every action from the collection and from the owner's action entry.</summary>
     public void Clear()
     {
         _actions.Clear();

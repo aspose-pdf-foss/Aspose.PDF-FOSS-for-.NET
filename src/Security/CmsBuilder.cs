@@ -1,10 +1,10 @@
-namespace Aspose.Pdf.Security;
+﻿namespace Aspose.Pdf.Security;
 
 /// <summary>
 /// Builds PKCS#7/CMS SignedData structures (RFC 5652) for PDF digital signatures.
 /// Replaces System.Security.Cryptography.Pkcs.SignedCms.
 /// </summary>
-internal static class CmsBuilder
+internal static partial class CmsBuilder
 {
 
 
@@ -102,13 +102,15 @@ internal static class CmsBuilder
     /// Returns DER-encoded ContentInfo containing SignedData.
     /// </summary>
     public static byte[] CreateDetachedSignature(byte[] hash, PdfCertificate certificate,
-        DigestHashAlgorithm digest = DigestHashAlgorithm.Sha256)
+        DigestHashAlgorithm digest = DigestHashAlgorithm.Sha256, Forms.SignHash? signer = null)
     {
         // Sign the hash (SHA-256 by default, SHA-1 for adbe.pkcs7.sha1). RSA uses the
         // hand-rolled PKCS#1 v1.5 path; DSA/ECDSA delegate to the platform key (r,s emitted
         // as an RFC 3279 DER SEQUENCE, which is what CMS expects). The signatureAlgorithm
-        // OID identifies which.
-        var (signature, sigAlgOid, sigAlgHasNullParams) = SignHash(hash, certificate, digest);
+        // OID identifies which. An external signer takes the key's place over the same hash.
+        var (signature, sigAlgOid, sigAlgHasNullParams) = signer is null
+            ? SignHash(hash, certificate, digest)
+            : SignHashExternally(hash, certificate, digest, signer);
         var digestOid = DigestOid(digest);
 
         var w = new Asn1Writer();
@@ -148,40 +150,7 @@ internal static class CmsBuilder
                     });
 
                     // signerInfos: SET { SignerInfo }
-                    sd.WriteSet(infos =>
-                    {
-                        infos.WriteSequence(si =>
-                        {
-                            // version: 1
-                            si.WriteInteger(1);
-
-                            // sid: IssuerAndSerialNumber
-                            si.WriteSequence(iasn =>
-                            {
-                                iasn.WriteRaw(certificate.IssuerDer);
-                                iasn.WriteIntegerBytes(certificate.SerialNumber);
-                            });
-
-                            // digestAlgorithm
-                            si.WriteSequence(algo =>
-                            {
-                                algo.WriteOid(digestOid);
-                                algo.WriteNull();
-                            });
-
-                            // signatureAlgorithm
-                            si.WriteSequence(algo =>
-                            {
-                                algo.WriteOid(sigAlgOid);
-                                // RSA carries an explicit NULL parameter; the ECDSA/DSA
-                                // "-with-SHA256" identifiers take absent parameters (RFC 5758).
-                                if (sigAlgHasNullParams) algo.WriteNull();
-                            });
-
-                            // signature
-                            si.WriteOctetString(signature);
-                        });
-                    });
+                    WriteSignerInfos(sd, certificate, digestOid, sigAlgOid, sigAlgHasNullParams, signature);
                 });
             });
         });
@@ -189,82 +158,144 @@ internal static class CmsBuilder
         return w.ToArray();
     }
 
-    /// <summary>Sign a SHA-256 hash with the certificate's private key, returning the
-    /// signature bytes, the CMS signatureAlgorithm OID, and whether that algorithm
-    /// identifier carries an explicit NULL parameter (RSA does; ECDSA/DSA don't).</summary>
+    /// <summary>signerInfos: SET { SignerInfo } - version 1, the issuer-and-serial sid, the
+    /// digest and signature algorithm identifiers and the signature itself.</summary>
+    private static void WriteSignerInfos(Asn1Writer sd, PdfCertificate certificate, string digestOid,
+        string sigAlgOid, bool sigAlgHasNullParams, byte[] signature)
+    {
+        sd.WriteSet(infos =>
+        {
+            infos.WriteSequence(si =>
+            {
+                // version: 1
+                si.WriteInteger(1);
+
+                // sid: IssuerAndSerialNumber
+                si.WriteSequence(iasn =>
+                {
+                    iasn.WriteRaw(certificate.IssuerDer);
+                    iasn.WriteIntegerBytes(certificate.SerialNumber);
+                });
+
+                // digestAlgorithm
+                si.WriteSequence(algo =>
+                {
+                    algo.WriteOid(digestOid);
+                    algo.WriteNull();
+                });
+
+                // signatureAlgorithm
+                si.WriteSequence(algo =>
+                {
+                    algo.WriteOid(sigAlgOid);
+                    // RSA carries an explicit NULL parameter; the ECDSA/DSA
+                    // "-with-SHA256" identifiers take absent parameters (RFC 5758).
+                    if (sigAlgHasNullParams) algo.WriteNull();
+                });
+
+                // signature
+                si.WriteOctetString(signature);
+            });
+        });
+    }
+
+    /// <summary>Sign a hash with the certificate's private key, returning the signature
+    /// bytes, the CMS signatureAlgorithm OID, and whether that algorithm identifier carries
+    /// an explicit NULL parameter (RSA does; ECDSA/DSA don't).</summary>
     private static (byte[] signature, string oid, bool hasNullParams) SignHash(
         byte[] hash, PdfCertificate certificate, DigestHashAlgorithm digest = DigestHashAlgorithm.Sha256)
     {
-        bool sha1 = digest == DigestHashAlgorithm.Sha1;
+        var (oid, hasNullParams) = SignatureAlgorithm(certificate.KeyKind, digest);
+        return (SignHashWithKey(hash, certificate, digest), oid, hasNullParams);
+    }
+
+    /// <summary>The signature value from an external signer: it signs the same hash the key
+    /// would, in the certificate's key algorithm, and the envelope names that algorithm as if
+    /// the key had been at hand.</summary>
+    private static (byte[] signature, string oid, bool hasNullParams) SignHashExternally(
+        byte[] hash, PdfCertificate certificate, DigestHashAlgorithm digest, Forms.SignHash signer)
+    {
+        var (oid, hasNullParams) = SignatureAlgorithm(certificate.KeyKind, digest);
+        return (signer(hash, digest), oid, hasNullParams);
+    }
+
+    /// <summary>The CMS signatureAlgorithm for a key kind and digest, and whether its
+    /// identifier carries an explicit NULL parameter (RSA does; ECDSA and DSA do not).</summary>
+    private static (string oid, bool hasNullParams) SignatureAlgorithm(SignatureKeyKind kind, DigestHashAlgorithm digest)
+        => kind switch
+        {
+            SignatureKeyKind.Ecdsa => (digest switch
+            {
+                DigestHashAlgorithm.Sha1 => OidEcdsaWithSha1,
+                DigestHashAlgorithm.Sha384 => OidEcdsaWithSha384,
+                DigestHashAlgorithm.Sha512 => OidEcdsaWithSha512,
+                DigestHashAlgorithm.Sha3_256 => OidEcdsaWithSha3_256,
+                DigestHashAlgorithm.Sha3_384 => OidEcdsaWithSha3_384,
+                DigestHashAlgorithm.Sha3_512 => OidEcdsaWithSha3_512,
+                _ => OidEcdsaWithSha256,
+            }, false),
+            SignatureKeyKind.Dsa => (digest == DigestHashAlgorithm.Sha1 ? OidDsaWithSha1 : OidDsaWithSha256, false),
+            _ => (OidRsaEncryption, true),
+        };
+
+    private static byte[] SignHashWithKey(byte[] hash, PdfCertificate certificate, DigestHashAlgorithm digest)
+    {
         switch (certificate.KeyKind)
         {
             case SignatureKeyKind.Ecdsa:
             {
                 using var ec = System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions.GetECDsaPrivateKey(certificate.DotNetCert!)
                     ?? throw new InvalidOperationException("Certificate has no ECDSA private key.");
-                var sig = ec.SignHash(hash,
-                    System.Security.Cryptography.DSASignatureFormat.Rfc3279DerSequence);
-                return (sig, digest switch
-                {
-                    DigestHashAlgorithm.Sha1 => OidEcdsaWithSha1,
-                    DigestHashAlgorithm.Sha384 => OidEcdsaWithSha384,
-                    DigestHashAlgorithm.Sha512 => OidEcdsaWithSha512,
-                    DigestHashAlgorithm.Sha3_256 => OidEcdsaWithSha3_256,
-                    DigestHashAlgorithm.Sha3_384 => OidEcdsaWithSha3_384,
-                    DigestHashAlgorithm.Sha3_512 => OidEcdsaWithSha3_512,
-                    _ => OidEcdsaWithSha256,
-                }, false);
+                return Compat.SignHashDer(ec, hash);
             }
             case SignatureKeyKind.Dsa:
             {
                 using var dsa = System.Security.Cryptography.X509Certificates.DSACertificateExtensions.GetDSAPrivateKey(certificate.DotNetCert!)
                     ?? throw new InvalidOperationException("Certificate has no DSA private key.");
-                var sig = dsa.CreateSignature(hash,
-                    System.Security.Cryptography.DSASignatureFormat.Rfc3279DerSequence);
-                return (sig, sha1 ? OidDsaWithSha1 : OidDsaWithSha256, false);
+                return Compat.CreateSignatureDer(dsa, hash);
             }
             default:
                 // RSA: the hand-rolled key when the PKCS#12 parser produced one,
                 // otherwise the platform key (a PFX whose encoding the hand-rolled
                 // parser rejected and which fell back to X509Certificate2).
                 if (certificate.PrivateKey is not null)
-                    return (digest switch
-                            {
-                                DigestHashAlgorithm.Sha1 => certificate.PrivateKey.SignSha1(hash),
-                                DigestHashAlgorithm.Sha384 => certificate.PrivateKey.SignSha384(hash),
-                                DigestHashAlgorithm.Sha512 => certificate.PrivateKey.SignSha512(hash),
-                                _ => certificate.PrivateKey.SignSha256(hash),
-                            },
-                            OidRsaEncryption, true);
+                    return digest switch
+                    {
+                        DigestHashAlgorithm.Sha1 => certificate.PrivateKey.SignSha1(hash),
+                        DigestHashAlgorithm.Sha384 => certificate.PrivateKey.SignSha384(hash),
+                        DigestHashAlgorithm.Sha512 => certificate.PrivateKey.SignSha512(hash),
+                        _ => certificate.PrivateKey.SignSha256(hash),
+                    };
                 using (var rsa = System.Security.Cryptography.X509Certificates
                            .RSACertificateExtensions.GetRSAPrivateKey(certificate.DotNetCert!)
                        ?? throw new InvalidOperationException("Certificate has no RSA private key."))
-                    return (rsa.SignHash(hash, HashName(digest),
-                                System.Security.Cryptography.RSASignaturePadding.Pkcs1),
-                            OidRsaEncryption, true);
+                    return rsa.SignHash(hash, HashName(digest),
+                        System.Security.Cryptography.RSASignaturePadding.Pkcs1);
         }
     }
 
     /// <summary>Verify a DSA/ECDSA signature (RFC 3279 DER r,s) over <paramref name="hash"/>
-    /// against the signer certificate's public key, delegating the curve/subgroup math to
-    /// the platform. Returns false on any decode/verify failure.</summary>
+    /// against the signer certificate's public key: an EC key on a NIST prime curve in
+    /// managed code (<see cref="EcdsaVerifier"/>), any other key by the platform. Returns
+    /// false on any decode/verify failure.</summary>
     private static bool VerifyDsaOrEcdsa(byte[] certDer, string keyAlgOid, byte[] hash, byte[] sig)
     {
         try
         {
-            using var cert = new System.Security.Cryptography.X509Certificates.X509Certificate2(certDer);
+            if (keyAlgOid == OidEcPublicKey && EcdsaVerifier.Verify(certDer, hash, sig) is { } managed)
+                return managed;
+            using var cert = Compat.LoadCertificate(certDer);
             if (keyAlgOid == OidEcPublicKey)
             {
                 using var ec = System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions.GetECDsaPublicKey(cert);
-                return ec is not null && ec.VerifyHash(hash, sig,
-                    System.Security.Cryptography.DSASignatureFormat.Rfc3279DerSequence);
+                return ec is not null && Compat.VerifyHashDer(ec, hash, sig);
             }
             if (keyAlgOid == OidDsa)
             {
                 using var dsa = System.Security.Cryptography.X509Certificates.DSACertificateExtensions.GetDSAPublicKey(cert);
                 if (dsa is null) return false;
                 var qLen = dsa.ExportParameters(false).Q!.Length;
-                var p1363 = DerSigToP1363(sig, qLen);
+                var p1363 = SignatureEncoding.DerToP1363(sig, qLen);
                 // DSA operates on the leftmost N bits of the digest (FIPS 186-4 §4.6).
                 // VerifySignature takes the raw hash without truncating, so feed it the
                 // leftmost q-sized slice to match how CreateSignature reduced the hash.
@@ -274,27 +305,6 @@ internal static class CmsBuilder
         }
         catch { }
         return false;
-    }
-
-    /// <summary>Convert an RFC 3279 DER ECDSA/DSA signature (SEQUENCE { INTEGER r,
-    /// INTEGER s }) to the fixed-width IEEE P1363 concatenation r‖s, each element
-    /// left-padded to <paramref name="elemLen"/> bytes.</summary>
-    private static byte[] DerSigToP1363(byte[] der, int elemLen)
-    {
-        var seq = new Asn1Reader(der).ReadSequence();
-        var r = StripLeadingZeros(seq.ReadIntegerBytes());
-        var s = StripLeadingZeros(seq.ReadIntegerBytes());
-        var outp = new byte[elemLen * 2];
-        Array.Copy(r, 0, outp, elemLen - r.Length, r.Length);
-        Array.Copy(s, 0, outp, elemLen * 2 - s.Length, s.Length);
-        return outp;
-    }
-
-    private static byte[] StripLeadingZeros(byte[] b)
-    {
-        var i = 0;
-        while (i < b.Length - 1 && b[i] == 0) i++;
-        return i == 0 ? b : b[i..];
     }
 
     /// <summary>Verify a raw RSA PKCS#1 v1.5 signature (the adbe.x509.rsa_sha1
@@ -327,11 +337,10 @@ internal static class CmsBuilder
             var modulus = pkReader.ReadIntegerBytes();
             var exponent = pkReader.ReadIntegerBytes();
 
-            var n = new System.Numerics.BigInteger(modulus, isUnsigned: true, isBigEndian: true);
-            var e = new System.Numerics.BigInteger(exponent, isUnsigned: true, isBigEndian: true);
-            var s = new System.Numerics.BigInteger(signature, isUnsigned: true, isBigEndian: true);
-            var decrypted = System.Numerics.BigInteger.ModPow(s, e, n)
-                .ToByteArray(isUnsigned: true, isBigEndian: true);
+            var n = Compat.BigIntegerFromUnsignedBigEndian(modulus);
+            var e = Compat.BigIntegerFromUnsignedBigEndian(exponent);
+            var s = Compat.BigIntegerFromUnsignedBigEndian(signature);
+            var decrypted = Compat.ToUnsignedBigEndian(System.Numerics.BigInteger.ModPow(s, e, n));
             if (decrypted.Length < modulus.Length)
             {
                 var padded = new byte[modulus.Length];
@@ -409,25 +418,7 @@ internal static class CmsBuilder
             byte[]? messageDigest = null;
             if (si.PeekTag() == 0xA0)
             {
-                // Read the raw [0] TLV (for re-encoding as SET)
-                var signedAttrsRaw = si.ReadRawTlv();
-                // Re-encode as SET (0x31) instead of context [0] (0xA0) for hashing
-                signedAttrsForHash = (byte[])signedAttrsRaw.Clone();
-                signedAttrsForHash[0] = 0x31;
-
-                // Parse attributes to find message-digest
-                var attrsReader = new Asn1Reader(signedAttrsRaw);
-                var attrs = attrsReader.ReadContextConstructed(0);
-                while (attrs.HasData)
-                {
-                    var attr = attrs.ReadSequence();
-                    var attrOid = attr.ReadOid();
-                    if (attrOid == "1.2.840.113549.1.9.4") // messageDigest
-                    {
-                        var attrValues = attr.ReadSet();
-                        messageDigest = attrValues.ReadOctetString();
-                    }
-                }
+                (signedAttrsForHash, messageDigest) = ReadSignedAttributes(si);
             }
 
             si.Skip(); // signatureAlgorithm
@@ -459,65 +450,7 @@ internal static class CmsBuilder
             {
                 try
                 {
-                    // Extract public key from certificate
-                    var cert = new Asn1Reader(certDer).ReadSequence();
-                    var tbs = cert.ReadSequence();
-                    tbs.TryReadContextConstructed(0); // version
-                    tbs.Skip(); // serial
-                    tbs.Skip(); // signature algo
-                    tbs.Skip(); // issuer
-                    tbs.Skip(); // validity
-                    tbs.Skip(); // subject
-                    var spki = tbs.ReadSequence(); // SubjectPublicKeyInfo
-                    var spkiAlgo = spki.ReadSequence(); // AlgorithmIdentifier
-                    var keyAlgOid = spkiAlgo.ReadOid();
-
-                    // DSA / ECDSA: delegate the signature check to the platform key.
-                    if (keyAlgOid == OidEcPublicKey || keyAlgOid == OidDsa)
-                    {
-                        if (VerifyDsaOrEcdsa(certDer, keyAlgOid, expectedHash, sig))
-                            return true;
-                        continue;
-                    }
-
-                    var pubKeyBits = spki.ReadBitString();
-
-                    // Parse RSA public key
-                    var pkReader = new Asn1Reader(pubKeyBits).ReadSequence();
-                    var modulus = pkReader.ReadIntegerBytes();
-                    var exponent = pkReader.ReadIntegerBytes();
-
-                    // RSA verify: sig^e mod n, then check PKCS#1 v1.5 padding
-                    var n = new System.Numerics.BigInteger(modulus, isUnsigned: true, isBigEndian: true);
-                    var e = new System.Numerics.BigInteger(exponent, isUnsigned: true, isBigEndian: true);
-                    var s = new System.Numerics.BigInteger(sig, isUnsigned: true, isBigEndian: true);
-                    var mVal = System.Numerics.BigInteger.ModPow(s, e, n);
-
-                    var decrypted = mVal.ToByteArray(isUnsigned: true, isBigEndian: true);
-                    if (decrypted.Length < modulus.Length)
-                    {
-                        var padded = new byte[modulus.Length];
-                        Array.Copy(decrypted, 0, padded, modulus.Length - decrypted.Length, decrypted.Length);
-                        decrypted = padded;
-                    }
-
-                    // Verify PKCS#1 v1.5: 00 01 FF.FF 00 DigestInfo
-                    if (decrypted.Length < 11 || decrypted[0] != 0x00 || decrypted[1] != 0x01)
-                        continue; // Try next cert
-
-                    var i = 2;
-                    while (i < decrypted.Length && decrypted[i] == 0xFF) i++;
-                    if (i >= decrypted.Length || decrypted[i] != 0x00) continue;
-                    i++;
-
-                    var digestInfo = decrypted[i..];
-                    var diReader = new Asn1Reader(digestInfo).ReadSequence();
-                    var algoSeq = diReader.ReadSequence();
-                    var hashOid = algoSeq.ReadOid();
-                    var recoveredHash = diReader.ReadOctetString();
-
-                    if (recoveredHash.AsSpan().SequenceEqual(expectedHash))
-                        return true;
+                    if (VerifySignerCert(certDer, expectedHash, sig)) return true;
                 }
                 catch
                 {

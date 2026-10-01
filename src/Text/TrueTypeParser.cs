@@ -6,7 +6,7 @@ namespace Aspose.Pdf.Text;
 /// Minimal TrueType/OpenType font parser that extracts metadata needed for PDF font embedding.
 /// Reads: head, hhea, OS/2, post, name, cmap, hmtx tables.
 /// </summary>
-internal sealed class TrueTypeParser
+internal sealed partial class TrueTypeParser
 {
     private readonly byte[] _data;
     private readonly Dictionary<string, (int offset, int length)> _tables = new();
@@ -69,6 +69,11 @@ internal sealed class TrueTypeParser
 
     /// <summary>Character code → glyph ID mapping (from cmap).</summary>
     public Dictionary<int, int> CMap { get; } = new();
+
+    /// <summary>A cmap subtable (platform, encoding) that <see cref="CMap"/> is read from in
+    /// preference to the usual choice, when the program has it (set before <see cref="Parse"/>)
+    /// - a symbolic font's (3,0) codes beside its Unicode subtable.</summary>
+    public (int Platform, int Encoding)? PreferSubtable { get; set; }
 
     /// <summary>Glyph ID → PostScript glyph name (from a version-2.0 post table).
     /// Empty when the font has no post names (version 1.0/3.0). Used to recover
@@ -382,6 +387,13 @@ internal sealed class TrueTypeParser
             else if (platformId == 0) priority = 2;                       // Generic Unicode
             else if (platformId == 1 && encodingId == 0) priority = 1;    // Mac Roman
             else if (platformId == 3 && encodingId == 0) priority = 0;    // Win Symbol
+            if (PreferSubtable is { } preferred && preferred.Platform == platformId && preferred.Encoding == encodingId)
+                priority = int.MaxValue;
+
+            // A subtable in a shape this reader cannot follow is no better than none:
+            // preferring it leaves the font with an EMPTY map when a readable
+            // subtable sits beside it.
+            if (!IsReadableSubtable(subtableOffset)) continue;
 
             if (priority > bestPriority)
             {
@@ -393,10 +405,39 @@ internal sealed class TrueTypeParser
         if (bestOffset < 0 || bestOffset + 6 > _data.Length) return;
 
         var format = ReadUInt16(bestOffset);
-        if (format == 4) ParseCMapFormat4(bestOffset);
+        if (format == 0) ParseCMapFormat0(bestOffset);
+        else if (format == 4) ParseCMapFormat4(bestOffset);
         else if (format == 6) ParseCMapFormat6(bestOffset);
         else if (format == 12) ParseCMapFormat12(bestOffset);
     }
+
+    /// <summary>The subtable shapes this reader understands.</summary>
+    private bool IsReadableSubtable(int offset)
+    {
+        if (offset < 0 || offset + 2 > _data.Length) return false;
+        var format = ReadUInt16(offset);
+        return format == 0 || format == 4 || format == 6 || format == 12;
+    }
+
+    /// <summary>
+    /// cmap format 0 - byte encoding table (OpenType &#167;cmap). Layout:
+    /// format(2) length(2) language(2) glyphIdArray[256](1 each). The single-byte
+    /// codes map straight to glyph ids, which is the only map a picture face such as
+    /// Symbol carries beside its Windows-symbol subtable.
+    /// </summary>
+    private void ParseCMapFormat0(int offset)
+    {
+        var arrayOffset = offset + 6;
+        if (arrayOffset + ByteCodeCount > _data.Length) return;
+        for (var code = 0; code < ByteCodeCount; code++)
+        {
+            var glyphId = _data[arrayOffset + code];
+            if (glyphId != 0) CMap[code] = glyphId;
+        }
+    }
+
+    /// <summary>How many codes a single-byte map covers.</summary>
+    private const int ByteCodeCount = 256;
 
     /// <summary>
     /// cmap format 6 — trimmed table mapping (OpenType §cmap). Used by Mac Roman

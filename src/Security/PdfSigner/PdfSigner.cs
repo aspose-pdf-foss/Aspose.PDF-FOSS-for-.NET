@@ -11,225 +11,6 @@ namespace Aspose.Pdf.Security;
 public sealed partial class PdfSigner
 {
     /// <summary>
-    /// Sign a PDF document and return the signed bytes.
-    /// Uses incremental update to preserve original content.
-    /// </summary>
-    public static byte[] Sign(byte[] pdfData, PdfCertificate certificate,
-        SignatureOptions? options = null)
-    {
-        options ??= new SignatureOptions();
-        var contentsSize = options.ContentsSize;
-
-        // Step 1: Parse the original document to find AcroForm and allocate objects
-        using var doc = OpenDoc(pdfData, options.Password);
-        var reader = doc.Reader;
-        var trailer = reader.Trailer;
-        var xref = reader.XRefTable;
-
-        // Resolve the target field name. An explicit name is honoured; otherwise
-        // pick the first SignatureN that is free or blank — signing again must not
-        // overwrite an already-signed field (each signature is its own revision).
-        var fieldName = ResolveSignatureFieldName(doc, options.FieldName);
-
-        // Determine next available object numbers
-        var maxObj = 0;
-        foreach (var entry in xref.Entries.Values)
-            if (entry.ObjectNumber > maxObj) maxObj = entry.ObjectNumber;
-        var nextObj = maxObj + 1;
-
-        // If the document already contains a (blank) signature field with this
-        // name, reuse it — update its /V in place rather than appending a
-        // duplicate field. Otherwise allocate a fresh field object.
-        var (existingFieldRef, existingFieldDict) = FindTopLevelField(doc, fieldName);
-        // An inline field is adopted: it keeps its /Rect and /T but takes a fresh object
-        // number, and its /Fields slot is rewritten to point at it.
-        var adoptDirectField = existingFieldRef is null && existingFieldDict is not null;
-
-        // Allocate object numbers for: sig value dict, sig field, updated AcroForm
-        var sigValObjNum = nextObj++;
-        var sigFieldObjNum = existingFieldRef is not null
-            ? existingFieldRef.ObjectNumber
-            : nextObj++;
-        var acroFormObjNum = nextObj++;
-        var dssCertObjNum = options.UseLtv ? nextObj++ : 0;
-
-        // The signed widget carries a TEXT BANNER, not the blank field's placeholder:
-        // one is written for every signature, an invisible one applied to a
-        // pre-existing field included (see SignatureBanner). Built before the field dict
-        // so its /AP can point at the appearance.
-        var banner = existingFieldDict is not null
-            ? BuildBannerObjects(existingFieldDict, reader, options, certificate, ref nextObj)
-            : null;
-
-        // Step 2: Build the incremental update with placeholder
-        using var ms = new MemoryStream();
-
-        // Copy original PDF
-        ms.Write(pdfData);
-
-        // Build signature value dictionary with placeholder
-        var sigValDict = BuildSignatureValueDict(certificate, options, contentsSize);
-
-        // Build signature field widget — reuse the existing field dict (keeping
-        // its /Rect, /P, /AP, /MK …) when signing a pre-existing blank field.
-        var sigFieldDict = existingFieldDict is not null
-            ? BuildUpdatedSignatureFieldDict(existingFieldDict, sigValObjNum)
-            : BuildSignatureFieldDict(fieldName, sigValObjNum, doc);
-        if (banner is { } bannerAp)
-        {
-            var apDict = new PdfDictionary();
-            apDict.Set("N", new PdfIndirectRef(bannerAp.ApObjNum, 0));
-            sigFieldDict.Set("AP", apDict);
-        }
-
-        // Build or update AcroForm. When reusing an existing field, it is
-        // already listed in /Fields — don't append a duplicate reference.
-        var acroFormDict = BuildAcroFormDict(doc, sigFieldObjNum,
-            appendField: existingFieldDict is null,
-            replaceFieldNamed: adoptDirectField ? fieldName : null,
-            reader: doc.Reader);
-
-        // Write the new objects
-        var offsets = new Dictionary<int, long>();
-
-        // Write sig value dict — we need to track the /Contents placeholder position
-        offsets[sigValObjNum] = ms.Position;
-        var sigValBytes = SerializeObject(sigValObjNum, sigValDict, contentsSize, out var contentsOffset, out var contentsLength);
-        ms.Write(sigValBytes);
-
-        // Adjust contentsOffset to be relative to the full file
-        contentsOffset += offsets[sigValObjNum];
-
-        // Write sig field
-        offsets[sigFieldObjNum] = ms.Position;
-        WriteIndirectObject(ms, sigFieldObjNum, sigFieldDict);
-
-        // Write AcroForm
-        offsets[acroFormObjNum] = ms.Position;
-        WriteIndirectObject(ms, acroFormObjNum, acroFormDict);
-
-        // The banner's own objects: the face, then the nested forms.
-        if (banner is { } bnObjs)
-            foreach (var (num, dict, isStream) in bnObjs.Objects)
-            {
-                offsets[num] = ms.Position;
-                if (isStream) WriteStreamObject(ms, num, dict);
-                else WriteIndirectObject(ms, num, dict);
-            }
-
-        // An adopted inline field is referenced by the PAGE as well: its widget rides in
-        // /Annots, and a viewer paints annotations from there. Repoint that slot at the
-        // object the signer just wrote, or the page keeps drawing the blank placeholder.
-        if (adoptDirectField)
-        {
-            var annotPageRef = FindPageRef(reader, 0);
-            if (annotPageRef is not null && reader.ResolveDict(annotPageRef) is { } annotPage
-                && reader.Resolve(annotPage.Get("Annots")) is PdfArray oldAnnotArr)
-            {
-                var newAnnots = new PdfArray();
-                var replaced = false;
-                foreach (var a in oldAnnotArr)
-                {
-                    if (!replaced && a is PdfDictionary ad
-                        && (reader.Resolve(ad.Get("T")) as PdfString)?.ToText() == fieldName)
-                    {
-                        newAnnots.Add(new PdfIndirectRef(sigFieldObjNum, 0));
-                        replaced = true;
-                        continue;
-                    }
-                    newAnnots.Add(a);
-                }
-                if (replaced)
-                {
-                    var newAnnotPage = CloneDict(annotPage);
-                    newAnnotPage.Set("Annots", newAnnots);
-                    offsets[annotPageRef.ObjectNumber] = ms.Position;
-                    WriteIndirectObject(ms, annotPageRef.ObjectNumber, newAnnotPage);
-                }
-            }
-        }
-
-        // Write updated catalog (add/update AcroForm reference)
-        var catalogRef = trailer.Get("Root") as PdfIndirectRef;
-        var catalogObjNum = catalogRef?.ObjectNumber ?? 1;
-        var catalogDict = CloneDict(reader.Catalog);
-        catalogDict.Set("AcroForm", new PdfIndirectRef(acroFormObjNum, 0));
-
-        // Certifying signature: catalog /Perms /DocMDP points at the sig value.
-        if (options.DocMdpPermissions is not null)
-        {
-            var perms = new PdfDictionary();
-            perms.Set("DocMDP", new PdfIndirectRef(sigValObjNum, 0));
-            catalogDict.Set("Perms", perms);
-        }
-
-        // LTV: embed the signer certificate in a /DSS (Document Security Store)
-        // so the signature stays verifiable after the certificate expires.
-        if (options.UseLtv)
-        {
-            offsets[dssCertObjNum] = ms.Position;
-            WriteStreamObject(ms, dssCertObjNum, BuildCertStreamDict(certificate.CertificateDer));
-            catalogDict.Set("DSS", BuildDssDict(dssCertObjNum));
-        }
-
-        offsets[catalogObjNum] = ms.Position;
-        WriteIndirectObject(ms, catalogObjNum, catalogDict);
-
-        // Write xref + trailer
-        var originalStartXref = XRefTable.FindStartXref(pdfData);
-        WriteXRefAndTrailer(ms, offsets, trailer, nextObj, originalStartXref);
-
-        var fileBytes = ms.ToArray();
-
-        // Step 3: Compute ByteRange — the two ranges that exclude /Contents value
-        // ByteRange = [0, contentsOffset, contentsOffset + contentsLength, fileLength - (contentsOffset + contentsLength)]
-        var byteRange = new long[]
-        {
-            0,
-            contentsOffset,
-            contentsOffset + contentsLength,
-            fileBytes.Length - (contentsOffset + contentsLength)
-        };
-
-        // Step 4: Patch the ByteRange in the signature value dict
-        // Find and replace the placeholder ByteRange
-        PatchByteRange(fileBytes, byteRange);
-
-        // Step 5: Compute the hash over the two byte ranges. Which digest applies
-        // depends on the caller's request, the /SubFilter default (SHA-1 for the
-        // adbe.pkcs7.sha1 / adbe.x509.rsa_sha1 handlers) and the signing key.
-        var digest = CmsBuilder.ResolveDigest(
-            certificate.KeyKind, options.Digest, DigestForSubFilter(options.SubFilter));
-        var hashInput = new byte[(int)byteRange[1] + (int)byteRange[3]];
-        Array.Copy(fileBytes, 0, hashInput, 0, (int)byteRange[1]);
-        Array.Copy(fileBytes, (int)byteRange[2], hashInput, (int)byteRange[1], (int)byteRange[3]);
-        var hash = HashByteRange(hashInput, digest);
-
-        // Step 6: Create PKCS#7/CMS detached signature
-        var signatureBytes = options.CustomSignHash is not null
-            ? options.CustomSignHash(hash, digest)
-            : CreatePkcs7Signature(hash, certificate, digest);
-
-        if (signatureBytes.Length > contentsSize)
-            throw options.AvoidEstimating
-                ? new SignatureLengthMismatchException(signatureBytes.Length)
-                : new InvalidOperationException(
-                    $"Signature ({signatureBytes.Length} bytes) exceeds reserved space ({contentsSize} bytes). " +
-                    "Increase SignatureOptions.ContentsSize.");
-
-        // Step 7: Write the signature into the /Contents placeholder
-        var hexSignature = Convert.ToHexString(signatureBytes);
-        // Pad with zeros to fill the reserved space
-        hexSignature = hexSignature.PadRight(contentsSize * 2, '0');
-
-        // Write hex string into the placeholder (skip the leading '<' at contentsOffset)
-        var hexBytes = Encoding.ASCII.GetBytes(hexSignature);
-        Array.Copy(hexBytes, 0, fileBytes, (int)contentsOffset + 1, hexBytes.Length);
-
-        return fileBytes;
-    }
-
-    /// <summary>
     /// Add an RFC 3161 document timestamp (PAdES DocTimeStamp, /SubFilter
     /// <c>ETSI.RFC3161</c>) via an incremental update. Hashes the ByteRange,
     /// requests a timestamp token from the TSA in
@@ -278,8 +59,7 @@ public sealed partial class PdfSigner
         var offsets = new Dictionary<int, long>();
 
         offsets[sigValObjNum] = ms.Position;
-        var sigValBytes = SerializeObject(sigValObjNum, sigValDict, contentsSize,
-            out var contentsOffset, out var contentsLength);
+        (var sigValBytes, var contentsOffset, var contentsLength) = SerializeObject(sigValObjNum, sigValDict, contentsSize);
         ms.Write(sigValBytes);
         contentsOffset += offsets[sigValObjNum];
 
@@ -326,7 +106,7 @@ public sealed partial class PdfSigner
             throw new InvalidOperationException(
                 $"Timestamp token ({token.Length} bytes) exceeds reserved space ({contentsSize} bytes).");
 
-        var hexToken = Convert.ToHexString(token).PadRight(contentsSize * 2, '0');
+        var hexToken = Compat.ToHexString(token).PadRight(contentsSize * 2, '0');
         var hexBytes = Encoding.ASCII.GetBytes(hexToken);
         Array.Copy(hexBytes, 0, fileBytes, (int)contentsOffset + 1, hexBytes.Length);
 
@@ -538,23 +318,23 @@ public sealed partial class PdfSigner
     /// face resolves, and the caller then leaves the field's own appearance alone.
     /// </summary>
     /// <remarks>See <see cref="SignatureBanner"/> for the shape that is written.</remarks>
-    private static (int ApObjNum, List<(int Num, PdfDictionary Dict, bool IsStream)> Objects)?
+    private static (int ApObjNum, List<(int Num, PdfDictionary Dict, bool IsStream)> Objects, int NextObj)?
         BuildBannerObjects(PdfDictionary fieldDict, PdfReader reader, SignatureOptions options,
-            PdfCertificate certificate, ref int nextObj)
+            PdfCertificate certificate, int nextObj)
     {
         if (reader.Resolve(fieldDict.Get("Rect")) is not PdfArray rect || rect.Count < 4)
             return null;
         double N(int i) => rect[i] switch { PdfReal r => r.Value, PdfInteger n => n.Value, _ => 0.0 };
         return BuildBannerObjects(Math.Abs(N(2) - N(0)), Math.Abs(N(3) - N(1)),
-            options, certificate, ref nextObj);
+            options, certificate, nextObj);
     }
 
     /// <summary>The banner for a box of the given size — the shape both signing paths
     /// share, the invisible one taking the box from the field it adopts and the visible
     /// one from the caller's rectangle.</summary>
-    private static (int ApObjNum, List<(int Num, PdfDictionary Dict, bool IsStream)> Objects)?
+    private static (int ApObjNum, List<(int Num, PdfDictionary Dict, bool IsStream)> Objects, int NextObj)?
         BuildBannerObjects(double w, double h, SignatureOptions options,
-            PdfCertificate certificate, ref int nextObj,
+            PdfCertificate certificate, int nextObj,
             string? fontFamily = null, double bannerFontSize = 10,
             SignatureAppearance? appearance = null)
     {
@@ -575,7 +355,8 @@ public sealed partial class PdfSigner
             appearance?.SignDate ?? options.SigningDate ?? DateTime.Now,
             Meta(appearance?.Reason, options.Reason),
             Meta(appearance?.Location, options.Location),
-            Meta(appearance?.ContactInfo, options.ContactInfo));
+            Meta(appearance?.ContactInfo, options.ContactInfo),
+            appearance?.Labels);
         if (lines.Count == 0) return null;
         if (SignatureBanner.ResolveFace(lines, fontFamily) is not { } face) return null;
 
@@ -589,11 +370,33 @@ public sealed partial class PdfSigner
         foreach (var line in lines)
             hexLines.Add(SignatureBanner.HexGlyphs(line, parser, widths, toUnicode));
 
-        var fontSize = bannerFontSize > 0 ? bannerFontSize : 10;
-        var fontRes = "C0_0";
         var objects = new List<(int, PdfDictionary, bool)>();
+        var fontObj = AppendBannerFace(face, widths, toUnicode, objects, ref nextObj);
+        const string fontRes = "C0_0";
+        var n2Obj = AppendBannerTextForm(w, h, hexLines, fontObj, fontRes,
+            bannerFontSize > 0 ? bannerFontSize : 10, objects, ref nextObj);
 
-        // The face, bottom up: program, descriptor, CID font, Type0.
+        // A caller-supplied graphic is the /n0 layer under the text: the frame draws
+        // the picture first, then the banner over it.
+        var layers = new List<(string Name, int Obj)>();
+        if (appearance?.ImageBytes is { Length: > 0 } picture
+            && SignatureBanner.PictureForm(picture, w, h, ref nextObj, objects) is { } n0Obj)
+            layers.Add(("n0", n0Obj));
+        layers.Add(("n2", n2Obj));
+        var frmObj = nextObj++;
+        objects.Add((frmObj, SignatureBanner.Wrapper(layers, w, h, "FRM"), true));
+        var apObj = nextObj++;
+        objects.Add((apObj, SignatureBanner.Wrapper("FRM", frmObj, w, h, null), true));
+
+        return (apObj, objects, nextObj);
+    }
+
+    /// <summary>The banner's face, bottom up: program, descriptor, CID font, Type0. Returns the
+    /// Type0 font's object number, the one the appearance stream names.</summary>
+    private static int AppendBannerFace((byte[] Ttf, string Name) face,
+        SortedDictionary<int, int> widths, SortedDictionary<int, char> toUnicode,
+        List<(int, PdfDictionary, bool)> objects, ref int nextObj)
+    {
         var fileObj = nextObj++;
         var fileDict = new PdfDictionary();
         // The program is DEFLATED. Raw, a font's tables carry
@@ -606,7 +409,6 @@ public sealed partial class PdfSigner
         fileDict.Set("__StreamData", new PdfString(packed));
         objects.Add((fileObj, fileDict, true));
 
-        var upm = parser.UnitsPerEm > 0 ? parser.UnitsPerEm : 1000;
         var descObj = nextObj++;
         var descDict = new PdfDictionary();
         descDict.Set("Type", new PdfName("FontDescriptor"));
@@ -668,8 +470,14 @@ public sealed partial class PdfSigner
             fontDict.Set("ToUnicode", new PdfIndirectRef(tuObj, 0));
         }
         objects.Add((fontObj, fontDict, false));
+        return fontObj;
+    }
 
-        // /n2 holds the text; /FRM invokes it; the widget's /N invokes /FRM.
+    /// <summary>/n2 holds the text; /FRM invokes it; the widget's /N invokes /FRM.</summary>
+    private static int AppendBannerTextForm(double w, double h, List<string> hexLines,
+        int fontObj, string fontRes, double fontSize,
+        List<(int, PdfDictionary, bool)> objects, ref int nextObj)
+    {
         var n2Obj = nextObj++;
         var n2 = new PdfDictionary();
         n2.Set("Type", new PdfName("XObject"));
@@ -692,14 +500,9 @@ public sealed partial class PdfSigner
         n2.Set("Length", new PdfInteger(content.Length));
         n2.Set("__StreamData", new PdfString(content));
         objects.Add((n2Obj, n2, true));
-
-        var frmObj = nextObj++;
-        objects.Add((frmObj, SignatureBanner.Wrapper("n2", n2Obj, w, h, "FRM"), true));
-        var apObj = nextObj++;
-        objects.Add((apObj, SignatureBanner.Wrapper("FRM", frmObj, w, h, null), true));
-
-        return (apObj, objects);
+        return n2Obj;
     }
+
 
     #endregion
 }

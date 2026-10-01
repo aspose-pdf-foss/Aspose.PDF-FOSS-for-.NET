@@ -85,7 +85,7 @@ public sealed partial class SoftwarePageRenderer
                         // No transform output: fall back to the tint read as an inverted
                         // plate, which is what BuildSeparationLut does for the same case.
                         if (alt is null) r = g = b = (byte)(255 - palette[i * tintComps]);
-                        else ComponentsToRgb(alt, baseInfo.AltSpaceName ?? "DeviceGray", out r, out g, out b);
+                        else (r, g, b) = ComponentsToRgb(alt, baseInfo.AltSpaceName ?? "DeviceGray");
                         rgbPalette[i * 3] = r; rgbPalette[i * 3 + 1] = g; rgbPalette[i * 3 + 2] = b;
                     }
                     return new ImageColorSpaceInfo
@@ -164,7 +164,7 @@ public sealed partial class SoftwarePageRenderer
 
     /// <summary>
     /// Build a 256-entry RGB lookup table for a single-component /Separation image:
-    /// sample byte → tint (0..1) → alternate components → RGB. <paramref name="invert"/>
+    /// sample byte → tint (0..1) → alternate components → RGB. <c>invert</c>
     /// applies a /Decode [1 0] reversal. Returns 256×3 packed RGB bytes.
     /// </summary>
     /// <summary>
@@ -206,7 +206,7 @@ public sealed partial class SoftwarePageRenderer
     {
         byte fr = 0, fg = 0, fb = 0;
         var full = cs.TintTransform!.Evaluate(new[] { 1.0 });
-        if (full is not null) ComponentsToRgb(full, cs.AltSpaceName ?? "DeviceGray", out fr, out fg, out fb);
+        if (full is not null) (fr, fg, fb) = ComponentsToRgb(full, cs.AltSpaceName ?? "DeviceGray");
         var lut = new byte[256 * 3];
         for (int i = 0; i < 256; i++)
         {
@@ -245,7 +245,7 @@ public sealed partial class SoftwarePageRenderer
             byte r, g, b;
             var alt = cs.TintTransform!.Evaluate(input);
             if (alt is null) { r = g = b = (byte)(255 - i); }
-            else ComponentsToRgb(alt, cs.AltSpaceName ?? "DeviceGray", out r, out g, out b);
+            else (r, g, b) = ComponentsToRgb(alt, cs.AltSpaceName ?? "DeviceGray");
             lut[i * 3] = r; lut[i * 3 + 1] = g; lut[i * 3 + 2] = b;
         }
         return lut;

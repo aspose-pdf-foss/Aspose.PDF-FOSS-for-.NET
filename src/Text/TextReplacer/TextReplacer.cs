@@ -14,6 +14,10 @@ namespace Aspose.Pdf.Text;
 /// </summary>
 public sealed partial class TextReplacer
 {
+    /// <summary>What the most recent content walk reported through its state: whether it met
+    /// anything a replace can act on. Read by the caller of a nested form walk to seal the
+    /// form's verdict.</summary>
+    private bool _walkSawText;
     private int _replacementCount;
 
     private bool _isRegex;
@@ -60,16 +64,6 @@ public sealed partial class TextReplacer
     public bool ReplaceFirstOnly { get; set; }
 
     /// <summary>
-    /// Redaction mode: when a match is fully deleted (replacement is empty),
-    /// emit a TJ advance equal to the removed text's width instead of dropping
-    /// the show operator, so following text on the same line keeps its position
-    /// (no reflow). The glyphs are still gone from the content — extraction can
-    /// no longer find them — but the layout is preserved. Used by
-    /// <c>RedactionAnnotation.Redact()</c>.
-    /// </summary>
-    internal bool PreserveAdvanceOnDelete { get; set; }
-
-    /// <summary>
     /// When true, a full deletion (replacement is empty) keeps an empty
     /// <c>() Tj</c> show operator instead of dropping it, so the emptied
     /// fragment is still re-extractable as a zero-length fragment. Set by the
@@ -112,59 +106,6 @@ public sealed partial class TextReplacer
     internal static void ResetSwitchedFont() => s_switchedFontFamily = null;
 
     internal static void RecordSwitchedFont(string family) => s_switchedFontFamily = family;
-
-    // Emit `[ kern ] TJ` — an advance with no glyphs — that moves the text
-    // position right by the width of <paramref name="removedBytes"/>, so text
-    // after a fully-deleted run stays put. No-op (writes nothing) when metrics
-    // are unavailable or the width is negligible.
-    private void WriteDeletionAdvance(MemoryStream result, byte[] removedBytes,
-        PdfDictionary? fontDict, PdfReader reader, double fontSize)
-    {
-        if (!PreserveAdvanceOnDelete || fontDict is null || fontSize <= 0) return;
-        double width;
-        try
-        {
-            var metrics = FontMetrics.FromFontDict(fontDict, reader);
-            if (metrics is null) return;
-            width = metrics.MeasureString(removedBytes, fontSize);
-        }
-        catch { return; }
-        WriteAdvance(result, width, fontSize);
-    }
-
-    // Width-preserving advance for a fully-deleted TJ array: total advance = sum of
-    // the strings' widths minus the kerning numbers (scaled), so the whole operator
-    // is replaced by a glyph-less advance of the same width.
-    private void WriteDeletionAdvanceTJ(MemoryStream result, PdfArray arr,
-        PdfDictionary? fontDict, PdfReader reader, double fontSize)
-    {
-        if (!PreserveAdvanceOnDelete || fontDict is null || fontSize <= 0) return;
-        double width;
-        try
-        {
-            var metrics = FontMetrics.FromFontDict(fontDict, reader);
-            if (metrics is null) return;
-            width = 0;
-            foreach (var el in arr)
-            {
-                if (el is PdfString ps) width += metrics.MeasureString(ps.Value, fontSize);
-                else if (el is PdfInteger pi) width += -pi.Value * fontSize / 1000.0;
-                else if (el is PdfReal pr) width += -pr.Value * fontSize / 1000.0;
-            }
-        }
-        catch { return; }
-        WriteAdvance(result, width, fontSize);
-    }
-
-    private static void WriteAdvance(MemoryStream result, double width, double fontSize)
-    {
-        if (width <= 0.05) return;
-        // PDF TJ: a number is subtracted from the advance (positive = shift left),
-        // so a NEGATIVE number advances right by width.
-        var kern = (int)Math.Round(-width * 1000.0 / fontSize);
-        if (kern == 0) return;
-        result.Write(Encoding.ASCII.GetBytes($"[{kern}] TJ"));
-    }
 
     /// <summary>
     /// When set, only replace inside text-showing operators whose composed
@@ -309,8 +250,7 @@ public sealed partial class TextReplacer
     /// repeated absorber passes from nesting graphics-state operators.</summary>
     internal static byte[] WrapInGraphicsState(byte[] content)
     {
-        var ops = ContentStreamOperatorParser.ParseOperators(content);
-        if (ops.Count >= 1 && ops[0] == "q")
+        if (OpensWithSaveState(content))
             return content;
 
         var prefix = System.Text.Encoding.ASCII.GetBytes("q\n");
@@ -320,6 +260,23 @@ public sealed partial class TextReplacer
         content.CopyTo(wrapped, prefix.Length);
         suffix.CopyTo(wrapped, prefix.Length + content.Length);
         return wrapped;
+    }
+
+    /// <summary>The bytes that hold a content stream's leading operator: a bare q sits
+    /// within them, and a stream whose first operator is longer opens with something
+    /// else anyway.</summary>
+    private const int LeadingOperatorWindow = 256;
+
+    /// <summary>Whether the content's first operator is a bare q. Only the head of the
+    /// stream is parsed for it; parsing a multi-megabyte page in full for its first
+    /// operator was a cost paid on every replaced fragment.</summary>
+    private static bool OpensWithSaveState(byte[] content)
+    {
+        var head = content.Length > LeadingOperatorWindow ? content[..LeadingOperatorWindow] : content;
+        var ops = ContentStreamOperatorParser.ParseOperators(head);
+        if (ops.Count == 0 && head.Length < content.Length)
+            ops = ContentStreamOperatorParser.ParseOperators(content);
+        return ops.Count >= 1 && ops[0] == "q";
     }
 
     /// <summary>
@@ -444,10 +401,11 @@ public sealed partial class TextReplacer
             ReplaceInFormXObjects(xobjStream.Dict, reader, search, replacement, processed);
 
             // Process the Form XObject's own content
-            var decoded = reader.DecodeStream(xobjStream);
+            if (!FormMayShowText(xobjStream, reader, out var decoded)) continue;
             var countBefore = _replacementCount;
             var replaced = ReplaceInContentStream(decoded, search, replacement,
                 xobjStream.Dict, reader, processed);
+            if (!_walkSawText) xobjStream.ShowsNoText = true;
 
             if (_replacementCount > countBefore)
             {
@@ -490,7 +448,7 @@ public sealed partial class TextReplacer
     /// repositions runs by inserting an absolute Tm before (and a restoring Tm after)
     /// each moved run. Only the matched run itself is rewritten, re-encoded in its
     /// ORIGINAL font. Every run after the match shifts by the replacement's width
-    /// delta; runs that would cross <paramref name="rightMargin"/> split at a space
+    /// delta; runs that would cross <c>rightMargin</c> split at a space
     /// glyph and wrap onto the next original baseline; later lines pull up greedily
     /// with their original inter-run gaps preserved. Returns false when this page's
     /// structure can't be handled (CID font, missing glyphs, match not at a run

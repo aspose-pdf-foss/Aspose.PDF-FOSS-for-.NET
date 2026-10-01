@@ -19,172 +19,28 @@ internal static partial class HtmlToPdfConverter
     /// to parse or the content overruns one page.</summary>
     internal static Document? RenderStyledDataFontDoc(StyledNode bodyNode)
     {
-        const double marginTop = 72.0;
-        const double marginLeftLay = 90.0;
+        var sy = new StyledDataDocState();
+        sy.bodyNode = bodyNode;
+        sy.marginTop = 72.0;
+        sy.marginLeftLay = 90.0;
 
-        var bodyWidth = bodyNode.Style.TryGetValue("width", out var bw) ? StyledLen(bw) : 0;
-        if (bodyWidth <= 0) bodyWidth = 595.0 - marginLeftLay - 90.0;
-        var bodyMarginLeft = bodyNode.Style.TryGetValue("margin-left", out var bml) ? StyledLen(bml) : 6.0;
-        var bodyMarginTop = bodyNode.Style.TryGetValue("margin-top", out var bmt) ? StyledLen(bmt) : 6.0;
+        sy.bodyWidth = sy.bodyNode.Style.TryGetValue("width", out var bw) ? StyledLen(bw) : 0;
+        if (sy.bodyWidth <= 0) sy.bodyWidth = 595.0 - sy.marginLeftLay - 90.0;
+        sy.bodyMarginLeft = sy.bodyNode.Style.TryGetValue("margin-left", out var bml) ? StyledLen(bml) : 6.0;
+        sy.bodyMarginTop = sy.bodyNode.Style.TryGetValue("margin-top", out var bmt) ? StyledLen(bmt) : 6.0;
 
-        // Per-face parsers and vertical metrics.
-        var glyphParsers = new Dictionary<string, Text.GlyphOutlineParser>(StringComparer.Ordinal);
-        var faceMetrics = new Dictionary<string, (double winAsc, double winDesc, double upm)>(StringComparer.Ordinal);
-        bool Faces(StyledNode p, out Text.GlyphOutlineParser gp, out (double winAsc, double winDesc, double upm) fm)
-        {
-            gp = null!;
-            fm = default;
-            if (!glyphParsers.TryGetValue(p.FontKey, out var g))
-            {
-                try
-                {
-                    g = new Text.GlyphOutlineParser(p.Ttf!);
-                    var tp = new Text.TrueTypeParser(p.Ttf!);
-                    tp.Parse();
-                    if (tp.UnitsPerEm <= 0 || tp.UsWinAscent <= 0) return false;
-                    faceMetrics[p.FontKey] = (tp.UsWinAscent, tp.UsWinDescent, tp.UnitsPerEm);
-                }
-                catch { return false; }
-                glyphParsers[p.FontKey] = g;
-            }
-            gp = g;
-            fm = faceMetrics[p.FontKey];
-            return true;
-        }
-
+        sy.glyphParsers = new Dictionary<string, Text.GlyphOutlineParser>(StringComparer.Ordinal);
+        sy.faceMetrics = new Dictionary<string, (double winAsc, double winDesc, double upm)>(StringComparer.Ordinal);
         // Font-independent CSS "normal" line height (LH(9)=10.5, LH(11.52)=13.5,
         // LH(12)=13.5), with win-metric half-leading baselines.
-        static double NormalLh(double f) => 1.5 * Math.Floor(0.78125 * f + 0.5);
+        sy.runsOut = new List<(double y, double x, string text, StyledNode p)>();
+        sy.maxUrx = 0.0;
+        sy.y = sy.marginTop;                     // top-down; baseline set per leaf
+        sy.pendingMargins = new List<double> { sy.bodyMarginTop };
+        sy.prevDesc = 0.0;
 
-        // ---- Layout pass: place every run, tracking the rightmost extent ----
-        var runsOut = new List<(double y, double x, string text, StyledNode p)>();
-        var maxUrx = 0.0;
-        var y = marginTop;                     // top-down; baseline set per leaf
-        var pendingMargins = new List<double> { bodyMarginTop };
-        var prevDesc = 0.0;
-
-        bool LayoutLeaf(StyledNode p)
-        {
-            if (!Faces(p, out var gp, out var fm)) return false;
-            var size = p.FontSizePt;
-            var lh = NormalLh(size);
-            var asc = fm.winAsc * size / fm.upm + (lh - (fm.winAsc + fm.winDesc) * size / fm.upm) / 2;
-            var ls = p.Style.TryGetValue("letter-spacing", out var lsv) ? StyledLen(lsv) : 0.0;
-            var lsF = (double)(float)Math.Round(ls, 3);
-            var upper = p.Style.TryGetValue("text-transform", out var tt)
-                && tt.Trim().Equals("uppercase", StringComparison.OrdinalIgnoreCase);
-
-            var x0 = marginLeftLay + bodyMarginLeft;
-            var colWidth = bodyWidth;
-            for (var a = p.Parent; a is not null && a.Tag == "div"; a = a.Parent)
-            {
-                var aml = a.Style.TryGetValue("margin-left", out var v1) ? StyledLen(v1) : 0;
-                var amr = a.Style.TryGetValue("margin-right", out var v2) ? StyledLen(v2) : 0;
-                x0 += aml;
-                colWidth -= aml + amr;
-            }
-            if (colWidth <= 0) return false;
-
-            // Character stream tagged with run index (span boundaries stay separate ops).
-            var stream = new List<(char c, int run)>();
-            for (var r = 0; r < p.Runs!.Count; r++)
-            {
-                var rt = upper ? p.Runs[r].ToUpperInvariant() : p.Runs[r];
-                foreach (var ch in rt) stream.Add((ch, r));
-            }
-            double AdvW(char c) =>
-                (gp.CMap.TryGetValue(c, out var g) ? gp.GetAdvanceWidth(g) : 0) * size / fm.upm;
-
-            // Greedy space-break wrap; letter-spacing widens every glyph advance
-            // (including a run's last — the next run starts that much further right).
-            var lines = new List<List<(char c, int run)>>();
-            {
-                var line = new List<(char c, int run)>();
-                var w = 0.0;
-                var i = 0;
-                while (i < stream.Count)
-                {
-                    var j = i + (stream[i].c == ' ' ? 1 : 0);
-                    while (j < stream.Count && stream[j].c != ' ') j++;
-                    var segW = 0.0;
-                    for (var k = i; k < j; k++) segW += AdvW(stream[k].c) + lsF;
-                    if (line.Count > 0 && w + segW > colWidth + 1e-9)
-                    {
-                        lines.Add(line);
-                        line = new List<(char c, int run)>();
-                        w = 0;
-                        var from = stream[i].c == ' ' ? i + 1 : i;
-                        for (var k = from; k < j; k++)
-                        {
-                            line.Add(stream[k]);
-                            w += AdvW(stream[k].c) + lsF;
-                        }
-                    }
-                    else
-                    {
-                        for (var k = i; k < j; k++) line.Add(stream[k]);
-                        w += segW;
-                    }
-                    i = j;
-                }
-                if (line.Count > 0) lines.Add(line);
-            }
-
-            var mt = p.Style.TryGetValue("margin-top", out var mtv) ? StyledLen(mtv, size) : 0.0;
-            pendingMargins.Add(mt);
-            y += prevDesc + pendingMargins.Max() + asc;
-
-            for (var li = 0; li < lines.Count; li++)
-            {
-                var ln = lines[li];
-                var x = x0;
-                var gi = 0;
-                while (gi < ln.Count)
-                {
-                    var runIdx = ln[gi].run;
-                    var piece = new StringBuilder();
-                    var pieceW = 0.0;
-                    while (gi < ln.Count && ln[gi].run == runIdx)
-                    {
-                        piece.Append(ln[gi].c);
-                        pieceW += AdvW(ln[gi].c) + lsF;
-                        gi++;
-                    }
-                    runsOut.Add((y, x, piece.ToString(), p));
-                    // The trailing letter-spacing advances the next run's X but does
-                    // not extend the drawn extent of this one.
-                    var urx = x + pieceW - (lsF > 0 ? lsF : 0);
-                    if (urx > maxUrx) maxUrx = urx;
-                    x += pieceW;
-                }
-                if (li < lines.Count - 1) y += lh;
-            }
-
-            prevDesc = lh - asc;
-            pendingMargins.Clear();
-            // UA default paragraph bottom margin is 1.12em when nothing is declared.
-            pendingMargins.Add(p.Style.TryGetValue("margin-bottom", out var mbv)
-                ? StyledLen(mbv, size) : 1.12 * size);
-            return true;
-        }
-
-        bool WalkLayout(StyledNode n)
-        {
-            if (n.Tag == "p") return LayoutLeaf(n);
-            foreach (var c in n.Children)
-            {
-                if (c.Tag == "div")
-                {
-                    pendingMargins.Add(c.Style.TryGetValue("margin-top", out var v) ? StyledLen(v) : 0);
-                    if (!WalkLayout(c)) return false;
-                    pendingMargins.Add(c.Style.TryGetValue("margin-bottom", out var v2) ? StyledLen(v2) : 0);
-                }
-                else if (!WalkLayout(c)) return false;
-            }
-            return true;
-        }
-        if (!WalkLayout(bodyNode) || runsOut.Count == 0) return null;
-        return BuildStyledPage(runsOut, maxUrx);
+        if (!SdWalkLayout(sy, sy.bodyNode) || sy.runsOut.Count == 0) return null;
+        return BuildStyledPage(sy.runsOut, sy.maxUrx);
     }
 
     /// <summary>Emit the laid-out runs as the fixed op pattern onto a fresh
@@ -296,7 +152,7 @@ internal static partial class HtmlToPdfConverter
         var any = false;
         foreach (var ch in s)
         {
-            if (ch <= 0x7F || Text.Cp1252.TryGetByte(ch, out _)) continue;
+            if (ch <= 0x7F || Text.Cp1252.TryGetByte(ch) is not null) continue;
             if (ch is < '￰' or > '￿') return false;
             any = true;
         }
@@ -309,7 +165,7 @@ internal static partial class HtmlToPdfConverter
     private static bool NeedsUnicode(string s)
     {
         foreach (var ch in s)
-            if (ch > 0x7F && !Text.Cp1252.TryGetByte(ch, out _)) return true;
+            if (ch > 0x7F && Text.Cp1252.TryGetByte(ch) is null) return true;
         return false;
     }
 
@@ -335,6 +191,66 @@ internal static partial class HtmlToPdfConverter
                 else break;
             }
             sb.Append(ToVisualRtl(s.Substring(i, end - i + 1)));
+            i = end + 1;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>A line of a RIGHT-TO-LEFT paragraph in visual order: UAX #9 at paragraph level 1
+    /// (the Latin words move to the visual left, the neutrals between them and the Arabic follow
+    /// the paragraph), then every Arabic run takes its contextual forms.</summary>
+    private static string VisualizeRtlParagraph(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (var (text, _) in VisualizeRtlParagraphSegments(s, _ => false)) sb.Append(text);
+        return sb.ToString();
+    }
+
+    /// <summary>The same visual order cut into emphasis segments: consecutive visual characters whose
+    /// logical positions share <paramref name="boldAt"/>, each segment's Arabic runs shaped from their
+    /// logical text (a bold Arabic word inside a regular line keeps its own face and forms).</summary>
+    private static List<(string text, bool bold)> VisualizeRtlParagraphSegments(string s, Func<int, bool> boldAt)
+    {
+        var (vis, perm) = Text.BidiReorderer.ToVisualOnRtlParagraph(s);
+        var segs = new List<(string text, bool bold)>();
+        if (vis.Length == 0) return segs;
+        // a line without a reorder maps every visual position onto itself
+        if (perm is null)
+        {
+            perm = new int[vis.Length];
+            for (var k = 0; k < perm.Length; k++) perm[k] = k;
+        }
+        var i = 0;
+        while (i < vis.Length)
+        {
+            var bold = boldAt(perm[i]);
+            var j = i;
+            while (j < vis.Length && boldAt(perm[j]) == bold) j++;
+            segs.Add((ShapeArabicRuns(s, vis, perm, i, j), bold));
+            i = j;
+        }
+        return segs;
+    }
+
+    /// <summary>The visual slice [<paramref name="from"/>, <paramref name="to"/>) with each maximal run of
+    /// Arabic letters (and the spaces between them) replaced by the contextual forms of its LOGICAL text.</summary>
+    private static string ShapeArabicRuns(string logical, string vis, int[] perm, int from, int to)
+    {
+        var sb = new StringBuilder(to - from);
+        var i = from;
+        while (i < to)
+        {
+            if (!Text.ArabicTextShaper.ContainsArabic(vis[i].ToString())) { sb.Append(vis[i]); i++; continue; }
+            int end = i, j = i;
+            while (j < to)
+            {
+                if (Text.ArabicTextShaper.ContainsArabic(vis[j].ToString())) { end = j; j++; }
+                else if (vis[j] == ' ' || vis[j] == (char)0xA0) j++;
+                else break;
+            }
+            int lo = int.MaxValue, hi = -1;
+            for (var k = i; k <= end; k++) { lo = Math.Min(lo, perm[k]); hi = Math.Max(hi, perm[k]); }
+            sb.Append(Text.ArabicTextShaper.Shape(logical.Substring(lo, hi - lo + 1)));
             i = end + 1;
         }
         return sb.ToString();
@@ -400,9 +316,11 @@ internal static partial class HtmlToPdfConverter
     /// face (the Standard-14 fonts would collapse it to '?'); everything else uses the WinAnsi
     /// Tf/Tj path. Used for list markers, which may themselves be non-Latin (a CSS ::before
     /// generated Arabic marker).</summary>
-    private static void EmitPositionedRun(Page page, string fontRes, double fontSize, double x, double y, string text)
+    private static void EmitPositionedRun(Page page, string fontRes, double fontSize, double x, double y, string text, double shear = 0)
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
+        // (a synthetic italic: the upright glyphs sheared right by the slant, see SyntheticItalicShear)
+        var tmSlant = shear != 0 ? shear.ToString("0.###", inv) : "0";
         var isRtl = IsPureRtl(text);
         var visual = isRtl ? ToVisualRtl(text)
             : Text.BidiReorderer.ContainsRtl(text) ? VisualizeMixedRtl(text) : text;
@@ -417,13 +335,13 @@ internal static partial class HtmlToPdfConverter
             var (rn, hex) = Text.Type0FontEmbedder.Embed(
                 fontDict, ttf, uniFont!.FontName ?? "Unicode", visual, stripSpacesInBaseFont: true);
             sb.Append($"/{rn} {fontSize.ToString("F1", inv)} Tf ");
-            sb.Append($"1 0 0 1 {x.ToString("F2", inv)} {y.ToString("F2", inv)} Tm ");
-            sb.Append('<').Append(System.Convert.ToHexString(hex)).Append("> Tj ");
+            sb.Append($"1 0 {tmSlant} 1 {x.ToString("F2", inv)} {y.ToString("F2", inv)} Tm ");
+            sb.Append('<').Append(Compat.ToHexString(hex)).Append("> Tj ");
         }
         else
         {
             sb.Append($"/{fontRes} {fontSize.ToString("F1", inv)} Tf ");
-            sb.Append($"1 0 0 1 {x.ToString("F2", inv)} {y.ToString("F2", inv)} Tm ");
+            sb.Append($"1 0 {tmSlant} 1 {x.ToString("F2", inv)} {y.ToString("F2", inv)} Tm ");
             sb.Append($"({EscapePdfString(text)}) Tj ");
         }
         sb.AppendLine("ET");
@@ -508,7 +426,7 @@ internal static partial class HtmlToPdfConverter
             var covers = true;
             foreach (var ch in text)
             {
-                if (ch <= 0x7F || Text.Cp1252.TryGetByte(ch, out _)) continue;
+                if (ch <= 0x7F || Text.Cp1252.TryGetByte(ch) is not null) continue;
                 if (entry.cmap.TryGetValue(ch, out var gid) && gid != 0) continue;
                 // A CJK radical counts as covered when the face carries its unified
                 // ideograph — the draw side maps it the same way (GlyphIdOrLookAlike),

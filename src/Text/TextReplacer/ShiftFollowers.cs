@@ -77,9 +77,9 @@ public sealed partial class TextReplacer
                 if (tokens.Count >= 6)
                 {
                     var six = tokens.GetRange(tokens.Count - 6, 6);
-                    if (TryNum(bytes, six[0], out var a) && TryNum(bytes, six[1], out var b)
-                        && TryNum(bytes, six[2], out var cc) && TryNum(bytes, six[3], out var dd)
-                        && TryNum(bytes, six[4], out var tx) && TryNum(bytes, six[5], out var ty)
+                    if (TryNum(bytes, six[0]) is { } a && TryNum(bytes, six[1]) is { } b
+                        && TryNum(bytes, six[2]) is { } cc && TryNum(bytes, six[3]) is { } dd
+                        && TryNum(bytes, six[4]) is { } tx && TryNum(bytes, six[5]) is { } ty
                         && a == 1 && b == 0 && cc == 0 && dd == 1)
                     {
                         yield return (six[4].start, six[4].end, tx, ty);
@@ -98,11 +98,11 @@ public sealed partial class TextReplacer
           or (byte)'(' or (byte)')' or (byte)'<' or (byte)'>'
           or (byte)'[' or (byte)']' or (byte)'{' or (byte)'}' or (byte)'/' or (byte)'%';
 
-    private static bool TryNum(byte[] bytes, (int start, int end) tok, out double value)
+    private static double? TryNum(byte[] bytes, (int start, int end) tok)
     {
-        value = 0;
+        double value = 0;
         var span = Encoding.ASCII.GetString(bytes, tok.start, tok.end - tok.start);
-        return double.TryParse(span, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+        return (double.TryParse(span, NumberStyles.Float, CultureInfo.InvariantCulture, out value)) ? value : null;
     }
 
     /// <summary>Step past a string, hex string, array, dictionary or name operand,

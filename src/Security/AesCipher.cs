@@ -80,7 +80,7 @@ internal sealed class AesCipher
 
     // ── Block operations ───────────────────────────────────────────
 
-    private void EncryptBlock(byte[] input, int inOff, byte[] output, int outOff)
+    internal void EncryptBlock(byte[] input, int inOff, byte[] output, int outOff)
     {
         // Initial round key addition
         var s0 = Pack(input, inOff) ^ _ek[0, 0];
@@ -110,7 +110,7 @@ internal sealed class AesCipher
         Unpack((uint)(o3 ^ (int)_ek[_rounds, 3]), output, outOff + 12);
     }
 
-    private void DecryptBlock(byte[] input, int inOff, byte[] output, int outOff)
+    internal void DecryptBlock(byte[] input, int inOff, byte[] output, int outOff)
     {
         var s0 = Pack(input, inOff) ^ _dk[0, 0];
         var s1 = Pack(input, inOff + 4) ^ _dk[0, 1];

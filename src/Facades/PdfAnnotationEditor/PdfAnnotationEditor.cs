@@ -65,8 +65,8 @@ public sealed partial class PdfAnnotationEditor : IDisposable
     // ── Extract ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns annotations on pages <paramref name="startPage"/> through
-    /// <paramref name="endPage"/> (1-based, inclusive) whose type appears in
+    /// Returns annotations on pages <c>startPage</c> through
+    /// <c>endPage</c> (1-based, inclusive) whose type appears in
     /// <paramref name="annotTypes"/>. Widget annotations are included only
     /// when explicitly requested.
     /// </summary>

@@ -4,6 +4,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Annotations;
 
+/// <summary>A pop-up annotation: the window that shows the text of its parent markup annotation.</summary>
 public partial class PopupAnnotation : Annotation
 {
     internal PopupAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -26,6 +27,7 @@ public partial class PopupAnnotation : Annotation
         Dict.Set("Subtype", new PdfName("Popup"));
     }
 
+    /// <summary>Gets or sets whether the pop-up window is initially shown open (/Open). Defaults to false.</summary>
     public bool Open
     {
         get => Dict.Get("Open") is PdfBoolean b ? b.Value : Dict.GetInt("Open") != 0;

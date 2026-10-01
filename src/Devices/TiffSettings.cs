@@ -63,6 +63,7 @@ public sealed class TiffSettings
         Depth = colorDepth;
     }
 
+    /// <summary>Initializes TIFF settings with the specified compression, color depth and margins (margins are stored but not applied by the renderer).</summary>
     public TiffSettings(CompressionType compressionType, ColorDepth colorDepth, Margins margins)
     {
         Compression = compressionType;
@@ -70,22 +71,27 @@ public sealed class TiffSettings
         Margins = margins ?? new Margins();
     }
 
+    /// <summary>Initializes TIFF settings with the specified compression, color depth, margins and blank-page skipping.</summary>
     public TiffSettings(CompressionType compressionType, ColorDepth colorDepth, Margins margins, bool skipBlankPages)
         : this(compressionType, colorDepth, margins)
     {
         SkipBlankPages = skipBlankPages;
     }
 
+    /// <summary>Initializes TIFF settings with the specified compression, color depth, margins, blank-page skipping and page orientation hint.</summary>
     public TiffSettings(CompressionType compressionType, ColorDepth colorDepth, Margins margins, bool skipBlankPages, ShapeType shapeType)
         : this(compressionType, colorDepth, margins, skipBlankPages)
     {
         Shape = shapeType;
     }
 
+    /// <summary>Initializes default TIFF settings with the specified margins (stored but not applied by the renderer).</summary>
     public TiffSettings(Margins margins) { Margins = margins ?? new Margins(); }
 
+    /// <summary>Initializes default TIFF settings with the specified page orientation hint (stored only).</summary>
     public TiffSettings(ShapeType shapeType) { Shape = shapeType; }
 
+    /// <summary>Initializes default TIFF settings, optionally skipping blank pages.</summary>
     public TiffSettings(bool skipBlankPages) { SkipBlankPages = skipBlankPages; }
 
     /// <summary>Initializes TIFF settings with all options.</summary>
@@ -139,29 +145,25 @@ public enum ShapeType
 /// <summary>Page margins in points for TIFF rendering.</summary>
 public sealed class Margins
 {
+    /// <summary>Gets or sets the left margin.</summary>
     public int Left { get; set; }
+    /// <summary>Gets or sets the right margin.</summary>
     public int Right { get; set; }
+    /// <summary>Gets or sets the top margin.</summary>
     public int Top { get; set; }
+    /// <summary>Gets or sets the bottom margin.</summary>
     public int Bottom { get; set; }
 
+    /// <summary>Creates margins with all four sides set to 0.</summary>
     public Margins() { }
 
+    /// <summary>Creates margins with the given left, right, top and bottom values.</summary>
     public Margins(int left, int right, int top, int bottom)
     {
         Left = left; Right = right; Top = top; Bottom = bottom;
     }
 }
 
-/// <summary>
-/// Abstract base class for converting rendered images to indexed (1/4/8bpp) bitmaps.
-/// </summary>
-public abstract class IndexBitmapConverter
-{
-    /// <summary>
-    /// Convert an RGBA pixel buffer to an indexed bitmap.
-    /// </summary>
-    public abstract byte[] Convert(byte[] rgba, int width, int height, ColorDepth depth);
-}
 
 /// <summary>
 /// Represents a physical page size in points.

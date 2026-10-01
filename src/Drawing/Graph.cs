@@ -7,7 +7,9 @@ namespace Aspose.Pdf.Drawing;
 /// </summary>
 public sealed class Graph : BaseParagraph
 {
+    /// <summary>Gets or sets the width of the graph area in points.</summary>
     public double Width { get; set; }
+    /// <summary>Gets or sets the height of the graph area in points.</summary>
     public double Height { get; set; }
 
     /// <summary>
@@ -57,6 +59,7 @@ public sealed class Graph : BaseParagraph
     /// <summary>The list of shapes inside this graph. Alias for <see cref="Add"/>.</summary>
     public BoundsCheckableList<Shape> Shapes { get; set; } = new();
 
+    /// <summary>Creates an empty graph area of the given width and height in points.</summary>
     public Graph(double width, double height)
     {
         Width = width;
@@ -69,6 +72,7 @@ public sealed class Graph : BaseParagraph
     /// <summary>Single-precision overload matching the public API.</summary>
     public Graph(float width, float height) : this((double)width, (double)height) { }
 
+    /// <summary>Adds a shape to the graph's <c>Shapes</c> list.</summary>
     public void Add(Shape shape) => Shapes.Add(shape);
 
     /// <summary>Shallow clone — shapes are shared by reference.</summary>

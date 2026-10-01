@@ -74,7 +74,7 @@ public sealed partial class PdfToHtmlConverter
         /// or null when it carries none.</summary>
         public string? HrefForAnnot(PdfDictionary annot, Document doc, PdfReader reader)
         {
-            return TryResolveDestPoint(annot, doc, reader, PageNumbers, out var tp, out var x, out var y)
+            return TryResolveDestPoint(annot, doc, reader, PageNumbers) is (var tp, var x, var y)
                 ? Href(tp, x, y)
                 : null;
         }
@@ -108,7 +108,7 @@ public sealed partial class PdfToHtmlConverter
             {
                 var annot = reader.ResolveDict(it);
                 if (annot is null || annot.GetName("Subtype") != "Link") continue;
-                if (TryResolveDestPoint(annot, doc, reader, reg.PageNumbers, out var tp, out var x, out var y))
+                if (TryResolveDestPoint(annot, doc, reader, reg.PageNumbers) is (var tp, var x, var y))
                     points.Add((tp, x, y));
             }
         }
@@ -126,9 +126,11 @@ public sealed partial class PdfToHtmlConverter
     /// <summary>Resolve a link annotation's internal destination — a direct /Dest
     /// or a GoTo action's /D, explicit array or named — to its target page number
     /// and point (defaults: page's top-left for view fits without coordinates).</summary>
-    private static bool TryResolveDestPoint(PdfDictionary annot, Document doc, PdfReader reader,
-        Dictionary<PdfDictionary, int> pageNum, out int targetPage, out double x, out double y)
+    internal static (int targetPage, double x, double y)? TryResolveDestPoint(PdfDictionary annot, Document doc, PdfReader reader, Dictionary<PdfDictionary, int> pageNum)
     {
+        int targetPage = default;
+        double x = default;
+        double y = default;
         targetPage = 0; x = 0; y = 0;
         var destObj = reader.Resolve(annot.Get("Dest"));
         if (destObj is null)
@@ -141,9 +143,9 @@ public sealed partial class PdfToHtmlConverter
             destObj = ResolveNamedDest(doc, reader, ds.ToText());
         else if (destObj is PdfName dn)
             destObj = ResolveNamedDest(doc, reader, dn.Value);
-        if (destObj is not PdfArray dest || dest.Count < 1) return false;
+        if (destObj is not PdfArray dest || dest.Count < 1) return null;
         var targetDict = reader.ResolveDict(dest[0]);
-        if (targetDict is null || !pageNum.TryGetValue(targetDict, out targetPage)) return false;
+        if (targetDict is null || !pageNum.TryGetValue(targetDict, out targetPage)) return null;
 
         var mb = doc.Pages[targetPage].MediaBox;
         x = mb.LLX; y = mb.URY;
@@ -165,7 +167,7 @@ public sealed partial class PdfToHtmlConverter
                 if (dest.Count >= 6 && NumOrNull(reader.Resolve(dest[5])) is { } yr) y = yr;
                 break;
         }
-        return true;
+        return (targetPage, x, y);
     }
 
     private static double? NumOrNull(PdfObject? obj) => obj switch
@@ -278,37 +280,13 @@ public sealed partial class PdfToHtmlConverter
                                 count++;
                                 break;
                             case "Tj" or "'" or "\"" or "TJ":
-                                foreach (var o in operands)
-                                {
-                                    if (o is PdfString ps)
-                                        foreach (var by in ps.Value) { if (by is not (0x20 or 0x09 or 0x0A or 0x0D)) count++; }
-                                    else if (o is PdfArray arr)
-                                        for (var ai = 0; ai < arr.Count; ai++)
-                                            if (arr[ai] is PdfString aps)
-                                                foreach (var by in aps.Value) { if (by is not (0x20 or 0x09 or 0x0A or 0x0D)) count++; }
-                                }
+                                count += CountShownChars(operands);
                                 break;
                             case "Do":
-                                if (res is not null && operands.Count >= 1 && operands[0] is PdfName doName)
-                                {
-                                    var xo = reader.ResolveDict(res.Get("XObject"));
-                                    var st = xo is not null ? reader.ResolveStream(xo.Get(doName.Value)) : null;
-                                    if (st is not null)
-                                    {
-                                        if (st.Dict.GetName("Subtype") == "Image") count++;
-                                        else count += CountMaskPaintOps(st, reader, memo, depth + 1);
-                                    }
-                                }
+                                count += CountXObjectPaintOps(res, operands, reader, memo, depth);
                                 break;
                             case "gs":
-                                if (res is not null && operands.Count >= 1 && operands[0] is PdfName gsName)
-                                {
-                                    var egs = reader.ResolveDict(
-                                        reader.ResolveDict(res.Get("ExtGState"))?.Get(gsName.Value));
-                                    var sm = egs is not null ? reader.ResolveDict(egs.Get("SMask")) : null;
-                                    var g = sm is not null ? reader.ResolveStream(sm.Get("G")) : null;
-                                    if (g is not null) count += CountMaskPaintOps(g, reader, memo, depth + 1);
-                                }
+                                count += CountExtGStatePaintOps(res, operands, reader, memo, depth);
                                 break;
                         }
                         operands.Clear();
@@ -318,6 +296,58 @@ public sealed partial class PdfToHtmlConverter
         }
         catch { /* an undecodable mask contributes what was counted so far */ }
         memo[form] = count;
+        return count;
+    }
+
+    /// <summary>Every non-blank byte a text-showing operand paints counts as one paint op.</summary>
+    private static int CountShownChars(List<PdfObject> operands)
+    {
+        var count = 0;
+        foreach (var o in operands)
+        {
+            if (o is PdfString ps)
+                foreach (var by in ps.Value) { if (by is not (0x20 or 0x09 or 0x0A or 0x0D)) count++; }
+            else if (o is PdfArray arr)
+                for (var ai = 0; ai < arr.Count; ai++)
+                    if (arr[ai] is PdfString aps)
+                        foreach (var by in aps.Value) { if (by is not (0x20 or 0x09 or 0x0A or 0x0D)) count++; }
+        }
+        return count;
+    }
+
+    /// <summary>What a `Do` paints: an image XObject is one op, a form XObject is counted
+    /// through.</summary>
+    private static int CountXObjectPaintOps(PdfDictionary? res, List<PdfObject> operands,
+        PdfReader reader, Dictionary<PdfStream, int> memo, int depth)
+    {
+        var count = 0;
+        if (res is not null && operands.Count >= 1 && operands[0] is PdfName doName)
+        {
+            var xo = reader.ResolveDict(res.Get("XObject"));
+            var st = xo is not null ? reader.ResolveStream(xo.Get(doName.Value)) : null;
+            if (st is not null)
+            {
+                if (st.Dict.GetName("Subtype") == "Image") count++;
+                else count += CountMaskPaintOps(st, reader, memo, depth + 1);
+            }
+        }
+        return count;
+    }
+
+    /// <summary>What a `gs` paints: the soft-mask group of the named ExtGState, counted
+    /// through.</summary>
+    private static int CountExtGStatePaintOps(PdfDictionary? res, List<PdfObject> operands,
+        PdfReader reader, Dictionary<PdfStream, int> memo, int depth)
+    {
+        var count = 0;
+        if (res is not null && operands.Count >= 1 && operands[0] is PdfName gsName)
+        {
+            var egs = reader.ResolveDict(
+                reader.ResolveDict(res.Get("ExtGState"))?.Get(gsName.Value));
+            var sm = egs is not null ? reader.ResolveDict(egs.Get("SMask")) : null;
+            var g = sm is not null ? reader.ResolveStream(sm.Get("G")) : null;
+            if (g is not null) count += CountMaskPaintOps(g, reader, memo, depth + 1);
+        }
         return count;
     }
 
@@ -552,7 +582,7 @@ public sealed partial class PdfToHtmlConverter
     /// <summary>Paint a shading into the page SVG: a gradient element describing the
     /// colour ramp, and a path filled with it covering the region the shading paints.
     /// The region is the current clip when there is one, otherwise the shading's own
-    /// bounding box. Axis endpoints and the box go through <paramref name="dp"/> so the
+    /// bounding box. Axis endpoints and the box go through <c>dp</c> so the
     /// gradient shares the coordinate space of every other path in the buffer, which is
     /// what lets it be declared with <c>userSpaceOnUse</c> and no transform of its own.
     /// A shading whose colours cannot be evaluated is skipped rather than guessed at.</summary>
@@ -580,8 +610,7 @@ public sealed partial class PdfToHtmlConverter
             input[0] = lo + t * (hi - lo);
             var comps = fn.Evaluate(input);
             if (comps is null) return;
-            Devices.SoftwarePageRenderer.ComponentsToRgb(comps, shading.ColorSpaceName,
-                out var cr, out var cg, out var cb, shading.TintTransform, shading.AltSpaceName);
+            var (cr, cg, cb) = Devices.SoftwarePageRenderer.ComponentsToRgb(comps, shading.ColorSpaceName, shading.TintTransform, shading.AltSpaceName);
             stops.Append($"<stop stop-color=\"{FormatHexRgb(cr / 255.0, cg / 255.0, cb / 255.0)}\" " +
                 $"offset=\"{i * 100 / (SvgGradientStops - 1)}%\" />");
         }
@@ -845,7 +874,7 @@ public sealed partial class PdfToHtmlConverter
         else
         {
             // Default: Latin1
-            decoded = Encoding.Latin1.GetString(s.Value);
+            decoded = Compat.Latin1.GetString(s.Value);
         }
         return NormalizeWhitespace(DecomposeAsciiLigatures(decoded, fRec?.SubsetHas));
     }

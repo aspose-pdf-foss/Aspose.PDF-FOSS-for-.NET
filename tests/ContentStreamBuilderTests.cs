@@ -103,3 +103,27 @@ public class ContentStreamBuilderTests
         Assert.True(content.Length > 50);
     }
 }
+
+public class OperatorSurfaceTests
+{
+    [Fact]
+    public void ContentOperators_ToString_DoesNotThrow()
+    {
+        var texts = new[]
+        {
+            new Aspose.Pdf.Operators.DP("tag").ToString(),
+            new Aspose.Pdf.Operators.BDC("tag").ToString(),
+            new Aspose.Pdf.Operators.MoveToNextLineShowText().ToString(),
+            new Aspose.Pdf.Operators.SetGlyphsPositionShowText(new[] { new Aspose.Pdf.Operators.GlyphPosition("text", 10) }).ToString(),
+            new Aspose.Pdf.Operators.SetSpacingMoveToNextLineShowText(1, 2, "text").ToString(),
+        };
+        Assert.All(texts, t => Assert.False(string.IsNullOrEmpty(t)));
+    }
+
+    [Fact]
+    public void Artifact_IsDisposable()
+    {
+        using var artifact = new Aspose.Pdf.WatermarkArtifact();
+        Assert.IsAssignableFrom<IDisposable>(artifact);
+    }
+}

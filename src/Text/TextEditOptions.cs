@@ -41,6 +41,7 @@ public sealed class TextEditOptions : TextOptions
         Remove,
     }
 
+    /// <summary>Creates options with the given <c>AllowLanguageTransformation</c> value, which is stored only.</summary>
     public TextEditOptions(bool allowLanguageTransformation)
     {
         AllowLanguageTransformation = allowLanguageTransformation;

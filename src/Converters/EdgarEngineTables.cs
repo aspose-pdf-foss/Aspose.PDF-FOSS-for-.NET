@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -415,18 +415,47 @@ internal static partial class EdgarHtmlRenderer
             var carryOut = new double[nCols];
             var trStyle = tableStyle.Clone();
             ApplyStyleAttr(tr.Attr("style"), trStyle);
-            var bg = tr.Attr("bgcolor");
-            int bgColor = -1;
-            if (bg.Length > 0)
-            {
-                var m = Regex.Match(bg, @"#?([0-9A-Fa-f]{6})");
-                if (m.Success) bgColor = int.Parse(m.Groups[1].Value, NumberStyles.HexNumber);
-            }
+            var bgColor = RowBackgroundColor(tr);
 
             var cells = tr.Children.Where(x => x.Tag is "td" or "th").ToList();
             if (cells.Count == 0) return carryOut;
+            if (LayoutContentlessRow(cells, trStyle, carryIn, carryOut) is { } contentless)
+                return contentless;
 
-            // spacer row: explicit height attr and no visible content
+            var (flows, tdBorders) = LayoutRowCellFlows(cells, trStyle, colW);
+            var rowH = AlignRowCells(flows, tdBorders, carryIn, nCols);
+            if (rowH <= 0) return carryIn;
+
+            var rowTop = SeatRowTop(flows);
+
+            // bg fill for the row region (clipped to this page)
+            if (bgColor >= 0)
+                _pg.Rects.Add(new RectFill { X = _tableX, TopTd = rowTop, W = colW.Sum(), H = Math.Min(rowH, BottomLimit - rowTop), Color = bgColor, Stroke = false });
+
+            // place lines in vertical order; break mid-row when a line misses
+            double pageShift = EmitPendingRowFlows(flows, rowTop);
+
+            StrokeRowBorders(flows, tdBorders, rowTop + rowH - pageShift, carryOut, nCols);
+
+            _y = rowTop + rowH - pageShift;
+            EndBlock(0, 0);
+            return carryOut;
+        }
+
+        /// <summary>The row's own bgcolor, or -1 when it names none.</summary>
+        static int RowBackgroundColor(Node tr)
+        {
+            var bg = tr.Attr("bgcolor");
+            if (bg.Length == 0) return -1;
+            var m = Regex.Match(bg, @"#?([0-9A-Fa-f]{6})");
+            return m.Success ? int.Parse(m.Groups[1].Value, NumberStyles.HexNumber) : -1;
+        }
+
+        /// <summary>A row with no visible content: a SPACER row (explicit height attr) holds that
+        /// height, and a width-definition row (no children at all) has zero height and passes its
+        /// carried borders on. Null means the row has content and lays out normally.</summary>
+        double[]? LayoutContentlessRow(List<Node> cells, Style trStyle, double[] carryIn, double[] carryOut)
+        {
             int hAttr = 0;
             foreach (var td in cells)
                 if (int.TryParse(td.Attr("height"), out var hv)) hAttr = Math.Max(hAttr, hv);
@@ -435,7 +464,8 @@ internal static partial class EdgarHtmlRenderer
             bool anyTdBorder = cells.Any(td => TdBorderBottom(td) > 0);
             bool empty = !anyBorderPara && !anyTdBorder
                 && cells.All(td => CollectRuns(td, trStyle).All(r => !RunHasInk(r)));
-            if (empty && hAttr > 0)
+            if (!empty) return null;
+            if (hAttr > 0)
             {
                 double h = hAttr * 0.75 + (carryIn.Length > 0 ? carryIn.Max() : 0);
                 double top = _atPageTop ? _y + (_dropTopMargins ? 0 : (_margins.Count > 0 ? _margins.Max() : 0)) : _y + (_margins.Count > 0 ? _margins.Max() : 0) + _prevBorderBottom;
@@ -446,10 +476,14 @@ internal static partial class EdgarHtmlRenderer
                 EndBlock(0, 0);
                 return carryOut;
             }
-            if (empty && cells.All(td => td.Children.Count == 0))
-                return carryIn; // width-definition row: zero height, borders pass on
+            return cells.All(td => td.Children.Count == 0) ? carryIn : null;
+        }
 
-            // per-cell mini flows
+        /// <summary>The row's per-cell mini flows, each over its colspan's width, and the bottom
+        /// border each cell declares.</summary>
+        (List<CellFlow> flows, List<double> tdBorders) LayoutRowCellFlows(
+            List<Node> cells, Style trStyle, double[] colW)
+        {
             var flows = new List<CellFlow>();
             var tdBorders = new List<double>();
             int colIdx = 0;
@@ -464,7 +498,15 @@ internal static partial class EdgarHtmlRenderer
                 tdBorders.Add(TdBorderBottom(td));
                 colIdx += span;
             }
+            return (flows, tdBorders);
+        }
 
+        /// <summary>Seats each cell's content in the row and returns the row edge: the maximum
+        /// over cells of content top + stack + own half border. Bottom-valign content bottoms sit
+        /// at that edge minus the cell's own half border; top-valign at its content top.</summary>
+        static double AlignRowCells(List<CellFlow> flows, List<double> tdBorders,
+            double[] carryIn, int nCols)
+        {
             // per-cell content top offset from the row top (half border carried in)
             var topOffsets = new List<double>();
             foreach (var f in flows)
@@ -475,14 +517,11 @@ internal static partial class EdgarHtmlRenderer
                 topOffsets.Add(off);
             }
 
-            // the row edge: max over cells of contentTop + stack + own half border
             double rowH = 0;
             for (int i = 0; i < flows.Count; i++)
                 rowH = Math.Max(rowH, topOffsets[i] + flows[i].Height + tdBorders[i] / 2);
-            if (rowH <= 0) return carryIn;
+            if (rowH <= 0) return rowH;
 
-            // align cells vertically: bottom-valign content bottoms sit at the row
-            // edge minus the cell's own half border; top-valign at its content top
             for (int i = 0; i < flows.Count; i++)
             {
                 var f = flows[i];
@@ -496,8 +535,13 @@ internal static partial class EdgarHtmlRenderer
                 if (dy > 0)
                     foreach (var ln in f.Lines) ln.Top += dy;
             }
+            return rowH;
+        }
 
-            // place the row: it may straddle pages at line granularity
+        /// <summary>Places the row: it may straddle pages at line granularity, but if even the
+        /// shallowest first line misses the page the whole row is pushed.</summary>
+        double SeatRowTop(List<CellFlow> flows)
+        {
             double rowTop;
             if (_atPageTop) { rowTop = _y + (_dropTopMargins ? 0 : (_margins.Count > 0 ? _margins.Max() : 0)); _atPageTop = false; }
             else
@@ -507,7 +551,6 @@ internal static partial class EdgarHtmlRenderer
             _margins.Clear();
             _prevBorderBottom = 0;
 
-            // if even the shallowest first line misses the page, push the whole row
             double firstLineBottom = flows.Where(f => f.Lines.Count > 0)
                 .Select(f => rowTop + f.Lines[0].Top + f.Lines[0].Asc + f.Lines[0].Desc)
                 .DefaultIfEmpty(rowTop).Min();
@@ -517,62 +560,24 @@ internal static partial class EdgarHtmlRenderer
                 rowTop = _y;
                 _atPageTop = false;
             }
+            return rowTop;
+        }
 
-            // bg fill for the row region (clipped to this page)
-            if (bgColor >= 0)
-                _pg.Rects.Add(new RectFill { X = _tableX, TopTd = rowTop, W = colW.Sum(), H = Math.Min(rowH, BottomLimit - rowTop), Color = bgColor, Stroke = false });
-
-            // place lines in vertical order; break mid-row when a line misses
-            double pageShift = 0;
-            var pending = flows.SelectMany(f => f.Lines.Select(l => (f, l)))
-                .OrderBy(t => t.l.Top).ToList();
-            foreach (var (f, ln) in pending)
-            {
-                var top = rowTop + ln.Top - pageShift;
-                var bottom = top + ln.Asc + ln.Desc;
-                if (bottom > BottomLimit + 0.01)
-                {
-                    BreakPage(false);
-                    _atPageTop = false;
-                    pageShift += top - _y;
-                    top = rowTop + ln.Top - pageShift;
-                }
-                var baseline = top + ln.Asc;
-                if (ln.BorderTopW > 0)
-                    _pg.Rects.Add(new RectFill { X = f.X0, TopTd = top - ln.BorderTopW / 2, W = f.Width, H = 0, Color = ln.BorderTopColor, Stroke = true, LineW = ln.BorderTopW });
-                double lineW = ln.Pieces.Sum(p => p.W);
-                double x = f.X0 + ln.St.MarginLeft + (ln.FirstLine ? ln.St.TextIndent : 0);
-                if (ln.St.Align == "center") x = f.X0 + (f.Width - lineW) / 2;
-                else if (ln.St.Align == "right") x = f.X0 + f.Width - lineW;
-                foreach (var piece in ln.Pieces)
-                {
-                    var r = piece.Run;
-                    AddRun(new Run { Text = piece.Text, Face = r.Face, Size = r.Size, Color = r.Color, Sup = r.Sup, LinkId = r.LinkId, AnchorsBefore = r.AnchorsBefore }, x, baseline - (r.Sup ? 1.26 : 0));
-                    r.AnchorsBefore = null;
-                    if (r.LinkId >= 0 && RunHasInk(piece.Run) && piece.Text.Trim(' ', (char)0xA0).Length > 0)
-                        AddLinkRect(r.LinkId, x, baseline, x + piece.W, r.Face, r.Size);
-                    x += piece.W;
-                }
-                if (ln.BorderBottomW > 0)
-                    _pg.Rects.Add(new RectFill { X = f.X0, TopTd = top + ln.Asc + ln.Desc + ln.BorderBottomW / 2, W = f.Width, H = 0, Color = ln.BorderBottomColor, Stroke = true, LineW = ln.BorderBottomW });
-            }
-
-            // collapsed td borders: stroke on the row edge; carry half into next row
+        /// <summary>Collapsed td borders: stroke on the row edge; carry half into the next
+        /// row.</summary>
+        void StrokeRowBorders(List<CellFlow> flows, List<double> tdBorders, double rowEdge,
+            double[] carryOut, int nCols)
+        {
             for (int i = 0; i < flows.Count; i++)
             {
-                if (tdBorders[i] > 0)
-                {
-                    var f = flows[i];
-                    _pg.Rects.Add(new RectFill { X = f.X0, TopTd = rowTop + rowH - pageShift, W = f.Width, H = 0, Color = 0, Stroke = true, LineW = tdBorders[i] });
-                    for (int c = f.Col; c < Math.Min(f.Col + f.Span, nCols); c++)
-                        carryOut[c] = tdBorders[i] / 2;
-                }
+                if (tdBorders[i] <= 0) continue;
+                var f = flows[i];
+                _pg.Rects.Add(new RectFill { X = f.X0, TopTd = rowEdge, W = f.Width, H = 0, Color = 0, Stroke = true, LineW = tdBorders[i] });
+                for (int c = f.Col; c < Math.Min(f.Col + f.Span, nCols); c++)
+                    carryOut[c] = tdBorders[i] / 2;
             }
-
-            _y = rowTop + rowH - pageShift;
-            EndBlock(0, 0);
-            return carryOut;
         }
+
 
         static double TdBorderBottom(Node td)
         {

@@ -30,21 +30,20 @@ public sealed class FontData
     internal bool NotifyAboutEmbeddingError { get; set; } = true;
 
     /// <summary>True when the face's own licence forbids embedding it. OS/2 fsType
-    /// (OpenType spec, "Type flags") states what a licensee may do: 0 installable and
-    /// 8 editable both allow it, while 2 (restricted) and 4 (preview and print) do not —
-    /// a PDF is an editable document, so a print-only licence does not cover it.
-    /// The remaining bits (no-subsetting, bitmap-only) do not bear on permission.</summary>
+    /// (OpenType spec, "Type flags") states what a licensee may do: 0 installable, 8
+    /// editable and 4 preview-and-print all allow a program in a document that is viewed
+    /// and printed, which a PDF is; only 2 (restricted) forbids it. The remaining bits
+    /// (no-subsetting, bitmap-only) do not bear on permission.</summary>
     internal static bool EmbeddingForbiddenByLicence(byte[]? program)
     {
         var (version, fsType) = ReadFsType(program);
         if (fsType < 0) return false;              // no OS/2 table: nothing forbids it
         // Only an OS/2 that POST-DATES the current type-flag definitions is taken as a
         // licence statement. Versions 0 and 1 predate them, and a bit set there does not
-        // mean what the same bit means today (probed: a version-1 face flagged 4 embeds,
-        // a version-2 face flagged 4 is refused).
+        // mean what the same bit means today (probed on the type flags: a version-1 face's
+        // flag is ignored, a version-2 face's flag 2 is refused).
         if (version < FsTypeMeaningfulOs2Version) return false;
-        var permission = fsType & 0x0F;
-        return permission == RestrictedLicenceFsType || permission == PreviewAndPrintFsType;
+        return (fsType & 0x0F) == RestrictedLicenceFsType;
     }
 
     /// <summary>Record — and by default raise — the refusal to embed a face whose own
@@ -73,10 +72,6 @@ public sealed class FontData
 
     /// <summary>fsType 2 — the face may not be embedded at all.</summary>
     private const int RestrictedLicenceFsType = 2;
-
-    /// <summary>fsType 4 — the face may be embedded only for preview and printing, which
-    /// a document that can be edited afterwards does not satisfy.</summary>
-    private const int PreviewAndPrintFsType = 4;
 
     private static int U16(byte[] d, int o) => (d[o] << 8) | d[o + 1];
     private static uint U32(byte[] d, int o) =>

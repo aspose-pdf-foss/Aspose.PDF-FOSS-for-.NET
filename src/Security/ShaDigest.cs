@@ -15,11 +15,31 @@ internal static class ShaDigest
     /// Initial hash values h0–h7 are the fractional parts of the square roots of
     /// the first 8 primes (FIPS 180-4 §5.3.3).
     /// </summary>
-    public static byte[] Sha256(byte[] data, int offset, int count)
-    {
+    public static byte[] Sha256(byte[] data, int offset, int count) =>
         // Initial hash values — fractional parts of sqrt(2), sqrt(3), . sqrt(19)
-        uint h0 = 0x6A09E667, h1 = 0xBB67AE85, h2 = 0x3C6EF372, h3 = 0xA54FF53A;
-        uint h4 = 0x510E527F, h5 = 0x9B05688C, h6 = 0x1F83D9AB, h7 = 0x5BE0CD19;
+        Sha256Core(data, offset, count,
+            0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+            0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19);
+
+    // ── SHA-224 ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// SHA-224 hash per FIPS 180-4 §6.3: the SHA-256 compression with its own initial hash
+    /// values (FIPS 180-4 §5.3.2), the result cut to its first 28 bytes.
+    /// </summary>
+    public static byte[] Sha224(byte[] data, int offset, int count) =>
+        Sha256Core(data, offset, count,
+            0xC1059ED8, 0x367CD507, 0x3070DD17, 0xF70E5939,
+            0xFFC00B31, 0x68581511, 0x64F98FA7, 0xBEFA4FA4)[..28];
+
+    // ── SHA-256 core (shared by SHA-224 and SHA-256) ───────────────
+
+    private static byte[] Sha256Core(byte[] data, int offset, int count,
+        uint iv0, uint iv1, uint iv2, uint iv3,
+        uint iv4, uint iv5, uint iv6, uint iv7)
+    {
+        uint h0 = iv0, h1 = iv1, h2 = iv2, h3 = iv3;
+        uint h4 = iv4, h5 = iv5, h6 = iv6, h7 = iv7;
 
         var padded = Pad32(data, offset, count);
         Span<uint> w = stackalloc uint[64];

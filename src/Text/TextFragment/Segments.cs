@@ -13,9 +13,9 @@ public partial class TextFragment
     /// operators (full precision, unlike the quantized segment positions):
     /// identity text matrices set inside the absorbed region, and the absolute
     /// Td straight after a BT.</summary>
-    private static bool TryGetSourceTopBaseline(Page page, Rectangle region, out double top)
+    private static double? TryGetSourceTopBaseline(Page page, Rectangle region)
     {
-        top = double.MinValue;
+        double top = double.MinValue;
         var afterBt = false;
         // A bare positioning op is not a line: empty marker runs park the pen
         // above the block's first baseline (and repeat it after the last line).
@@ -55,7 +55,7 @@ public partial class TextFragment
                     break;
             }
         }
-        return top > double.MinValue;
+        return (top > double.MinValue) ? top : null;
     }
 
     /// <summary>The Y a re-flowed line is written on: the source line's TRUE BASELINE, never

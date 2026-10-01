@@ -59,6 +59,24 @@ endcmap";
     }
 
     [Fact]
+    public void ParseCMap_BfRangeArrayWrappedOverLines()
+    {
+        // An array-form range wraps over lines as its writer pleases, and a destination may be
+        // two characters (a ligature). Read per line, the continuation lines were taken for
+        // sequential triples: <0057><00660069><003B> became a range up to 0x660069 that shadowed
+        // every 2-byte code of the text.
+        var cmap = "1 begincodespacerange\n<00><FF>endcodespacerange\n1 beginbfrange\n"
+            + "<01><09>[<0050><0065><0072>\n<0063><006E><0074><0020>\n<0057><00660069>]endbfrange";
+        var map = TextAbsorber.ParseCMap(cmap);
+        Assert.Equal("P", map[1]);
+        Assert.Equal("t", map[6]);
+        Assert.Equal(" ", map[7]);
+        Assert.Equal("W", map[8]);
+        Assert.Equal(9, map.Count);
+        Assert.False(map.ContainsKey(0x0203));
+    }
+
+    [Fact]
     public void ParseCMap_BfRangeMapping()
     {
         var cmap = @"

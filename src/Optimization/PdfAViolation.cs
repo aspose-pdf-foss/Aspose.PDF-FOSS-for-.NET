@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Optimization;
 
@@ -28,4 +28,19 @@ internal sealed class PdfAViolation
     /// <summary>Value for the log's ObjectID attribute (an object number, or the
     /// document's permanent file ID for whole-document refusals); omitted when null.</summary>
     public string? ObjectId { get; init; }
+
+    /// <summary>Value for the log's Code attribute. The reference vocabulary keys its
+    /// checks by CODE (<c>7.1:7.2(12.2)</c>), which is finer than the conformance
+    /// <see cref="Clause"/> it belongs to (<c>7.1</c>); when null the code repeats the
+    /// clause, which is what the single-code PDF/A families do.</summary>
+    public string? Code { get; init; }
+
+    /// <summary>Name of the log section this problem is filed under (PDF/UA-1 sorts its
+    /// problems into nineteen fixed sections). Null lets the writer place the problem by
+    /// its <see cref="Rule"/>, the PDF/A layout.</summary>
+    public string? Section { get; init; }
+
+    /// <summary>How the problem is reported. Only <see cref="PdfAProblemSeverity.Error"/>
+    /// fails the verdict.</summary>
+    public PdfAProblemSeverity Severity { get; init; } = PdfAProblemSeverity.Error;
 }

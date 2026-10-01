@@ -3,6 +3,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.LogicalStructure;
 
+/// <summary>A table-of-contents structure element (tag <c>/TOC</c>) that holds TOC items.</summary>
 public sealed class TOCElement : StructureElement
 {
     internal TOCElement() : base("TOC") { }
@@ -12,6 +13,9 @@ public sealed class TOCElement : StructureElement
     // linked header element mirrors (LinkTocPageTitleToHeaderElement).
     private Page? _linkedTocPage;
     private HeaderElement? _linkedTitleHeader;
+
+    /// <summary>The header bound to the TOC page's title, which renders only as that title.</summary>
+    internal HeaderElement? LinkedTitleHeader => _linkedTitleHeader;
 
     /// <summary>Links the TOC page's <see cref="TocInfo"/> title to the given
     /// header element so the tagged navigation header carries the page title
@@ -23,6 +27,7 @@ public sealed class TOCElement : StructureElement
             throw new TOCpageHasNoTitleException();
         _linkedTocPage = tocPage;
         _linkedTitleHeader = tocTitleHeader;
+        tocPage.TocInfo!.TitleHeader = tocTitleHeader;
     }
 
     /// <summary>Save-time consistency check for the linked title (called from

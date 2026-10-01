@@ -30,6 +30,37 @@ public class FileSpecificationTests
         Assert.Single(reloaded.EmbeddedFiles!);
     }
 
+    /// <summary>
+    /// A file added and then deleted in the SAME session must not reach the
+    /// saved document. The collection used to capture the catalogue's /Names
+    /// dictionary when it was built, so a document that arrived with no
+    /// attachments captured null and could never find the name tree that the
+    /// first Add had just created: the delete emptied the in-memory list and
+    /// left the written entry behind, and a reload found the file again.
+    /// </summary>
+    [Fact]
+    public void DeleteAfterAdd_InOneSession_RemovesItFromTheSavedDocument()
+    {
+        var pdf = Helpers.PdfBuilder.BuildMinimal();
+        using var doc = Document.Open(pdf);
+
+        // ⚠ The collection is read BEFORE the first add, which is what a caller
+        // that deletes-then-adds does. That is the whole bug: built against a
+        // document with no attachments, it used to capture a null /Names and
+        // could never see the tree the add went on to create. Touching it only
+        // afterwards hides the defect completely.
+        Assert.Empty(doc.EmbeddedFiles);
+
+        doc.AddEmbeddedFile("first.txt", Encoding.UTF8.GetBytes("one"));
+        doc.EmbeddedFiles.Delete("first.txt");
+        doc.AddEmbeddedFile("second.txt", Encoding.UTF8.GetBytes("two"));
+
+        using var reloaded = Document.Open(doc.ToArray());
+
+        Assert.Single(reloaded.EmbeddedFiles!);
+        Assert.Equal("second.txt", reloaded.EmbeddedFiles![1].Name);
+    }
+
     [Fact]
     public void EmbeddedFiles_ReturnsCorrectCount()
     {

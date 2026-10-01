@@ -102,14 +102,15 @@ public class ExplicitDestination : IAppointment
     {
         var pagesDict = reader.ResolveDict(reader.Catalog.Get("Pages"));
         if (pagesDict is null) return 0;
-        int counter = 0;
-        return FindPage(reader, pagesDict, targetObjNum, ref counter) ? counter : 0;
+        var (found, counter) = FindPage(reader, pagesDict, targetObjNum, 0);
+        return found ? counter : 0;
     }
 
-    private static bool FindPage(PdfReader reader, PdfDictionary node, int targetObjNum, ref int counter)
+    /// <returns>Whether the page was found, and the pages counted up to and including it.</returns>
+    private static (bool found, int counter) FindPage(PdfReader reader, PdfDictionary node, int targetObjNum, int counter)
     {
         var kids = reader.Resolve(node.Get("Kids")) as PdfArray;
-        if (kids is null) return false;
+        if (kids is null) return (false, counter);
         foreach (var kid in kids)
         {
             if (kid is PdfIndirectRef kidRef)
@@ -120,15 +121,17 @@ public class ExplicitDestination : IAppointment
                 if (type == "Page")
                 {
                     counter++;
-                    if (kidRef.ObjectNumber == targetObjNum) return true;
+                    if (kidRef.ObjectNumber == targetObjNum) return (true, counter);
                 }
                 else if (type == "Pages")
                 {
-                    if (FindPage(reader, kidDict, targetObjNum, ref counter)) return true;
+                    bool found;
+                    (found, counter) = FindPage(reader, kidDict, targetObjNum, counter);
+                    if (found) return (true, counter);
                 }
             }
         }
-        return false;
+        return (false, counter);
     }
 
     /// <summary>Serialize this destination to a PDF array for writing.</summary>

@@ -1,6 +1,5 @@
 using System.Text;
 using Aspose.Pdf;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 using Aspose.Pdf.Tests.Helpers;
 using Xunit;

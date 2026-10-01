@@ -38,14 +38,14 @@ public sealed class SystemFontSource : FontSource
     private static string[] GetSystemFontDirs()
     {
         var dirs = new List<string>();
-        if (OperatingSystem.IsWindows())
+        if (Compat.IsWindows())
         {
             dirs.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts)));
             var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             if (!string.IsNullOrEmpty(localAppData))
                 dirs.Add(Path.Combine(localAppData, "Microsoft", "Windows", "Fonts"));
         }
-        else if (OperatingSystem.IsMacOS())
+        else if (Compat.IsMacOS())
         {
             dirs.Add("/System/Library/Fonts");
             dirs.Add("/Library/Fonts");
@@ -75,6 +75,9 @@ public sealed class SystemFontSource : FontSource
     internal override FontData? FindFont(string name, bool ignoreCase)
         => FindFont(name, ignoreCase, nameTableScan: true);
 
+    /// <summary>Finds an installed font by name in the system font folders.</summary>
+    /// <param name="name">The font name to look for.</param>
+    /// <param name="ignoreCase">True to compare names case-insensitively.</param>
     /// <param name="nameTableScan">Match installed faces by their embedded name tables
     /// after the filename walk. The public FindFont contract needs it (comic.ttf carries
     /// "Comic Sans MS"); internal pipeline helpers calibrated against filename-level

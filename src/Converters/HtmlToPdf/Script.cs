@@ -31,7 +31,7 @@ internal static partial class HtmlToPdfConverter
         return Regex.Replace(html, @"<script[^>]*>([\s\S]*?)</script>", m =>
         {
             var body = m.Groups[1].Value;
-            return TryEvalTrivialDomScript(body, out var text) ? text : m.Value;
+            return TryEvalTrivialDomScript(body) is { } text ? text : m.Value;
         }, RegexOptions.IgnoreCase);
     }
 
@@ -45,15 +45,15 @@ internal static partial class HtmlToPdfConverter
         public string? TextNode;     // a created text node's contents
     }
 
-    private static bool TryEvalTrivialDomScript(string js, out string appended)
+    private static string? TryEvalTrivialDomScript(string js)
     {
-        appended = "";
-        if (string.IsNullOrWhiteSpace(js)) return false;
+        string appended = "";
+        if (string.IsNullOrWhiteSpace(js)) return null;
         var vars = new Dictionary<string, JsVal>(StringComparer.Ordinal);
         var output = new StringBuilder();
-        if (!EvalScriptBlock(js, vars, output, depth: 0)) return false;
+        if (!EvalScriptBlock(js, vars, output, depth: 0)) return null;
         appended = output.ToString();
-        return appended.Length > 0;
+        return (appended.Length > 0) ? appended : null;
     }
 
     /// <summary>Evaluate a sequence of statements; false = the block (or any part

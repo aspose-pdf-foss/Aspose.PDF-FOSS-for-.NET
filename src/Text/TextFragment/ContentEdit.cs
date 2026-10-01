@@ -60,45 +60,6 @@ public partial class TextFragment
         _segments.Clear();
     }
 
-    /// <summary>
-    /// Remove this fragment's text from the page for redaction: like
-    /// <see cref="DeleteFromContent"/> but width-preserving — a fully-deleted show
-    /// operator leaves a glyph-less advance instead of being dropped, so text after
-    /// it on the same line keeps its position (no reflow). Scoped to the fragment's
-    /// page-space Y so only this occurrence is removed.
-    /// </summary>
-    internal void RedactFromContent()
-    {
-        if (SourcePage is null || string.IsNullOrEmpty(_text))
-            return;
-
-        // Scope to this occurrence: Y picks the line, X picks the operator —
-        // a short run like " e" can appear several times on one line, and
-        // deleting the copies outside the redaction box would eat text the
-        // caller never asked to remove.
-        var replacer = new TextReplacer { MatchWholeOperator = true, PreserveAdvanceOnDelete = true };
-        if (_position is { } pos)
-        {
-            replacer.TargetY = pos.YIndent;
-            replacer.TargetX = pos.XIndent;
-        }
-        replacer.Replace(SourcePage, _text, string.Empty);
-
-        if (replacer.ReplacementCount == 0)
-        {
-            var fallback = new TextReplacer { PreserveAdvanceOnDelete = true };
-            if (_position is { } pos2)
-            {
-                fallback.TargetY = pos2.YIndent;
-                fallback.TargetX = pos2.XIndent;
-            }
-            fallback.Replace(SourcePage, _text, string.Empty);
-        }
-
-        _text = string.Empty;
-        _segments.Clear();
-    }
-
     private int DeleteReflowSource(Page page, string oldText)
     {
         var deleted = 0;

@@ -32,6 +32,14 @@ public sealed class Cell
     /// <summary>Cell background color.</summary>
     public Color? BackgroundColor { get; set; }
 
+    /// <summary>Rounds the cell's corners (see <see cref="Aspose.Pdf.CornerRadii"/>): its
+    /// background is filled inside the rounded outline of the area it covers, each reach
+    /// held to half that area. In a grid whose rules stand inside the column widths
+    /// (<see cref="Table.RulesInsideColumnWidth"/>) the cell's own rules are painted inside
+    /// the ring the outline leaves; a collapsed grid's shared rules stay straight. Null
+    /// (the default) leaves the corners square.</summary>
+    public CornerRadii? CornerRadii { get; set; }
+
     /// <summary>Cell padding (margin around content inside the cell).</summary>
     public MarginInfo? Margin { get; set; }
 

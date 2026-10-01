@@ -46,7 +46,7 @@ internal static partial class HtmlToPdfConverter
         var fs = 12.0;
         if (css.TryGetValue("body", out var bodyRule)
             && bodyRule.TryGetValue("font-size", out var bfsV)
-            && TryParseLength(bfsV, out var bfs)) fs = bfs;
+            && TryParseLength(bfsV) is { } bfs) fs = bfs;
         var lineH = MetricLineHeight(fs, HheaLineSumFor("Times New Roman") ?? fm.sum);
         var drop = MetricBaselineDrop(fs, lineH, fm);
         var paraMargin = ColParaMarginEm * fs;

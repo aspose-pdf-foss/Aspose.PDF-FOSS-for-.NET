@@ -75,6 +75,19 @@ public sealed partial class Document : IDisposable
         // flushed in the outer loop after this layout finishes).
         private int _currentSlot = -1;
 
+        /// <summary>The slot the flow's first spill takes: what a slot index must
+        /// drop to index the flow's own page slice.</summary>
+        private readonly int _slotBase;
+
+        /// <summary>The page a slot became: the start page below zero, else the
+        /// slice's page for it, or null when the slice does not reach that far.</summary>
+        private Page? SlotPage(int slot, IList<Page> pageRange)
+        {
+            if (slot < 0) return _startPage;
+            var i = slot - _slotBase;
+            return i >= 0 && i < pageRange.Count ? pageRange[i] : null;
+        }
+
         // Where each rendered paragraph started, so a LocalHyperlink with
         // Target = another paragraph (e.g. LocalHyperlink(head)) can resolve to
         // the right slot + y in the saved document. Resolved against the
@@ -170,6 +183,9 @@ public sealed partial class Document : IDisposable
         {
             _startPage = startPage;
             _overflowPages = overflowPages;
+            // Slots number the SHARED overflow list; this flow's pages are the slice
+            // from where the list stood when it began.
+            _slotBase = overflowPages.Count;
             _marginLeft = marginLeft;
             _marginRight = marginRight;
             _marginTop = marginTop;
@@ -588,8 +604,9 @@ public sealed partial class Document : IDisposable
             _lastBodyBaseline = null;
         }
 
-        /// <summary>Bottom content margin (points) — the Y below which the flow page-breaks.</summary>
-        public double BottomMargin => _marginBottom;
+        /// <summary>Bottom content margin (points) — the Y below which the flow page-breaks;
+        /// inside a box, raised by the room the open boxes keep under their paragraphs.</summary>
+        public double BottomMargin => _marginBottom + _boxFloor;
         /// <summary>The current page's top margin (content top = page height − this).</summary>
         public double ContentTopMargin => _marginTop;
 
@@ -601,10 +618,12 @@ public sealed partial class Document : IDisposable
         /// While still on the start page this appends to it directly; once the flow has
         /// page-broken into an overflow buffer it appends to that buffer instead, so the
         /// content lands on the page the cursor is actually on (not the original start page).
-        /// The caller advances <see cref="CurrentY"/> afterwards.</summary>
+        /// The caller advances <see cref="CurrentY"/> afterwards. Once the flow defers its
+        /// text the content waits in the deferred queue too (see QueueDeferredContent).</summary>
         public void InjectContentAtCursor(byte[] content)
         {
             if (content is null || content.Length == 0) return;
+            if (_forceDeferredWrites) { QueueDeferredContent(content); return; }
             if (_overflowBuffer is null) _startPage.AddContentStream(content);
             else _overflowBuffer.Add(content);
         }
@@ -633,6 +652,10 @@ public sealed partial class Document : IDisposable
         /// fragment — used for HTML block / list-item indentation. Reset by the caller
         /// between blocks.</summary>
         public double LeftIndent { get; set; }
+
+        /// <summary>Extra right indent (points) taken off the write region for the next
+        /// fragment -- the right band of a bordered block. Reset by the caller between blocks.</summary>
+        public double RightIndent { get; set; }
 
         /// <summary>CSS <c>orphans</c>: the least number of a block's own lines that may
         /// be left at the foot of a page. A block with fewer lines than this still fits
@@ -738,6 +761,10 @@ public sealed partial class Document : IDisposable
         /// fragment without a FontSize).</summary>
         internal const double XmlDefaultFontSize = 10;
 
+        /// <summary>The line a text-less inline line stands on: the builder's default
+        /// 10 pt, whatever the fragment's own size and leading.</summary>
+        internal const double BuilderDefaultLinePt = 10;
+
         /// <summary>Default #$TAB stops sit at multiples of this many space-widths
         /// of the active font/size (8 × 0.278 em at every
         /// size).</summary>
@@ -745,7 +772,7 @@ public sealed partial class Document : IDisposable
 
         /// <summary>Rounding slack allowed before a word is judged not to fit the
         /// content box — the same half-point the plain styled-line writer uses.</summary>
-        private const double WrapWidthSlackPt = 0.5;
+        internal const double WrapWidthSlackPt = 0.5;
 
         /// <summary>First baseline of a FullSize-spaced paragraph: its line box is the
         /// FULL line height (not the bare font size) hanging from the band top, and the
@@ -772,7 +799,12 @@ public sealed partial class Document : IDisposable
         /// the page's bottom margin, or the top of a reserved footnote band
         /// when one occupies this page.</summary>
         private double EffectiveBottom => Math.Max(_marginBottom,
-            _slotBottomLimit.TryGetValue(_currentSlot, out var l) ? l : double.MinValue);
+            _slotBottomLimit.TryGetValue(_currentSlot, out var l) ? l : double.MinValue) + _boxFloor;
+
+        /// <summary>Room the paragraph being laid needs under its LAST line - its own
+        /// bottom margin, when it asks for that line to leave room for it
+        /// (<see cref="Text.TextFormattingOptions.BottomMarginInsideRegion"/>).</summary>
+        public double BottomReserve { get; set; }
 
         /// <summary>Break to the next region unless <paramref name="height"/> of the
         /// current one is still free — a box that must not be split announces its own
@@ -832,12 +864,43 @@ public sealed partial class Document : IDisposable
             public Note? Note;
             public byte[]? ImageData;
             public double ImageW, ImageH;
+            /// <summary>An inline Graph: a box of its declared size on the line,
+            /// standing on the line top like a picture (ImageData is then the
+            /// empty marker so the box rules apply).</summary>
+            public Drawing.Graph? Graph;
+            /// <summary>A run box filled behind the run (an HTML del/ins background).</summary>
+            public Color? Background;
+            /// <summary>Underline / Strike drawn on the HTML dialect's geometry: 0.1 em
+            /// thick, the underline centred 0.1 em under the baseline, the strike
+            /// 0.2588 em above it (probed on a bare del/ins fragment at 12 pt).</summary>
+            public bool HtmlDeco;
         }
 
-        private readonly List<(int slot, byte[] data, Rectangle rect)> _pendingImages = new();
+        /// <summary>Thickness of an HTML-dialect underline or strike, in em.</summary>
+        internal const double HtmlDecoThicknessEm = 0.1;
+        /// <summary>Drop of an HTML-dialect underline's centre below the baseline, in em.</summary>
+        internal const double HtmlUnderlineDropEm = 0.1;
+        /// <summary>Rise of an HTML-dialect strike's centre above the baseline, in em.</summary>
+        internal const double HtmlStrikeRiseEm = 0.2588;
+        /// <summary>A run background's top sits this many ems under the line top and the
+        /// box is HtmlRunBackgroundEm tall (probed: 0.105 and 13.289 at 12 pt).</summary>
+        internal const double HtmlRunBackgroundTopEm = 0.0088;
+        internal const double HtmlRunBackgroundEm = 1.1074;
+
+        /// <summary>Pictures queued against a slot until it becomes a page, each with
+        /// the flag that embeds it as 1-bit black and white -- the flag rides the queue,
+        /// so a bilevel frame bound overleaf is embedded as its start-page sibling is.</summary>
+        private readonly List<(int slot, byte[] data, Rectangle rect, bool blackWhite)> _pendingImages = new();
 
         /// <summary>Reserved line pitch of a multi-line deferred chunk, keyed by its
         /// index in the deferred render queue.</summary>
+        /// <summary>The character and word spacing a deferred line was stretched with, by render index.</summary>
+        private readonly Dictionary<int, (double Tc, double Tw)> _pendingRenderSpacing = new();
+        /// <summary>Content and pictures of blocks laid while the flow was deferring its text, by
+        /// render index: they keep their place in the queue, so the page's stream stays in flow
+        /// order (a table after an embedded-face paragraph used to land before it).</summary>
+        private readonly Dictionary<int, byte[]> _pendingRenderOps = new();
+        private readonly Dictionary<int, (byte[] Data, Rectangle Rect)> _pendingRenderPictures = new();
         private readonly Dictionary<int, double> _pendingRenderPitch = new();
         // Renders clipped to a box (a margined note paragraph), by render index.
         private readonly Dictionary<int, Rectangle> _pendingRenderClip = new();

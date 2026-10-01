@@ -9,7 +9,7 @@ namespace Aspose.Pdf;
 internal static class LabColor
 {
     /// <summary>L in [0,100], a/b roughly [-128,127] → r,g,b in [0,1].</summary>
-    public static void ToRgb(double l, double a, double bb, out double r, out double g, out double b)
+    public static (double r, double g, double b) ToRgb(double l, double a, double bb)
     {
         // L*a*b* → CIE XYZ (D50).
         var fy = (l + 16.0) / 116.0;
@@ -28,9 +28,7 @@ internal static class LabColor
         var gl = -0.9787684 * x + 1.9161415 * y + 0.0334540 * z;
         var bl = 0.0719453 * x - 0.2289914 * y + 1.4052427 * z;
 
-        r = Gamma(rl);
-        g = Gamma(gl);
-        b = Gamma(bl);
+        return (Gamma(rl), Gamma(gl), Gamma(bl));
     }
 
     private static double Finv(double t)

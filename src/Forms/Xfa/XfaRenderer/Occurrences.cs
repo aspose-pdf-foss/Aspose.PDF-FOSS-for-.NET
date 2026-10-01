@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Xml;
 
@@ -180,168 +180,28 @@ internal static partial class XfaRenderer
     /// and those extra instances render with template defaults.</summary>
     private static XmlElement ExpandOccurrences(XmlElement root, XmlElement? dataRoot, List<XmlElement> groups, XmlElement? formRoot = null)
     {
-        var owner = new XmlDocument();
-        var clone = (XmlElement)owner.ImportNode(root, true);
-        owner.AppendChild(clone);
-        if (dataRoot is null && formRoot is null) return clone;
+        var ox = new OccurrenceExpandState();
+        ox.root = root;
+        ox.dataRoot = dataRoot;
+        ox.groups = groups;
+        ox.formRoot = formRoot;
+        ox.owner = new XmlDocument();
+        ox.clone = (XmlElement)ox.owner.ImportNode(ox.root, true);
+        ox.owner.AppendChild(ox.clone);
+        if (ox.dataRoot is null && ox.formRoot is null) return ox.clone;
         // Instance expansion is the FORM packet's job — it records the runtime
         // instance set a viewer saved. Without one the renderer draws exactly
         // ONE instance per template subform and leaves repeated data groups
         // unbound (five <detail> data rows under occur min=2
         // render as a single empty row; singular values all bind).
-        if (formRoot is null) return clone;
+        if (ox.formRoot is null) return ox.clone;
 
-        var used = new HashSet<XmlElement>();
-        static bool IsGroup(XmlElement el) =>
-            el.ChildNodes.OfType<XmlElement>().Any()
-            || el.GetAttribute("dataNode", "http://www.xfa.org/schema/xfa-data/1.0/") == "dataGroup";
+        ox.used = new HashSet<XmlElement>();
+        ox.packetRecords = ox.formRoot is not null
+            && ox.formRoot.SelectNodes(".//*")!.OfType<XmlElement>().Any(c => c.LocalName == "subform");
 
-        // A NON-TRIVIAL form packet records the instance set a viewer last saved —
-        // under it, a data-less min-0 subform absent from the packet stays removed.
-        // Without such a record the merge runs from scratch and every subform gets
-        // its <occur initial> instances (the spec default is 1 even when min is 0 —
-        // Designer sections like optional bordered tables render once, empty).
-        var packetRecords = formRoot is not null
-            && formRoot.SelectNodes(".//*")!.OfType<XmlElement>().Any(c => c.LocalName == "subform");
-
-        void Walk(XmlElement e, XmlElement? scope, XmlElement? fScope)
-        {
-            foreach (var sub in e.ChildNodes.OfType<XmlElement>().Where(c => c.LocalName == "subform").ToList())
-            {
-                var name = sub.GetAttribute("name");
-                var occ = sub.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == "occur");
-                int max = 1, min = 1;
-                if (occ is not null)
-                {
-                    var maxs = occ.GetAttribute("max"); var mins = occ.GetAttribute("min");
-                    if (maxs.Length > 0 && int.TryParse(maxs, out var m)) max = m;
-                    if (mins.Length > 0 && int.TryParse(mins, out var mi)) min = mi;
-                    // occur with only a min (e.g. min="5"): the subform still repeats
-                    // at least min times — an absent max never caps below it.
-                    if (max >= 0 && max < min) max = min;
-                }
-                var avail = name.Length > 0 && scope is not null
-                    ? scope.ChildNodes.OfType<XmlElement>()
-                        .Where(c => c.LocalName == name && IsGroup(c) && !used.Contains(c)).ToList()
-                    : new List<XmlElement>();
-                var deepMatched = false;
-                if (avail.Count == 0 && name.Length > 0 && scope is not null)
-                {
-                    // No direct child of the scope matches: fall back to scope DESCENDANTS
-                    // (XFA's lenient matching for data nested deeper than the template).
-                    avail = scope.SelectNodes(".//*")!.OfType<XmlElement>()
-                        .Where(c => c.LocalName == name && IsGroup(c) && !used.Contains(c)).ToList();
-                    // Same-name groups under DIFFERENT parents belong to different
-                    // template sections (Debtor1's aliases vs Debtor2's): each
-                    // repeating subform consumes only the first unconsumed parent's
-                    // run, and the next section's search starts after it.
-                    if (avail.Count > 1)
-                    {
-                        var firstParent = avail[0].ParentNode;
-                        avail = avail.Where(c => ReferenceEquals(c.ParentNode, firstParent)).ToList();
-                    }
-                    deepMatched = avail.Count > 0;
-                }
-                if (avail.Count == 0 && name.Length > 0 && scope is not null && occ is not null)
-                {
-                    // Still nothing: a repeating subform whose own scope group is empty
-                    // matches data one scope UP (a container bound to an empty marker
-                    // group — e.g. <SubsequentSF/> — with the real repeat groups
-                    // recorded as its siblings). Data-scope matching ascends.
-                    for (var up = scope.ParentNode as XmlElement; up is not null && avail.Count == 0;
-                         up = up.ParentNode as XmlElement)
-                        avail = up.ChildNodes.OfType<XmlElement>()
-                            .Where(c => c.LocalName == name && IsGroup(c) && !used.Contains(c)).ToList();
-                }
-                // Explicit <occur initial> (clamped up to min); the spec default is 1.
-                int initial = 1;
-                if (occ?.GetAttribute("initial") is { Length: > 0 } inis && int.TryParse(inis, out var ii))
-                    initial = ii;
-                if (initial < min) initial = min;
-                int n = avail.Count == 0
-                    // The data-less min=0 removal only applies when the document both
-                    // carries data to bind against AND a form packet recording the saved
-                    // instance set (the subform's absence from it means it was removed).
-                    // A first-time merge instead creates the occur INITIAL instances.
-                    // A data-less min>1 still renders its min instances (empty).
-                    ? (occ is not null && dataRoot is not null && min == 0
-                        ? (packetRecords ? 0 : initial)
-                        : Math.Max(1, occ is null ? 1 : min))
-                    : Math.Min(avail.Count, max < 0 ? avail.Count : Math.Max(max, 1));
-                // Data present but fewer groups than the occur minimum: the template
-                // minimum still governs the rendered instance count (trailing
-                // instances stay empty).
-                if (avail.Count > 0 && occ is not null && n < min) n = min;
-                // Form-packet instances: when this subform's instanceManager appears in the
-                // form DOM, honour the recorded instance count (never shrinking below the
-                // data-driven count — stale packets must not drop bound data). Only an
-                // OCCUR-LESS subform takes the boost: without <occur> the template alone
-                // clamps to one instance and the packet is the only record of user-added
-                // repeats, while a subform with an explicit <occur> already resolves its
-                // count from the data (a packet layered on top double-counts).
-                var fInst = new List<XmlElement>();
-                var packetAuthoritative = false;
-                if (fScope is not null && name.Length > 0)
-                {
-                    fInst = fScope.ChildNodes.OfType<XmlElement>()
-                        .Where(c => c.LocalName == "subform" && c.GetAttribute("name") == name).ToList();
-                    bool managed = fScope.ChildNodes.OfType<XmlElement>()
-                        .Any(c => c.LocalName == "instanceManager" && c.GetAttribute("name") == "_" + name);
-                    bool containerRepeats = e.ChildNodes.OfType<XmlElement>().Any(c => c.LocalName == "occur");
-                    if (managed && packetRecords && !containerRepeats && fInst.Count == 0)
-                    {
-                        // A manager the packet records with ZERO instances is a
-                        // DELIBERATE removal: the one template default renders
-                        // UNBOUND (probed — five <detail> data rows under
-                        // such a packet render as a single empty row). A manager
-                        // with recorded instances is NOT trusted to cap the count:
-                        // generator-produced packets under-record,
-                        // and the data-driven merge stays the authority there.
-                        packetAuthoritative = true;
-                        n = 1;
-                    }
-                    else if (managed && occ is null && !containerRepeats && fInst.Count > n)
-                        n = fInst.Count;
-                }
-                if (n == 0) { e.RemoveChild(sub); continue; }
-                var instances = new List<XmlElement> { sub };
-                for (int k = 1; k < n; k++)
-                {
-                    var copy = (XmlElement)sub.CloneNode(true);
-                    e.InsertAfter(copy, instances[k - 1]);
-                    instances.Add(copy);
-                }
-                for (int k = 0; k < instances.Count; k++)
-                {
-                    var fk = k < fInst.Count ? fInst[k] : null;
-                    // Under an authoritative packet only RECORDED instances bind data;
-                    // the template-default filler stays explicitly unbound.
-                    if (packetAuthoritative && k >= fInst.Count)
-                    {
-                        instances[k].SetAttribute("data-idx", "-1");
-                        Walk(instances[k], scope, null);
-                        continue;
-                    }
-                    if (k < avail.Count)
-                    {
-                        used.Add(avail[k]);
-                        instances[k].SetAttribute("data-idx", groups.Count.ToString());
-                        groups.Add(avail[k]);
-                        Walk(instances[k], avail[k], fk);
-                    }
-                    else
-                    {
-                        // A deep-matched repeat that ran out of groups is explicitly
-                        // UNBOUND: its fields must stay empty rather than scavenge
-                        // same-name leaves from another section's data.
-                        if (deepMatched) instances[k].SetAttribute("data-idx", "-1");
-                        Walk(instances[k], scope, fk);
-                    }
-                }
-            }
-        }
-        Walk(clone, dataRoot, formRoot);
-        return clone;
+        OccWalk(ox, ox.clone, ox.dataRoot, ox.formRoot);
+        return ox.clone;
     }
 
     /// <summary>Resolve a bound value for <paramref name="name"/>: the nearest expanded

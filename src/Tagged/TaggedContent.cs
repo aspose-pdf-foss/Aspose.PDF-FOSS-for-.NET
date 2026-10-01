@@ -103,6 +103,9 @@ public sealed class TaggedContent : ITaggedContent
     {
         element._roleMap = GetRoleMap();
         element._idRegistry = GetIdRegistry();
+        // An element belongs to the document that made it from the moment it is made: a caller may tag
+        // it to a field or to marked content before placing it in the tree.
+        element._sourceDoc = _document;
         return element;
     }
 
@@ -142,6 +145,11 @@ public sealed class TaggedContent : ITaggedContent
 
     /// <inheritdoc />
     LS.StructTreeRootElement ITaggedContent.StructTreeRootElement => GetOrCreateStructTreeRoot();
+
+    /// <summary>Make <paramref name="root"/> the document root <see cref="ITaggedContent.RootElement"/>
+    /// returns, after the tree under /StructTreeRoot was rebuilt (auto-tagging) — a root read
+    /// before would otherwise stay cached, detached from the tree.</summary>
+    internal void ResetRootElement(LS.StructureElement root) => _lsRootElement = root;
 
     /// <inheritdoc />
     LS.StructureElement ITaggedContent.RootElement
@@ -211,7 +219,7 @@ public sealed class TaggedContent : ITaggedContent
     /// <summary>No-op hook: the FOSS save path doesn't run an explicit
     /// pre-save normalisation pass over the structure tree yet — children
     /// appended via the LogicalStructure builder are already written into
-    /// the underlying /K array by <see cref="LS.StructureElement.AppendChild"/>.</summary>
+    /// the underlying /K array by <c>LS.StructureElement.AppendChild</c>.</summary>
     void ITaggedContent.PreSave() { }
 
     /// <summary>Ensure /Catalog/MarkInfo /Marked is set, then leave

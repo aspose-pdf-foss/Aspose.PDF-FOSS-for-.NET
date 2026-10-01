@@ -30,7 +30,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
     /// the group's color space; we approximate by treating 1-component as gray
     /// (R=G=B) and 3-component as RGB. Default per spec: black.
     /// </summary>
-    private static (byte R, byte G, byte B) SampleBackdropRgb(PdfArray? bc)
+    internal static (byte R, byte G, byte B) SampleBackdropRgb(PdfArray? bc)
     {
         if (bc is null || bc.Count == 0) return (0, 0, 0);
         // /BC is written in the mask GROUP's own colour space (PDF 32000 §11.6.5.2), so its
@@ -113,9 +113,9 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         foreach (var (ia, ib, ic) in tris)
         {
             var va = verts[ia]; var vb = verts[ib]; var vc = verts[ic];
-            TransformPoint(ctm, va.X, va.Y, out var ax, out var ay);
-            TransformPoint(ctm, vb.X, vb.Y, out var bx, out var by);
-            TransformPoint(ctm, vc.X, vc.Y, out var cx, out var cy);
+            var (ax, ay) = TransformPoint(ctm, va.X, va.Y);
+            var (bx, by) = TransformPoint(ctm, vb.X, vb.Y);
+            var (cx, cy) = TransformPoint(ctm, vc.X, vc.Y);
             RasterizeColoredTriangle(ctx, csName, alpha,
                 ax, ay, va.Color,
                 bx, by, vb.Color,
@@ -145,9 +145,9 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
                 for (var j = 0; j <= N; j++)
                 {
                     var v = j / (double)N;
-                    EvalBicubic(patch.Px, u, v, out var x);
-                    EvalBicubic(patch.Py, u, v, out var y);
-                    TransformPoint(ctm, x, y, out var ux, out var uy);
+                    var x = EvalBicubic(patch.Px, u, v);
+                    var y = EvalBicubic(patch.Py, u, v);
+                    var (ux, uy) = TransformPoint(ctm, x, y);
                     px[i, j] = ux; py[i, j] = uy;
                 }
             }
@@ -194,8 +194,9 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         return result;
     }
 
-    private static void EvalBicubic(double[,] g, double u, double v, out double r)
+    private static double EvalBicubic(double[,] g, double u, double v)
     {
+        double r = default;
         // S(u,v) = sum_{i,j} B_i(u) B_j(v) * g[i,j]
         var bu0 = (1 - u) * (1 - u) * (1 - u);
         var bu1 = 3 * (1 - u) * (1 - u) * u;
@@ -211,6 +212,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         var r2 = bu0 * g[0, 2] + bu1 * g[1, 2] + bu2 * g[2, 2] + bu3 * g[3, 2];
         var r3 = bu0 * g[0, 3] + bu1 * g[1, 3] + bu2 * g[2, 3] + bu3 * g[3, 3];
         r = bv0 * r0 + bv1 * r1 + bv2 * r2 + bv3 * r3;
+        return r;
     }
 
     /// <summary>Fill a triangle in user space with per-vertex colours
@@ -269,7 +271,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
                 if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue;
                 for (var k = 0; k < ncc; k++)
                     col[k] = w0 * c0[k] + w1 * c1[k] + w2 * c2[k];
-                ComponentsToRgb(col, csName, out var r, out var g, out var b);
+                var (r, g, b) = ComponentsToRgb(col, csName);
                 SetPixel(ctx, px, py, r, g, b, alpha);
             }
         }
@@ -296,7 +298,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         double dx0 = Math.Min(dom[0], dom[1]), dx1 = Math.Max(dom[0], dom[1]);
         double dy0 = Math.Min(dom[2], dom[3]), dy1 = Math.Max(dom[2], dom[3]);
 
-        ComputeShadingPixelBounds(ctx, out var xStart, out var xEnd, out var yStart, out var yEnd);
+        var (xStart, xEnd, yStart, yEnd) = ComputeShadingPixelBounds(ctx);
         var bboxLocal = fn.BBox;
         double[]? ctmInv = bboxLocal is not null ? InvertMatrix(state.Ctm) : null;
 
@@ -318,136 +320,74 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
 
                 if (bboxLocal is not null && ctmInv is not null)
                 {
-                    TransformPoint(ctmInv, ux, uy, out var lx, out var ly);
+                    var (lx, ly) = TransformPoint(ctmInv, ux, uy);
                     if (lx < bboxLocal[0] || lx > bboxLocal[2] ||
                         ly < bboxLocal[1] || ly > bboxLocal[3])
                         continue;
                 }
 
-                TransformPoint(inv, ux, uy, out var fx, out var fy);
+                var (fx, fy) = TransformPoint(inv, ux, uy);
                 // Outside the domain the shading paints nothing (§8.7.4.5.3).
                 if (fx < dx0 || fx > dx1 || fy < dy0 || fy > dy1) continue;
 
                 input[0] = fx; input[1] = fy;
                 var col = fn.Function.Evaluate(input);
                 if (col is null) continue;
-                ComponentsToRgb(col, csName, out var r, out var g, out var b,
-                    fn.TintTransform, fn.AltSpaceName);
+                var (r, g, b) = ComponentsToRgb(col, csName, fn.TintTransform, fn.AltSpaceName);
                 SetPixel(ctx, px, py, r, g, b, alpha);
             }
         }
     }
 
-    private static void DrawAxialShading(RenderContext ctx, AxialShading axial, GraphicsState state,
-        bool bareSh = false)
+    private static void DrawAxialShading(RenderContext ctx, AxialShading axial, GraphicsState state, bool bareSh = false)
     {
-        if (axial.Function is null) return;
+        var ash = new AxialShadingState();
+        ash.ctx = ctx;
+        ash.axial = axial;
+        ash.state = state;
+        ash.bareSh = bareSh;
+        if (ash.axial.Function is null) return;
 
-        // The shading's two axis endpoints live in shading-local coordinates; the CTM
-        // at the moment of `sh` maps them into user space (§8.7.4.3).
-        var ctm = state.Ctm;
-        TransformPoint(ctm, axial.X0, axial.Y0, out var x0u, out var y0u);
-        TransformPoint(ctm, axial.X1, axial.Y1, out var x1u, out var y1u);
+        ash.ctm = ash.state.Ctm;
+        var (x0u, y0u) = TransformPoint(ash.ctm, ash.axial.X0, ash.axial.Y0);
+        var (x1u, y1u) = TransformPoint(ash.ctm, ash.axial.X1, ash.axial.Y1);
 
-        var dx = x1u - x0u;
-        var dy = y1u - y0u;
-        var denom = dx * dx + dy * dy;
-        if (denom < 1e-12) return; // axis collapsed to a point — nothing to draw
+        ash.dx = x1u - x0u;
+        ash.dy = y1u - y0u;
+        ash.denom = ash.dx * ash.dx + ash.dy * ash.dy;
+        if (ash.denom < 1e-12) return; // axis collapsed to a point — nothing to draw
 
-        var domLo = axial.Domain.Length > 0 ? axial.Domain[0] : 0;
-        var domHi = axial.Domain.Length > 1 ? axial.Domain[1] : 1;
-        var domLen = domHi - domLo;
-        var extendBefore = axial.Extend.Length > 0 && axial.Extend[0];
-        var extendAfter = axial.Extend.Length > 1 && axial.Extend[1];
+        ash.domLo = ash.axial.Domain.Length > 0 ? ash.axial.Domain[0] : 0;
+        ash.domHi = ash.axial.Domain.Length > 1 ? ash.axial.Domain[1] : 1;
+        ash.domLen = ash.domHi - ash.domLo;
+        ash.extendBefore = ash.axial.Extend.Length > 0 && ash.axial.Extend[0];
+        ash.extendAfter = ash.axial.Extend.Length > 1 && ash.axial.Extend[1];
 
-        ComputeShadingPixelBounds(ctx, out var xStart, out var xEnd, out var yStart, out var yEnd);
+        var (xStart, xEnd, yStart, yEnd) = ComputeShadingPixelBounds(ash.ctx);
 
-        // PDF 32000 §8.7.4.5.2: a shading's optional /BBox is its bounding box in
-        // shading-local coordinates (before CTM). The shading "need not be applied
-        // outside that rectangle". Without this, a Form XObject wrapping a small
-        // axial gradient (e.g. a thin footer stripe) instead floods the entire
-        // Form BBox / page clip, covering everything previously drawn. For
-        // arbitrary CTMs we pre-compute the inverse and test each pixel in
-        // shading-local space.
-        var bboxLocal = axial.BBox;
-        double[]? inv = null;
-        if (bboxLocal is not null)
-            inv = InvertMatrix(ctm);
+        ash.bboxLocal = ash.axial.BBox;
+        ash.inv = null;
+        if (ash.bboxLocal is not null)
+            ash.inv = InvertMatrix(ash.ctm);
 
-        var invScale = 1.0 / ctx.Scale;
-        var mbLlx = ctx.MediaBox.LLX;
-        var mbLly = ctx.MediaBox.LLY;
-        var alpha = (byte)(state.FillAlpha * 255);
-        var csName = axial.ColorSpaceName;
-        var input = new double[1];
+        ash.invScale = 1.0 / ash.ctx.Scale;
+        ash.mbLlx = ash.ctx.MediaBox.LLX;
+        ash.mbLly = ash.ctx.MediaBox.LLY;
+        ash.alpha = (byte)(ash.state.FillAlpha * 255);
+        ash.csName = ash.axial.ColorSpaceName;
+        ash.input = new double[1];
 
-        // A bare `sh` in a MULTI-SPOT ink space (DeviceN, or another tint space resolving
-        // to CMYK) is ink laid over the page - a `sh` vignette painted across a photo, say.
-        // Composite it with an overprint Multiply so its no-ink end (which converts to
-        // white) leaves the content beneath unchanged instead of knocking it out; over bare
-        // paper Multiply equals an opaque paint. A SPOT-colour (/Separation) shading is the
-        // opposite case - a decorative panel whose plate replaces what sits under it - and
-        // plain process-CMYK is opaque paint too, so both keep the straight paint. This is
-        // the GDI+ renderer's rule (DrawAxialShading/MultiplyBrushFill); the two rasterisers
-        // have to agree, and without it a DeviceN vignette wiped out the photo under it.
-        var subtractive = bareSh && (csName is "DeviceN"
-                                     || (csName is not "Separation" and not "DeviceCMYK"
-                                         && axial.AltSpaceName is "DeviceCMYK"));
-        // Like GDI+, the multiply only stands in for the plain paint: an explicit blend
-        // mode or a soft mask already carries its own compositing and wins.
-        var savedBlend = ctx.CurrentBlendMode;
-        if (subtractive && ctx.SoftMaskAlpha is null && savedBlend == "Normal")
-            ctx.CurrentBlendMode = "Multiply";
+        ash.subtractive = ash.bareSh && (ash.csName is "DeviceN"
+                                     || (ash.csName is not "Separation" and not "DeviceCMYK"
+                                         && ash.axial.AltSpaceName is "DeviceCMYK"));
+        ash.savedBlend = ash.ctx.CurrentBlendMode;
+        if (ash.subtractive && ash.ctx.SoftMaskAlpha is null && ash.savedBlend == "Normal")
+            ash.ctx.CurrentBlendMode = "Multiply";
         try
         {
-
-            // Sample at pixel centres (+0.5) rather than corners. Sampling at the corner
-            // means the pixel covering [0, 1) on the y-axis is probed at exactly y=0 —
-            // which for a shading BBox of [0, …, max] with strict inequalities just barely
-            // lands on the upper edge and gets excluded. Probing at +0.5 keeps the
-            // first/last rows inside their BBoxes, the behaviour mainstream
-            // viewers exhibit.
-            for (var py = yStart; py < yEnd; py++)
-            {
-                var uy = mbLly + (ctx.PixelH - py - 0.5) * invScale;
-                var rowBase = py * ctx.PixelW;
-                for (var px = xStart; px < xEnd; px++)
-                {
-                    if (ctx.ClipMask is { } mask && mask[rowBase + px] == 0) continue;
-
-                    var ux = mbLlx + (px + 0.5) * invScale;
-
-                    if (bboxLocal is not null && inv is not null)
-                    {
-                        TransformPoint(inv, ux, uy, out var lx, out var ly);
-                        if (lx < bboxLocal[0] || lx > bboxLocal[2] ||
-                            ly < bboxLocal[1] || ly > bboxLocal[3])
-                            continue;
-                    }
-
-                    var t = ((ux - x0u) * dx + (uy - y0u) * dy) / denom;
-
-                    if (t < 0)
-                    {
-                        if (!extendBefore) continue;
-                        t = 0;
-                    }
-                    else if (t > 1)
-                    {
-                        if (!extendAfter) continue;
-                        t = 1;
-                    }
-
-                    input[0] = domLo + t * domLen;
-                    var col = axial.Function.Evaluate(input);
-                    if (col is null) continue;
-
-                    ComponentsToRgb(col, csName, out var r, out var g, out var b, axial.TintTransform, axial.AltSpaceName);
-                    SetPixel(ctx, px, py, r, g, b, alpha);
-                }
-            }
+            DrawAxialRows(ash, x0u, xEnd, xStart, y0u, yEnd, yStart);
         }
-        finally { ctx.CurrentBlendMode = savedBlend; }
+        finally { ash.ctx.CurrentBlendMode = ash.savedBlend; }
     }
 
     // 2D affine inverse for shading-BBox transforms. The CTM is
@@ -470,128 +410,59 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
 
     private static void DrawRadialShading(RenderContext ctx, RadialShading radial, GraphicsState state)
     {
-        if (radial.Function is null) return;
+        var rs = new RadialShadingState();
+        rs.ctx = ctx;
+        rs.radial = radial;
+        rs.state = state;
+        if (rs.radial.Function is null) return;
 
-        // Transform circle centres to user space; radii scale by the CTM's uniform
-        // component (sqrt(|det|)), which is exact for rotation+uniform-scale CTMs
-        // and a best-effort approximation for skewed ones — circles become ellipses
-        // only under genuinely asymmetric scale, which real-world logo gradients
-        // rarely use.
-        var ctm = state.Ctm;
-        TransformPoint(ctm, radial.X0, radial.Y0, out var x0u, out var y0u);
-        TransformPoint(ctm, radial.X1, radial.Y1, out var x1u, out var y1u);
-        var radiusScale = Math.Sqrt(Math.Abs(ctm[0] * ctm[3] - ctm[1] * ctm[2]));
-        var r0 = radial.R0 * radiusScale;
-        var r1 = radial.R1 * radiusScale;
+        rs.ctm = rs.state.Ctm;
+        var (x0u, y0u) = TransformPoint(rs.ctm, rs.radial.X0, rs.radial.Y0);
+        var (x1u, y1u) = TransformPoint(rs.ctm, rs.radial.X1, rs.radial.Y1);
+        rs.radiusScale = Math.Sqrt(Math.Abs(rs.ctm[0] * rs.ctm[3] - rs.ctm[1] * rs.ctm[2]));
+        rs.r0 = rs.radial.R0 * rs.radiusScale;
+        rs.r1 = rs.radial.R1 * rs.radiusScale;
 
-        var domLo = radial.Domain.Length > 0 ? radial.Domain[0] : 0;
-        var domHi = radial.Domain.Length > 1 ? radial.Domain[1] : 1;
-        var domLen = domHi - domLo;
-        var extendBefore = radial.Extend.Length > 0 && radial.Extend[0];
-        var extendAfter = radial.Extend.Length > 1 && radial.Extend[1];
+        rs.domLo = rs.radial.Domain.Length > 0 ? rs.radial.Domain[0] : 0;
+        rs.domHi = rs.radial.Domain.Length > 1 ? rs.radial.Domain[1] : 1;
+        rs.domLen = rs.domHi - rs.domLo;
+        rs.extendBefore = rs.radial.Extend.Length > 0 && rs.radial.Extend[0];
+        rs.extendAfter = rs.radial.Extend.Length > 1 && rs.radial.Extend[1];
 
-        // Radial shading: for each user-space point p, find the largest t ∈ [0,1]
-        // such that the point lies on circle(t) of centre
-        // c(t) = c0 + t*(c1-c0), radius r(t) = r0 + t*(r1-r0). Solving the circle
-        // equation reduces to a quadratic in t — standard closed-form approach
-        // used by all PDF rasterisers.
-        var cdx = x1u - x0u;
-        var cdy = y1u - y0u;
-        var dr = r1 - r0;
+        rs.cdx = x1u - x0u;
+        rs.cdy = y1u - y0u;
+        rs.dr = rs.r1 - rs.r0;
 
-        ComputeShadingPixelBounds(ctx, out var xStart, out var xEnd, out var yStart, out var yEnd);
+        var (xStart, xEnd, yStart, yEnd) = ComputeShadingPixelBounds(rs.ctx);
 
-        var bboxLocal = radial.BBox;
-        double[]? inv = null;
-        if (bboxLocal is not null)
-            inv = InvertMatrix(ctm);
+        rs.bboxLocal = rs.radial.BBox;
+        rs.inv = null;
+        if (rs.bboxLocal is not null)
+            rs.inv = InvertMatrix(rs.ctm);
 
-        var invScale = 1.0 / ctx.Scale;
-        var mbLlx = ctx.MediaBox.LLX;
-        var mbLly = ctx.MediaBox.LLY;
-        var alpha = (byte)(state.FillAlpha * 255);
-        var csName = radial.ColorSpaceName;
-        var input = new double[1];
+        rs.invScale = 1.0 / rs.ctx.Scale;
+        rs.mbLlx = rs.ctx.MediaBox.LLX;
+        rs.mbLly = rs.ctx.MediaBox.LLY;
+        rs.alpha = (byte)(rs.state.FillAlpha * 255);
+        rs.csName = rs.radial.ColorSpaceName;
+        rs.input = new double[1];
 
         // Pixel centres (+0.5), same rationale as DrawAxialShading.
         for (var py = yStart; py < yEnd; py++)
         {
-            var uy = mbLly + (ctx.PixelH - py - 0.5) * invScale;
-            var rowBase = py * ctx.PixelW;
-            for (var px = xStart; px < xEnd; px++)
-            {
-                if (ctx.ClipMask is { } mask && mask[rowBase + px] == 0) continue;
-
-                var ux = mbLlx + (px + 0.5) * invScale;
-
-                if (bboxLocal is not null && inv is not null)
-                {
-                    TransformPoint(inv, ux, uy, out var lx, out var ly);
-                    if (lx < bboxLocal[0] || lx > bboxLocal[2] ||
-                        ly < bboxLocal[1] || ly > bboxLocal[3])
-                        continue;
-                }
-
-                var fx = ux - x0u;
-                var fy = uy - y0u;
-
-                // (fx - t*cdx)^2 + (fy - t*cdy)^2 = (r0 + t*dr)^2
-                // qa*t^2 - 2*qb*t + qc = 0, pick the larger root in [0, 1].
-                var qa = cdx * cdx + cdy * cdy - dr * dr;
-                var qb = fx * cdx + fy * cdy + r0 * dr;
-                var qc = fx * fx + fy * fy - r0 * r0;
-
-                double t;
-                if (Math.Abs(qa) < 1e-12)
-                {
-                    if (Math.Abs(qb) < 1e-12) continue;
-                    t = qc / (2 * qb);
-                }
-                else
-                {
-                    var disc = qb * qb - qa * qc;
-                    if (disc < 0) continue;
-                    var sq = Math.Sqrt(disc);
-                    var t1 = (qb + sq) / qa;
-                    var t2 = (qb - sq) / qa;
-                    // Pick the larger valid root that gives a non-negative radius.
-                    t = double.NaN;
-                    foreach (var candidate in new[] { t1, t2 })
-                    {
-                        if (double.IsNaN(candidate)) continue;
-                        if (r0 + candidate * dr < 0) continue;
-                        if (double.IsNaN(t) || candidate > t) t = candidate;
-                    }
-                    if (double.IsNaN(t)) continue;
-                }
-
-                if (t < 0)
-                {
-                    if (!extendBefore) continue;
-                    t = 0;
-                }
-                else if (t > 1)
-                {
-                    if (!extendAfter) continue;
-                    t = 1;
-                }
-
-                input[0] = domLo + t * domLen;
-                var col = radial.Function.Evaluate(input);
-                if (col is null) continue;
-
-                ComponentsToRgb(col, csName, out var r, out var g, out var b, radial.TintTransform, radial.AltSpaceName);
-                SetPixel(ctx, px, py, r, g, b, alpha);
-            }
+            DrawRadialRow(rs, py, xStart, xEnd, x0u, y0u);
         }
     }
 
     /// <summary>Restrict the per-pixel shading loop to the clip mask's bounding box when set.</summary>
-    private static void ComputeShadingPixelBounds(RenderContext ctx,
-        out int xStart, out int xEnd, out int yStart, out int yEnd)
+    private static (int xStart, int xEnd, int yStart, int yEnd) ComputeShadingPixelBounds(RenderContext ctx)
     {
+        int xStart = default;
+        int xEnd = default;
+        int yStart = default;
+        int yEnd = default;
         xStart = 0; xEnd = ctx.PixelW; yStart = 0; yEnd = ctx.PixelH;
-        if (ctx.ClipMask is null) return;
+        if (ctx.ClipMask is null) return (xStart, xEnd, yStart, yEnd);
 
         var mask = ctx.ClipMask;
         int minX = ctx.PixelW, maxX = -1, minY = ctx.PixelH, maxY = -1;
@@ -607,16 +478,20 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
                 if (y > maxY) maxY = y;
             }
         }
-        if (maxX < 0) { xEnd = 0; yEnd = 0; return; }
+        if (maxX < 0) { xEnd = 0; yEnd = 0; return (xStart, xEnd, yStart, yEnd); }
         xStart = minX; xEnd = maxX + 1;
         yStart = minY; yEnd = maxY + 1;
+        return (xStart, xEnd, yStart, yEnd);
     }
 
     /// <summary>Apply an affine matrix [a b c d e f] to a user-space point.</summary>
-    private static void TransformPoint(double[] m, double x, double y, out double xo, out double yo)
+    private static (double xo, double yo) TransformPoint(double[] m, double x, double y)
     {
+        double xo = default;
+        double yo = default;
         xo = m[0] * x + m[2] * y + m[4];
         yo = m[1] * x + m[3] * y + m[5];
+        return (xo, yo);
     }
 
     /// <summary>
@@ -625,10 +500,11 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
     /// (Gray/RGB/CMYK); anything exotic falls back to mid-grey so the gradient
     /// still paints something rather than leaving the region blank.
     /// </summary>
-    internal static void ComponentsToRgb(double[] components, string csName,
-        out byte r, out byte g, out byte b,
-        Functions.PdfFunction? tint = null, string? altName = null)
+    internal static (byte r, byte g, byte b) ComponentsToRgb(double[] components, string csName, Functions.PdfFunction? tint = null, string? altName = null)
     {
+        byte r = default;
+        byte g = default;
+        byte b = default;
         // /Separation or /DeviceN output: map the tint components into the alternate
         // device space first, then convert that to RGB.
         if (tint is not null && altName is not null)
@@ -636,8 +512,8 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
             var alt = tint.Evaluate(components);
             if (alt is not null)
             {
-                ComponentsToRgb(alt, altName, out r, out g, out b);
-                return;
+                (r, g, b) = ComponentsToRgb(alt, altName);
+                return (r, g, b);
             }
         }
 
@@ -650,10 +526,9 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         {
             if (Environment.GetEnvironmentVariable("Q_SHLUT") == "0")
             {
-                CmykToRgbClamp(components[0], components[1], components[2], components[3],
-                    out rd, out gd, out bd);
+                (rd, gd, bd) = CmykToRgbClamp(components[0], components[1], components[2], components[3]);
                 r = ToByteClamp(rd); g = ToByteClamp(gd); b = ToByteClamp(bd);
-                return;
+                return (r, g, b);
             }
             // Same ICC-style conversion the content-stream `k`/`K` operators use
             // (CmykToRgbLut): a gradient authored in the same ink as an adjacent flat
@@ -662,19 +537,19 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
             var (rb, gb, bb) = Aspose.Pdf.Devices.CmykToRgbLut.Convert(
                 components[0], components[1], components[2], components[3]);
             r = rb; g = gb; b = bb;
-            return;
+            return (r, g, b);
         }
         else if (csName == "Lab" && components.Length >= 3)
         {
-            LabColor.ToRgb(components[0], components[1], components[2], out rd, out gd, out bd);
+            (rd, gd, bd) = LabColor.ToRgb(components[0], components[1], components[2]);
         }
         else if (csName == "LabEnc" && components.Length >= 3)
         {
             // Lab-encoded scanner-class ICC channels (L/100, (a+128)/255,
             // (b+128)/255 — see ContentStreamParser.IsLabEncodedIcc).
             static double C(double v) => v < 0 ? 0 : v > 1 ? 1 : v;
-            LabColor.ToRgb(C(components[0]) * 100.0, C(components[1]) * 255.0 - 128.0,
-                C(components[2]) * 255.0 - 128.0, out rd, out gd, out bd);
+            (rd, gd, bd) = LabColor.ToRgb(C(components[0]) * 100.0, C(components[1]) * 255.0 - 128.0,
+                C(components[2]) * 255.0 - 128.0);
         }
         else if (components.Length >= 3)
         {
@@ -690,14 +565,18 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         r = ToByteClamp(rd);
         g = ToByteClamp(gd);
         b = ToByteClamp(bd);
+        return (r, g, b);
     }
 
-    private static void CmykToRgbClamp(double c, double m, double y, double k,
-        out double r, out double g, out double b)
+    private static (double r, double g, double b) CmykToRgbClamp(double c, double m, double y, double k)
     {
+        double r = default;
+        double g = default;
+        double b = default;
         r = (1 - c) * (1 - k);
         g = (1 - m) * (1 - k);
         b = (1 - y) * (1 - k);
+        return (r, g, b);
     }
 
     private static byte ToByteClamp(double v)

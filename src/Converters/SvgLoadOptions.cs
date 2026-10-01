@@ -5,6 +5,9 @@ namespace Aspose.Pdf;
 /// </summary>
 public sealed class SvgLoadOptions : LoadOptions
 {
+    /// <summary>Creates SVG load options that size the page from the SVG content.</summary>
+    public SvgLoadOptions() { }
+
     /// <summary>SVG conversion engine selection.</summary>
     public ConversionEngines ConversionEngine { get; set; } = ConversionEngines.NewEngine;
 

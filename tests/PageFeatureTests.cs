@@ -71,5 +71,6 @@ public class PageFeatureTests
     {
         public bool PutCalled { get; private set; }
         public override void Put(Page page) { PutCalled = true; _ = page; }
+        internal override byte[] BuildContentStream(Page page) => System.Array.Empty<byte>();
     }
 }

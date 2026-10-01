@@ -19,7 +19,7 @@ public enum BlendingColorSpace
 
 /// <summary>
 /// Represents a stamp to be applied via PdfFileStamp facade.
-/// This is distinct from Aspose.Pdf.Stamps.Stamp (the base class for page stamps).
+/// This is distinct from Aspose.Pdf.Stamp (the base class for page stamps).
 /// </summary>
 public sealed class Stamp
 {
@@ -74,6 +74,9 @@ public sealed class Stamp
     private TextState? _textState;
     private float _imageWidth;
     private float _imageHeight;
+
+    /// <summary>Creates an empty stamp with full opacity and no content; bind a logo, image or PDF page before adding it.</summary>
+    public Stamp() { }
 
     /// <summary>
     /// Bind a FormattedText as the stamp's logo (text stamp).

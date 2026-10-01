@@ -41,7 +41,7 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
     private protected double? DsLineHeightPt()
     {
         var ds = _dict.Get("DS") is PdfString dsStr
-            ? System.Text.Encoding.Latin1.GetString(dsStr.Value)
+            ? Compat.Latin1.GetString(dsStr.Value)
             : null;
         if (string.IsNullOrEmpty(ds)) return null;
         var m = System.Text.RegularExpressions.Regex.Match(ds,
@@ -77,12 +77,10 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
         OwnerDocument = doc;
     }
 
-    /// <summary>The PDF object number for this field's dictionary (-1 if unknown).</summary>
-    internal int ObjectNumber { get; set; } = -1;
 
     /// <summary>Low-level view of the field's underlying PDF dictionary, surfacing raw
     /// stored bytes (see <see cref="FieldDictionaryView"/>).</summary>
-    internal new FieldDictionaryView EngineDict => FieldDictionaryView.For(_dict, _reader);
+    internal new FieldDictionaryView DictionaryView => FieldDictionaryView.For(_dict, _reader ?? Aspose.Pdf.IO.PdfReader.Empty);
 
     /// <summary>The owning document (for dirty tracking during incremental save).</summary>
     internal Document? OwnerDocument { get; set; }
@@ -138,7 +136,7 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
             if (value is null)
                 _dict.Remove("T");
             else
-                _dict.Set("T", new PdfString(System.Text.Encoding.Latin1.GetBytes(value)));
+                _dict.Set("T", new PdfString(Compat.Latin1.GetBytes(value)));
         }
     }
 
@@ -360,7 +358,10 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
     {
         get
         {
-            int i = 1;
+            // The same order as the enumerator and Count: a merged self widget beside grown kids is the first.
+            if (HasMergedSelfWidget && index == 1)
+                return new Aspose.Pdf.Annotations.WidgetAnnotation(_dict, _reader);
+            int i = HasMergedSelfWidget ? 2 : 1;
             foreach (var kidDict in AllKids())
             {
                 if (i == index)
@@ -438,6 +439,10 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
     /// <summary>The form-field flags (/Ff entry) — Required, Multiline, Combo,
     /// etc. Used internally to derive the typed Is* properties.</summary>
     internal int FieldFlags => (int)_dict.GetInt("Ff");
+
+    /// <summary>Bit 21 of /Ff: the text field holds a file path and offers a file-select
+    /// dialog (PDF 32000-1, table 228).</summary>
+    internal const int FileSelectFlag = 1 << 20;
 
     /// <summary>
     /// Tab order index for this field. Returns -1 if not specified.
@@ -551,7 +556,7 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
             // already reflects this font/size/colour.
             if (value is not null)
                 Dict.Set("DA", new PdfString(
-                    System.Text.Encoding.Latin1.GetBytes(value.ToAppearanceString())));
+                    Compat.Latin1.GetBytes(value.ToAppearanceString())));
             // When the field is already part of a form, embed an embeddable font
             // immediately (the font may be set after Form.Add); this re-points /DA
             // at the embedded resource. A no-op otherwise.
@@ -645,7 +650,7 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
             var newDa = string.Join(" ", parts).Trim();
             if (newDa.Length > 0) newDa += " ";
             newDa += $"{r} {g} {b} rg";
-            _dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(newDa)));
+            _dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(newDa)));
         }
     }
 

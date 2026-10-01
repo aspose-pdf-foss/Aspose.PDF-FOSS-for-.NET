@@ -32,23 +32,25 @@ public sealed partial class SoftwarePageRenderer
     /// space by the blit. Returns null when the entry is absent, is a colour-key array,
     /// or cannot be decoded as a 1-bit stencil.
     /// </summary>
-    internal static byte[]? ResolveStencilMaskAlpha(PdfObject? maskRef, IO.PdfReader reader, out int width, out int height)
+    internal static (byte[]? result, int width, int height) ResolveStencilMaskAlpha(PdfObject? maskRef, IO.PdfReader reader)
     {
+        int width = default;
+        int height = default;
         width = 0;
         height = 0;
-        if (maskRef is null) return null;
+        if (maskRef is null) return (null, width, height);
         // A colour-key /Mask is a PdfArray, not a stream; not handled here.
         var stream = reader.ResolveStream(maskRef);
-        if (stream is null) return null;
+        if (stream is null) return (null, width, height);
         var d = stream.Dict;
         var w = (int)d.GetInt("Width");
         var h = (int)d.GetInt("Height");
-        if (w <= 0 || h <= 0) return null;
+        if (w <= 0 || h <= 0) return (null, width, height);
         byte[] decoded;
         try { decoded = reader.DecodeStream(stream); }
-        catch { return null; }
+        catch { return (null, width, height); }
         var rowBytes = (w + 7) / 8;
-        if (decoded.Length < (long)rowBytes * h) return null; // not the 1-bit stencil we expect
+        if (decoded.Length < (long)rowBytes * h) return (null, width, height); // not the 1-bit stencil we expect
         // Default /Decode [0 1]: sample 1 ⇒ masked. /Decode [1 0] flips it.
         var invert = false;
         if (d.Get("Decode") is PdfArray da && da.Count >= 2)
@@ -66,27 +68,42 @@ public sealed partial class SoftwarePageRenderer
         }
         width = w;
         height = h;
-        return alpha;
+        return (alpha, width, height);
     }
 
-    // Repair a soft mask's /DecodeParms /Colors to 1 (its true single-component value) when a
-    // predictor is active and the producer left it at the parent image's component count.
-    // Handles /DecodeParms as a single dict or a per-filter array. Idempotent.
-    private static void ForceSoftMaskPredictorColors(PdfObject? decodeParms, IO.PdfReader reader)
+    /// <summary>The /Colors a soft mask's predictor declares (1 when no predictor is active).</summary>
+    private static int SoftMaskPredictorColors(PdfObject? decodeParms, IO.PdfReader reader)
     {
-        switch (reader.Resolve(decodeParms))
+        var parms = reader.Resolve(decodeParms) switch
         {
-            case PdfDictionary dp:
-                if (dp.GetInt("Predictor") > 1 && dp.GetInt("Colors", 1) != 1)
-                    dp.Set("Colors", new PdfInteger(1));
-                break;
-            case PdfArray arr:
-                foreach (var el in arr)
-                    if (reader.Resolve(el) is PdfDictionary edp
-                        && edp.GetInt("Predictor") > 1 && edp.GetInt("Colors", 1) != 1)
-                        edp.Set("Colors", new PdfInteger(1));
-                break;
-        }
+            PdfDictionary dp => dp,
+            PdfArray arr => arr.Select(reader.Resolve).OfType<PdfDictionary>()
+                .FirstOrDefault(p => p.GetInt("Predictor") > 1),
+            _ => null,
+        };
+        return parms is not null && parms.GetInt("Predictor") > 1 ? (int)parms.GetInt("Colors", 1) : 1;
+    }
+
+    /// <summary>
+    /// Decode a soft mask's samples. A soft mask is a one-component image, yet a producer
+    /// may carry its parent image's /Colors into the mask's predictor (4 for a CMYK parent).
+    /// Which stride the bytes were actually filtered through shows in the decoded length:
+    /// when the declared stride yields exactly the mask's own sample count the producer
+    /// filtered through that stride (its rows simply do not align with the image rows), and
+    /// when it does not, the samples were filtered at the mask's own stride and the decode
+    /// is repeated with /Colors 1. The document's dictionaries stay untouched either way.
+    /// </summary>
+    private static byte[]? DecodeSoftMaskSamples(PdfStream stream, IO.PdfReader reader, long expectedBytes)
+    {
+        byte[] declared;
+        try { declared = reader.DecodeStream(stream); }
+        catch { return null; }
+        if (declared.Length == expectedBytes || SoftMaskPredictorColors(stream.Dict.Get("DecodeParms"), reader) == 1)
+            return declared;
+        byte[] single;
+        try { single = reader.DecodeStreamWithPredictorColors(stream, 1); }
+        catch { return declared; }
+        return single.Length == expectedBytes || declared.Length < expectedBytes ? single : declared;
     }
 
     /// <summary>
@@ -96,30 +113,27 @@ public sealed partial class SoftwarePageRenderer
     /// mapping. Returns null if the entry is missing or the stream cannot be
     /// decoded as a grayscale image.
     /// </summary>
-    internal static byte[]? ResolveSMaskAlpha(PdfObject? smaskRef, IO.PdfReader reader, out int width, out int height)
+    internal static (byte[]? result, int width, int height) ResolveSMaskAlpha(PdfObject? smaskRef, IO.PdfReader reader)
     {
+        int width = default;
+        int height = default;
         width = 0;
         height = 0;
-        if (smaskRef is null) return null;
+        if (smaskRef is null) return (null, width, height);
         var stream = reader.ResolveStream(smaskRef);
-        if (stream is null) return null;
+        if (stream is null) return (null, width, height);
         var d = stream.Dict;
         var w = (int)d.GetInt("Width");
         var h = (int)d.GetInt("Height");
-        if (w <= 0 || h <= 0) return null;
+        if (w <= 0 || h <= 0) return (null, width, height);
 
-        // A soft mask is a single-component DeviceGray image (PDF 32000 §11.6.5.1). Some
-        // producers copy the parent image's /DecodeParms onto the mask verbatim, leaving
-        // /Colors at the parent's component count (e.g. 4 for a CMYK base image). A PNG/TIFF
-        // predictor unfiltered with the wrong /Colors uses the wrong per-row stride and
-        // yields fewer bytes than W*H, so the 8-bpc branch below rejects it, the mask is
-        // dropped, and the image composites fully opaque (occluding what should show through).
-        // Force the mask's own predictor /Colors to its true value of 1.
-        ForceSoftMaskPredictorColors(d.Get("DecodeParms"), reader);
+        var bpc = (int)d.GetInt("BitsPerComponent");
+        if (bpc == 0) bpc = 8;
 
-        byte[] decoded;
-        try { decoded = reader.DecodeStream(stream); }
-        catch { return null; }
+        // A soft mask is a single-component DeviceGray image (PDF 32000 §11.6.5.1); its
+        // sample count follows from its own geometry, whatever /Colors its predictor declares.
+        var decoded = DecodeSoftMaskSamples(stream, reader, (long)((w * bpc + 7) / 8) * h);
+        if (decoded is null) return (null, width, height);
 
         // A soft mask compressed with DCTDecode/JPXDecode arrives here still encoded
         // (DecodeStream leaves image-specific filters in place for the renderer to
@@ -132,25 +146,22 @@ public sealed partial class SoftwarePageRenderer
             {
                 var (jp, jw, jh, jc) = IO.Filters.JpegDecoder.Decode(decoded);
                 width = jw; height = jh;
-                return JpegPlaneToAlpha(jp, jw, jh, jc);
+                return (JpegPlaneToAlpha(jp, jw, jh, jc), width, height);
             }
-            catch { return null; }
+            catch { return (null, width, height); }
         }
         bool smJ2k = (decoded.Length > 3 && decoded[0] == 0xFF && decoded[1] == 0x4F)
             || (decoded.Length > 12 && decoded[0] == 0x00 && decoded[1] == 0x00 && decoded[2] == 0x00
                 && decoded[3] == 0x0C && decoded[4] == 0x6A && decoded[5] == 0x50);
         if (smJ2k)
         {
-            if (IO.Filters.JpxDecoder.TryDecode(decoded, out var jp, out var jw, out var jh, out var jc))
+            if (IO.Filters.JpxDecoder.TryDecode(decoded) is (var jp, var jw, var jh, var jc))
             {
                 width = jw; height = jh;
-                return JpegPlaneToAlpha(jp, jw, jh, jc);
+                return (JpegPlaneToAlpha(jp, jw, jh, jc), width, height);
             }
-            return null;
+            return (null, width, height);
         }
-
-        var bpc = (int)d.GetInt("BitsPerComponent");
-        if (bpc == 0) bpc = 8;
 
         // Decode the bytes into a W*H byte buffer of alpha values.
         byte[] alpha;
@@ -178,7 +189,7 @@ public sealed partial class SoftwarePageRenderer
         }
         else
         {
-            return null;
+            return (null, width, height);
         }
 
         // PDF 32000 §11.6.5.3: soft-mask sample values are alpha (0=transparent,
@@ -191,7 +202,7 @@ public sealed partial class SoftwarePageRenderer
 
         width = w;
         height = h;
-        return alpha;
+        return (alpha, width, height);
     }
 
     /// <summary>Reduce a decoded image plane (gray or RGB) to a W×H 8-bit alpha buffer.</summary>

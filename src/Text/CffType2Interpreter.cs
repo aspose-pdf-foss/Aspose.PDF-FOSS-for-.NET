@@ -1,4 +1,4 @@
-namespace Aspose.Pdf.Text;
+﻿namespace Aspose.Pdf.Text;
 
 /// <summary>
 /// Interprets a single Type 2 CharString to produce a flattened polygonal
@@ -41,6 +41,11 @@ internal sealed class CffType2Interpreter
     /// the private dict's nominalWidthX) when one was present, else null — the
     /// glyph then advances by defaultWidthX.</summary>
     public double? WidthDelta { get; private set; }
+
+    /// <summary>Keep each cubic as its two control points (off-curve) and end point instead of
+    /// flattening it: the outline then carries the curve itself, for a rasterizer that
+    /// flattens on its own device grid.</summary>
+    public bool KeepCurves { get; init; }
 
     // Runaway subroutine recursion guard — real charstrings stay under ~20 deep;
     // anything beyond that is almost certainly a malformed font.
@@ -126,157 +131,18 @@ internal sealed class CffType2Interpreter
 
             switch (b0)
             {
-                case 1:  // hstem
-                case 3:  // vstem
-                case 18: // hstemhm
-                case 23: // vstemhm
-                    CheckWidthStem();
-                    _hintCount += _sp / 2;
-                    _sp = 0;
+                case 1: case 3: case 18: case 23: case 19: case 20:
+                    pos = InterpretHintOperator(bytes, pos, b0);
                     break;
-
-                case 19: // hintmask
-                case 20: // cntrmask
-                    CheckWidthStem();
-                    _hintCount += _sp / 2; // trailing stems allowed before the mask
-                    _sp = 0;
-                    // mask is ceil(hintCount / 8) bytes immediately following the op
-                    var maskBytes = (_hintCount + 7) / 8;
-                    pos = Math.Min(bytes.Length, pos + maskBytes);
+                case 4: case 22: case 21:
+                    if (InterpretMoveOperator(b0)) return;
                     break;
-
-                case 4:  // vmoveto (dy [optional width])
-                    CheckWidthMove(1);
-                    MoveTo(0, _stack[_sp - 1]);
-                    _sp = 0;
+                case 5: case 6: case 7: case 8: case 24: case 25: case 26: case 27: case 30: case 31:
+                    if (InterpretDrawOperator(b0)) return;
                     break;
-
-                case 22: // hmoveto (dx [optional width])
-                    CheckWidthMove(1);
-                    MoveTo(_stack[_sp - 1], 0);
-                    _sp = 0;
+                case 10: case 29: case 11: case 14:
+                    if (InterpretControlOperator(b0)) return;
                     break;
-
-                case 21: // rmoveto (dx dy [optional width])
-                    CheckWidthMove(2);
-                    MoveTo(_stack[_sp - 2], _stack[_sp - 1]);
-                    _sp = 0;
-                    break;
-
-                case 5:  // rlineto (dx1 dy1 dx2 dy2 … pairs)
-                    for (var i = 0; i + 1 < _sp; i += 2)
-                        LineTo(_stack[i], _stack[i + 1]);
-                    _sp = 0;
-                    break;
-
-                case 6:  // hlineto (alternating h,v starting with h)
-                    for (var i = 0; i < _sp; i++)
-                    {
-                        if ((i & 1) == 0) LineTo(_stack[i], 0);
-                        else LineTo(0, _stack[i]);
-                    }
-                    _sp = 0;
-                    break;
-
-                case 7:  // vlineto (alternating v,h starting with v)
-                    for (var i = 0; i < _sp; i++)
-                    {
-                        if ((i & 1) == 0) LineTo(0, _stack[i]);
-                        else LineTo(_stack[i], 0);
-                    }
-                    _sp = 0;
-                    break;
-
-                case 8:  // rrcurveto (dxa dya dxb dyb dxc dyc … triples of points)
-                    for (var i = 0; i + 5 < _sp; i += 6)
-                        CurveTo(_stack[i], _stack[i + 1], _stack[i + 2], _stack[i + 3],
-                                _stack[i + 4], _stack[i + 5]);
-                    _sp = 0;
-                    break;
-
-                case 24: // rcurveline: N×rrcurveto followed by one rlineto
-                    {
-                        var curves = (_sp - 2) / 6;
-                        var idx = 0;
-                        for (var c = 0; c < curves; c++, idx += 6)
-                            CurveTo(_stack[idx], _stack[idx + 1], _stack[idx + 2],
-                                    _stack[idx + 3], _stack[idx + 4], _stack[idx + 5]);
-                        if (idx + 1 < _sp) LineTo(_stack[idx], _stack[idx + 1]);
-                        _sp = 0;
-                    }
-                    break;
-
-                case 25: // rlinecurve: N×rlineto followed by one rrcurveto
-                    {
-                        var lines = (_sp - 6) / 2;
-                        var idx = 0;
-                        for (var l = 0; l < lines; l++, idx += 2)
-                            LineTo(_stack[idx], _stack[idx + 1]);
-                        if (idx + 5 < _sp)
-                            CurveTo(_stack[idx], _stack[idx + 1], _stack[idx + 2],
-                                    _stack[idx + 3], _stack[idx + 4], _stack[idx + 5]);
-                        _sp = 0;
-                    }
-                    break;
-
-                case 26: // vvcurveto (dx1? {dya dxb dyb dyc}+)
-                    {
-                        var i = 0;
-                        var firstDx = 0.0;
-                        if (_sp % 4 != 0) { firstDx = _stack[0]; i = 1; }
-                        for (; i + 3 < _sp; i += 4)
-                        {
-                            var dx1 = firstDx; firstDx = 0;
-                            CurveTo(dx1, _stack[i], _stack[i + 1], _stack[i + 2],
-                                    0, _stack[i + 3]);
-                        }
-                        _sp = 0;
-                    }
-                    break;
-
-                case 27: // hhcurveto (dy1? {dxa dxb dyb dxc}+)
-                    {
-                        var i = 0;
-                        var firstDy = 0.0;
-                        if (_sp % 4 != 0) { firstDy = _stack[0]; i = 1; }
-                        for (; i + 3 < _sp; i += 4)
-                        {
-                            var dy1 = firstDy; firstDy = 0;
-                            CurveTo(_stack[i], dy1, _stack[i + 1], _stack[i + 2],
-                                    _stack[i + 3], 0);
-                        }
-                        _sp = 0;
-                    }
-                    break;
-
-                case 30: // vhcurveto (alternating v-h curves)
-                case 31: // hvcurveto (alternating h-v curves)
-                    InterpretInterleavedCurves(b0 == 31);
-                    _sp = 0;
-                    break;
-
-                case 10: // callsubr
-                case 29: // callgsubr
-                    {
-                        if (_sp == 0) break;
-                        var idx = (int)_stack[--_sp];
-                        idx += (b0 == 10) ? _localSubrBias : _globalSubrBias;
-                        var subrs = (b0 == 10) ? _localSubrs : _globalSubrs;
-                        if (_subrDepth++ > 20) return;
-                        var body = CffParser.ReadIndexEntry(_cffData, subrs, idx);
-                        if (body.Length > 0) Interpret(body);
-                        _subrDepth--;
-                    }
-                    break;
-
-                case 11: // return — end subr, back to caller
-                    return;
-
-                case 14: // endchar — close last open contour, done with glyph
-                    CheckWidthEndchar();
-                    FlushCurrent();
-                    return;
-
                 default:
                     // Unknown / reserved opcode — drop operands and keep going
                     // rather than abort the glyph. Malformed CFF shouldn't crash.
@@ -415,7 +281,18 @@ internal sealed class CffType2Interpreter
         var p3x = p2x + dx3; var p3y = p2y + dy3;
 
         _current ??= new List<ContourPoint> { new ContourPoint(p0x, p0y, true) };
-        FlattenCubic(p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, 0);
+        if (KeepCurves)
+        {
+            _current.Add(new ContourPoint(p1x, p1y, false));
+            _current.Add(new ContourPoint(p2x, p2y, false));
+            UpdateBbox(p1x, p1y);
+            UpdateBbox(p2x, p2y);
+            AppendOnCurve(p3x, p3y);
+        }
+        else
+        {
+            FlattenCubic(p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, 0);
+        }
 
         _x = p3x; _y = p3y;
     }
@@ -518,5 +395,193 @@ internal sealed class CffType2Interpreter
         if (_widthSeen) return;
         _widthSeen = true;
         if (_sp == 1) { WidthDelta = _stack[0]; _sp = 0; }
+    }
+
+    /// <summary>The hint operators: stems counted, and the hintmask bytes skipped over.</summary>
+    /// <returns>The position after the operator's mask bytes, when it carries any.</returns>
+    private int InterpretHintOperator(byte[] bytes, int pos, int b0)
+    {
+        switch (b0)
+        {
+            case 1:  // hstem
+            case 3:  // vstem
+            case 18: // hstemhm
+            case 23: // vstemhm
+                CheckWidthStem();
+                _hintCount += _sp / 2;
+                _sp = 0;
+                break;
+
+            case 19: // hintmask
+            case 20: // cntrmask
+                CheckWidthStem();
+                _hintCount += _sp / 2; // trailing stems allowed before the mask
+                _sp = 0;
+                // mask is ceil(hintCount / 8) bytes immediately following the op
+                var maskBytes = (_hintCount + 7) / 8;
+                pos = Math.Min(bytes.Length, pos + maskBytes);
+                break;
+
+        }
+        return pos;
+    }
+
+    /// <summary>The move operators: rmoveto, hmoveto and vmoveto, each closing the open contour with its width read.</summary>
+    private bool InterpretMoveOperator(int b0)
+    {
+        switch (b0)
+        {
+            case 4:  // vmoveto (dy [optional width])
+                CheckWidthMove(1);
+                MoveTo(0, _stack[_sp - 1]);
+                _sp = 0;
+                break;
+
+            case 22: // hmoveto (dx [optional width])
+                CheckWidthMove(1);
+                MoveTo(_stack[_sp - 1], 0);
+                _sp = 0;
+                break;
+
+            case 21: // rmoveto (dx dy [optional width])
+                CheckWidthMove(2);
+                MoveTo(_stack[_sp - 2], _stack[_sp - 1]);
+                _sp = 0;
+                break;
+
+        }
+        return false;
+    }
+
+    /// <summary>The line and curve operators, every alternating and flex-less form of the Type 2 charstring.</summary>
+    private bool InterpretDrawOperator(int b0)
+    {
+        switch (b0)
+        {
+            case 5:  // rlineto (dx1 dy1 dx2 dy2 … pairs)
+                for (var i = 0; i + 1 < _sp; i += 2)
+                    LineTo(_stack[i], _stack[i + 1]);
+                _sp = 0;
+                break;
+
+            case 6:  // hlineto (alternating h,v starting with h)
+                for (var i = 0; i < _sp; i++)
+                {
+                    if ((i & 1) == 0) LineTo(_stack[i], 0);
+                    else LineTo(0, _stack[i]);
+                }
+                _sp = 0;
+                break;
+
+            case 7:  // vlineto (alternating v,h starting with v)
+                for (var i = 0; i < _sp; i++)
+                {
+                    if ((i & 1) == 0) LineTo(0, _stack[i]);
+                    else LineTo(_stack[i], 0);
+                }
+                _sp = 0;
+                break;
+
+            case 8:  // rrcurveto (dxa dya dxb dyb dxc dyc … triples of points)
+                for (var i = 0; i + 5 < _sp; i += 6)
+                    CurveTo(_stack[i], _stack[i + 1], _stack[i + 2], _stack[i + 3],
+                            _stack[i + 4], _stack[i + 5]);
+                _sp = 0;
+                break;
+
+            case 24: // rcurveline: N×rrcurveto followed by one rlineto
+                {
+                    var curves = (_sp - 2) / 6;
+                    var idx = 0;
+                    for (var c = 0; c < curves; c++, idx += 6)
+                        CurveTo(_stack[idx], _stack[idx + 1], _stack[idx + 2],
+                                _stack[idx + 3], _stack[idx + 4], _stack[idx + 5]);
+                    if (idx + 1 < _sp) LineTo(_stack[idx], _stack[idx + 1]);
+                    _sp = 0;
+                }
+                break;
+
+            case 25: // rlinecurve: N×rlineto followed by one rrcurveto
+                {
+                    var lines = (_sp - 6) / 2;
+                    var idx = 0;
+                    for (var l = 0; l < lines; l++, idx += 2)
+                        LineTo(_stack[idx], _stack[idx + 1]);
+                    if (idx + 5 < _sp)
+                        CurveTo(_stack[idx], _stack[idx + 1], _stack[idx + 2],
+                                _stack[idx + 3], _stack[idx + 4], _stack[idx + 5]);
+                    _sp = 0;
+                }
+                break;
+
+            case 26: // vvcurveto (dx1? {dya dxb dyb dyc}+)
+                {
+                    var i = 0;
+                    var firstDx = 0.0;
+                    if (_sp % 4 != 0) { firstDx = _stack[0]; i = 1; }
+                    for (; i + 3 < _sp; i += 4)
+                    {
+                        var dx1 = firstDx; firstDx = 0;
+                        CurveTo(dx1, _stack[i], _stack[i + 1], _stack[i + 2],
+                                0, _stack[i + 3]);
+                    }
+                    _sp = 0;
+                }
+                break;
+
+            case 27: // hhcurveto (dy1? {dxa dxb dyb dxc}+)
+                {
+                    var i = 0;
+                    var firstDy = 0.0;
+                    if (_sp % 4 != 0) { firstDy = _stack[0]; i = 1; }
+                    for (; i + 3 < _sp; i += 4)
+                    {
+                        var dy1 = firstDy; firstDy = 0;
+                        CurveTo(_stack[i], dy1, _stack[i + 1], _stack[i + 2],
+                                _stack[i + 3], 0);
+                    }
+                    _sp = 0;
+                }
+                break;
+
+            case 30: // vhcurveto (alternating v-h curves)
+            case 31: // hvcurveto (alternating h-v curves)
+                InterpretInterleavedCurves(b0 == 31);
+                _sp = 0;
+                break;
+
+        }
+        return false;
+    }
+
+    /// <summary>The subroutine calls, the return and the endchar.</summary>
+    private bool InterpretControlOperator(int b0)
+    {
+        switch (b0)
+        {
+            case 10: // callsubr
+            case 29: // callgsubr
+                {
+                    if (_sp == 0) break;
+                    var idx = (int)_stack[--_sp];
+                    idx += (b0 == 10) ? _localSubrBias : _globalSubrBias;
+                    var subrs = (b0 == 10) ? _localSubrs : _globalSubrs;
+                    if (_subrDepth++ > 20) return true;
+                    var body = CffParser.ReadIndexEntry(_cffData, subrs, idx);
+                    if (body.Length > 0) Interpret(body);
+                    _subrDepth--;
+                }
+                break;
+
+            case 11: // return — end subr, back to caller
+                return true;
+
+            case 14: // endchar — close last open contour, done with glyph
+                CheckWidthEndchar();
+                FlushCurrent();
+                return true;
+
+        }
+        return false;
     }
 }

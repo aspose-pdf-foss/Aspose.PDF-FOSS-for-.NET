@@ -21,13 +21,10 @@ public sealed partial class TextAbsorber
     /// so a text-space pen X maps to page space as
     /// tmOriginX + (penText - tmOriginX) * tmScaleX + localCmTx.
     /// </remarks>
-    private static void AppendClippedRun(StringBuilder sb, byte[] bytes,
-        Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, PdfReader reader,
-        bool useFontEngine, FontMetrics? metrics, double fontSize, double horizScale,
-        Rectangle searchRect, double tmOriginX, double tmScaleX, double localCmTx,
-        double cmScaleX, ref double penText, double charSpacing, double wordSpacing,
-        out double keptStartPen, bool blankClipped = false, bool dropLeadingSpaces = false)
+    /// <returns>The text-space pen after the run's glyph advances.</returns>
+    private static (double result, double keptStartPen) AppendClippedRun(StringBuilder sb, byte[] bytes, Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, PdfReader reader, bool useFontEngine, FontMetrics? metrics, double fontSize, double horizScale, Rectangle searchRect, double tmOriginX, double tmScaleX, double localCmTx, double cmScaleX, double penText, double charSpacing, double wordSpacing, bool blankClipped = false, bool dropLeadingSpaces = false)
     {
+        double keptStartPen = default;
         // Text-space pen of the first SURVIVING glyph: a left-clipped run's
         // grid position starts there, not at the run's off-page origin.
         // (Not reported in blank mode — the run keeps its original position.)
@@ -77,6 +74,7 @@ public sealed partial class TextAbsorber
             }
             penText += w;
         }
+        return (penText, keptStartPen);
     }
 
     // Compute number of spaces to emit for an inter-run gap.

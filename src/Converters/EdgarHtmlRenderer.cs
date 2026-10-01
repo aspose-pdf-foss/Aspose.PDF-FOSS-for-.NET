@@ -391,26 +391,28 @@ internal static partial class EdgarHtmlRenderer
             var val = kv[1].Trim();
             switch (prop)
             {
-                case "font-size": if (TryLen(val, s.Size, out var fs)) s.Size = fs; break;
+                case "font-size": if (TryLen(val, s.Size) is { } fs) s.Size = fs; break;
                 case "font-family": s.Family = val.Split(',')[0].Trim().Trim('"', '\''); break;
                 case "font-weight": s.Bold = val.StartsWith("bold", StringComparison.OrdinalIgnoreCase) || val == "700"; break;
                 case "font-style": s.Italic = val.StartsWith("italic", StringComparison.OrdinalIgnoreCase); break;
-                case "margin-top": if (TryLen(val, s.Size, out var mt)) s.MarginTop = mt; break;
-                case "margin-bottom": if (TryLen(val, s.Size, out var mb)) s.MarginBottom = mb; break;
-                case "margin-left": if (TryLen(val, s.Size, out var ml)) s.MarginLeft = ml; break;
-                case "text-indent": if (TryLen(val, s.Size, out var ti)) s.TextIndent = ti; break;
-                case "line-height": if (TryLen(val, s.Size, out var lh2)) s.LineHeight = lh2; break;
+                case "margin-top": if (TryLen(val, s.Size) is { } mt) s.MarginTop = mt; break;
+                case "margin-bottom": if (TryLen(val, s.Size) is { } mb) s.MarginBottom = mb; break;
+                case "margin-left": if (TryLen(val, s.Size) is { } ml) s.MarginLeft = ml; break;
+                case "text-indent": if (TryLen(val, s.Size) is { } ti) s.TextIndent = ti; break;
+                case "line-height": if (TryLen(val, s.Size) is { } lh2) s.LineHeight = lh2; break;
                 case "page-break-before": if (val.Equals("always", StringComparison.OrdinalIgnoreCase)) s.PageBreakBefore = true; break;
-                case "color": if (TryColor(val, out var c)) s.Color = c; break;
-                case "border-top": ParseBorder(val, out s.BorderTopW, out s.BorderTopColor); break;
-                case "border-bottom": ParseBorder(val, out s.BorderBottomW, out s.BorderBottomColor); break;
+                case "color": if (TryColor(val) is { } c) s.Color = c; break;
+                case "border-top": (s.BorderTopW, s.BorderTopColor) = ParseBorder(val); break;
+                case "border-bottom": (s.BorderBottomW, s.BorderBottomColor) = ParseBorder(val); break;
                 case "text-align": s.Align = val.ToLowerInvariant(); break;
             }
         }
     }
 
-    static void ParseBorder(string val, out double w, out int color)
+    static (double w, int color) ParseBorder(string val)
     {
+        double w = default;
+        int color = default;
         w = 0; color = 0;
         var m = Regex.Match(val, @"([\d.]+)\s*(px|pt)");
         if (m.Success)
@@ -420,13 +422,14 @@ internal static partial class EdgarHtmlRenderer
         }
         var c = Regex.Match(val, @"#([0-9A-Fa-f]{6})");
         if (c.Success) color = int.Parse(c.Groups[1].Value, NumberStyles.HexNumber);
+        return (w, color);
     }
 
-    internal static bool TryLen(string val, double em, out double pt)
+    internal static double? TryLen(string val, double em)
     {
-        pt = 0;
+        double pt = 0;
         var m = Regex.Match(val.Trim(), @"^(-?[\d.]+)\s*(pt|px|em|%)?$");
-        if (!m.Success) return false;
+        if (!m.Success) return null;
         var num = double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
         pt = m.Groups[2].Value switch
         {
@@ -435,22 +438,22 @@ internal static partial class EdgarHtmlRenderer
             "%" => num / 100.0 * em,
             _ => num,
         };
-        return true;
+        return pt;
     }
 
-    static bool TryColor(string val, out int color)
+    static int? TryColor(string val)
     {
-        color = 0;
+        int color = 0;
         var m = Regex.Match(val.Trim(), @"^#([0-9A-Fa-f]{6})$");
-        if (m.Success) { color = int.Parse(m.Groups[1].Value, NumberStyles.HexNumber); return true; }
+        if (m.Success) { color = int.Parse(m.Groups[1].Value, NumberStyles.HexNumber); return color; }
         switch (val.Trim().ToLowerInvariant())
         {
-            case "black": color = 0; return true;
-            case "white": color = 0xFFFFFF; return true;
-            case "red": color = 0xFF0000; return true;
-            case "blue": color = 0x0000FF; return true;
+            case "black": color = 0; return color;
+            case "white": color = 0xFFFFFF; return color;
+            case "red": color = 0xFF0000; return color;
+            case "blue": color = 0x0000FF; return color;
         }
-        return false;
+        return null;
     }
 
     // ── Inline runs ─────────────────────────────────────────────────────────────
@@ -712,7 +715,7 @@ internal static partial class EdgarHtmlRenderer
             }
             catch { }
             if (data is null) return;
-            if (!TryJpegSize(data, out var wPx, out var hPx)) { wPx = 100; hPx = 40; }
+            if (TryJpegSize(data) is not (var wPx, var hPx)) { wPx = 100; hPx = 40; }
             double w = wPx * 0.75, h = hPx * 0.75;
 
             double top;
@@ -737,10 +740,12 @@ internal static partial class EdgarHtmlRenderer
             EndBlock(st.MarginBottom, 0);
         }
 
-        static bool TryJpegSize(byte[] d, out int w, out int h)
+        static (int w, int h)? TryJpegSize(byte[] d)
         {
+            int w = default;
+            int h = default;
             w = h = 0;
-            if (d.Length < 4 || d[0] != 0xFF || d[1] != 0xD8) return false;
+            if (d.Length < 4 || d[0] != 0xFF || d[1] != 0xD8) return null;
             int i = 2;
             while (i + 9 < d.Length)
             {
@@ -752,11 +757,11 @@ internal static partial class EdgarHtmlRenderer
                 {
                     h = (d[i + 5] << 8) | d[i + 6];
                     w = (d[i + 7] << 8) | d[i + 8];
-                    return true;
+                    return (w, h);
                 }
                 i += 2 + len;
             }
-            return false;
+            return null;
         }
 
         // ——— tables (v1) ————————————————————————————————————————————————

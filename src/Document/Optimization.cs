@@ -74,6 +74,7 @@ public sealed partial class Document : IDisposable
         SaveWithSaveOptions(doc, dstFileName, saveOptions);
     }
 
+    /// <summary>Opens the source file with the given load options (HTML, SVG, Markdown and so on) and writes the result to a stream. <c>HtmlSaveOptions</c> saves as HTML; any other save options save as PDF.</summary>
     public static void Convert(string srcFileName, LoadOptions loadOptions,
         Stream dstStream, SaveOptions saveOptions)
     {
@@ -81,6 +82,7 @@ public sealed partial class Document : IDisposable
         SaveWithSaveOptions(doc, dstStream, saveOptions);
     }
 
+    /// <summary>Reads the source from a stream with the given load options (HTML, SVG, Markdown and so on) and saves the result to a file. <c>HtmlSaveOptions</c> saves as HTML; any other save options save as PDF.</summary>
     public static void Convert(Stream srcStream, LoadOptions loadOptions,
         string dstFileName, SaveOptions saveOptions)
     {
@@ -88,6 +90,7 @@ public sealed partial class Document : IDisposable
         SaveWithSaveOptions(doc, dstFileName, saveOptions);
     }
 
+    /// <summary>Reads the source from a stream with the given load options (HTML, SVG, Markdown and so on) and writes the result to another stream. <c>HtmlSaveOptions</c> saves as HTML; any other save options save as PDF.</summary>
     public static void Convert(Stream srcStream, LoadOptions loadOptions,
         Stream dstStream, SaveOptions saveOptions)
     {
@@ -198,11 +201,27 @@ public sealed partial class Document : IDisposable
         {
             Aspose.Pdf.CryptoAlgorithm.RC4x40 => PdfEncryptor.CreateRC4x40(userPassword, ownerPassword, p),
             Aspose.Pdf.CryptoAlgorithm.RC4x128 => PdfEncryptor.CreateRC4x128(userPassword, ownerPassword, p),
-            Aspose.Pdf.CryptoAlgorithm.AESx128 => PdfEncryptor.CreateAES128(userPassword, ownerPassword, p),
-            Aspose.Pdf.CryptoAlgorithm.AESx256 => PdfEncryptor.CreateAES256(userPassword, ownerPassword, p),
-            _ => PdfEncryptor.CreateAES128(userPassword, ownerPassword, p),
+            Aspose.Pdf.CryptoAlgorithm.AESx128 => PdfEncryptor.CreateAES128(userPassword, ownerPassword, p,
+                encryptMetadata: EncryptMetadata),
+            Aspose.Pdf.CryptoAlgorithm.AESx256 => PdfEncryptor.CreateAES256(userPassword, ownerPassword, p,
+                encryptMetadata: EncryptMetadata),
+            _ => PdfEncryptor.CreateAES128(userPassword, ownerPassword, p,
+                encryptMetadata: EncryptMetadata),
         };
     }
+
+    /// <summary>
+    /// Whether the next encryption carries the document's METADATA with
+    /// everything else, or leaves the packet in the clear for a reader that
+    /// indexes it without the password.
+    ///
+    /// ⚠ Only the crypt-filter handlers can express it: from revision 4 on, the
+    /// choice is part of the key. A 40-bit RC4 document has no way to say it and
+    /// ignores this.
+    ///
+    /// Default true, which is what a document says by writing nothing.
+    /// </summary>
+    public bool EncryptMetadata { get; set; } = true;
 
     /// <summary>True when the document carries a DocMDP certification (author) signature.
     /// A certification is recorded in the catalog as <c>/Perms &lt;&lt; /DocMDP &lt;sigref&gt; &gt;&gt;</c>
@@ -327,12 +346,8 @@ public sealed partial class Document : IDisposable
     }
 
     /// <summary>
-    /// Optimize document resources by removing unused objects and deduplicating streams.
-    /// The optimization is applied on the next save.
-    /// </summary>
-    /// <summary>
-    /// Linearize the document for fast web view (mirrors the public API
-    /// <c>Document.Optimize()</c>). Default optimization is applied.
+    /// Optimize document resources by removing unused objects and deduplicating streams,
+    /// and linearize the document for fast web view. Both are applied on the next save.
     /// </summary>
     public void Optimize()
     {
@@ -378,11 +393,6 @@ public sealed partial class Document : IDisposable
 
     // ── PDF/A conversion ────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Convert the document to the specified PDF/A conformance level.
-    /// Applies automatic fixes for common violations when ErrorAction is Delete.
-    /// Returns true if the document was successfully made compliant (or all fixable issues were addressed).
-    /// </summary>
     /// <summary>True for a CONFORMANCE target (PDF/A, PDF/X, PDF/UA …) as opposed to a
     /// plain version target. Only a conformance target carries the embed-everything
     /// requirement that overrides a face's licence.</summary>
@@ -392,8 +402,15 @@ public sealed partial class Document : IDisposable
             or Aspose.Pdf.PdfFormat.v_1_5 or Aspose.Pdf.PdfFormat.v_1_6 or Aspose.Pdf.PdfFormat.v_1_7
             or Aspose.Pdf.PdfFormat.v_2_0 or Aspose.Pdf.PdfFormat.Pdf);
 
+    /// <summary>
+    /// Convert the document to the specified PDF/A conformance level.
+    /// Applies automatic fixes for common violations when ErrorAction is Delete.
+    /// Returns true if the document was successfully made compliant (or all fixable issues were addressed).
+    /// </summary>
     public bool Convert(PdfFormatConversionOptions options)
     {
+        // Each conversion decides afresh whether its save packs objects into streams.
+        _packObjectsOnSave = false;
         // Converting to PDF 2.0 with a pending RC4 encryption cannot succeed —
         // 2.0 removes the RC4 crypt filters (ISO 32000-2 §7.6) — so the request
         // is refused instead of producing a file that violates its own header.
@@ -421,7 +438,7 @@ public sealed partial class Document : IDisposable
             }
             else if (options.LogStream is not null)
             {
-                using var writer = new StreamWriter(options.LogStream, System.Text.Encoding.UTF8, leaveOpen: true);
+                using var writer = Compat.LeaveOpenWriter(options.LogStream, System.Text.Encoding.UTF8);
                 WriteValidationLogXml(writer, options.TargetFormat, blocked, "Conversion");
             }
             return false;
@@ -444,7 +461,7 @@ public sealed partial class Document : IDisposable
             }
             else if (options.LogStream is not null)
             {
-                using var writer = new StreamWriter(options.LogStream, System.Text.Encoding.UTF8, leaveOpen: true);
+                using var writer = Compat.LeaveOpenWriter(options.LogStream, System.Text.Encoding.UTF8);
                 WriteValidationLogXml(writer, options.TargetFormat, refused, "Conversion");
             }
             return false;
@@ -481,7 +498,7 @@ public sealed partial class Document : IDisposable
         }
         else if (options.LogStream is not null && options.ConversionLog.Count > 0)
         {
-            using var writer = new StreamWriter(options.LogStream, System.Text.Encoding.UTF8, leaveOpen: true);
+            using var writer = Compat.LeaveOpenWriter(options.LogStream, System.Text.Encoding.UTF8);
             WriteValidationLogXml(writer, options.TargetFormat, logResult, "Conversion");
         }
 
@@ -498,6 +515,10 @@ public sealed partial class Document : IDisposable
     }
 
     private Aspose.Pdf.PdfFormat? _lastConvertedFormat;
+
+    /// <summary>A size-optimized conversion asked the next save to pack objects into
+    /// compressed object streams even when the source had none.</summary>
+    private bool _packObjectsOnSave;
 
     /// <summary>True once a PDF/A conversion succeeded on this instance. Validation
     /// of file-structure rules that conversion repairs on save (e.g. the PDF/A-1

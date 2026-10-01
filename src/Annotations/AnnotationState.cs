@@ -45,7 +45,7 @@ public enum AnnotationStateModel
 }
 
 /// <summary>Reply-relationship between a markup annotation and its
-/// <see cref="MarkupAnnotation.InReplyTo"/> target.</summary>
+/// <c>MarkupAnnotation.InReplyTo</c> target.</summary>
 public enum ReplyType
 {
     /// <summary>A direct reply to the parent annotation.</summary>

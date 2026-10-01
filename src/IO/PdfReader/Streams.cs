@@ -11,6 +11,48 @@ internal sealed partial class PdfReader
     /// Get the decoded stream data (decryption + filters applied).
     /// </summary>
     public byte[] DecodeStream(PdfStream stream, int objectNumber = 0, int generation = 0)
+        => StreamFilter.Decode(DecryptedRawData(stream, objectNumber, generation), ResolveStreamFilterDict(stream.Dict));
+
+    /// <summary>
+    /// Decode a stream as <see cref="DecodeStream"/> does, but with every predictor's
+    /// /Colors replaced by <paramref name="predictorColors"/>. The replacement lives on a
+    /// copy of the filter dictionary: the document's own objects are not touched, so a
+    /// later save writes the stream's declared parameters unchanged.
+    /// </summary>
+    internal byte[] DecodeStreamWithPredictorColors(PdfStream stream, int predictorColors)
+        => StreamFilter.Decode(DecryptedRawData(stream, 0, 0),
+            WithPredictorColors(ResolveStreamFilterDict(stream.Dict), predictorColors));
+
+    private static PdfDictionary WithPredictorColors(PdfDictionary filterDict, int predictorColors)
+    {
+        var copy = new PdfDictionary();
+        foreach (var key in filterDict.Keys) copy.Set(key, filterDict.Get(key)!);
+        switch (filterDict.Get("DecodeParms"))
+        {
+            case PdfDictionary parms:
+                copy.Set("DecodeParms", PredictorParmsWithColors(parms, predictorColors));
+                break;
+            case PdfArray arr:
+                var items = new PdfArray();
+                foreach (var it in arr)
+                    items.Add(it is PdfDictionary parms ? PredictorParmsWithColors(parms, predictorColors) : it);
+                copy.Set("DecodeParms", items);
+                break;
+        }
+        return copy;
+    }
+
+    private static PdfObject PredictorParmsWithColors(PdfDictionary parms, int predictorColors)
+    {
+        if (parms.GetInt("Predictor", 1) <= 1) return parms;
+        var copy = new PdfDictionary();
+        foreach (var key in parms.Keys) copy.Set(key, parms.Get(key)!);
+        copy.Set("Colors", new PdfInteger(predictorColors));
+        return copy;
+    }
+
+    /// <summary>The stream's raw bytes with the document's encryption removed.</summary>
+    private byte[] DecryptedRawData(PdfStream stream, int objectNumber, int generation)
     {
         var data = stream.RawData;
 
@@ -48,9 +90,7 @@ internal sealed partial class PdfReader
             data = _decryptor.DecryptStream(data, objectNumber, generation, cryptFilterName);
         }
 
-        // /Filter and /DecodeParms may be stored as indirect refs in the stream dict.
-        // Resolve them before passing to StreamFilter so filters are always applied.
-        return StreamFilter.Decode(data, ResolveStreamFilterDict(stream.Dict));
+        return data;
     }
 
     /// <summary>Decode at most <paramref name="maxBytes"/> of a stream's leading content
@@ -59,34 +99,7 @@ internal sealed partial class PdfReader
     /// the cipher operates on the (typically small) raw stream bytes, not the decoded output.</summary>
     public byte[] DecodeStreamPrefix(PdfStream stream, int maxBytes, int objectNumber = 0, int generation = 0)
     {
-        var data = stream.RawData;
-
-        if (objectNumber == 0 && stream.ObjectNumber > 0)
-        {
-            objectNumber = stream.ObjectNumber;
-            generation = stream.Generation;
-        }
-
-        if (_decryptor is not null && objectNumber > 0)
-        {
-            string? cryptFilterName = null;
-            var filterObj = stream.Dict.Get("Filter");
-            if (filterObj is PdfName filterName && filterName.Value == "Crypt")
-            {
-                var dp = stream.Dict.Get("DecodeParms") as PdfDictionary;
-                cryptFilterName = dp?.GetName("Name") ?? "Identity";
-            }
-            else if (filterObj is PdfArray filterArr && filterArr.Count > 0
-                     && filterArr[0] is PdfName fn && fn.Value == "Crypt")
-            {
-                var dpArr = stream.Dict.Get("DecodeParms") as PdfArray;
-                cryptFilterName = dpArr is { Count: > 0 } && dpArr[0] is PdfDictionary dp
-                    ? dp.GetName("Name") ?? "Identity"
-                    : "Identity";
-            }
-            data = _decryptor.DecryptStream(data, objectNumber, generation, cryptFilterName);
-        }
-
+        var data = DecryptedRawData(stream, objectNumber, generation);
         return StreamFilter.DecodePrefix(data, ResolveStreamFilterDict(stream.Dict), maxBytes);
     }
 

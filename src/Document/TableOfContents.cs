@@ -29,7 +29,7 @@ public sealed partial class Document
     }
 
     /// <summary>Collect every <see cref="Heading"/> across the document whose
-    /// <see cref="Heading.TocPage"/> is <paramref name="tocPage"/>, paired with the
+    /// <see cref="Heading.TocPage"/> is <c>tocPage</c>, paired with the
     /// 1-based destination page number shown in its TOC entry. A heading qualifies
     /// when it is flagged <see cref="Heading.IsInList"/> (added to a content page
     /// and listed in the TOC) or when it sits directly on the TOC page itself

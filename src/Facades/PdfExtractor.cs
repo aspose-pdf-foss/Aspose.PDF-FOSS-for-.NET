@@ -93,10 +93,13 @@ namespace Aspose.Pdf.Facades
             set => _textSearchOptions = value;
         }
 
+        /// <summary>Creates an extractor with no document bound; call <c>BindPdf</c> before extracting.</summary>
         public PdfExtractor() { }
 
+        /// <summary>Creates an extractor bound to an already opened document.</summary>
         public PdfExtractor(Document document) { BindPdf(document); }
 
+        /// <summary>Opens the PDF file at the given path (using <c>Password</c> when set) and resets the page range to the whole document.</summary>
         public void BindPdf(string inputFile)
         {
             _document = string.IsNullOrEmpty(Password)
@@ -106,6 +109,7 @@ namespace Aspose.Pdf.Facades
             Reset();
         }
 
+        /// <summary>Binds an already opened document, which the extractor does not dispose, and resets the page range to the whole document.</summary>
         public void BindPdf(Document document)
         {
             _document = document ?? throw new ArgumentNullException(nameof(document));
@@ -113,6 +117,7 @@ namespace Aspose.Pdf.Facades
             Reset();
         }
 
+        /// <summary>Opens the PDF from the given stream (using <c>Password</c> when set) and resets the page range to the whole document.</summary>
         public void BindPdf(Stream inputStream)
         {
             _document = string.IsNullOrEmpty(Password)
@@ -167,6 +172,7 @@ namespace Aspose.Pdf.Facades
             return sb.ToString();
         }
 
+        /// <summary>Extracts the text of pages <c>StartPage</c> to <c>EndPage</c> using the current <c>ExtractTextMode</c>. Call it before <c>GetText</c> or <c>GetNextPageText</c>; throws when no document is bound.</summary>
         public void ExtractText()
         {
             if (_document is null)
@@ -346,7 +352,7 @@ namespace Aspose.Pdf.Facades
             File.WriteAllBytes(outputFile, _getTextEncoding.GetBytes(_extractedText!));
         }
 
-        /// <summary>True if there is another page's text available via <see cref="GetNextPageText"/>.</summary>
+        /// <summary>True if there is another page's text available via <c>GetNextPageText</c>.</summary>
         public bool HasNextPageText()
         {
             if (_document is null) return false;
@@ -393,6 +399,7 @@ namespace Aspose.Pdf.Facades
         private System.Collections.Generic.List<ImageXObject>? _extractedImages;
         private int _imageCursor;
 
+        /// <summary>Collects the images of pages <c>StartPage</c> to <c>EndPage</c> (each shared image once) for retrieval with <c>GetNextImage</c>. Throws when no document is bound.</summary>
         public void ExtractImage()
         {
             if (_document is null)
@@ -560,8 +567,8 @@ namespace Aspose.Pdf.Facades
                     if (csRes?.Get(csName.Value) is { } actual)
                         dict.Set("ColorSpace", actual);
                 }
-                var key = string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                    $"{dict.GetInt("Width")}x{dict.GetInt("Height")}:{System.Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(data))}");
+                var key = Compat.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    $"{dict.GetInt("Width")}x{dict.GetInt("Height")}:{Compat.ToHexString(Compat.Sha1(data))}");
                 if (inlineSeen.Add(key))
                     order.Add((null, new ImageXObject("InlineImage", new Core.PdfStream(dict, data), reader)));
             };
@@ -620,6 +627,7 @@ namespace Aspose.Pdf.Facades
         public bool HasNextImage() =>
             _extractedImages is not null && _imageCursor < _extractedImages.Count;
 
+        /// <summary>Writes the next extracted image to the stream as JPEG; returns false when no images remain.</summary>
         public bool GetNextImage(Stream outputStream)
         {
             if (!HasNextImage()) return false;
@@ -627,6 +635,7 @@ namespace Aspose.Pdf.Facades
             return true;
         }
 
+        /// <summary>Writes the next extracted image to the given file (JPEG for a .jpg/.jpeg name when the source is JPEG, PNG otherwise); returns false when no images remain.</summary>
         public bool GetNextImage(string outputFile)
         {
             if (!HasNextImage()) return false;
@@ -690,7 +699,7 @@ namespace Aspose.Pdf.Facades
             return list;
         }
 
-        // "<4>The SmartMoney.com Daily Views.pdf" -> "The SmartMoney.com Daily Views.pdf".
+        // "<4>Quarterly Report.pdf" -> "Quarterly Report.pdf".
         // GetAttachNames can return a "<N>" key prefix that differs from the
         // file name; strip it so callers can pass the key straight back to ExtractAttachment.
         private static string StripKeyPrefix(string key)
@@ -793,6 +802,7 @@ namespace Aspose.Pdf.Facades
             EndPage = _document?.PageCount ?? 0;
         }
 
+        /// <summary>Releases the bound document (when the extractor opened it) and clears all extraction state.</summary>
         public void Close()
         {
             if (_ownsDocument) _document?.Dispose();

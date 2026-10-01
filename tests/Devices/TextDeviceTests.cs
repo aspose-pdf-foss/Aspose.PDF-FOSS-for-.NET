@@ -43,7 +43,7 @@ public class TextDeviceTests
         using var ms = new MemoryStream();
         device.Process(doc.Pages[1], ms);
 
-        var result = Encoding.UTF8.GetString(ms.ToArray());
+        var result = device.Encoding.GetString(ms.ToArray());
         Assert.Contains("Stream output", result);
     }
 

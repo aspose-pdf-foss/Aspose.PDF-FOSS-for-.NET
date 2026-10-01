@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>netstandard2.0;net48;net8.0;net9.0;net10.0</TargetFrameworks>
     <LangVersion>12</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -10,23 +10,24 @@
 
     <!-- Package / release metadata -->
     <PackageId>Aspose.PDF.FOSS</PackageId>
-    <Version>26.9.0</Version>
+    <Version>26.10.0</Version>
     <Product>Aspose.PDF FOSS for .NET</Product>
     <PackageReleaseNotes>
-v26.9.0 - rendering and cross-platform release.
+26.10.0 - multi-target, security and accessibility release.
 
-New: PdfFileSanitization repairs files too damaged to load (header/EOF waste, broken cross-reference table); DateField form fields; HideAction; ruby and warichu tagged-structure elements with the StructureTypeStandard role set; a composite drawing Path shape; typed exceptions for empty values, forbidden font embedding, signature-length mismatch and missing optional dependencies (the printing guard names the package to add).
-Rendering: dash patterns on software strokes, soft masks (matte, backdrop, isolated/non-isolated groups), colour-key masks, overprint and multi-spot ink spaces, tiling-pattern ranges, function-based shadings, indexed images with soft masks, DPI-exact output, annotations rotating with the page, sub-pixel-thin images.
-Text: horizontal scaling and negative sizes flip and stretch glyphs, vertical CMaps, substitute faces for fonts without a program, CJK radical fallback, whole-paragraph re-flow on replace.
-Cross-platform: managed BMP/JPEG/TIFF paths, font fallback by name, case-blind and Windows-authored asset paths, glyph recognition, redaction and image colour sampling all work off Windows.
-Also: PDF 2.0 saves move descriptive Info text into XMP and write non-Latin-1 text as UTF-16BE; PDF/A conversion refuses live-signed files and exempts freshly UA-converted documents from the untagged-content scan; signature trust reads intermediates from the per-user store; action Next chains and submit targets; XMP structs stay live; forms treat a field as the collection of its widgets; plus HTML-to-PDF, generator table, facade and annotation fixes.
+Platforms: the package now targets netstandard2.0, net48, net8.0, net9.0 and net10.0; graphical page comparison, TIFF binarization and image merging (except to GIF) run on managed code everywhere, and Linux resolves common Windows faces to installed stand-ins.
+New: TextPdfComparer compares the text of two documents, with ComparisonOptions, HTML/Markdown/JSON/PDF result writers and change statistics; SvgExtractor writes a page's vector graphics as SVG; ThumbnailDevice; DictionaryEditor edits page, catalog and resource dictionaries; BarcodeField and FileSelectBoxField; Bates numbering and pagination artifacts; BoxBlock (rounded corners, background pictures), ListBlock and ReservedBlock for generated layouts; OpenTypeFeatures; PostScript and EPS input through PsLoadOptions.
+Security: SignaturesCompromiseDetector reports forged signatures and how much of a document its signatures cover; UnsignedContentAbsorber finds content added after the last signature; non-throwing TryVerifySignature and Signature.TryVerify; external signing through ExternalSignature and SignHash; managed ECDSA verification; HiddenDataSanitizer; the AES-GCM crypt filter; certificate-encrypted documents open with the recipient's RSA key.
+Redaction: applying a redaction removes the glyphs, path parts and image pixels under the area, the fields and annotations it touches, the alternate text restating removed content, the page thumbnail and private data; redacted JBIG2 scans stay JBIG2 through a new lossless encoder; a redacted document is always saved whole.
+Accessibility: auto-tagging reads columns, running headers, tables (spans, stacked and split tables), lists, figures, formulas and links; StructureElement.GetMarkedContent reads the content an element marks and MarkedContentItem.SaveImage writes its images; AutoTaggingSettings.CustomProgressHandler reports tagging progress; PDF/UA conversion describes fields, links and media and logs what it cannot convert.
+Also: printing sends pages as drawing commands, falling back to an image only for Type 3 text, grayscale or image jobs; tables size columns to their content, repeat header and footer bands, round their corners and split row-spanning cells across pages; software-renderer fixes for strokes, sub-pixel fills and Type 3 glyphs; plus many HTML-to-PDF layout fixes.
 
-Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/releases/tag/v26.9.0
+Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/releases/tag/v26.10.0
     </PackageReleaseNotes>
     <Authors>Aspose</Authors>
     <Company>Aspose Pty Ltd</Company>
     <Copyright>Copyright (c) 2026 Aspose Pty Ltd</Copyright>
-    <Description>A free, open-source PDF library for .NET 8+: read, create, modify, and render PDF documents. Provides an Aspose.PDF-compatible API surface for common PDF scenarios. Some features are incomplete and the public API may change between releases.</Description>
+    <Description>A free, open-source PDF library for .NET Framework 4.8, .NET Standard 2.0 and .NET 8+: read, create, modify, and render PDF documents. Some features are incomplete and the public API may change between releases.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET</PackageProjectUrl>
     <RepositoryUrl>https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET.git</RepositoryUrl>
@@ -52,9 +53,42 @@ Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/
     <NoWarn>$(NoWarn);CS0649</NoWarn>
   </PropertyGroup>
 
+<!-- Runtime dependencies. System.Drawing.Common is the only one on the modern targets;
+     netstandard2.0 and net48 add the packages that carry APIs their BCL lacks
+     (System.Text.Json, Span, PKCS#7, code-page encodings, HashCode). -->
 <ItemGroup>
   <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
 </ItemGroup>
+<ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' Or '$(TargetFramework)' == 'net48'">
+  <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  <PackageReference Include="System.Memory" Version="4.5.5" />
+  <PackageReference Include="System.Security.Cryptography.Pkcs" Version="8.0.1" />
+  <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+  <PackageReference Include="Microsoft.Bcl.HashCode" Version="6.0.0" />
+  <!-- Build-time only (PrivateAssets=all): they add nothing to the shipped package.
+       The first generates the C# language-feature types the old BCLs lack (IsExternalInit,
+       Index/Range, RequiredMember, the OS-platform attributes); the second supplies the
+       newer BCL convenience overloads as source (string.Contains(char), Stream.Write(Span),
+       KeyValuePair.Deconstruct, ...). Everything they cannot cover lives in src/Compat. -->
+  <PackageReference Include="PolySharp" Version="1.16.0" PrivateAssets="all" />
+  <PackageReference Include="Polyfill" Version="7.33.0" PrivateAssets="all" />
+</ItemGroup>
+<ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+  <Reference Include="System.Net.Http" />
+</ItemGroup>
+<PropertyGroup Condition="'$(TargetFramework)' == 'netstandard2.0' Or '$(TargetFramework)' == 'net48'">
+  <PolySharpIncludeRuntimeSupportedAttributes>true</PolySharpIncludeRuntimeSupportedAttributes>
+  <!-- The polyfill sources use C# 13 features; the language level of the modern targets is unchanged. -->
+  <LangVersion>13</LangVersion>
+  <!-- CS0436: RuntimeHelpers.GetSubArray (the array range operator) is declared in src/Compat for these
+       targets and shadows the BCL type that lacks it. -->
+  <NoWarn>$(NoWarn);CS0436</NoWarn>
+  <!-- The old reference assemblies carry no nullability annotations (no [NotNullWhen] on
+       string.IsNullOrEmpty, TryGetValue, ...), so flow analysis there reports what the
+       annotated modern targets prove safe. The modern targets keep full checking of the
+       same source. -->
+  <Nullable>annotations</Nullable>
+</PropertyGroup>
 
 <!-- SonarSource's C# rules - the same engine a SonarQube server applies, delivered as
      analyzers that run inside the compiler. OFF unless asked for: a first analysis of a
@@ -75,11 +109,13 @@ Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/
 
 <ItemGroup>
   <EmbeddedResource Include="Devices\CmykToRgbLut.bin" />
+  <EmbeddedResource Include="Operators\CmykOperatorColors.bin" />
   <EmbeddedResource Include="Text\Resources\DjVuDingbats.ttf" LogicalName="Aspose.Pdf.Text.Resources.DjVuDingbats.ttf" />
   <EmbeddedResource Include="Text\Resources\AdobeCid.Japan1.bin" LogicalName="Aspose.Pdf.Text.Resources.AdobeCid.Japan1.bin" />
   <EmbeddedResource Include="Text\Resources\AdobeCid.CNS1.bin" LogicalName="Aspose.Pdf.Text.Resources.AdobeCid.CNS1.bin" />
   <EmbeddedResource Include="Text\Resources\AdobeCid.GB1.bin" LogicalName="Aspose.Pdf.Text.Resources.AdobeCid.GB1.bin" />
   <EmbeddedResource Include="Text\Resources\AdobeCid.Korea1.bin" LogicalName="Aspose.Pdf.Text.Resources.AdobeCid.Korea1.bin" />
+  <EmbeddedResource Include="Text\Resources\AdobeGlyphList.txt" LogicalName="Aspose.Pdf.Text.Resources.AdobeGlyphList.txt" />
 </ItemGroup>
 
   <!-- Force a full rebuild of this project on EVERY build, even when no source

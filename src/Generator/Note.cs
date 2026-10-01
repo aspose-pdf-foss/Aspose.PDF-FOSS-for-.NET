@@ -9,6 +9,7 @@ namespace Aspose.Pdf;
 /// </summary>
 public sealed class Note
 {
+    /// <summary>Creates an empty note with an auto-numbered reference marker and no body.</summary>
     public Note() { }
 
     /// <summary>Content passed here becomes the note's body paragraph;

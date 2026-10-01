@@ -29,7 +29,7 @@ internal static class AnnotationFactory
             da += $" {F(color[0])} {F(color[1])} {F(color[2])} rg";
         else
             da += " 0 0 0 rg";
-        dict.Set("DA", new PdfString(Encoding.Latin1.GetBytes(da)));
+        dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(da)));
         return dict;
     }
 
@@ -329,7 +329,7 @@ internal static class AnnotationFactory
         {
             if (c > 0xFF) { isLatin1 = false; break; }
         }
-        if (isLatin1) return Encoding.Latin1.GetBytes(text);
+        if (isLatin1) return Compat.Latin1.GetBytes(text);
 
         // Use UTF-16BE with BOM (PDF text string per spec §7.9.2.2)
         var utf16beBytes = Encoding.BigEndianUnicode.GetBytes(text);

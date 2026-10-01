@@ -58,6 +58,10 @@ public sealed partial class Form
         // slim header); a static XFA keeps its authoritative pages untouched.
         if (!hasWidgets || Type == FormType.Dynamic)
             RenderDynamicXfa();     // paint the form onto real pages (replaces the preview pages)
+        // A static form keeps its pages, so a widget the template alone paints (a barcode)
+        // needs an appearance of its own to survive the conversion.
+        else
+            GenerateXfaBarcodeAppearances(flatReader, acroForm);
 
         // Remove XFA key from AcroForm — this converts XFA to standard AcroForm
         acroForm.Remove("XFA");
@@ -400,7 +404,6 @@ public sealed partial class Form
     internal string? GetXfaFormXml() => GetXfaPart("form").xml;
 
     /// <summary>
-    /// <summary>
     /// Get the caption text for an XFA field by walking the template XML.
     /// Returns the text from &lt;caption&gt;&lt;value&gt;&lt;text&gt; inside the field element.
     /// </summary>
@@ -419,27 +422,31 @@ public sealed partial class Form
             // Look for <caption><value><text>.</text></value></caption>
             foreach (XmlNode child in fieldNode.ChildNodes)
             {
-                if (child.LocalName == "caption")
-                {
-                    // Try <value><text> first
-                    foreach (XmlNode vc in child.ChildNodes)
-                    {
-                        if (vc.LocalName == "value")
-                        {
-                            foreach (XmlNode tc in vc.ChildNodes)
-                            {
-                                if (tc.LocalName == "text")
-                                    return tc.InnerText;
-                            }
-                        }
-                    }
-                    // Fallback: direct text content
-                    return child.InnerText;
-                }
+                if (child.LocalName == "caption") return XfaCaptionText(child);
             }
             return null;
         }
         catch { return null; }
+    }
+
+    /// <summary>The text of a template &lt;caption&gt;: its &lt;value&gt;&lt;text&gt; when present,
+    /// else the caption's own text content.</summary>
+    private static string XfaCaptionText(XmlNode caption)
+    {
+        // Try <value><text> first
+        foreach (XmlNode vc in caption.ChildNodes)
+        {
+            if (vc.LocalName == "value")
+            {
+                foreach (XmlNode tc in vc.ChildNodes)
+                {
+                    if (tc.LocalName == "text")
+                        return tc.InnerText;
+                }
+            }
+        }
+        // Fallback: direct text content
+        return caption.InnerText;
     }
 
     /// <summary>

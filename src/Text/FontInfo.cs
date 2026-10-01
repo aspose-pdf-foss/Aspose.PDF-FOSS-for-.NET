@@ -202,6 +202,19 @@ public class FontInfo
     /// dedupes on (one instance per resolved indirect object).</summary>
     internal PdfDictionary FontDict => _fontDict;
 
+    /// <summary>The name this font was registered under in a page's resources,
+    /// set when it is added to a page and used when text is shown against it.</summary>
+    internal string? PageResourceName { get; set; }
+
+    /// <summary>The /BaseFont name this font was embedded under on a page.</summary>
+    internal string? EmbeddedBaseFontName { get; set; }
+
+    /// <summary>
+    /// The face program behind this font, wherever it came from: the program
+    /// embedded in a document it was read out of, or the file it was opened from.
+    /// </summary>
+    internal byte[]? ProgramBytes() => GetEmbeddedProgramBytes() ?? SourceFontData?.TtfData;
+
     /// <summary>Decoded embedded font program (FontFile2 / FontFile3 / FontFile),
     /// or null when the font is not embedded or has no reachable program.</summary>
     internal byte[]? GetEmbeddedProgramBytes()
@@ -307,7 +320,7 @@ public class FontInfo
                     // Add subset prefix if not present
                     if (BaseFont.Length < 7 || BaseFont[6] != '+')
                     {
-                        var tag = new string(Enumerable.Range(0, 6).Select(_ => (char)('A' + Random.Shared.Next(26))).ToArray());
+                        var tag = new string(Enumerable.Range(0, 6).Select(_ => (char)('A' + Compat.SharedRandom.Next(26))).ToArray());
                         _fontDict.Set("BaseFont", new PdfName($"{tag}+{BaseFont}"));
                     }
                 }
@@ -510,7 +523,7 @@ public class FontInfo
     /// <summary>
     /// Whether the font program is available — either embedded in the PDF,
     /// already loaded as source data, or installed on the system under the
-    /// same name (resolvable via <see cref="FontRepository.FindFont"/>).
+    /// same name (resolvable via <c>FontRepository.FindFont</c>).
     /// </summary>
     public bool IsAccessible => SourceFontData is not null || IsEmbedded || IsSystemFontAvailable();
 
@@ -534,7 +547,16 @@ public class FontInfo
     /// <summary>
     /// Measure the width of a string in points, given a font size.
     /// </summary>
-    public double MeasureString(string text, double fontSize) => Metrics.MeasureString(text, fontSize);
+    public double MeasureString(string text, double fontSize) =>
+        MeasuresByOwnProgram ? SourceFontData!.MeasureString(text, fontSize) : Metrics.MeasureString(text, fontSize);
+
+    /// <summary>A font opened from a file or found among the installed ones is a bare
+    /// dictionary with no /Widths: unless its name is a Standard-14 face, its metrics would
+    /// answer the default width for every glyph (1 em — Liberation Sans, the Linux Arial, measured
+    /// "A" and "z" alike). The program it was opened from holds the real advances.</summary>
+    private bool MeasuresByOwnProgram =>
+        SourceFontData?.TtfData is { Length: > 12 } && !_fontDict.ContainsKey("Widths")
+        && !_fontDict.ContainsKey("DescendantFonts") && !Metrics.IsStandard14;
 
     private IGlyphOutlineSource? _outlineSource;
     private bool _outlineSourceTried;
@@ -680,258 +702,5 @@ public class FontInfo
         catch { return null; }
 
         return set.Count > 0 ? set : null;
-    }
-}
-
-/// <summary>
-/// Collection of fonts referenced by a page.
-/// </summary>
-public sealed class FontCollection : IEnumerable<Font>
-{
-    private readonly List<Font> _fonts = new();
-    private int _nextResId = 1;
-
-    /// <summary>Empty collection — used by <see cref="FontAbsorber"/> to expose accumulated fonts.</summary>
-    internal FontCollection() { }
-
-    internal FontCollection(PdfDictionary pageDict, PdfReader reader)
-    {
-        // /Resources is an inheritable page attribute: a page dict frequently carries no
-        // /Resources of its own and inherits the nearest ancestor's in the /Pages tree.
-        // Resolve the effective resources so fonts referenced by the page content (e.g.
-        // /FAAAAI Tf) are discoverable rather than reporting an empty collection.
-        var resources = ResolveEffectiveResources(pageDict, reader);
-        if (resources is not null)
-        {
-            var fontDict = reader.ResolveDict(resources.Get("Font"));
-            if (fontDict is not null)
-            {
-                var t3 = 0;
-                foreach (var key in fontDict.Keys)
-                {
-                    var font = reader.ResolveDict(fontDict.Get(key));
-                    if (font is not null)
-                    {
-                        var fi = new Font(key, font, reader);
-                        if (fi.IsNamelessType3) fi.SynthesizedFontName = $"T3Font_{t3++}";
-                        _fonts.Add(fi);
-                    }
-                }
-            }
-        }
-    }
-
-    /// <summary>Resolve a page's effective /Resources, walking the /Parent chain for the
-    /// inherited dictionary when the page itself declares none. Returns null when no page
-    /// or ancestor carries /Resources.</summary>
-    private static PdfDictionary? ResolveEffectiveResources(PdfDictionary pageDict, PdfReader reader)
-    {
-        var resources = reader.ResolveDict(pageDict.Get("Resources"));
-        if (resources is not null) return resources;
-
-        var parentObj = pageDict.Get("Parent");
-        var visited = new HashSet<int>();
-        while (parentObj is not null)
-        {
-            if (parentObj is PdfIndirectRef iref && !visited.Add(iref.ObjectNumber))
-                break;
-            var parent = reader.ResolveDict(parentObj);
-            if (parent is null) break;
-            var res = reader.ResolveDict(parent.Get("Resources"));
-            if (res is not null) return res;
-            parentObj = parent.Get("Parent");
-        }
-        return null;
-    }
-
-    /// <summary>Build a collection from a resource dictionary that carries /Font
-    /// directly (e.g. the AcroForm /DR), as opposed to a page dict whose fonts
-    /// live under /Resources/Font.</summary>
-    internal static FontCollection ForResources(PdfDictionary resourceDict, PdfReader reader)
-    {
-        var fc = new FontCollection();
-        var fontDict = reader.ResolveDict(resourceDict.Get("Font"));
-        if (fontDict is not null)
-        {
-            var t3 = 0;
-            foreach (var key in fontDict.Keys)
-            {
-                var font = reader.ResolveDict(fontDict.Get(key));
-                if (font is not null)
-                {
-                    var fi = new Font(key, font, reader);
-                    if (fi.IsNamelessType3) fi.SynthesizedFontName = $"T3Font_{t3++}";
-                    fc._fonts.Add(fi);
-                }
-            }
-        }
-        return fc;
-    }
-
-    public int Count => _fonts.Count;
-
-    /// <summary>1-based indexer for API compatibility.</summary>
-    public Font this[int index] => _fonts[index - 1];
-
-    /// <summary>Look up a font by its PDF resource name (e.g. "F1") or BaseFont name.</summary>
-    public Font this[string name]
-    {
-        get
-        {
-            foreach (var f in _fonts)
-                if (f.ResourceName == name || f.BaseFont == name || f.FontName == name)
-                    return f;
-            throw new KeyNotFoundException($"Font '{name}' not found in collection.");
-        }
-    }
-
-    public IEnumerator<Font> GetEnumerator() => _fonts.GetEnumerator();
-    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-
-    public bool IsReadOnly => false;
-    public bool IsSynchronized => false;
-    public object SyncRoot { get; } = new();
-
-    public bool Contains(Font item) => _fonts.Contains(item);
-
-    public bool Contains(string name)
-    {
-        foreach (var f in _fonts)
-            if (f.ResourceName == name || f.BaseFont == name || f.FontName == name)
-                return true;
-        return false;
-    }
-
-    public void CopyTo(Font[] array, int index) => _fonts.CopyTo(array, index);
-
-    public bool Remove(Font item) => _fonts.Remove(item);
-
-    /// <summary>
-    /// Add a font and emit the PDF resource name assigned to it (e.g. "F1", "F2", ...).
-    /// </summary>
-    public void Add(Font newFont, out string resName)
-    {
-        if (newFont is null) throw new ArgumentNullException(nameof(newFont));
-        resName = $"F{_nextResId++}";
-        _fonts.Add(newFont);
-    }
-}
-
-/// <summary>
-/// Type alias for FontInfo, matching the Font class name.
-/// </summary>
-public class Font : FontInfo
-{
-    internal Font(string resourceName, PdfDictionary fontDict, PdfReader reader)
-        : base(resourceName, fontDict, reader) { }
-
-    internal Font(string baseFont, string subtype) : base(baseFont, subtype) { }
-
-    public new string BaseFont => base.BaseFont;
-    public new string FontName => base.FontName;
-    public new string DecodedFontName => base.DecodedFontName;
-    public new bool IsEmbedded { get => base.IsEmbedded; set => base.IsEmbedded = value; }
-    public new bool IsSubset { get => base.IsSubset; set => base.IsSubset = value; }
-    public new bool IsAccessible => base.IsAccessible;
-
-    public IFontOptions FontOptions => _fontOptions ??= new FontOptionsImpl(this);
-    private IFontOptions? _fontOptions;
-
-    /// <summary>Lower-level PDF-font view of this Font. The public API exposes
-    /// the engine's IPdfFont through here; FOSS returns a thin wrapper
-    /// that surfaces just <c>BaseFontNameOnly</c>.</summary>
-    public PdfFontView iPdfFont => new PdfFontView(this);
-
-    /// <summary>Last error encountered embedding this font in a PDF; empty when none.</summary>
-    public string GetLastFontEmbeddingError() =>
-        _lastEmbeddingError ?? SourceFontData?.LastEmbeddingError ?? string.Empty;
-    private string? _lastEmbeddingError;
-
-    /// <summary>Measure the rendered width of a string at the given size, in points.</summary>
-    public double MeasureString(string str, float fontSize) =>
-        MeasureString(str, (double)fontSize);
-
-    /// <summary>Write the raw font file data to a stream: data loaded via
-    /// FontRepository.OpenFont, the program embedded in the source PDF (an absorbed
-    /// font), or the installed system face resolved by name — in that order.</summary>
-    public void Save(System.IO.Stream stream)
-    {
-        if (stream is null) throw new ArgumentNullException(nameof(stream));
-        var data = SourceFontData?.TtfData ?? GetEmbeddedProgramBytes();
-        if (data is null || data.Length == 0)
-        {
-            try { data = FontRepository.GetTtfData(FontName); }
-            catch { data = null; }
-        }
-        if (data is null || data.Length == 0)
-        {
-            _lastEmbeddingError = "No embeddable font data is available for this Font.";
-            return;
-        }
-        stream.Write(data, 0, data.Length);
-    }
-
-    /// <summary>
-    /// Implicit conversion from FontData (returned by FontRepository.FindFont)
-    /// to Font, so tests can write <c>TextState.Font = FontRepository.FindFont("Arial")</c>
-    /// without an explicit cast.
-    /// </summary>
-    public static implicit operator Font?(FontData? fontData)
-    {
-        if (fontData is null) return null;
-        var font = new Font(fontData.FontName,
-            fontData.Type == FontType.TrueType ? "TrueType" : "Type1");
-        font.SourceFontData = fontData;
-        return font;
-    }
-
-    /// <summary>The options ride on the face program (<see cref="SourceFontData"/>) when
-    /// there is one, so the embedding writer — which is handed the program, not this
-    /// wrapper — sees the caller's choice. A Font with no program of its own keeps the
-    /// value locally.</summary>
-    private sealed class FontOptionsImpl : IFontOptions
-    {
-        private readonly Font _owner;
-        private bool _notify = true;
-        public FontOptionsImpl(Font owner) { _owner = owner; }
-
-        public bool NotifyAboutFontEmbeddingError
-        {
-            get => _owner.SourceFontData?.NotifyAboutEmbeddingError ?? _notify;
-            set
-            {
-                _notify = value;
-                if (_owner.SourceFontData is { } data) data.NotifyAboutEmbeddingError = value;
-            }
-        }
-    }
-}
-
-/// <summary>Per-font runtime options (currently only the font-embedding error toggle).</summary>
-public interface IFontOptions
-{
-    bool NotifyAboutFontEmbeddingError { get; set; }
-}
-
-/// <summary>Thin engine-font view exposed for public-API compatibility (Font.iPdfFont).
-/// Stripped down to the members the test corpus actually reads.</summary>
-public sealed class PdfFontView
-{
-    private readonly Font _font;
-    internal PdfFontView(Font font) { _font = font; }
-
-    /// <summary>The PDF /BaseFont name with the subset prefix removed but the full font name
-    /// (including any style suffix) preserved — e.g. "ABCDEF+TimesNewRomanPS-BoldMT" becomes
-    /// "TimesNewRomanPS-BoldMT" and "Helvetica-Bold" stays "Helvetica-Bold". The 6-letter
-    /// subset tag (per PDF §9.6.4) is the only part stripped.</summary>
-    public string BaseFontNameOnly
-    {
-        get
-        {
-            var bf = _font.BaseFont ?? string.Empty;
-            var plus = bf.IndexOf('+');
-            if (plus >= 0 && plus < bf.Length - 1) bf = bf.Substring(plus + 1);
-            return bf;
-        }
     }
 }

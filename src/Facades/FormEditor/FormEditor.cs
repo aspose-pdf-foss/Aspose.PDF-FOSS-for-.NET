@@ -135,10 +135,10 @@ public sealed partial class FormEditor : IDisposable
         set => _convertTo = value;
     }
 
-    /// <summary>Visual appearance applied by <see cref="AddField"/> and <see cref="DecorateField()"/>.</summary>
+    /// <summary>Visual appearance applied by <c>AddField</c> and <see cref="DecorateField()"/>.</summary>
     public FormFieldFacade Facade { get; set; } = new FormFieldFacade();
 
-    /// <summary>Default list of items used by <see cref="AddField"/> when creating ListBox / ComboBox fields.</summary>
+    /// <summary>Default list of items used by <c>AddField</c> when creating ListBox / ComboBox fields.</summary>
     public string[]? Items { get; set; }
 
     /// <summary>Export-value pairs paired with <see cref="Items"/>.</summary>

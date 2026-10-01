@@ -9,6 +9,9 @@ namespace Aspose.Pdf.Text;
 /// </summary>
 public sealed class AbsorbedTable : IComparable<AbsorbedTable>
 {
+    /// <summary>Creates an empty table with no rows.</summary>
+    public AbsorbedTable() { }
+
     public IReadOnlyList<AbsorbedRow> Rows { get; init; } = [];
 
     /// <summary>Mutable row list.</summary>
@@ -21,6 +24,7 @@ public sealed class AbsorbedTable : IComparable<AbsorbedTable>
         }
     }
 
+    /// <summary>Gets the bounding rectangle of the table on the page, in points; <c>null</c> when unknown.</summary>
     public Rectangle? Rect { get; init; }
     /// <summary>Alias for Rect.</summary>
     public Rectangle? Rectangle => Rect;

@@ -46,6 +46,24 @@ public abstract class PaginationArtifact
     /// <summary>Text styling for the stamped number (font, size, colour).</summary>
     public TextState TextState { get; set; } = new();
 
+    /// <summary>Distance of left-aligned text from the page's left edge, in points.</summary>
+    public double LeftMargin { get; set; } = DefaultSideMargin;
+
+    /// <summary>Distance of right-aligned text from the page's right edge, in points.</summary>
+    public double RightMargin { get; set; } = DefaultSideMargin;
+
+    /// <summary>Distance of top-aligned text's baseline from the page's top edge, in points.</summary>
+    public double TopMargin { get; set; } = DefaultEdgeMargin;
+
+    /// <summary>Distance of bottom-aligned text from the page's bottom edge, in points.</summary>
+    public double BottomMargin { get; set; } = DefaultEdgeMargin;
+
+    /// <summary>The left and right margins' default: an inch.</summary>
+    internal const double DefaultSideMargin = 72;
+
+    /// <summary>The top and bottom margins' default: half an inch.</summary>
+    internal const double DefaultEdgeMargin = 36;
+
     /// <summary>The text stamped for running number <paramref name="number"/>.</summary>
     internal abstract string FormatText(int number);
 
@@ -57,6 +75,9 @@ public abstract class PaginationArtifact
 /// with optional prefix and suffix.</summary>
 public sealed class BatesNArtifact : PaginationArtifact
 {
+    /// <summary>Creates a Bates-numbering artifact that starts at 1 with six digits and no prefix or suffix.</summary>
+    public BatesNArtifact() { }
+
     /// <summary>Text prepended to the number.</summary>
     public string Prefix { get; set; } = string.Empty;
 
@@ -73,7 +94,7 @@ public sealed class BatesNArtifact : PaginationArtifact
     internal override int FirstNumber => Math.Max(1, StartNumber);
 
     internal override string FormatText(int number)
-        => Prefix + number.ToString("D" + Math.Clamp(NumberOfDigits, 3, 15), CultureInfo.InvariantCulture) + Suffix;
+        => Prefix + number.ToString("D" + Compat.Clamp(NumberOfDigits, 3, 15), CultureInfo.InvariantCulture) + Suffix;
 }
 
 /// <summary>Pagination stamping over a <see cref="PageCollection"/> (Bates numbering etc.).</summary>
@@ -348,14 +369,14 @@ public static class PageCollectionExtensions
 
         double x = spec.ArtifactHorizontalAlignment switch
         {
-            HorizontalAlignment.Left => 72,
-            HorizontalAlignment.Right => page.Width - textW - 72,
+            HorizontalAlignment.Left => spec.LeftMargin,
+            HorizontalAlignment.Right => page.Width - textW - spec.RightMargin,
             _ => (page.Width - textW) / 2,
         };
         double y = spec.ArtifactVerticalAlignment switch
         {
-            VerticalAlignment.Top => page.Height - 36,
-            VerticalAlignment.Bottom => 36 - 1.12 * fs,
+            VerticalAlignment.Top => page.Height - spec.TopMargin,
+            VerticalAlignment.Bottom => spec.BottomMargin - 1.12 * fs,
             _ => (page.Height - fs) / 2,
         };
         return new Point(x, y);

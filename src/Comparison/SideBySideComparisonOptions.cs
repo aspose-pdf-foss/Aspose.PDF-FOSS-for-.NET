@@ -19,6 +19,9 @@ namespace Aspose.Pdf.Comparison
     /// comparison/exclusion areas and the marker colours used in the output document.</summary>
     public class SideBySideComparisonOptions
     {
+        /// <summary>Creates options with their default values: whitespace compared as-is and the whole page compared.</summary>
+        public SideBySideComparisonOptions() { }
+
         /// <summary>Whitespace handling for the text comparison.</summary>
         public ComparisonMode ComparisonMode { get; set; }
 

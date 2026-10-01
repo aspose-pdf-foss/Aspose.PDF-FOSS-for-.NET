@@ -346,7 +346,7 @@ public sealed partial class PdfToHtmlConverter
             ct.r = tr; ct.g = tg; ct.b = tb;
             ct.pathState.FillR = tr; ct.pathState.FillG = tg; ct.pathState.FillB = tb;
         }
-        else if (TryColorComponents(ct.operands, out var fr, out var fg, out var fb))
+        else if (TryColorComponents(ct.operands) is (var fr, var fg, var fb))
         {
             ct.r = fr; ct.g = fg; ct.b = fb;
             ct.pathState.FillR = fr; ct.pathState.FillG = fg; ct.pathState.FillB = fb;
@@ -363,7 +363,7 @@ public sealed partial class PdfToHtmlConverter
             var (tr, tg, tb) = ct.strokeTintMap(Num(ct.operands[0]));
             ct.pathState.StrokeR = tr; ct.pathState.StrokeG = tg; ct.pathState.StrokeB = tb;
         }
-        else if (TryColorComponents(ct.operands, out var sr, out var sg, out var sbb))
+        else if (TryColorComponents(ct.operands) is (var sr, var sg, var sbb))
         {
             ct.pathState.StrokeR = sr; ct.pathState.StrokeG = sg; ct.pathState.StrokeB = sbb;
         }

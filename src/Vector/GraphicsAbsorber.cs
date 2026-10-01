@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Aspose.Pdf.Operators;
 
 namespace Aspose.Pdf.Vector;
@@ -16,14 +16,22 @@ namespace Aspose.Pdf.Vector;
 /// removed on their source page — edits rewrite only the elements' own
 /// operator ranges, so text and other non-vector content is untouched.
 /// </summary>
-public sealed class GraphicsAbsorber
+public sealed partial class GraphicsAbsorber : IDisposable
 {
     /// <summary>The extracted vector elements (populated by <see cref="Visit"/>).</summary>
     public GraphicElementCollection Elements { get; } = new();
 
     private GraphicsEditState? _editState;
 
+    /// <summary>Creates a graphics absorber with an empty <c>Elements</c> collection.</summary>
     public GraphicsAbsorber() { }
+
+    /// <summary>Releases what the absorber holds: its elements and the page snapshot they edit.</summary>
+    public void Dispose()
+    {
+        Elements.Clear();
+        _editState = null;
+    }
 
     /// <summary>Extract the painted sub-paths and form placements of <paramref name="page"/>.</summary>
     public void Visit(Page page)
@@ -63,6 +71,8 @@ public sealed class GraphicsAbsorber
         // any other state). Elements painted under it record it so a source-page
         // move can translate the clip path along with the element.
         public GraphicsClipInfo? ActiveClip;
+        // The region painting is clipped to, at any depth (a form's walk starts inside its placement's).
+        public ClipRegion? Clip;
 
         public WalkState Clone() => new()
         {
@@ -70,173 +80,47 @@ public sealed class GraphicsAbsorber
             Fill = Fill, Stroke = Stroke,
             LineWidth = LineWidth, LineJoin = LineJoin,
             ActiveClip = ActiveClip,
+            Clip = Clip,
         };
     }
 
     private const int MaxFormDepth = 12;
 
-    private static void Walk(IReadOnlyList<Aspose.Pdf.Operator> ops, Core.PdfDictionary? resources,
-        IO.PdfReader reader, GraphicElementCollection elements, int depth,
-        GraphicsEditState? editState, Aspose.Pdf.Matrix? baseCtm = null)
+    private static void Walk(IReadOnlyList<Aspose.Pdf.Operator> ops, Core.PdfDictionary? resources, IO.PdfReader reader, GraphicElementCollection elements, int depth, GraphicsEditState? editState, Aspose.Pdf.Matrix? baseCtm = null, ClipRegion? baseClip = null)
     {
-        var gs = new WalkState();
-        if (baseCtm is not null) gs.Ctm = new Aspose.Pdf.Matrix(baseCtm);
-        var stack = new Stack<WalkState>();
+        var gw = new GraphicsWalkState();
+        gw.ops = ops;
+        gw.resources = resources;
+        gw.reader = reader;
+        gw.elements = elements;
+        gw.depth = depth;
+        gw.editState = editState;
+        gw.baseCtm = baseCtm;
+        gw.gs = new WalkState();
+        if (gw.baseCtm is not null) gw.gs.Ctm = new Aspose.Pdf.Matrix(gw.baseCtm);
+        gw.gs.Clip = baseClip;
+        gw.stack = new Stack<WalkState>();
 
-        // Sub-paths constructed for the current (not-yet-painted) path, each with
-        // the operator index span of its construction ops.
-        var subpaths = new List<(Aspose.Pdf.Matrix ctm, List<Aspose.Pdf.Operator> ops,
+        gw.subpaths = new List<(Aspose.Pdf.Matrix ctm, List<Aspose.Pdf.Operator> ops,
             double minX, double minY, double maxX, double maxY, int startIdx, int endIdx)>();
 
-        List<Aspose.Pdf.Operator>? curOps = null;
-        Aspose.Pdf.Matrix? curCtm = null;
-        double minX = 0, minY = 0, maxX = 0, maxY = 0;
-        bool any = false;
-        double curX = 0, curY = 0;   // current point in user space
-        int curStart = -1, curEnd = -1;
-        // A W/W* seen for the current path: the clip activates at the path-ending
-        // op (n or a paint) and stays in force until the enclosing Q.
-        GraphicsClipInfo? pendingClip = null;
+        gw.curOps = null;
+        gw.curCtm = null;
+        gw.minX = 0;
+        gw.minY = 0;
+        gw.maxX = 0;
+        gw.maxY = 0;
+        gw.any = false;
+        gw.curX = 0;   // current point in user space
+        gw.curY = 0;
+        gw.curStart = -1;
+        gw.curEnd = -1;
+        gw.pendingClip = null;
+        gw.pendingRegion = null;
 
-        void Flush()
+        for (var i = 0; i < gw.ops.Count; i++)
         {
-            if (curOps is { Count: > 0 } && any)
-                subpaths.Add((curCtm!, curOps, minX, minY, maxX, maxY, curStart, curEnd));
-            curOps = null; any = false;
-        }
-        int PathStart() =>
-            subpaths.Count > 0 ? subpaths[0].startIdx : curStart;
-        void Start(double ux, double uy, int idx)
-        {
-            Flush();
-            curOps = new List<Aspose.Pdf.Operator>();
-            curCtm = new Aspose.Pdf.Matrix(gs.Ctm);
-            any = false; curX = ux; curY = uy;
-            curStart = idx; curEnd = idx;
-        }
-        void AddPoint(double ux, double uy)
-        {
-            var (px, py) = curCtm!.TransformPoint(ux, uy);
-            if (!any) { minX = maxX = px; minY = maxY = py; any = true; }
-            else
-            {
-                if (px < minX) minX = px; else if (px > maxX) maxX = px;
-                if (py < minY) minY = py; else if (py > maxY) maxY = py;
-            }
-        }
-        void Paint(Aspose.Pdf.Operator paintOp, bool fill, bool stroke, bool evenOdd)
-        {
-            Flush();
-            var style = new SubPathStyle(
-                fill ? gs.Fill : null,
-                stroke ? gs.Stroke : null,
-                gs.LineWidth, gs.LineJoin, evenOdd);
-            foreach (var sp in subpaths)
-            {
-                var el = new SubPath(sp.ctm, sp.ops, paintOp,
-                    new Rectangle(sp.minX, sp.minY, sp.maxX, sp.maxY), style);
-                if (depth == 0)
-                {
-                    el.SetSourceRange(sp.startIdx, sp.endIdx);
-                    el.SourceClip = gs.ActiveClip;
-                }
-                elements.AddInternal(el);
-            }
-            subpaths.Clear();
-            ActivatePendingClip();
-        }
-        void Discard()
-        {
-            Flush();
-            subpaths.Clear();
-            ActivatePendingClip();
-        }
-        void ActivatePendingClip()
-        {
-            if (pendingClip is not null) { gs.ActiveClip = pendingClip; pendingClip = null; }
-        }
-
-        for (var i = 0; i < ops.Count; i++)
-        {
-            var op = ops[i];
-            switch (op)
-            {
-                case GSave: stack.Push(gs.Clone()); break;
-                case GRestore: if (stack.Count > 0) gs = stack.Pop(); break;
-                case ConcatenateMatrix cm: gs.Ctm = cm.Matrix.Multiply(gs.Ctm); break;
-
-                case SetRGBColor rgb:
-                    gs.Fill = (rgb.R, rgb.G, rgb.B);
-                    break;
-                case SetGray or SetCMYKColor or SetColor or SetAdvancedColor:
-                {
-                    var c = ((SetColorOperator)op).getColor();
-                    gs.Fill = (c.R / 255.0, c.G / 255.0, c.B / 255.0);
-                    break;
-                }
-                case SetRGBColorStroke or SetGrayStroke or SetCMYKColorStroke
-                    or SetColorStroke or SetAdvancedColorStroke:
-                {
-                    var c = ((SetColorOperator)op).getColor();
-                    gs.Stroke = (c.R / 255.0, c.G / 255.0, c.B / 255.0);
-                    break;
-                }
-                case SetLineWidth lw: gs.LineWidth = lw.Width; break;
-                case SetLineJoin lj: gs.LineJoin = (int)lj.Join; break;
-
-                case MoveTo m:
-                    Start(m.X, m.Y, i); curOps!.Add(m); AddPoint(m.X, m.Y); break;
-                case Re re:
-                    Start(re.X, re.Y, i); curOps!.Add(re);
-                    AddPoint(re.X, re.Y); AddPoint(re.X + re.Width, re.Y);
-                    AddPoint(re.X + re.Width, re.Y + re.Height); AddPoint(re.X, re.Y + re.Height);
-                    break;
-                case LineTo l:
-                    if (curOps is null) Start(l.X, l.Y, i);
-                    curOps!.Add(l); AddPoint(l.X, l.Y); curX = l.X; curY = l.Y; curEnd = i; break;
-                case CurveTo c:
-                    if (curOps is null) Start(curX, curY, i);
-                    curOps!.Add(c); AddPoint(c.X1, c.Y1); AddPoint(c.X2, c.Y2); AddPoint(c.X3, c.Y3);
-                    curX = c.X3; curY = c.Y3; curEnd = i; break;
-                case CurveTo1 v:
-                    if (curOps is null) Start(curX, curY, i);
-                    curOps!.Add(v); AddPoint(v.X2, v.Y2); AddPoint(v.X3, v.Y3);
-                    curX = v.X3; curY = v.Y3; curEnd = i; break;
-                case CurveTo2 y:
-                    if (curOps is null) Start(curX, curY, i);
-                    curOps!.Add(y); AddPoint(y.X1, y.Y1); AddPoint(y.X3, y.Y3);
-                    curX = y.X3; curY = y.Y3; curEnd = i; break;
-                case ClosePath h:
-                    if (curOps is not null) { curOps.Add(h); curEnd = i; }
-                    break;
-
-                case Stroke or ClosePathStroke:
-                    Paint(op, fill: false, stroke: true, evenOdd: false); break;
-                case Fill or ObsoleteFill:
-                    Paint(op, fill: true, stroke: false, evenOdd: false); break;
-                case EOFill:
-                    Paint(op, fill: true, stroke: false, evenOdd: true); break;
-                case FillStroke or ClosePathFillStroke:
-                    Paint(op, fill: true, stroke: true, evenOdd: false); break;
-                case EOFillStroke or ClosePathEOFillStroke:
-                    Paint(op, fill: true, stroke: true, evenOdd: true); break;
-
-                case Clip or EOClip:
-                    // Record the clip path's construction range so a later element
-                    // move can translate the clip with the element (the clip takes
-                    // effect at the path-ending op that follows).
-                    if (depth == 0 && PathStart() >= 0)
-                        pendingClip = new GraphicsClipInfo(PathStart(), i, new Aspose.Pdf.Matrix(gs.Ctm));
-                    break;
-
-                case EndPath: Discard(); break;   // n — clip / no-paint: drop the path
-
-                case Do d when depth < MaxFormDepth:
-                    VisitForm(d, i, resources, reader, gs, elements, depth, editState);
-                    break;
-
-                default: break;                    // colour/clip/text/etc. don't affect path geometry
-            }
+            if (!WalkOperator(gw, i)) break;
         }
     }
 
@@ -267,7 +151,7 @@ public sealed class GraphicsAbsorber
         foreach (var raw in ContentStreamOperatorParser.ParseOperators(bytes))
             formOps.Add(TypedOperatorParser.Parse(raw));
         var childBase = formMatrix is null ? gs.Ctm : formMatrix.Multiply(gs.Ctm);
-        Walk(formOps, formResources, reader, children, depth + 1, editState: null, childBase);
+        Walk(formOps, formResources, reader, children, depth + 1, editState: null, childBase, gs.Clip);
 
         // Placement rectangle: /BBox under /Matrix × CTM.
         var rect = new Rectangle(0, 0, 0, 0);

@@ -171,11 +171,12 @@ public class OptimizeResourcesTests
     [Fact]
     public void ConvertToGrayscale_ChangesColorSpace()
     {
-        // Create a PDF with an RGB image
+        // Create a PDF with an RGB image of noise: incompressible, so the grayscale
+        // version really is a third of the size once compressed.
         var width = 32;
         var height = 32;
         var pixels = new byte[width * height * 3];
-        for (var i = 0; i < pixels.Length; i++) pixels[i] = (byte)(i % 256);
+        new Random(7).NextBytes(pixels);
 
         var pdf = PdfBuilder.BuildMinimal();
         using var doc = Document.Open(pdf);

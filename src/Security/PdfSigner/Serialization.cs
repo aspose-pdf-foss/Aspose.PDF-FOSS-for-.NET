@@ -9,9 +9,10 @@ public sealed partial class PdfSigner
     /// <summary>
     /// Serialize an indirect object, tracking the position and length of the /Contents hex string.
     /// </summary>
-    private static byte[] SerializeObject(int objNum, PdfDictionary dict, int contentsSize,
-        out long contentsOffset, out long contentsLength)
+    private static (byte[] result, long contentsOffset, long contentsLength) SerializeObject(int objNum, PdfDictionary dict, int contentsSize)
     {
+        long contentsOffset = default;
+        long contentsLength = default;
         contentsOffset = 0;
         contentsLength = 0;
 
@@ -41,7 +42,7 @@ public sealed partial class PdfSigner
         }
         Write(">>\nendobj\n");
 
-        return ms.ToArray();
+        return (ms.ToArray(), contentsOffset, contentsLength);
     }
 
     private static void SerializeValue(MemoryStream ms, PdfObject val)
@@ -63,7 +64,7 @@ public sealed partial class PdfSigner
                 Write(r.Value.ToString("G"));
                 break;
             case PdfString s when s.IsHex:
-                Write($"<{Convert.ToHexString(s.Value)}>");
+                Write($"<{Compat.ToHexString(s.Value)}>");
                 break;
             case PdfString s:
                 Write("(");
@@ -104,14 +105,7 @@ public sealed partial class PdfSigner
     }
 
     /// <summary>zlib-deflate a stream payload for an appended object.</summary>
-    private static byte[] DeflateBytes(byte[] data)
-    {
-        using var buf = new MemoryStream();
-        using (var zlib = new System.IO.Compression.ZLibStream(
-                   buf, System.IO.Compression.CompressionMode.Compress, leaveOpen: true))
-            zlib.Write(data, 0, data.Length);
-        return buf.ToArray();
-    }
+    internal static byte[] DeflateBytes(byte[] data) => IO.Filters.ManagedDeflater.DeflateZlib(data);
 
     private static void WriteIndirectObject(MemoryStream ms, int objNum, PdfObject obj)
     {
@@ -227,7 +221,7 @@ public sealed partial class PdfSigner
         }
 
         if (!needsUnicode)
-            return new PdfString(Encoding.Latin1.GetBytes(text));
+            return new PdfString(Compat.Latin1.GetBytes(text));
 
         // UTF-16BE with BOM (0xFE 0xFF)
         var utf16 = Encoding.BigEndianUnicode.GetBytes(text);

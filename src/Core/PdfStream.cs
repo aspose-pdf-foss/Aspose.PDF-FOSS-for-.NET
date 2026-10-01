@@ -24,6 +24,11 @@ internal sealed class PdfStream : PdfObject
         RawData = rawData;
     }
 
+    /// <summary>Cached verdict that this form XObject's content shows no text - nothing for a
+    /// text replace to find, so the replacer skips it without decoding it again. Null until
+    /// examined; cleared whenever the data changes.</summary>
+    internal bool? ShowsNoText { get; set; }
+
     /// <summary>Replace the raw stream data (used by optimization).</summary>
-    internal void ReplaceData(byte[] newData) => RawData = newData;
+    internal void ReplaceData(byte[] newData) { RawData = newData; ShowsNoText = null; }
 }

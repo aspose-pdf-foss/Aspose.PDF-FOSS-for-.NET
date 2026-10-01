@@ -1,5 +1,4 @@
-﻿using System.IO.Compression;
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf;
 
@@ -10,72 +9,54 @@ public partial class ImageStamp
     /// </summary>
     public void ApplyTo(Page page)
     {
-        var imgName = RegisterXObject(page);
+        var st = new ImageStampApplyState();
+        st.page = page;
+        st.imgName = RegisterXObject(st.page);
 
-        // Build content stream operators to place the image.
-        var w = DisplayWidth;
-        var h = DisplayHeight;
+        st.w = DisplayWidth;
+        st.h = DisplayHeight;
 
-        // Anchor at XIndent/YIndent (the bottom-left placement) when set, else X/Y,
-        // else derive it from Horizontal/VerticalAlignment against the page box
-        // (a Right/Bottom-aligned image with no explicit
-        // indent lands at pageWidth-imageWidth / 0).
-        var pageBox = page.MediaBox;
-        double ax = XIndent != 0 ? XIndent
+        st.pageBox = st.page.MediaBox;
+        st.ax = XIndent != 0 ? XIndent
             : X != 0 ? X
             : HorizontalAlignment switch
             {
-                HorizontalAlignment.Right => pageBox.Width - w,
-                HorizontalAlignment.Center => (pageBox.Width - w) / 2.0,
+                HorizontalAlignment.Right => st.pageBox.Width - st.w,
+                HorizontalAlignment.Center => (st.pageBox.Width - st.w) / 2.0,
                 _ => 0,
             };
-        double ay = YIndent != 0 ? YIndent
+        st.ay = YIndent != 0 ? YIndent
             : Y != 0 ? Y
             : VerticalAlignment switch
             {
-                VerticalAlignment.Top => pageBox.Height - h,
-                VerticalAlignment.Center => (pageBox.Height - h) / 2.0,
+                VerticalAlignment.Top => st.pageBox.Height - st.h,
+                VerticalAlignment.Center => (st.pageBox.Height - st.h) / 2.0,
                 _ => 0,
             };
 
-        // Compose scale + rotation into the cm matrix, then translate so the
-        // rotated image's bounding box bottom-left lands at the anchor.
-        double deg = RotateAngle != 0 ? RotateAngle : (double)Rotate;
-        double rad = deg * System.Math.PI / 180.0;
-        double cos = System.Math.Cos(rad), sin = System.Math.Sin(rad);
-        double ma = w * cos, mb = w * sin, mc = -h * sin, md = h * cos;
-        double minX = System.Math.Min(System.Math.Min(0, ma), System.Math.Min(mc, ma + mc));
-        double minY = System.Math.Min(System.Math.Min(0, mb), System.Math.Min(md, mb + md));
-        double me = ax - minX, mf = ay - minY;
+        st.deg = RotateAngle != 0 ? RotateAngle : (double)Rotate;
+        st.rad = st.deg * System.Math.PI / 180.0;
+        st.cos = System.Math.Cos(st.rad);
+        st.sin = System.Math.Sin(st.rad);
+        st.ma = st.w * st.cos;
+        st.mb = st.w * st.sin;
+        st.mc = -st.h * st.sin;
+        st.md = st.h * st.cos;
+        st.minX = System.Math.Min(System.Math.Min(0, st.ma), System.Math.Min(st.mc, st.ma + st.mc));
+        st.minY = System.Math.Min(System.Math.Min(0, st.mb), System.Math.Min(st.md, st.mb + st.md));
+        st.me = st.ax - st.minX;
+        st.mf = st.ay - st.minY;
 
-        // Always emit a graphics-state operator (/GS gs) before placing the image so
-        // the stamp composites against an explicit ExtGState rather than inheriting a
-        // residual one from prior page content — otherwise a background image
-        // watermark could hide the underlying content. The
-        // ExtGState carries a non-default blend mode and/or partial opacity when
-        // requested; otherwise it is empty (an /Type /ExtGState no-op).
-        bool wantBlend = !string.IsNullOrEmpty(BlendMode) && BlendMode != "Normal";
-        var gsName = RegisterGsExtGState(page, wantBlend ? BlendMode : null, Opacity);
-        var gsOp = $"/{gsName} gs ";
-        // A %StampId comment makes this stamp discoverable by PdfContentEditor.GetStamps
-        // when an id was assigned via setStampId; the PdfFileStamp facade keeps its own
-        // ImageStamp's StampId at 0 (it injects the id itself), so there is no double-mark.
-        var idComment = (StampId != 0 || ForceStampIdComment) ? $"%StampId={StampId}\n" : "";
-        var rectComment = MetaRect is { } mr
+        st.wantBlend = !string.IsNullOrEmpty(BlendMode) && BlendMode != "Normal";
+        st.gsName = RegisterGsExtGState(st.page, st.wantBlend ? BlendMode : null, Opacity);
+        st.gsOp = $"/{st.gsName} gs ";
+        st.idComment = (StampId != 0 || ForceStampIdComment) ? $"%StampId={StampId}\n" : "";
+        st.rectComment = MetaRect is { } mr
             ? $"%StampRect={Format(mr.LLX)} {Format(mr.LLY)} {Format(mr.URX)} {Format(mr.URY)}\n" : "";
-        // A foreground stamp is appended after the page's existing content, so it
-        // inherits whatever CTM that content leaves active. Pages that were
-        // flattened or are slightly malformed can leave a residual CTM — a scale
-        // (e.g. a page authored in 1/600" units with a leading "0.12 0 0 -0.12 0
-        // 792 cm") and/or an unbalanced q — that would silently transform the
-        // stamp, placing it at the wrong position and size. Undo that residual by
-        // prefixing the inverse of the active CTM, so the stamp's anchor
-        // coordinates are interpreted against the page's base coordinate system.
-        var resetCm = string.Empty;
-        if (!Background && TryGetResidualCtmInverse(page, out var ia, out var ib,
-                out var ic, out var id, out var ie, out var iff))
+        st.resetCm = string.Empty;
+        if (!Background && TryGetResidualCtmInverse(st.page) is (var ia, var ib, var ic, var id, var ie, var iff))
         {
-            resetCm = $"{Format(ia)} {Format(ib)} {Format(ic)} {Format(id)} {Format(ie)} {Format(iff)} cm ";
+            st.resetCm = $"{Format(ia)} {Format(ib)} {Format(ic)} {Format(id)} {Format(ie)} {Format(iff)} cm ";
         }
         // Rotated-page compensation (AddImage semantics): map the as-displayed
         // coordinate system back onto page space so the anchor rect is where the
@@ -88,47 +69,31 @@ public partial class ImageStamp
         // them the unrotated placement and report the stamp as axis-aligned.
         if (CompensatePageRotation)
         {
-            var box = page.MediaBox;
-            var rot = ((page.RotateDegrees % 360) + 360) % 360;
-            (double ra, double rb, double rc, double rd, double re, double rf)? frame = rot switch
-            {
-                90 => (0, 1, -1, 0, box.URX, 0),
-                180 => (-1, 0, 0, -1, box.URX, box.URY),
-                270 => (0, -1, 1, 0, 0, box.URY),
-                _ => null,
-            };
-            if (frame is { } f)
-            {
-                (ma, mb, mc, md, me, mf) = (
-                    ma * f.ra + mb * f.rc, ma * f.rb + mb * f.rd,
-                    mc * f.ra + md * f.rc, mc * f.rb + md * f.rd,
-                    me * f.ra + mf * f.rc + f.re, me * f.rb + mf * f.rd + f.rf);
-            }
+            CompensateStampForPageRotation(st);
         }
-        var stampBody = $"q {resetCm}{gsOp}{Format(ma)} {Format(mb)} {Format(mc)} {Format(md)} {Format(me)} {Format(mf)} cm /{imgName} Do Q\n";
+        // A crop clips in page space, so it is written before the placement matrix.
+        var clip = ClipBox is { } box
+            ? $"{Format(box.LLX)} {Format(box.LLY)} {Format(box.Width)} {Format(box.Height)} re W n " : string.Empty;
+        st.stampBody = $"q {st.resetCm}{st.gsOp}{clip}{Format(st.ma)} {Format(st.mb)} {Format(st.mc)} {Format(st.md)} {Format(st.me)} {Format(st.mf)} cm /{st.imgName} Do Q\n";
 
-        // A foreground image stamp is a pagination artifact: wrap it in an
-        // /Artifact BDC … EMC marked-content block.
-        // The BDC/EMC sit outside the q…Q draw block, so GetStamps still recognises
-        // the clean q gs cm /Im Do Q shape inside. Background stamps stay bare.
-        var contentOps = Background
-            ? $"{idComment}{rectComment}{stampBody}"
-            : $"{idComment}{rectComment}/Artifact BDC\n{stampBody}EMC\n";
-        var contentBytes = System.Text.Encoding.ASCII.GetBytes(contentOps);
+        st.contentOps = Background
+            ? $"{st.idComment}{st.rectComment}{st.stampBody}"
+            : $"{st.idComment}{st.rectComment}/Artifact BDC\n{st.stampBody}EMC\n";
+        st.contentBytes = System.Text.Encoding.ASCII.GetBytes(st.contentOps);
 
         // Add the stamp as a separate content stream so the page's existing
         // content is preserved — AddContentStream/PrependContentStream are
         // array-aware (a page whose /Contents is a stream array would otherwise
         // be overwritten). Background stamps go behind the page content.
         if (Background)
-            page.PrependContentStream(contentBytes);
+            st.page.PrependContentStream(st.contentBytes);
         else
         {
             // A session-stamped artifact belongs to THIS page alone — the flow's
             // continuation-page artifact copy must not repeat it (see
             // Page.SessionStampBlocks).
-            page.SessionStampBlocks.Add(contentBytes);
-            page.AddContentStream(contentBytes);
+            st.page.SessionStampBlocks.Add(st.contentBytes);
+            st.page.AddContentStream(st.contentBytes);
         }
     }
 
@@ -188,7 +153,7 @@ public partial class ImageStamp
     // failure the original bytes are still returned unchanged.
     private static byte[] ReencodeJpeg(byte[] data, int quality)
     {
-        if (OperatingSystem.IsWindows())
+        if (Compat.IsWindows())
         {
             try { return ReencodeJpegWindows(data, quality); }
             catch { return data; }
@@ -225,7 +190,7 @@ public partial class ImageStamp
             var d = i * 4;
             rgba[d] = r; rgba[d + 1] = g; rgba[d + 2] = b; rgba[d + 3] = 255;
         }
-        return IO.JpegEncoderImpl.Encode(rgba, width, height, System.Math.Clamp(quality, 1, 100));
+        return IO.JpegEncoderImpl.Encode(rgba, width, height, Compat.Clamp(quality, 1, 100));
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -239,7 +204,7 @@ public partial class ImageStamp
         if (jpegCodec is null) return data;
         using var ep = new System.Drawing.Imaging.EncoderParameters(1);
         ep.Param[0] = new System.Drawing.Imaging.EncoderParameter(
-            System.Drawing.Imaging.Encoder.Quality, (long)System.Math.Clamp(quality, 1, 100));
+            System.Drawing.Imaging.Encoder.Quality, (long)Compat.Clamp(quality, 1, 100));
         using var outMs = new MemoryStream();
         bmp.Save(outMs, jpegCodec, ep);
         return outMs.ToArray();
@@ -343,13 +308,7 @@ public partial class ImageStamp
         return dict;
     }
 
-    private static byte[] CompressFlate(byte[] data)
-    {
-        using var ms = new MemoryStream();
-        using (var zlib = new ZLibStream(ms, CompressionMode.Compress, leaveOpen: true))
-            zlib.Write(data);
-        return ms.ToArray();
-    }
+    private static byte[] CompressFlate(byte[] data) => IO.Filters.ManagedDeflater.DeflateZlib(data);
 
     private static string Format(double v)
     {
@@ -365,31 +324,36 @@ public partial class ImageStamp
     /// the page's base coordinate system. Returns false (no correction needed)
     /// when the active CTM is already the identity, or when it cannot be parsed
     /// or is singular.</summary>
-    private static bool TryGetResidualCtmInverse(Page page, out double ia, out double ib,
-        out double ic, out double id, out double ie, out double iff)
+    private static (double ia, double ib, double ic, double id, double ie, double iff)? TryGetResidualCtmInverse(Page page)
     {
+        double ia = default;
+        double ib = default;
+        double ic = default;
+        double id = default;
+        double ie = default;
+        double iff = default;
         ia = id = 1; ib = ic = ie = iff = 0;
         try
         {
             var content = page.GetContentStreamBytes();
-            if (content is null || content.Length == 0) return false;
+            if (content is null || content.Length == 0) return null;
             var (a, b, c, d, e, f) = ComputeActiveCtm(content);
             // Already identity → nothing to undo (the common, well-formed case).
             if (System.Math.Abs(a - 1) < 1e-6 && System.Math.Abs(b) < 1e-6
                 && System.Math.Abs(c) < 1e-6 && System.Math.Abs(d - 1) < 1e-6
                 && System.Math.Abs(e) < 1e-6 && System.Math.Abs(f) < 1e-6)
-                return false;
+                return null;
             var det = a * d - b * c;
-            if (System.Math.Abs(det) < 1e-9) return false;
+            if (System.Math.Abs(det) < 1e-9) return null;
             ia = d / det;
             ib = -b / det;
             ic = -c / det;
             id = a / det;
             ie = (c * f - d * e) / det;
             iff = (b * e - a * f) / det;
-            return true;
+            return (ia, ib, ic, id, ie, iff);
         }
-        catch { return false; }
+        catch { return null; }
     }
 
     private static bool IsDelimOrWs(byte b) =>

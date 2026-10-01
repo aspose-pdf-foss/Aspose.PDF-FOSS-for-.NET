@@ -153,7 +153,8 @@ public sealed partial class TextAbsorber
     // Sideways-text glyph clip: keep glyphs whose advance span (which runs along
     // the page Y axis for rotated text) lies inside the rectangle's Y band. The
     // X band was already enforced at line level by LineFiltered.
-    private void AppendClippedRunRot(ExtractState xs, StringBuilder sb, byte[] bytes, ref double penText)
+    /// <returns>The text-space pen after the run's glyph advances.</returns>
+    private double AppendClippedRunRot(ExtractState xs, StringBuilder sb, byte[] bytes, double penText)
     {
         const double eps = 0.05;
         var isCid = xs.currentMetrics?.IsCid ?? false;
@@ -179,5 +180,6 @@ public sealed partial class TextAbsorber
                 sb.Append(glyph);
             penText += w;
         }
+        return penText;
     }
 }

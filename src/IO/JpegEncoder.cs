@@ -7,7 +7,7 @@ namespace Aspose.Pdf.IO;
 /// Used by the streaming JPEG encoder to avoid materialising a full
 /// RGBA buffer for huge images (byte[] caps at 2.1 GB).
 /// </summary>
-internal delegate void PixelGetter(int x, int y, out byte r, out byte g, out byte b);
+internal delegate (byte r, byte g, byte b) PixelGetter(int x, int y);
 
 /// <summary>
 /// Pure C# baseline JPEG encoder.
@@ -19,12 +19,10 @@ internal static class JpegEncoderImpl
     /// <summary>Encode RGBA pixels (4 bytes per pixel) to JPEG.</summary>
     public static byte[] Encode(byte[] rgba, int width, int height, int quality, int xDpi = 0, int yDpi = 0)
     {
-        return Encode((int x, int y, out byte r, out byte g, out byte b) =>
+        return Encode((int x, int y) =>
         {
             var idx = (y * width + x) * 4;
-            r = rgba[idx];
-            g = rgba[idx + 1];
-            b = rgba[idx + 2];
+            return (rgba[idx], rgba[idx + 1], rgba[idx + 2]);
         }, width, height, quality, xDpi, yDpi);
     }
 
@@ -262,7 +260,7 @@ internal static class JpegEncoderImpl
                 for (var x = 0; x < 8; x++)
                 {
                     var px = Math.Min(bx + x, _width - 1);
-                    _getPixel(px, py, out var r, out var g, out var b);
+                    var (r, g, b) = _getPixel(px, py);
                     block[y * 8 + x] = (int)Math.Round(0.299 * r + 0.587 * g + 0.114 * b - 128);
                 }
             }
@@ -283,7 +281,7 @@ internal static class JpegEncoderImpl
                         {
                             var px = Math.Min(mx + x * 2 + dx, _width - 1);
                             var py = Math.Min(my + y * 2 + dy, _height - 1);
-                            _getPixel(px, py, out var r, out var g, out var b);
+                            var (r, g, b) = _getPixel(px, py);
                             sum += chroma == 1
                                 ? -0.168736 * r - 0.331264 * g + 0.5 * b        // Cb
                                 :  0.5 * r - 0.418688 * g - 0.081312 * b;       // Cr
@@ -491,7 +489,7 @@ internal static class JpegEncoderImpl
             for (var i = 0; i < 64; i++)
             {
                 var val = (src[i] * s + 50) / 100;
-                dst[i] = Math.Clamp(val, 1, 255);
+                dst[i] = Compat.Clamp(val, 1, 255);
             }
         }
 

@@ -279,194 +279,13 @@ public sealed partial class Form
         }
     }
 
+    /// <summary>The full dotted names of the FDF's leaf fields (see <see cref="FdfFieldScanner"/>).</summary>
     private static List<string> ParseFdfFieldNames(byte[] fdfData)
     {
-        // FDF /Fields encodes a tree of dicts: each entry has an optional /T
-        // (partial name), an optional /V (value), and an optional /Kids (array
-        // of child entries). Leaves are entries without /Kids; their full
-        // field name is the dotted join of /T values from the root.
-        //
-        // Recursive-descent parser handles nested <<...>> dicts and [...]
-        // arrays without flattening to bare /T scans.
         var result = new List<string>();
-        var text = Encoding.Latin1.GetString(fdfData);
-        var fieldsIdx = text.IndexOf("/Fields", StringComparison.Ordinal);
-        if (fieldsIdx < 0) return result;
-        var pos = text.IndexOf('[', fieldsIdx);
-        if (pos < 0) return result;
-        pos++; // step past '['
-        ParseFdfFieldsArray(text, ref pos, parentPath: null, result);
+        foreach (var (name, _) in FdfFieldScanner.ReadFields(Compat.Latin1.GetString(fdfData)))
+            result.Add(name);
         return result;
-    }
-
-    private static void ParseFdfFieldsArray(string t, ref int pos, string? parentPath, List<string> result)
-    {
-        while (pos < t.Length)
-        {
-            FdfSkipWS(t, ref pos);
-            if (pos >= t.Length) return;
-            if (t[pos] == ']') { pos++; return; }
-            if (pos + 1 < t.Length && t[pos] == '<' && t[pos + 1] == '<')
-            {
-                pos += 2;
-                ParseFdfFieldDict(t, ref pos, parentPath, result);
-            }
-            else
-            {
-                pos++; // tolerate stray bytes
-            }
-        }
-    }
-
-    private static void ParseFdfFieldDict(string t, ref int pos, string? parentPath, List<string> result)
-    {
-        string? partialName = null;
-        int kidsStart = -1;
-
-        while (pos < t.Length)
-        {
-            FdfSkipWS(t, ref pos);
-            if (pos >= t.Length) return;
-            if (pos + 1 < t.Length && t[pos] == '>' && t[pos + 1] == '>')
-            {
-                pos += 2;
-                break;
-            }
-            if (t[pos] != '/') { pos++; continue; }
-            pos++; // step past '/'
-            int kStart = pos;
-            while (pos < t.Length && !IsFdfDelimOrWS(t[pos])) pos++;
-            var key = t.Substring(kStart, pos - kStart);
-            FdfSkipWS(t, ref pos);
-            if (key == "T" && pos < t.Length && t[pos] == '(')
-            {
-                partialName = FdfReadStringLiteral(t, ref pos);
-            }
-            else if (key == "Kids" && pos < t.Length && t[pos] == '[')
-            {
-                kidsStart = pos + 1; // remember; consume below
-                FdfSkipArray(t, ref pos);
-            }
-            else
-            {
-                FdfSkipValue(t, ref pos);
-            }
-        }
-
-        var fullPath = (parentPath, partialName) switch
-        {
-            (null, null) => null,
-            (null, _) => partialName,
-            (_, null) => parentPath,
-            _ => $"{parentPath}.{partialName}",
-        };
-
-        if (kidsStart >= 0)
-        {
-            int kp = kidsStart;
-            ParseFdfFieldsArray(t, ref kp, fullPath, result);
-        }
-        else if (fullPath is not null)
-        {
-            result.Add(fullPath);
-        }
-    }
-
-    private static void FdfSkipWS(string t, ref int pos)
-    {
-        while (pos < t.Length)
-        {
-            char c = t[pos];
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\0') pos++;
-            else if (c == '%') { while (pos < t.Length && t[pos] != '\n') pos++; }
-            else break;
-        }
-    }
-
-    private static bool IsFdfDelimOrWS(char c) =>
-        c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\0'
-        || c == '(' || c == ')' || c == '<' || c == '>' || c == '[' || c == ']'
-        || c == '/' || c == '%';
-
-    private static string FdfReadStringLiteral(string t, ref int pos)
-    {
-        pos++; // step past '('
-        var sb = new StringBuilder();
-        int depth = 1;
-        while (pos < t.Length && depth > 0)
-        {
-            char c = t[pos++];
-            if (c == '\\')
-            {
-                if (pos >= t.Length) break;
-                char esc = t[pos++];
-                switch (esc)
-                {
-                    case 'n': sb.Append('\n'); break;
-                    case 'r': sb.Append('\r'); break;
-                    case 't': sb.Append('\t'); break;
-                    case 'b': sb.Append('\b'); break;
-                    case 'f': sb.Append('\f'); break;
-                    case '(': sb.Append('('); break;
-                    case ')': sb.Append(')'); break;
-                    case '\\': sb.Append('\\'); break;
-                    case '\n': break;
-                    case '\r': if (pos < t.Length && t[pos] == '\n') pos++; break;
-                    default: sb.Append(esc); break;
-                }
-            }
-            else if (c == '(') { depth++; sb.Append(c); }
-            else if (c == ')') { depth--; if (depth > 0) sb.Append(c); }
-            else sb.Append(c);
-        }
-        return sb.ToString();
-    }
-
-    private static void FdfSkipValue(string t, ref int pos)
-    {
-        FdfSkipWS(t, ref pos);
-        if (pos >= t.Length) return;
-        char c = t[pos];
-        if (c == '(') { FdfReadStringLiteral(t, ref pos); }
-        else if (c == '[') { FdfSkipArray(t, ref pos); }
-        else if (c == '<' && pos + 1 < t.Length && t[pos + 1] == '<') { FdfSkipDict(t, ref pos); }
-        else if (c == '<') { pos++; while (pos < t.Length && t[pos] != '>') pos++; if (pos < t.Length) pos++; }
-        else if (c == '/') { pos++; while (pos < t.Length && !IsFdfDelimOrWS(t[pos])) pos++; }
-        else { while (pos < t.Length && !IsFdfDelimOrWS(t[pos])) pos++; }
-    }
-
-    private static void FdfSkipArray(string t, ref int pos)
-    {
-        pos++; // step past '['
-        int depth = 1;
-        while (pos < t.Length && depth > 0)
-        {
-            FdfSkipWS(t, ref pos);
-            if (pos >= t.Length) break;
-            char c = t[pos];
-            if (c == '[') { pos++; depth++; }
-            else if (c == ']') { pos++; depth--; }
-            else if (c == '<' && pos + 1 < t.Length && t[pos + 1] == '<') FdfSkipDict(t, ref pos);
-            else if (c == '(') FdfReadStringLiteral(t, ref pos);
-            else FdfSkipValue(t, ref pos);
-        }
-    }
-
-    private static void FdfSkipDict(string t, ref int pos)
-    {
-        pos += 2; // step past '<<'
-        int depth = 1;
-        while (pos < t.Length && depth > 0)
-        {
-            FdfSkipWS(t, ref pos);
-            if (pos >= t.Length) break;
-            char c = t[pos];
-            if (pos + 1 < t.Length && c == '<' && t[pos + 1] == '<') { pos += 2; depth++; }
-            else if (pos + 1 < t.Length && c == '>' && t[pos + 1] == '>') { pos += 2; depth--; }
-            else if (c == '(') FdfReadStringLiteral(t, ref pos);
-            else if (c == '[') FdfSkipArray(t, ref pos);
-            else FdfSkipValue(t, ref pos);
-        }
     }
 
     /// <summary>
@@ -538,8 +357,9 @@ public sealed partial class Form
     }
 
     /// <summary>Read a PDF/FDF string literal beginning at <paramref name="open"/> (the '(').</summary>
-    private static string ReadFdfLiteral(string s, int open, out int afterClose)
+    private static (string result, int afterClose) ReadFdfLiteral(string s, int open)
     {
+        int afterClose = default;
         var sb = new StringBuilder();
         int depth = 0;
         int i = open;
@@ -552,7 +372,7 @@ public sealed partial class Form
             if (depth > 0) sb.Append(c);
         }
         afterClose = i;
-        return sb.ToString();
+        return (sb.ToString(), afterClose);
     }
 
     /// <summary>

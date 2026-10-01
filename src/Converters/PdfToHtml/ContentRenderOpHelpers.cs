@@ -50,6 +50,35 @@ public sealed partial class PdfToHtmlConverter
         return (pen, glyphs);
     }
 
+    /// <summary>A shown glyph whose ToUnicode is U+200B (ZERO WIDTH SPACE) is a word gap when
+    /// it advances the pen: the fixture's producer maps Arial's space glyph to U+200B, and the
+    /// gap it draws is an inter-word space to a reader. Probed on the reference writer's rule
+    /// for U+00A0 (the same glyph mapped to a no-break space): a positive net advance is
+    /// written as an ordinary U+0020 inside the same run; a glyph kerned back to a zero net
+    /// advance draws nothing and is dropped from the text. The per-character lists stay
+    /// aligned with the text; without them the advance is unknown and the gap reads as a space.</summary>
+    private static string FoldZeroWidthSpaces(string text,
+        List<(double pen, double glyph)>? perChar, List<int>? perCode)
+    {
+        if (text.IndexOf(ZeroWidthSpace) < 0) return text;
+        var sb = new StringBuilder(text.Length);
+        var aligned = perChar is not null && perChar.Count == text.Length;
+        for (int i = 0, k = 0; i < text.Length; i++)
+        {
+            var ch = text[i];
+            if (ch != ZeroWidthSpace) { sb.Append(ch); k++; continue; }
+            var pen = aligned ? perChar![k].pen : double.NaN;
+            if (double.IsNaN(pen) || pen > ZeroAdvanceTolerance) { sb.Append(' '); k++; continue; }
+            if (aligned) { perChar!.RemoveAt(k); perCode?.RemoveAt(k); }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>U+200B ZERO WIDTH SPACE as a shown glyph's ToUnicode value.</summary>
+    private const char ZeroWidthSpace = '​';
+    /// <summary>A net pen advance below this (pt) is a glyph kerned back onto its own origin.</summary>
+    private const double ZeroAdvanceTolerance = 0.01;
+
     private static (List<(double pen, double glyph)> perChar, List<int> perCode)? DecodeAligned(ContentRenderState ct, 
         PdfString ps, string wholeText)
     {

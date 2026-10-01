@@ -50,6 +50,10 @@ doc.Pages.Delete(1, 4, 5);       // delete pages 1, 4, 5
 doc.Pages.Delete();              // delete every page
 ```
 
+`Pages.Insert(index, Page[])` (or an `ICollection<Page>`) inserts copies of
+several pages at once; `Pages.Remove(page)` deletes a page by object and
+`Pages.Clear()` is the same as `Delete()`.
+
 ## Reordering / moving a page
 
 There's no dedicated move method — reinsert the page object, then delete the
@@ -76,8 +80,11 @@ doc.Pages[2].SetRotation(270);
 ## Resizing pages
 
 ```csharp
-// Set a page's size (points)
+// Set a page's size (points) - the media box changes, the content stays as drawn
 doc.Pages[1].SetPageSize(PageSize.A4.Width, PageSize.A4.Height);
+
+// Or resize the page and scale its content to the new size
+doc.Pages[2].Resize(PageSize.Letter);
 
 // Read / set the boxes directly
 Rectangle media = doc.Pages[1].MediaBox;
@@ -124,6 +131,13 @@ foreach (var path in new[] { "a.pdf", "b.pdf", "c.pdf" })
 }
 merged.Save("all.pdf");
 ```
+
+`Document` also merges in one call: `target.Merge(otherDocs)` (or file paths)
+appends every page of each source to `target`, and the static
+`Document.MergeDocuments(...)` returns a new document built from documents,
+file paths or byte arrays. The document and file-path overloads of both also
+take a `Document.MergeOptions` first argument (e.g. `RemoveSignatures`,
+`MergeDuplicateOutlines`, `KeepFieldsUnique`).
 
 ## Splitting a document
 

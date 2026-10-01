@@ -4,7 +4,6 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Operators;
 using Aspose.Pdf.Shading;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -18,11 +17,16 @@ public class PageResources
     private readonly XForm? _xform;
     private readonly PdfDictionary? _resDict;
     private readonly PdfReader? _resReader;
+    /// <summary>The resources dictionary itself, for the data editor.</summary>
+    internal PdfDictionary ResourceDict => _resDict ?? new PdfDictionary();
+
+    /// <summary>The reader the resources resolve through, for the data editor.</summary>
+    internal PdfReader? ResourceReader => _resReader;
 
     /// <summary>Low-level view of the underlying resource dictionary (the
-    /// corpus' <c>EngineDict</c> assert surface — the same canonical view the
+    /// resolved dictionary view - the same canonical view the
     /// annotation/field bridges hand out).</summary>
-    internal global::Aspose.Pdf.Forms.FieldDictionaryView EngineDict
+    internal global::Aspose.Pdf.Forms.FieldDictionaryView DictionaryView
     {
         get
         {
@@ -109,13 +113,10 @@ public class PageResources
         get
         {
             var reader = _page?.Reader ?? _xform!.Reader;
-            var resources = _page is not null
-                ? reader.ResolveDict(_page.Dict.Get("Resources"))
-                : XFormResourcesDict();
-            if (resources is null) return new XFormCollection(new Core.PdfDictionary(), reader, _page);
-            var xobjects = reader.ResolveDict(resources.Get("XObject"));
-            if (xobjects is null) return new XFormCollection(new Core.PdfDictionary(), reader, _page);
-            return new XFormCollection(xobjects, reader, _page);
+            var owner = _page is not null ? _page.Dict : _xform!.StreamDict;
+            var resources = reader.ResolveDict(owner.Get("Resources"));
+            var xobjects = resources is null ? null : reader.ResolveDict(resources.Get("XObject"));
+            return new XFormCollection(xobjects ?? new Core.PdfDictionary(), reader, _page, owner);
         }
     }
 }
@@ -176,7 +177,7 @@ public class Resources : PageResources
 /// <summary>
 /// Represents a Form XObject (reusable content stream with its own resources).
 /// </summary>
-public sealed class XForm
+public sealed partial class XForm
 {
     private readonly Core.PdfStream _stream;
     private readonly IO.PdfReader _reader;
@@ -194,7 +195,21 @@ public sealed class XForm
     /// <summary>The Form XObject's content stream as a typed operator collection.
     /// Lazy: parses on first access and caches.</summary>
     public OperatorCollection Contents
-        => _contents ??= new OperatorCollection(() => _reader.DecodeStream(_stream));
+    {
+        get
+        {
+            if (_contents is null)
+            {
+                _contents = new OperatorCollection(() => _reader.DecodeStream(_stream), ReplaceContent);
+                _reader.OwnerDocument?.TrackContentEdits(this);
+            }
+            return _contents;
+        }
+    }
+
+    /// <summary>Write operators added through <see cref="Contents"/> back into the stream;
+    /// the owning document calls this before a save reads the stream.</summary>
+    internal void FlushContentEdits() => _contents?.FlushToStream();
 
     /// <summary>The raw decoded content bytes of this XForm. Use
     /// <see cref="Contents"/> for typed-operator iteration.</summary>
@@ -205,17 +220,31 @@ public sealed class XForm
     /// path when a fragment extracted from this form has its Text changed/removed.</summary>
     internal void SetDecodedContent(byte[] data)
     {
+        ReplaceContent(data);
+        _contents = null;
+    }
+
+    /// <summary>Replace the stream's content with decoded bytes, dropping the filter so the
+    /// writer re-compresses, and register the stream for the next incremental save.</summary>
+    private void ReplaceContent(byte[] data)
+    {
         _stream.Dict.Remove("Filter");
         _stream.Dict.Remove("DecodeParms");
         _stream.ReplaceData(data);
-        _contents = null;
+        if (_stream.ObjectNumber > 0) _reader.OwnerDocument?.MarkDirty(_stream.ObjectNumber, _stream);
     }
 
     /// <summary>Internal reader for object resolution.</summary>
     internal IO.PdfReader Reader => _reader;
 
+    /// <summary>The object number of the underlying stream, or 0 for a stream not yet written.</summary>
+    internal int ObjectNumber => _stream.ObjectNumber;
+
     /// <summary>The XForm's stream dictionary (contains Resources, BBox, etc.).</summary>
     internal Core.PdfDictionary StreamDict => _stream.Dict;
+
+    /// <summary>The Form XObject stream itself.</summary>
+    internal Core.PdfStream Stream => _stream;
 
     /// <summary>The bounding box of this XForm. /BBox PDF entry.</summary>
     public Rectangle? BBox
@@ -322,18 +351,41 @@ public sealed class XForm
         // Best-effort: build a /Form XObject stream from the source page's
         // /MediaBox + content bytes. Mostly stored: this XForm does not
         // currently get registered in document.Pages or any resource dict.
+        var dict = FormDictionary(source.Rect ?? LetterBox);
+        var stream = new Core.PdfStream(dict, Array.Empty<byte>());
+        return new XForm(stream, source.Reader);
+    }
+
+    /// <summary>The box of a form created without a page to take one from: US Letter,
+    /// 8.5 by 11 inches at 72 points per inch.</summary>
+    private static readonly Rectangle LetterBox = new(0, 0, 8.5 * 72, 11 * 72);
+
+    /// <summary>A fresh, empty form on <paramref name="document"/>: a Form XObject stream
+    /// with the Letter box and an empty font resource, ready for operators and fonts. The
+    /// caller places it through a page's <see cref="XFormCollection.Add"/>.</summary>
+    internal static XForm CreateNew(Document document)
+    {
+        if (document is null) throw new ArgumentNullException(nameof(document));
+        var dict = FormDictionary(LetterBox);
+        var resources = new Core.PdfDictionary();
+        resources.Set("Font", new Core.PdfDictionary());
+        dict.Set("Resources", resources);
+        return new XForm(new Core.PdfStream(dict, Array.Empty<byte>()), document.Reader);
+    }
+
+    /// <summary>A Form XObject stream dictionary over <paramref name="box"/>.</summary>
+    private static Core.PdfDictionary FormDictionary(Rectangle box)
+    {
         var dict = new Core.PdfDictionary();
         dict.Set("Type", new Core.PdfName("XObject"));
         dict.Set("Subtype", new Core.PdfName("Form"));
-        var rect = source.Rect ?? new Rectangle(0, 0, 612, 792);
         var bbox = new Core.PdfArray();
-        bbox.Add(new Core.PdfReal(rect.LLX));
-        bbox.Add(new Core.PdfReal(rect.LLY));
-        bbox.Add(new Core.PdfReal(rect.URX));
-        bbox.Add(new Core.PdfReal(rect.URY));
+        bbox.Add(new Core.PdfReal(box.LLX));
+        bbox.Add(new Core.PdfReal(box.LLY));
+        bbox.Add(new Core.PdfReal(box.URX));
+        bbox.Add(new Core.PdfReal(box.URY));
         dict.Set("BBox", bbox);
-        var stream = new Core.PdfStream(dict, Array.Empty<byte>());
-        return new XForm(stream, source.Reader);
+        return dict;
     }
 }
 
@@ -402,19 +454,30 @@ public sealed class XFormResources
 /// </summary>
 public sealed class XFormCollection : IEnumerable<XForm>
 {
-    private readonly Core.PdfDictionary _xobjects;
+    private Core.PdfDictionary _xobjects;
     private readonly IO.PdfReader _reader;
     private readonly Page? _ownerPage;
+    private readonly Core.PdfDictionary? _owner;
     private List<XForm>? _forms;
 
     internal XFormCollection(Core.PdfDictionary xobjects, IO.PdfReader reader)
-        : this(xobjects, reader, null) { }
+        : this(xobjects, reader, null, null) { }
 
     internal XFormCollection(Core.PdfDictionary xobjects, IO.PdfReader reader, Page? ownerPage)
+        : this(xobjects, reader, ownerPage, null) { }
+
+    /// <summary>Creates a collection over an /XObject resource dictionary.</summary>
+    /// <param name="xobjects">The /XObject dictionary whose form entries the collection lists.</param>
+    /// <param name="reader">The reader that resolves the entries.</param>
+    /// <param name="ownerPage">The page the forms belong to, or null.</param>
+    /// <param name="owner">The page or form dictionary whose /Resources the collection
+    /// writes new forms into; null for a read-only view.</param>
+    internal XFormCollection(Core.PdfDictionary xobjects, IO.PdfReader reader, Page? ownerPage, Core.PdfDictionary? owner)
     {
         _xobjects = xobjects;
         _reader = reader;
         _ownerPage = ownerPage;
+        _owner = owner;
     }
 
     /// <summary>Number of Form XObjects.</summary>
@@ -472,11 +535,11 @@ public sealed class XFormCollection : IEnumerable<XForm>
         if (_ownerPage is null || string.IsNullOrEmpty(name)) return;
         var bytes = LayerHelper.GetPageContentBytes(_ownerPage);
         if (bytes.Length == 0) return;
-        var text = System.Text.Encoding.Latin1.GetString(bytes);
+        var text = Compat.Latin1.GetString(bytes);
         var pattern = $@"/{System.Text.RegularExpressions.Regex.Escape(name)}\s+Do\b";
         if (!System.Text.RegularExpressions.Regex.IsMatch(text, pattern)) return;
         var newText = System.Text.RegularExpressions.Regex.Replace(text, pattern, string.Empty);
-        _ownerPage.SetContentStream(System.Text.Encoding.Latin1.GetBytes(newText));
+        _ownerPage.SetContentStream(Compat.Latin1.GetBytes(newText));
     }
 
     /// <summary>Remove an XForm by 1-based index. Resolves to the underlying name then defers to Delete(string).</summary>
@@ -504,6 +567,7 @@ public sealed class XFormCollection : IEnumerable<XForm>
     public bool IsSynchronized => false;
     public object SyncRoot { get; } = new();
 
+    /// <summary>Adds a form XObject to the collection and to the owner's <c>/XObject</c> resources. A form without a name is named <c>Fm</c> plus its position (for example <c>Fm1</c>); <c>null</c> throws <c>ArgumentNullException</c>.</summary>
     public void Add(XForm item)
     {
         if (item is null) throw new ArgumentNullException(nameof(item));
@@ -511,8 +575,68 @@ public sealed class XFormCollection : IEnumerable<XForm>
         var name = item.Name ?? $"Fm{_forms!.Count + 1}";
         item.Name = name;
         _forms!.Add(item);
+        Register(name, item.Stream);
     }
 
+    /// <summary>Enter the form's stream into the owner's /XObject dictionary, creating the
+    /// resource dictionaries on the way. Under a document the stream becomes a new indirect
+    /// object and the dictionary that gained the entry is marked for the incremental save;
+    /// without one the writer promotes the inline stream when the owner is written.</summary>
+    private void Register(string name, Core.PdfStream stream)
+    {
+        if (_owner is not null) _xobjects = EnsureXObjects(_owner);
+        var document = _reader.OwnerDocument;
+        if (document is null)
+        {
+            _xobjects.Set(name, stream);
+            return;
+        }
+        if (stream.ObjectNumber == 0)
+        {
+            stream.ObjectNumber = document.AllocateObjectNumber();
+            document.AddNewObject(stream.ObjectNumber, stream, registerOverlay: true);
+        }
+        _xobjects.Set(name, new Core.PdfIndirectRef(stream.ObjectNumber, 0));
+        MarkHolderDirty(document);
+    }
+
+    private Core.PdfDictionary EnsureXObjects(Core.PdfDictionary owner)
+    {
+        var resources = _reader.ResolveDict(owner.Get("Resources"));
+        if (resources is null)
+        {
+            resources = new Core.PdfDictionary();
+            owner.Set("Resources", resources);
+        }
+        var xobjects = _reader.ResolveDict(resources.Get("XObject"));
+        if (xobjects is null)
+        {
+            xobjects = new Core.PdfDictionary();
+            resources.Set("XObject", xobjects);
+        }
+        return xobjects;
+    }
+
+    /// <summary>Mark the nearest indirect holder of the new entry - the /XObject dictionary,
+    /// its /Resources, or the owner - so an incremental save rewrites it.</summary>
+    private void MarkHolderDirty(Document document)
+    {
+        var holders = new List<Core.PdfDictionary> { _xobjects };
+        if (_owner is not null)
+        {
+            if (_reader.ResolveDict(_owner.Get("Resources")) is { } resources) holders.Add(resources);
+            holders.Add(_owner);
+        }
+        foreach (var holder in holders)
+        {
+            var number = document.FindObjectNumber(holder);
+            if (number <= 0) continue;
+            document.MarkDirty(number, holder);
+            return;
+        }
+    }
+
+    /// <summary>Removes every form XObject from the collection and from the underlying <c>/XObject</c> resource dictionary.</summary>
     public void Clear()
     {
         EnsureForms();
@@ -521,18 +645,21 @@ public sealed class XFormCollection : IEnumerable<XForm>
         _forms!.Clear();
     }
 
+    /// <summary>Returns <c>true</c> when the given form XObject is in the collection.</summary>
     public bool Contains(XForm item)
     {
         EnsureForms();
         return _forms!.Contains(item);
     }
 
+    /// <summary>Copies the form XObjects into an array, starting at the given array index.</summary>
     public void CopyTo(XForm[] array, int index)
     {
         EnsureForms();
         _forms!.CopyTo(array, index);
     }
 
+    /// <summary>Removes a form XObject from the collection and its entry from the <c>/XObject</c> resource dictionary. Returns <c>true</c> when the form was in the collection.</summary>
     public bool Remove(XForm item)
     {
         EnsureForms();

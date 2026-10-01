@@ -116,14 +116,20 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
     /// glyph-edge anti-aliasing shifts at large sizes, nothing structural.</summary>
     public bool QuantizeToFontUnits { get; set; }
 
-    public GlyphOutline? GetOutline(int glyphId)
+    public GlyphOutline? GetOutline(int glyphId) => ReadOutline(glyphId, keepCurves: false);
+
+    /// <summary>The glyph's outline with its cubic curves kept, not flattened: every curve is an
+    /// on-curve start, its two control points as off-curve points, and an on-curve end.</summary>
+    public GlyphOutline? GetCurveOutline(int glyphId) => ReadOutline(glyphId, keepCurves: true);
+
+    private GlyphOutline? ReadOutline(int glyphId, bool keepCurves)
     {
         if (glyphId < 0 || glyphId >= _charStrings.count) return null;
         var csData = CffParser.ReadIndexEntry(_data, _charStrings, glyphId);
         if (csData.Length == 0) return null;
 
         var fd = _fonts[GetFdIndex(glyphId)];
-        var interp = new CffType2Interpreter(_data, _globalSubrs, fd.LocalSubrs);
+        var interp = new CffType2Interpreter(_data, _globalSubrs, fd.LocalSubrs) { KeepCurves = keepCurves };
         try
         {
             var outline = interp.Run(csData);

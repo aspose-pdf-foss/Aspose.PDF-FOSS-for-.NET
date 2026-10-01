@@ -55,36 +55,42 @@ public sealed class DocumentInfo
     /// as null.</summary>
     private string? MissingString => _document?.IsNewDocument == true ? string.Empty : null;
 
+    /// <summary>Gets or sets the document title (the /Title entry). Reads as an empty string on a new document and as null when a loaded file has none.</summary>
     public string? Title
     {
         get => GetString("Title") ?? MissingString;
         set => SetString("Title", value);
     }
 
+    /// <summary>Gets or sets the name of the person who created the document (the /Author entry). Reads as an empty string on a new document and as null when a loaded file has none.</summary>
     public string? Author
     {
         get => GetString("Author") ?? MissingString;
         set => SetString("Author", value);
     }
 
+    /// <summary>Gets or sets the document subject (the /Subject entry). Reads as an empty string on a new document and as null when a loaded file has none.</summary>
     public string? Subject
     {
         get => GetString("Subject") ?? MissingString;
         set => SetString("Subject", value);
     }
 
+    /// <summary>Gets or sets the keywords associated with the document (the /Keywords entry). Reads as an empty string on a new document and as null when a loaded file has none.</summary>
     public string? Keywords
     {
         get => GetString("Keywords") ?? MissingString;
         set => SetString("Keywords", value);
     }
 
+    /// <summary>Gets or sets the name of the application that created the original content (the /Creator entry). When it is empty at save time, the library writes its own name.</summary>
     public string? Creator
     {
         get => GetString("Creator") ?? MissingString;
         set => SetString("Creator", value);
     }
 
+    /// <summary>Gets or sets the name of the application that produced the PDF (the /Producer entry). Unless you assign it, saving replaces it with this library's name.</summary>
     public string? Producer
     {
         get => GetString("Producer") ?? MissingString;
@@ -116,12 +122,14 @@ public sealed class DocumentInfo
         }
     }
 
+    /// <summary>Gets or sets the date the document was created (the /CreationDate entry). Reads as <c>DateTime.MinValue</c> when absent; assigning <c>DateTime.MinValue</c> removes the entry.</summary>
     public DateTime CreationDate
     {
         get => ParseDate(GetString("CreationDate")) ?? DateTime.MinValue;
         set => SetDate("CreationDate", value == DateTime.MinValue ? null : value);
     }
 
+    /// <summary>Gets or sets the date the document was last modified (the /ModDate entry). Unless you assign it, every save stamps the current UTC time; reads as <c>DateTime.MinValue</c> when absent.</summary>
     public DateTime ModDate
     {
         get => ParseDate(GetString("ModDate")) ?? DateTime.MinValue;
@@ -182,7 +190,7 @@ public sealed class DocumentInfo
         var dt = ParseDate(GetString(key));
         if (dt is null) return;
         EnsureDict();
-        _dict?.Set(key, new PdfString(Encoding.Latin1.GetBytes(FormatPdfDate(dt.Value, tz))));
+        _dict?.Set(key, new PdfString(Compat.Latin1.GetBytes(FormatPdfDate(dt.Value, tz))));
         FlushDirty();
     }
 
@@ -345,7 +353,7 @@ public sealed class DocumentInfo
                 "ModDate" => _modTimeZoneOverride,
                 _ => null,
             };
-            _dict.Set(key, new PdfString(Encoding.Latin1.GetBytes(FormatPdfDate(value.Value, tz))));
+            _dict.Set(key, new PdfString(Compat.Latin1.GetBytes(FormatPdfDate(value.Value, tz))));
         }
         FlushDirty();
     }

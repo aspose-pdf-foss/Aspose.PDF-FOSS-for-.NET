@@ -24,14 +24,14 @@ public sealed class ExternalFontCache
     public string[] GetDefaultFontsFolders()
     {
         var dirs = new List<string>();
-        if (OperatingSystem.IsWindows())
+        if (Compat.IsWindows())
         {
             dirs.Add(Environment.GetFolderPath(Environment.SpecialFolder.Fonts));
             var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             if (!string.IsNullOrEmpty(localAppData))
                 dirs.Add(Path.Combine(localAppData, "Microsoft", "Windows", "Fonts"));
         }
-        else if (OperatingSystem.IsMacOS())
+        else if (Compat.IsMacOS())
         {
             dirs.Add("/System/Library/Fonts");
             dirs.Add("/Library/Fonts");

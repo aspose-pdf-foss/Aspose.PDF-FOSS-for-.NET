@@ -22,6 +22,8 @@ private sealed class RenderBlockState
     // non-flow block (table, image, input, spacer) between two flow blocks
     // breaks the adjacency, so the pair no longer collapses.
     public double uaPrevMB;
+    // ...and that block's UA closing gap, spent by a margin-less follower.
+    public double uaClosingGap;
     public bool wasRow;
     public double prevRowBottomPx;
     // An INLINE unitless line-height on a legacy-flow block is a CSS line

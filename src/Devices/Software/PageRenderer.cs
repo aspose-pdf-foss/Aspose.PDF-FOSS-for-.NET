@@ -65,6 +65,12 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         return RenderPageAtPixelSize(page, pixelW, pixelH, xDpi / 72.0, yDpi / 72.0);
     }
 
+    /// <summary>How far the requested canvas's vertical fit may drift from its horizontal one
+    /// before the page is treated as PINNED to a non-proportional size and stretched to fill it.
+    /// A size derived from the page at a DPI lands within a pixel or two of the page's own aspect;
+    /// a deliberately pinned one (1000x2000 for a letter page) is off by tens of per cent.</summary>
+    private const double PinnedAspectTolerance = 0.01;
+
     /// <summary>
     /// Render a PDF page directly at the requested pixel dimensions (no resample).
     /// Preserves the AA scanline filler's fractional coverage on thin strokes — a
@@ -72,165 +78,54 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
     /// toward binary when neighbouring source rows differ, which is how 50%-grey
     /// page-frame edges used to be lost.
     /// </summary>
-    /// <summary>How far the requested canvas's vertical fit may drift from its horizontal one
-    /// before the page is treated as PINNED to a non-proportional size and stretched to fill it.
-    /// A size derived from the page at a DPI lands within a pixel or two of the page's own aspect;
-    /// a deliberately pinned one (1000x2000 for a letter page) is off by tens of per cent.</summary>
-    private const double PinnedAspectTolerance = 0.01;
-
+    /// <param name="page">The page to render.</param>
+    /// <param name="pixelW">Width of the output canvas in pixels.</param>
+    /// <param name="pixelH">Height of the output canvas in pixels.</param>
     /// <param name="xScale">Device pixels per PDF point horizontally. Null means derive it
     /// from the canvas, which is what a caller that PINNED a pixel size wants; a caller that
     /// asked for a DPI passes the true scale so the truncated canvas does not shrink the page.</param>
     /// <param name="yScale">The vertical counterpart; see <paramref name="xScale"/>.</param>
-    internal RgbaBuffer RenderPageAtPixelSize(Page page, int pixelW, int pixelH,
-        double? xScale = null, double? yScale = null)
+    internal RgbaBuffer RenderPageAtPixelSize(Page page, int pixelW, int pixelH, double? xScale = null, double? yScale = null)
     {
-        if (pixelW <= 0) pixelW = 1;
-        if (pixelH <= 0) pixelH = 1;
+        var px = new PixelPageRenderState();
+        px.page = page;
+        px.pixelW = pixelW;
+        px.pixelH = pixelH;
+        px.xScale = xScale;
+        px.yScale = yScale;
+        if (px.pixelW <= 0) px.pixelW = 1;
+        if (px.pixelH <= 0) px.pixelH = 1;
 
-        var reader = page.Reader;
-        var rawMb = page.MediaBox;
-        // The visible region is the crop box clipped to the media box; content is
-        // sized and offset to it so anything outside the crop area is excluded.
-        var crop = EffectiveCropRect(page);
+        px.reader = px.page.Reader;
+        px.cachedBefore = px.reader.CachedObjects();
+        px.rawMb = px.page.MediaBox;
+        px.crop = EffectiveCropRect(px.page);
 
-        // PDF 32000 §14.8.2.7 — /Rotate (0/90/180/270, clockwise) defines how the
-        // page is displayed. The content stream is authored in the unrotated
-        // coordinate system; we have to compose the rotation into the initial CTM
-        // so glyphs/images/paths land on the (rotated) visible canvas. Otherwise
-        // a 90°-Rotate landscape page draws as portrait content shoved into the
-        // left half of a landscape canvas (the symptom seen on a
-        // facility-plan diagram).
-        var rot = ((page.RotateDegrees % 360) + 360) % 360;
-        Aspose.Pdf.Rectangle effectiveMb;
-        double[]? initialPageCtm = null;
-        if (rot == 90 || rot == 180 || rot == 270)
+        px.rot = ((px.page.RotateDegrees % 360) + 360) % 360;
+        px.initialPageCtm = null;
+        FitPixelPageRotation(px);
+
+        px.scale = px.xScale ?? px.pixelW / px.effectiveMb.Width;
+
+        px.yFit = px.yScale ?? px.pixelH / px.effectiveMb.Height;
+        ReconcilePinnedAspect(px);
+
+        px.pixels = new byte[px.pixelW * px.pixelH * 4];
+
+        // Fill with white background - unless the caller asked for bare paper to stay
+        // transparent, when the buffer starts (0, 0, 0, 0) as the GDI+ canvas does: the
+        // compositor weights a backdrop by its own alpha, so content lands with its true
+        // coverage and nothing is flattened onto white afterwards.
+        for (int i = 0; i < px.pixels.Length && !TransparentBackground; i += 4)
         {
-            // The rotation swings the CROP rectangle (the visible region), not the
-            // media box — a crop offset from the media origin must rotate with the
-            // content, and the canvas edge the content lands against is the crop's,
-            // so both the dimensions AND the lower-left offset below come from crop.
-            // (Anchoring on the media box shifted a 270°-rotated cropped page by the
-            // media/crop height difference.)
-            var w = crop.Width;
-            var h = crop.Height;
-            // Rotated bounding box: 90/270 swap dimensions, 180 keeps them.
-            effectiveMb = rot == 180
-                ? new Aspose.Pdf.Rectangle(0, 0, w, h)
-                : new Aspose.Pdf.Rectangle(0, 0, h, w);
-            // Initial CTM = clockwise rotation of the unrotated content into
-            // the rotated canvas's coord frame. PDF 32000 §14.8.2.7 says /Rotate
-            // is the *clockwise* angle the page is shown at, so the content's
-            // crop-frame corners need to swing CW into the visible canvas:
-            //   Rotate=90 maps crop (LLX,LLY) → visible (0,w)   [top-left]
-            //   Rotate=180 maps crop (LLX,LLY) → visible (w,h)  [top-right]
-            //   Rotate=270 maps crop (LLX,LLY) → visible (h,0)  [bottom-right]
-            initialPageCtm = rot switch
-            {
-                90 => new[] { 0.0, -1.0, 1.0, 0.0, -crop.LLY, w + crop.LLX },
-                180 => new[] { -1.0, 0.0, 0.0, -1.0, w + crop.LLX, h + crop.LLY },
-                270 => new[] { 0.0, 1.0, -1.0, 0.0, h + crop.LLY, -crop.LLX },
-                _ => null,
-            };
-        }
-        else
-        {
-            // Unrotated: the device box is the crop rectangle. Its lower-left maps to
-            // the bottom-left pixel, so cropped content is positioned correctly and the
-            // area outside the crop box falls off the (crop-sized) canvas.
-            effectiveMb = crop;
+            px.pixels[i] = 255;     // R
+            px.pixels[i + 1] = 255; // G
+            px.pixels[i + 2] = 255; // B
+            px.pixels[i + 3] = 255; // A
         }
 
-        // Uniform scale: caller is expected to pick pixelW/pixelH with the visible box's
-        // own aspect ratio. When they don't match exactly, X scale wins (height drifts
-        // ±1px which is swallowed by the comparison tolerance anyway).
-        var scale = xScale ?? pixelW / effectiveMb.Width;
-
-        // A caller CAN pin a target size that is NOT the page's aspect - SaveAsTIFF takes an
-        // explicit width and height - and then the page is STRETCHED to fill it, which is
-        // what the GDI+ renderer's independent _scaleY does. Rather than thread a second
-        // scale through every blit, shading and glyph placement, stretch the page's own
-        // coordinate system by the ratio of the two scales and grow the device box to
-        // match: a uniform scale over a k-times-taller box is the same device transform.
-        // Without it a page pinned to 1000x2000 rendered at its own 1000x1294 and sat in
-        // the bottom of the canvas. Only a real mismatch is corrected, so a size derived
-        // from the page at some DPI (where the ratio is a rounding artefact) is untouched
-        // and its AA-calibrated bilevel output stays exact.
-        var yFit = yScale ?? pixelH / effectiveMb.Height;
-        if (scale > 0 && Math.Abs(yFit / scale - 1.0) > PinnedAspectTolerance)
-        {
-            var k = yFit / scale;
-            var lly = effectiveMb.LLY;
-            var stretch = new[] { 1.0, 0.0, 0.0, k, 0.0, lly * (1 - k) };
-            initialPageCtm = initialPageCtm is null
-                ? stretch
-                : GraphicsState.MultiplyMatrices(initialPageCtm, stretch);
-            effectiveMb = new Aspose.Pdf.Rectangle(effectiveMb.LLX, lly,
-                effectiveMb.URX, lly + effectiveMb.Height * k);
-        }
-
-        var pixels = new byte[pixelW * pixelH * 4];
-
-        // Fill with white background
-        for (int i = 0; i < pixels.Length; i += 4)
-        {
-            pixels[i] = 255;     // R
-            pixels[i + 1] = 255; // G
-            pixels[i + 2] = 255; // B
-            pixels[i + 3] = 255; // A
-        }
-
-        var ctx = new RenderContext(pixels, pixelW, pixelH, scale, effectiveMb, reader)
-        {
-            ConvertFontsToUnicodeTtf = ConvertFontsToUnicodeTtf,
-            PdfXOverprintSim = HasPdfXOutputIntent(reader),
-        };
-
-        // Resolve page resources, walking up the Pages tree if the page itself omits
-        // /Resources. PDF 32000 §7.7.3.4 makes /Resources an inheritable attribute —
-        // many real PDFs list only /Group + /MediaBox + /Contents on the page and put
-        // patterns / XObjects on the parent /Pages dict. Without inheritance, every
-        // "/P1 scn" / "/X1 Do" resolves to nothing and the page renders blank.
-        var resources = ResolveInheritedPageResources(page.Dict, reader);
-        var extGStates = ResolveExtGStates(resources, reader);
-        var fontDicts = ResolveFontDicts(resources, reader);
-        var allXObjects = ResolveAllXObjects(resources, reader);
-
-        ctx.PageCtm = initialPageCtm;
-        ctx.AllXObjects = allXObjects;
-        ctx.FontDicts = fontDicts;
-        // /Pattern entry in page resources holds colour-pattern dicts (tiling or shading).
-        // Cached on the context so DrawPath can resolve "/Pn scn" in O(1) without re-walking
-        // the resources tree per fill.
-        ctx.Patterns = reader.ResolveDict(resources?.Get("Pattern"));
-        // /Shading entry is a sibling of /Pattern and feeds the `sh` operator directly
-        // (PDF 32000 §8.7.4.5). Stored on the context so OnShadingPainted can resolve
-        // names without re-walking the resources tree.
-        ctx.Shadings = reader.ResolveDict(resources?.Get("Shading"));
-        // /ColorSpace entry: dictionary of named Separation/DeviceN/etc. spaces
-        // that `cs`/`CS` operators reference. The parser consumes this to
-        // pre-resolve tint transforms (Pantone spot colours, etc.) so `scn`
-        // produces real RGB instead of falling through to the gray default.
-        ctx.ColorSpaces = reader.ResolveDict(resources?.Get("ColorSpace"));
-        // /Properties is where named BDC props live (e.g. /OC /MC0 BDC →
-        // resources./Properties/MC0 → OCG dict). Needed alongside the
-        // /OCProperties OFF set so the renderer can skip hidden layers.
-        ctx.Properties = reader.ResolveDict(resources?.Get("Properties"));
-        ctx.OcgHidden = ResolveHiddenOcgs(reader);
-
-        // Parse and render content stream
-        var contentBytes = GetPageContent(page.Dict, reader);
-        RenderContent(contentBytes, ctx, extGStates, initialCtm: initialPageCtm);
-
-        // Annotations are painted *after* the page content (PDF 32000-1:2008 §12.5):
-        // Highlight annotations use Multiply blending so underlying text shows through.
-        DrawAnnotations(ctx, page.Dict);
-
-        // Clear resolved object cache after rendering to prevent memory growth
-        // when rendering many pages sequentially.
-        reader.ClearCache();
-
-        return new RgbaBuffer(pixels, pixelW, pixelH);
+        RenderPixelPageContent(px);
+        return new RgbaBuffer(px.pixels, px.pixelW, px.pixelH);
     }
 
     /// <summary>
@@ -397,9 +292,23 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
 
     private static void RenderContent(byte[] contentBytes, RenderContext ctx,
         Dictionary<string, PdfDictionary>? extGStates, double[]? initialCtm = null,
-        byte[]? initialClipMask = null, PdfDictionary? colorSpaces = null)
+        byte[]? initialClipMask = null, PdfDictionary? colorSpaces = null,
+        GraphicsState? inheritState = null)
     {
         var parser = new ContentStreamParser(ctx.Reader);
+        // Content run on behalf of another state starts from it: a Type 3 glyph that
+        // opens with `d1` describes a shape and no colour and is painted in the colour
+        // the text is set in (PDF 32000 §9.6.5), at the text's alphas and blend mode -
+        // the same fields the GDI+ renderer hands its char procs.
+        if (inheritState is not null)
+        {
+            var st = parser.State;
+            st.FillAlpha = inheritState.FillAlpha;
+            st.StrokeAlpha = inheritState.StrokeAlpha;
+            st.BlendMode = inheritState.BlendMode;
+            st.FillR = inheritState.FillR; st.FillG = inheritState.FillG; st.FillB = inheritState.FillB;
+            st.StrokeR = inheritState.StrokeR; st.StrokeG = inheritState.StrokeG; st.StrokeB = inheritState.StrokeB;
+        }
 
         parser.OnTextShown += (text, rawBytes, state) =>
         {

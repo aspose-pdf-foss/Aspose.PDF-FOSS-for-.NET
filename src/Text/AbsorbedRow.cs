@@ -9,6 +9,9 @@ namespace Aspose.Pdf.Text;
 /// </summary>
 public sealed class AbsorbedRow : IComparable<AbsorbedRow>
 {
+    /// <summary>Creates an empty row with no cells.</summary>
+    public AbsorbedRow() { }
+
     public IReadOnlyList<AbsorbedCell> Cells { get; init; } = [];
 
     /// <summary>Mutable cell list.</summary>

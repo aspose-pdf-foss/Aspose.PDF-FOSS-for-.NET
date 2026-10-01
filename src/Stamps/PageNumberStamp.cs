@@ -7,8 +7,11 @@ namespace Aspose.Pdf;
 /// A stamp that adds page numbers to PDF pages.
 /// Use the Format string with {0} for page number and {1} for total pages.
 /// </summary>
-public sealed class PageNumberStamp : Aspose.Pdf.Stamps.Stamp
+public sealed class PageNumberStamp : Stamp
 {
+    /// <summary>Creates a page-number stamp with the default format "Page {0} of {1}", starting at 1, in 10-point Helvetica.</summary>
+    public PageNumberStamp() { }
+
     /// <summary>Page number format. Default: "Page {0} of {1}".</summary>
     public string Format { get; set; } = "Page {0} of {1}";
 

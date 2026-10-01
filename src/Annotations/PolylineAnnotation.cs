@@ -4,10 +4,12 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Annotations;
 
+/// <summary>A polyline annotation: an open line through a list of vertices.</summary>
 public partial class PolylineAnnotation : PolyAnnotation
 {
     internal PolylineAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
+    /// <summary>Creates a polyline annotation on <c>page</c> inside <c>rect</c> with the given vertices (page coordinates in points).</summary>
     public PolylineAnnotation(Page page, Rectangle rect, Point[] vertices) : base(page, rect)
     {
         Dict.Set("Subtype", new PdfName("PolyLine"));

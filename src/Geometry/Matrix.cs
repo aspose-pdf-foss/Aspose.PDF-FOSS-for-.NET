@@ -5,11 +5,17 @@ namespace Aspose.Pdf;
 /// </summary>
 public sealed class Matrix
 {
+    /// <summary>Gets or sets element <c>a</c>: the horizontal scale (combined with rotation).</summary>
     public double A { get; set; }
+    /// <summary>Gets or sets element <c>b</c>: the rotation/skew term that maps x into y.</summary>
     public double B { get; set; }
+    /// <summary>Gets or sets element <c>c</c>: the rotation/skew term that maps y into x.</summary>
     public double C { get; set; }
+    /// <summary>Gets or sets element <c>d</c>: the vertical scale (combined with rotation).</summary>
     public double D { get; set; }
+    /// <summary>Gets or sets element <c>e</c>: the horizontal translation in points.</summary>
     public double E { get; set; }
+    /// <summary>Gets or sets element <c>f</c>: the vertical translation in points.</summary>
     public double F { get; set; }
 
     /// <summary>Default constructor — produces the identity matrix.</summary>
@@ -18,6 +24,7 @@ public sealed class Matrix
         A = 1; B = 0; C = 0; D = 1; E = 0; F = 0;
     }
 
+    /// <summary>Creates a matrix from its six elements, in PDF order <c>[a b c d e f]</c>; a point (x, y) maps to (a*x + c*y + e, b*x + d*y + f).</summary>
     public Matrix(double a, double b, double c, double d, double e, double f)
     {
         A = a; B = b; C = c; D = d; E = e; F = f;
@@ -105,7 +112,7 @@ public sealed class Matrix
     public static Matrix Skew(double alpha, double beta)
         => new(1, Math.Tan(alpha), Math.Tan(beta), 1, 0, 0);
 
-    /// <summary>Convert a <see cref="Rotation"/> value to its angle in radians.</summary>
+    /// <summary>Convert a <c>Rotation</c> value to its angle in radians.</summary>
     public static double GetAngle(Rotation rotation) => rotation switch
     {
         Aspose.Pdf.Rotation.on90 => Math.PI / 2,

@@ -7,6 +7,7 @@ public sealed class DocumentActionCollection
 {
     private readonly Document _document;
 
+    /// <summary>Creates the document-level action collection for <c>document</c>, loading any actions already in the catalog /AA entry. Throws when <c>document</c> is null.</summary>
     public DocumentActionCollection(Document document)
     {
         _document = document ?? throw new System.ArgumentNullException(nameof(document));

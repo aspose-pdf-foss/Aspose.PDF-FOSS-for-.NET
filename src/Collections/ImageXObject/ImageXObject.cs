@@ -91,10 +91,7 @@ public partial class ImageXObject
                     rgb[i * 3] = px[i * 4]; rgb[i * 3 + 1] = px[i * 4 + 1]; rgb[i * 3 + 2] = px[i * 4 + 2];
                 }
             }
-            using var ms = new MemoryStream();
-            using (var z = new System.IO.Compression.ZLibStream(ms, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
-                z.Write(rgb, 0, rgb.Length);
-            _stream.ReplaceData(ms.ToArray());
+            _stream.ReplaceData(IO.Filters.ManagedDeflater.DeflateZlib(rgb));
             var pdict = _stream.Dict;
             pdict.Set("Filter", new PdfName("FlateDecode"));
             pdict.Remove("DecodeParms");
@@ -115,7 +112,7 @@ public partial class ImageXObject
             var dict = _stream.Dict;
             dict.Set("Filter", new PdfName("DCTDecode"));
             dict.Remove("DecodeParms");
-            if (TryParseJpegSize(newData, out var w, out var h, out var nf))
+            if (TryParseJpegSize(newData) is (var w, var h, var nf))
             {
                 dict.Set("Width", new PdfInteger(w));
                 dict.Set("Height", new PdfInteger(h));
@@ -230,37 +227,40 @@ public partial class ImageXObject
     /// Scan a JPEG byte stream for the first SOFn marker (0xFFC0..0xFFCF except
     /// FFC4/FFC8/FFCC) and extract height, width, and number-of-components.
     /// </summary>
-    private static bool TryParseJpegSize(byte[] data, out int width, out int height, out int nf)
+    internal static (int width, int height, int nf)? TryParseJpegSize(byte[] data)
     {
+        int width = default;
+        int height = default;
+        int nf = default;
         width = height = nf = 0;
         var i = 2; // skip SOI
         while (i + 4 < data.Length)
         {
-            if (data[i] != 0xFF) return false;
+            if (data[i] != 0xFF) return null;
             // Skip fill bytes
             while (i < data.Length && data[i] == 0xFF) i++;
-            if (i >= data.Length) return false;
+            if (i >= data.Length) return null;
             var marker = data[i++];
             // SOFn (baseline=C0, extended=C1..CF except DHT=C4, JPG=C8, DAC=CC)
             if (marker is >= 0xC0 and <= 0xCF and not 0xC4 and not 0xC8 and not 0xCC)
             {
-                if (i + 7 >= data.Length) return false;
+                if (i + 7 >= data.Length) return null;
                 // length(2), precision(1), height(2), width(2), Nf(1)
                 i += 2; // length
                 i += 1; // precision
                 height = (data[i] << 8) | data[i + 1]; i += 2;
                 width = (data[i] << 8) | data[i + 1]; i += 2;
                 nf = data[i];
-                return true;
+                return (width, height, nf);
             }
             // Skip segment: read 2-byte length and advance
-            if (marker == 0xD9 || marker == 0xDA) return false; // EOI / SOS reached
-            if (i + 1 >= data.Length) return false;
+            if (marker == 0xD9 || marker == 0xDA) return null; // EOI / SOS reached
+            if (i + 1 >= data.Length) return null;
             var len = (data[i] << 8) | data[i + 1];
-            if (len < 2) return false;
+            if (len < 2) return null;
             i += len;
         }
-        return false;
+        return null;
     }
 
     /// <summary>Image width in pixels.</summary>
@@ -413,29 +413,44 @@ public partial class ImageXObject
     /// </summary>
     internal void SaveRotated(Stream output, int clockwiseQuarterTurns)
     {
-        var turns = ((clockwiseQuarterTurns % 4) + 4) % 4;
-        var src = turns == 0 ? null : GetPixelSource();
+        switch (((clockwiseQuarterTurns % 4) + 4) % 4)
+        {
+            // 90° CW: output(x,y) = source(y, h-1-x)
+            case 1: SaveOriented(output, (0, 1), (-1, 0)); break;
+            // 180°: output(x,y) = source(w-1-x, h-1-y)
+            case 2: SaveOriented(output, (-1, 0), (0, -1)); break;
+            // 270° CW: output(x,y) = source(w-1-y, x)
+            case 3: SaveOriented(output, (0, -1), (1, 0)); break;
+            default: Save(output); break;
+        }
+    }
+
+    /// <summary>
+    /// Save the decoded image as it appears where it is drawn: its columns (left to right) running
+    /// along <paramref name="across"/> and its rows (top to bottom) along <paramref name="down"/>,
+    /// each a unit step in the output's pixel grid (x to the right, y downwards). The eight
+    /// turns and mirrorings of an image are the eight such pairs; ((1, 0), (0, 1)) is the image
+    /// as stored, saved verbatim. A JPEG source re-encodes as JPEG, every other format as PNG.
+    /// </summary>
+    internal void SaveOriented(Stream output, (int X, int Y) across, (int X, int Y) down)
+    {
+        var src = across == (1, 0) && down == (0, 1) ? null : GetPixelSource();
         if (src is null)
         {
-            // No rotation requested, or a colour space the pixel decoder can't read —
+            // Stored as drawn, or a colour space the pixel decoder can't read —
             // fall back to the verbatim save rather than producing a blank image.
             Save(output);
             return;
         }
 
         int w = Width, h = Height;
-        int ow = turns == 2 ? w : h;
-        int oh = turns == 2 ? h : w;
-
-        IO.PixelGetter rotated = turns switch
-        {
-            // 90° CW: output(x,y) = source(y, h-1-x)
-            1 => (int x, int y, out byte r, out byte g, out byte b) => src(y, h - 1 - x, out r, out g, out b),
-            // 180°: output(x,y) = source(w-1-x, h-1-y)
-            2 => (int x, int y, out byte r, out byte g, out byte b) => src(w - 1 - x, h - 1 - y, out r, out g, out b),
-            // 270° CW: output(x,y) = source(w-1-y, x)
-            _ => (int x, int y, out byte r, out byte g, out byte b) => src(w - 1 - y, x, out r, out g, out b),
-        };
+        var sideways = across.X == 0;
+        int ow = sideways ? h : w;
+        int oh = sideways ? w : h;
+        // The source index along an axis, read off an output position.
+        int Along((int X, int Y) axis, int x, int y) =>
+            axis.X > 0 ? x : axis.X < 0 ? ow - 1 - x : axis.Y > 0 ? y : oh - 1 - y;
+        IO.PixelGetter rotated = (int x, int y) => src(Along(across, x, y), Along(down, x, y));
 
         if (IsJpeg)
         {
@@ -450,7 +465,7 @@ public partial class ImageXObject
         for (var y = 0; y < oh; y++)
             for (var x = 0; x < ow; x++)
             {
-                rotated(x, y, out var r, out var g, out var b);
+                var (r, g, b) = rotated(x, y);
                 rgb[p++] = r; rgb[p++] = g; rgb[p++] = b;
             }
         output.Write(IO.PngEncoder.Encode(rgb, ow, oh, 2, 8));
@@ -472,7 +487,7 @@ public partial class ImageXObject
         var scale = (double)HugeImageMaxDim / maxDim;
         var tw = Math.Max(1, (int)(w * scale));
         var th = Math.Max(1, (int)(h * scale));
-        IO.PixelGetter scaled = (int x, int y, out byte r, out byte g, out byte b) =>
+        IO.PixelGetter scaled = (int x, int y) =>
         {
             var sx0 = (int)((long)x * w / tw);
             var sx1 = (int)((long)(x + 1) * w / tw);
@@ -484,10 +499,10 @@ public partial class ImageXObject
             for (var yy = sy0; yy < sy1; yy++)
                 for (var xx = sx0; xx < sx1; xx++)
                 {
-                    src(xx, yy, out var cr, out var cg, out var cb);
+                    var (cr, cg, cb) = src(xx, yy);
                     ar += cr; ag += cg; ab += cb; n++;
                 }
-            r = (byte)(ar / n); g = (byte)(ag / n); b = (byte)(ab / n);
+            return ((byte)(ar / n), (byte)(ag / n), (byte)(ab / n));
         };
         return (scaled, tw, th);
     }

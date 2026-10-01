@@ -4,9 +4,17 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Annotations;
 
+/// <summary>A widget annotation: the visible part of a form field on a page, such as a text box or a check box.</summary>
 public partial class WidgetAnnotation : Annotation
 {
     internal WidgetAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
+
+    /// <summary>Sets or clears one bit of the field flags (/Ff).</summary>
+    internal void SetFieldFlag(int bit, bool value)
+    {
+        var flags = (int)Dict.GetInt("Ff");
+        Dict.Set("Ff", new PdfInteger(value ? flags | bit : flags & ~bit));
+    }
 
     /// <summary>Detached ctor — a document-less widget used as a configuration holder
     /// (see <see cref="Annotation()"/>). Tags the dict as a Widget annotation.</summary>
@@ -131,7 +139,7 @@ public partial class WidgetAnnotation : Annotation
         {
             _defaultAppearance = value;
             if (value is not null)
-                Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(SerializeDefaultAppearance(value))));
+                Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(SerializeDefaultAppearance(value))));
         }
     }
 

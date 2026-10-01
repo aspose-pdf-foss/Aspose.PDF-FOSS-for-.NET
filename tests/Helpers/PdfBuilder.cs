@@ -1418,7 +1418,7 @@ internal static class PdfBuilder
     private static byte[] AssembleTrueTypeFont(Dictionary<string, byte[]> tables)
     {
         var numTables = tables.Count;
-        var entrySelector = (int)Math.Floor(Math.Log2(numTables));
+        var entrySelector = (int)Math.Floor(Compat.Log2(numTables));
         var searchRange = (int)Math.Pow(2, entrySelector) * 16;
         var rangeShift = numTables * 16 - searchRange;
 

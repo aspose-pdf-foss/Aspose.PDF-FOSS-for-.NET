@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -7,6 +7,11 @@ namespace Aspose.Pdf.Text;
 
 internal sealed partial class TextStateModifier
 {
+    /// <summary>Whether the last <see cref="ModifyForegroundColor"/> call found a
+    /// matching show operator and injected the colour (callers use it to retry
+    /// with a wider positional scope).</summary>
+    public bool LastForegroundColorApplied { get; private set; }
+
     /// <summary>
     /// Inject a `R G B rg` operator immediately before the first text-showing
     /// operator whose decoded string contains <paramref name="text"/>, so the
@@ -17,17 +22,18 @@ internal sealed partial class TextStateModifier
     /// per-fragment colour changes since each fragment's text-showing op is
     /// what we're targeting).
     /// </summary>
-    /// <summary>Whether the last <see cref="ModifyForegroundColor"/> call found a
-    /// matching show operator and injected the colour (callers use it to retry
-    /// with a wider positional scope).</summary>
-    public bool LastForegroundColorApplied { get; private set; }
-
+    /// <param name="page">The page whose content (and form XObjects) is rewritten.</param>
+    /// <param name="text">The decoded text of the run to recolour.</param>
+    /// <param name="color">The new fill colour.</param>
+    /// <param name="targetY">The baseline y of the run to match, or null to match on text alone.</param>
+    /// <param name="targetX">The pen x of the run to match, or null to match on text alone.</param>
     /// <param name="nearestX">Fallback mode. The strict pass anchors a recolour on a show
     /// operator whose pen sits at <paramref name="targetX"/>; when an EARLIER replacement on the
     /// same line has already moved the run, that anchor misses by the width delta. Rather than
     /// fall back to "the first operator on the line that contains the text" — which repaints the
     /// wrong occurrence whenever a line carries several — this mode picks the occurrence whose
     /// pen is NEAREST the recorded X.</param>
+    /// <param name="renderingMode">A text rendering mode (Tr) to set with the colour, or null to leave it unchanged.</param>
     public void ModifyForegroundColor(Page page, string text, Color color, double? targetY = null,
         double? targetX = null, bool nearestX = false, int? renderingMode = null)
     {
@@ -99,475 +105,96 @@ internal sealed partial class TextStateModifier
         double initCtmA, double initCtmB, double initCtmC, double initCtmD,
         double initCtmTx, double initCtmTy, bool nearestX = false, int? renderingMode = null)
     {
-        var fonts = TextAbsorber.ResolveFonts(pageDict, reader);
-        var lexer = new PdfLexer(streamBytes);
-        var operands = new List<(TokenKind kind, PdfObject obj, int startPos, int endPos)>();
-        Dictionary<int, string>? currentToUnicode = null;
-        string? currentFontName = null;
-        FontMetrics? currentMetrics = null;
-        double fontSize = 0, charSpacing = 0, wordSpacing = 0, hScaling = 1.0;
-        // Raw components of the pending TJ array (strings + kern adjustments), kept
-        // for the pen-advance computation below.
-        List<object>? tjItems = null;
-
-        // CTM/TM tracking — same approach as TextReplacer.ReplaceInContentStream so
-        // targetY scopes the color injection to the right text-showing op when the
-        // same text occurs at multiple positions on the page.
-        double ctmA = initCtmA, ctmB = initCtmB, ctmC = initCtmC, ctmD = initCtmD;
-        double ctmTx = initCtmTx, ctmTy = initCtmTy;
-        var ctmStack = new Stack<(double, double, double, double, double, double)>();
-        double tmA = 1, tmB = 0, tmC = 0, tmD = 1, tmTx = 0, tmTy = 0;
-        double tlLeading = 0;
-        const double yTolerance = 6.0;
-        // Pen X in text space: the line matrix origin (tmTx) plus the glyph advances
-        // of the show operators already drawn on the line. tmTx itself stays the LINE
-        // matrix (Td/TD/Tm/T* semantics unchanged); penTx is what a show operator's
-        // real start X is, so X-scoping can tell apart same-text runs on one line.
-        double penTx = 0;
-
-        // Track the active fill colour so a substring recolour can restore the surrounding
-        // glyphs to whatever colour was in effect (default black) when splitting a run.
-        double fillR = 0, fillG = 0, fillB = 0;
-        // ...and the VERBATIM source text of the operator that set it, so the restore
-        // re-emits the producer's own form (`0 0 0 rg` stays `0 0 0 rg`, never
-        // collapsing to `0 g`). Null until a fill-colour operator has been seen.
-        string? fillOpText = null;
-        // Active text rendering mode (Tr). A replacement carrying a TextState writes
-        // its own mode before the run and restores this one after it.
-        int trMode = 0;
-
-        bool MatchesY() => !targetY.HasValue
-            || Math.Abs(ctmD * tmTy + ctmTy - targetY.Value) <= yTolerance;
-
-        // X scoping (same formula/tolerance as TextReplacer.IsAtTargetX): lets a
-        // short segment (e.g. a lone space) recolour ITS OWN show operator instead
-        // of the first operator on the line whose decoded text merely contains it.
-        const double xTolerance = 4.0;
-        bool MatchesX() => !targetX.HasValue
-            || Math.Abs(ctmA * penTx + ctmC * tmTy + ctmTx - targetX.Value) <= xTolerance;
-        // A show operator whose start X coincides with the target segment's X to
-        // half a point IS that segment's operator — the segment position was
-        // measured from it. Trusted over the decoded-text containment check,
-        // whose ToUnicode interpretation can disagree with the absorber's for
-        // exotic CID maps (observed: a space run decoding as '=').
-        bool GeometricallyExact() => targetX.HasValue
-            && Math.Abs(ctmA * penTx + ctmC * tmTy + ctmTx - targetX.Value) <= 0.5;
-
-        // Nearest-X fallback state: the best candidate rewrite seen so far and how far
-        // its occurrence sits from the recorded X.
-        byte[]? bestResult = null;
-        double bestGap = double.MaxValue;
-
-        // Distance from targetX of the occurrence PickOccurrence last chose; the
-        // nearest-X fallback ranks candidate operators by it.
-        double lastOccurrenceGap = double.MaxValue;
-
-        // ★ Which OCCURRENCE of the text inside this show operator the target segment is.
-        // A line that draws the same replacement twice ("… 12345.  The 12345 …") is one
-        // show operator with two matches, and each carries its own segment — anchoring on
-        // the operator's start X alone would give them both the first one, so the second
-        // recolour lands on glyphs that already have it and the real second occurrence is
-        // never reached. The pen at each occurrence is the operator's pen plus the advance
-        // of everything drawn before it (kerns included).
-        // Returns the char offset to split at, or -1 when none of them is the target.
-        int PickOccurrence(string decoded, List<object>? arrayItems, byte[]? singleRun)
-        {
-            var first = decoded.IndexOf(text, StringComparison.Ordinal);
-            if (first < 0 || !targetX.HasValue) return first;
-            var nearestAt = -1;
-            var nearestGap = double.MaxValue;
-            for (var at = first; at >= 0; at = decoded.IndexOf(text, at + 1, StringComparison.Ordinal))
-            {
-                var pen = penTx + PrefixAdvance(arrayItems, singleRun, at) * tmA;
-                var gap = Math.Abs(ctmA * pen + ctmC * tmTy + ctmTx - targetX.Value);
-                if (gap < nearestGap) { nearestGap = gap; nearestAt = at; }
-            }
-            if (nearestAt < 0) return -1;
-            lastOccurrenceGap = nearestGap;
-            return nearestX || nearestGap <= xTolerance ? nearestAt : -1;
-        }
-
-        // Advance of the first `chars` shown characters of this operator. Only a 1:1
-        // byte↔char run can be measured this way, which is the same restriction the
-        // colour split itself works under; anything else reports 0 so the caller keeps
-        // its whole-operator behaviour.
-        double PrefixAdvance(List<object>? arrayItems, byte[]? singleRun, int chars)
-        {
-            if (chars <= 0) return 0;
-            double total = 0;
-            var left = chars;
-            if (arrayItems is null)
-            {
-                if (singleRun is null || singleRun.Length < chars) return 0;
-                var head = new byte[chars];
-                Array.Copy(singleRun, head, chars);
-                return StringAdvance(head);
-            }
-            foreach (var item in arrayItems)
-            {
-                if (left <= 0) break;
-                if (item is byte[] runBytes)
-                {
-                    var take = Math.Min(left, runBytes.Length);
-                    var head = new byte[take];
-                    Array.Copy(runBytes, head, take);
-                    total += StringAdvance(head);
-                    left -= take;
-                }
-                else if (item is double kern)
-                {
-                    total -= kern / 1000.0 * fontSize * hScaling;
-                }
-            }
-            return total;
-        }
-
-        // Advance of one shown string in text-space units (mirrors
-        // ContentStreamParser's cursor math: per-code width + Tc, + Tw on the
-        // single-byte space code, scaled by Tz). CID (2-byte) fonts consume the
-        // bytes pairwise through the /W-keyed metrics.
-        double StringAdvance(byte[] bytes)
-        {
-            if (bytes.Length == 0 || fontSize <= 0) return 0;
-            double total = 0;
-            if (currentMetrics is { IsCid: true })
-            {
-                for (var i = 0; i + 1 < bytes.Length; i += 2)
-                {
-                    var cid = (bytes[i] << 8) | bytes[i + 1];
-                    total += (currentMetrics.GetWidth(cid) / 1000.0 * fontSize + charSpacing) * hScaling;
-                }
-            }
-            else
-            {
-                foreach (var b in bytes)
-                {
-                    var w = currentMetrics?.GetWidth(b) ?? 500;
-                    total += (w / 1000.0 * fontSize + charSpacing
-                        + (b == 0x20 ? wordSpacing : 0)) * hScaling;
-                }
-            }
-            return total;
-        }
-
+        var fc = new ForegroundColorState();
+        InitForegroundColorState(fc, streamBytes, text, targetY, targetX, pageDict, reader, initCtmA, initCtmB, initCtmC, initCtmD, initCtmTx, initCtmTy, nearestX);
 
         while (true)
         {
-            var startPos = (int)lexer.Position;
-            var token = lexer.NextToken();
+            var startPos = (int)fc.lexer.Position;
+            var token = fc.lexer.NextToken();
             if (token.Kind == TokenKind.Eof) break;
-            var endPos = (int)lexer.Position;
+            var endPos = (int)fc.lexer.Position;
 
             switch (token.Kind)
             {
                 case TokenKind.Integer:
-                    operands.Add((token.Kind, new PdfInteger(token.IntValue), startPos, endPos));
+                    fc.operands.Add((token.Kind, new PdfInteger(token.IntValue), startPos, endPos));
                     break;
                 case TokenKind.Real:
-                    operands.Add((token.Kind, new PdfReal(token.RealValue), startPos, endPos));
+                    fc.operands.Add((token.Kind, new PdfReal(token.RealValue), startPos, endPos));
                     break;
                 case TokenKind.LiteralString:
-                    operands.Add((token.Kind, new PdfString(token.BytesValue!), startPos, endPos));
+                    fc.operands.Add((token.Kind, new PdfString(token.BytesValue!), startPos, endPos));
                     break;
                 case TokenKind.HexString:
-                    operands.Add((token.Kind, new PdfString(token.BytesValue!, isHex: true), startPos, endPos));
+                    fc.operands.Add((token.Kind, new PdfString(token.BytesValue!, isHex: true), startPos, endPos));
                     break;
                 case TokenKind.Name:
-                    operands.Add((token.Kind, new PdfName(token.StringValue!), startPos, endPos));
+                    fc.operands.Add((token.Kind, new PdfName(token.StringValue!), startPos, endPos));
                     break;
                 case TokenKind.ArrayStart:
-                {
-                    // Collect the TJ array's text into a single PdfString operand so the
-                    // TJ branch below can match it (mirrors ModifyFontSizeInStream /
-                    // FindTfNameRange). Without this, `[ (hi world) -180 ... ] TJ` runs
-                    // would never be seen by the colour matcher and no `rg` is injected.
-                    // The raw components are kept for the pen-advance computation.
-                    var arrTexts = new StringBuilder();
-                    tjItems = new List<object>();
-                    while (true)
-                    {
-                        var t = lexer.NextToken();
-                        if (t.Kind == TokenKind.Eof) goto streamDone;
-                        if (t.Kind == TokenKind.ArrayEnd) break;
-                        if (t.Kind == TokenKind.LiteralString || t.Kind == TokenKind.HexString)
-                        {
-                            var strBytes = t.BytesValue;
-                            if (strBytes is not null)
-                            {
-                                arrTexts.Append(DecodeTextString(strBytes, currentToUnicode));
-                                tjItems.Add(strBytes);
-                            }
-                        }
-                        else if (t.Kind == TokenKind.Integer) tjItems.Add((double)t.IntValue);
-                        else if (t.Kind == TokenKind.Real) tjItems.Add(t.RealValue);
-                    }
-                    operands.Add((TokenKind.ArrayStart, new PdfString(
-                        Cp1252.GetBytes(arrTexts.ToString())), startPos, (int)lexer.Position));
+                    if (!CollectTjArray(fc, startPos)) goto streamDone;
                     break;
-                }
                 case TokenKind.Keyword:
                     var op = token.StringValue!;
                     switch (op)
                     {
-                        case "BT":
-                            tmA = 1; tmB = 0; tmC = 0; tmD = 1; tmTx = 0; tmTy = 0;
-                            tlLeading = 0;
-                            penTx = 0;
+                        case "BT": case "Td": case "TD": case "Tm": case "TL": case "T*": case "Tc": case "Tw": case "Tz":
+                            TrackColorTextMatrix(fc, op);
                             break;
-                        case "Td":
-                        case "TD":
-                            if (operands.Count >= 2)
-                            {
-                                double dx = ToDouble(operands[0].obj);
-                                double dy = ToDouble(operands[1].obj);
-                                tmTx = dx * tmA + dy * tmC + tmTx;
-                                tmTy = dx * tmB + dy * tmD + tmTy;
-                                if (op == "TD") tlLeading = -dy;
-                                penTx = tmTx;
-                            }
-                            break;
-                        case "Tm":
-                            if (operands.Count >= 6)
-                            {
-                                tmA = ToDouble(operands[0].obj);
-                                tmB = ToDouble(operands[1].obj);
-                                tmC = ToDouble(operands[2].obj);
-                                tmD = ToDouble(operands[3].obj);
-                                tmTx = ToDouble(operands[4].obj);
-                                tmTy = ToDouble(operands[5].obj);
-                                penTx = tmTx;
-                            }
-                            break;
-                        case "TL":
-                            if (operands.Count >= 1) tlLeading = ToDouble(operands[0].obj);
-                            break;
-                        case "T*":
-                            tmTx = -tlLeading * tmC + tmTx;
-                            tmTy = -tlLeading * tmD + tmTy;
-                            penTx = tmTx;
-                            break;
-                        case "Tc":
-                            if (operands.Count >= 1) charSpacing = ToDouble(operands[^1].obj);
-                            break;
-                        case "Tw":
-                            if (operands.Count >= 1) wordSpacing = ToDouble(operands[^1].obj);
-                            break;
-                        case "Tz":
-                            if (operands.Count >= 1) hScaling = ToDouble(operands[^1].obj) / 100.0;
-                            break;
-                        case "q":
-                            ctmStack.Push((ctmA, ctmB, ctmC, ctmD, ctmTx, ctmTy));
-                            break;
-                        case "Q":
-                            if (ctmStack.Count > 0)
-                                (ctmA, ctmB, ctmC, ctmD, ctmTx, ctmTy) = ctmStack.Pop();
-                            break;
-                        case "cm":
-                            if (operands.Count >= 6)
-                            {
-                                double a = ToDouble(operands[0].obj);
-                                double b = ToDouble(operands[1].obj);
-                                double c = ToDouble(operands[2].obj);
-                                double d = ToDouble(operands[3].obj);
-                                double tx = ToDouble(operands[4].obj);
-                                double ty = ToDouble(operands[5].obj);
-                                var newA = a * ctmA + b * ctmC;
-                                var newB = a * ctmB + b * ctmD;
-                                var newC = c * ctmA + d * ctmC;
-                                var newD = c * ctmB + d * ctmD;
-                                var newTx = tx * ctmA + ty * ctmC + ctmTx;
-                                var newTy = tx * ctmB + ty * ctmD + ctmTy;
-                                ctmA = newA; ctmB = newB; ctmC = newC; ctmD = newD;
-                                ctmTx = newTx; ctmTy = newTy;
-                            }
+                        case "q": case "Q": case "cm": case "Tf": case "rg": case "g": case "k": case "Tr":
+                            TrackColorGraphicsState(fc, endPos, streamBytes, reader, op);
                             break;
                         case "Do":
-                            // Recurse into Form XObjects with current CTM as initial state.
-                            if (operands.Count >= 1 && operands[0].obj is PdfName xobjName)
-                            {
-                                var pageRes = reader.ResolveDict(pageDict.Get("Resources"));
-                                var xobjsDict = pageRes is null ? null
-                                    : reader.ResolveDict(pageRes.Get("XObject"));
-                                var xobjRef = xobjsDict?.Get(xobjName.Value);
-                                if (xobjRef is not null)
-                                {
-                                    var xobjStream = reader.ResolveStream(xobjRef);
-                                    if (xobjStream is not null
-                                        && xobjStream.Dict.GetName("Subtype") == "Form")
-                                    {
-                                        var xobjBytes = reader.DecodeStream(xobjStream);
-                                        var modified = ModifyForegroundColorInStream(xobjBytes,
-                                            text, color, targetY, targetX,
-                                            xobjStream.Dict, reader,
-                                            ctmA, ctmB, ctmC, ctmD, ctmTx, ctmTy);
-                                        if (modified is not null)
-                                        {
-                                            xobjStream.Dict.Remove("Filter");
-                                            xobjStream.Dict.Remove("DecodeParms");
-                                            xobjStream.Dict.Set("Length", new PdfInteger(modified.Length));
-                                            xobjStream.ReplaceData(modified);
-                                            return streamBytes; // signal "modified" — we changed the XObject
-                                        }
-                                    }
-                                }
-                            }
+                            if (RecolorInFormXObject(fc, streamBytes, text, color, targetY, targetX, pageDict, reader, op) is { } recolorInFormXObjectResult) return recolorInFormXObjectResult;
                             break;
-                        case "Tf":
-                            if (operands.Count >= 2 && operands[0].obj is PdfName fn)
-                            {
-                                currentFontName = fn.Value;
-                                fontSize = ToDouble(operands[^1].obj);
-                                if (fonts.TryGetValue(currentFontName, out var fontDict))
-                                {
-                                    currentToUnicode = TextAbsorber.ParseToUnicodeFromDict(fontDict, reader);
-                                    try { currentMetrics = FontMetrics.FromFontDict(fontDict, reader); }
-                                    catch { currentMetrics = null; }
-                                }
-                                else
-                                {
-                                    currentToUnicode = null;
-                                    currentMetrics = null;
-                                }
-                            }
-                            break;
-                        case "rg":
-                            if (operands.Count >= 3)
-                            {
-                                fillR = ToDouble(operands[^3].obj);
-                                fillG = ToDouble(operands[^2].obj);
-                                fillB = ToDouble(operands[^1].obj);
-                                fillOpText = Verbatim(streamBytes, operands[^3].startPos, endPos);
-                            }
-                            break;
-                        case "g":
-                            if (operands.Count >= 1)
-                            {
-                                fillR = fillG = fillB = ToDouble(operands[^1].obj);
-                                fillOpText = Verbatim(streamBytes, operands[^1].startPos, endPos);
-                            }
-                            break;
-                        case "k":
-                            if (operands.Count >= 4)
-                            {
-                                double c = ToDouble(operands[^4].obj), m = ToDouble(operands[^3].obj);
-                                double y = ToDouble(operands[^2].obj), kk = ToDouble(operands[^1].obj);
-                                fillR = (1 - c) * (1 - kk);
-                                fillG = (1 - m) * (1 - kk);
-                                fillB = (1 - y) * (1 - kk);
-                                fillOpText = Verbatim(streamBytes, operands[^4].startPos, endPos);
-                            }
-                            break;
-                        case "Tr":
-                            if (operands.Count >= 1) trMode = (int)ToDouble(operands[^1].obj);
-                            break;
-                        case "Tj":
-                        case "'":
-                        case "\"":
-                            // ' and " move to the next line before showing.
-                            if (op is "'" or "\"")
-                            {
-                                tmTx = -tlLeading * tmC + tmTx;
-                                tmTy = -tlLeading * tmD + tmTy;
-                                penTx = tmTx;
-                            }
-                            if (operands.Count >= 1 && operands[^1].obj is PdfString s)
-                            {
-                                var occ = MatchesY()
-                                    ? PickOccurrence(DecodeTextString(s.Value, currentToUnicode), null, s.Value)
-                                    : -1;
-                                if (MatchesY() && (MatchesX() || occ >= 0))
-                                {
-                                    var decoded = DecodeTextString(s.Value, currentToUnicode);
-                                    // In nearest-X mode every candidate is only a candidate:
-                                    // skip building the rewrite for one that is already further
-                                    // from the target than the best seen, so a page with many
-                                    // occurrences does not copy the whole stream per occurrence.
-                                    if ((decoded.Contains(text) || GeometricallyExact())
-                                        && !(nearestX && targetX.HasValue && lastOccurrenceGap >= bestGap))
-                                    {
-                                        // When the match is only part of the run, split the show
-                                        // operator so the new colour applies to the matched glyphs
-                                        // alone and the surrounding glyphs keep the active fill
-                                        // colour (consecutive Tj operators advance the text matrix
-                                        // automatically, so the split preserves positioning).
-                                        var split = SplitColorRun(streamBytes,
-                                            operands[^1].startPos, operands[^1].endPos,
-                                            text, color, (fillR, fillG, fillB), occ,
-                                            renderingMode, trMode)
-                                            // Whole-run recolour: wrap the show operator with the new
-                                            // fill colour AND a trailing restore to the colour that was
-                                            // active before it, so the recolour doesn't leak onto the
-                                            // subsequent text (endPos is just past the show keyword).
-                                            ?? InjectColorAround(streamBytes, operands[^1].startPos,
-                                                endPos, color, (fillR, fillG, fillB), fillOpText,
-                                                renderingMode, trMode);
-                                        if (!nearestX) return split;
-                                        if (lastOccurrenceGap < bestGap)
-                                        {
-                                            bestGap = lastOccurrenceGap;
-                                            bestResult = split;
-                                        }
-                                    }
-                                }
-                                // Advances live in Tm-space; the tracked tm coordinates are
-                                // Tm-applied (Td folds tmA in), so scale the advance the same way.
-                                penTx += StringAdvance(s.Value) * tmA;
-                            }
+                        case "Tj": case "'": case "\"":
+                            if (RecolorShownString(fc, endPos, streamBytes, text, color, targetX, nearestX, renderingMode, op) is { } recolorShownStringResult) return recolorShownStringResult;
                             break;
                         case "TJ":
-                            // The TJ array's text was concatenated into a single PdfString
-                            // operand by the ArrayStart handler above.
-                            if (operands.Count >= 1 && operands[^1].obj is PdfString tjText)
-                            {
-                                var tjOcc = MatchesY()
-                                    ? PickOccurrence(DecodeTextString(tjText.Value, currentToUnicode), tjItems, null)
-                                    : -1;
-                                if (MatchesY() && (MatchesX() || tjOcc >= 0))
-                                {
-                                    var decoded = DecodeTextString(tjText.Value, currentToUnicode);
-                                    if ((decoded.Contains(text) || GeometricallyExact())
-                                        && !(nearestX && targetX.HasValue && lastOccurrenceGap >= bestGap))
-                                    {
-                                        // Same rule as the Tj branch: recolour only the matched
-                                        // glyphs. A TJ array carries a whole line, so colouring
-                                        // the operator as a unit repaints the words either side
-                                        // of the match too.
-                                        var splitTj = SplitShowRunTJ(streamBytes,
-                                            operands[^1].startPos, operands[^1].endPos,
-                                            text, RgOps(color), RestoreFillOps(fillR, fillG, fillB),
-                                            currentToUnicode, tjOcc)
-                                            ?? InjectColorAround(streamBytes, operands[^1].startPos,
-                                                endPos, color, (fillR, fillG, fillB), fillOpText,
-                                                renderingMode, trMode);
-                                        if (!nearestX) return splitTj;
-                                        if (lastOccurrenceGap < bestGap)
-                                        {
-                                            bestGap = lastOccurrenceGap;
-                                            bestResult = splitTj;
-                                        }
-                                    }
-                                }
-                                if (tjItems is not null)
-                                    foreach (var item in tjItems)
-                                    {
-                                        if (item is byte[] strBytes)
-                                            penTx += StringAdvance(strBytes) * tmA;
-                                        else if (item is double kern)
-                                            penTx -= kern / 1000.0 * fontSize * hScaling * tmA;
-                                    }
-                            }
-                            tjItems = null;
+                            if (RecolorShownArray(fc, endPos, streamBytes, text, color, targetX, nearestX, renderingMode, op) is { } recolorShownArrayResult) return recolorShownArrayResult;
                             break;
                     }
-                    operands.Clear();
+                    fc.operands.Clear();
                     break;
                 default:
-                    operands.Clear();
+                    fc.operands.Clear();
                     break;
             }
         }
         streamDone:
-        return bestResult;
+        return fc.bestResult;
+    }
+
+    /// <summary>Collect the TJ array's text into a single PdfString operand so the
+    /// TJ branch below can match it (mirrors ModifyFontSizeInStream /
+    /// FindTfNameRange). Without this, `[ (hi world) -180 ... ] TJ` runs
+    /// would never be seen by the colour matcher and no `rg` is injected.
+    /// The raw components are kept for the pen-advance computation. Returns false at an unterminated array (end of stream).</summary>
+    private static bool CollectTjArray(ForegroundColorState fc, int startPos)
+    {
+        var arrTexts = new StringBuilder();
+        fc.tjItems = new List<object>();
+        while (true)
+        {
+            var t = fc.lexer.NextToken();
+            if (t.Kind == TokenKind.Eof) return false;
+            if (t.Kind == TokenKind.ArrayEnd) break;
+            if (t.Kind == TokenKind.LiteralString || t.Kind == TokenKind.HexString)
+            {
+                var strBytes = t.BytesValue;
+                if (strBytes is not null)
+                {
+                    arrTexts.Append(DecodeTextString(strBytes, fc.currentToUnicode));
+                    fc.tjItems.Add(strBytes);
+                }
+            }
+            else if (t.Kind == TokenKind.Integer) fc.tjItems.Add((double)t.IntValue);
+            else if (t.Kind == TokenKind.Real) fc.tjItems.Add(t.RealValue);
+        }
+        fc.operands.Add((TokenKind.ArrayStart, new PdfString(
+            Cp1252.GetBytes(arrTexts.ToString())), startPos, (int)fc.lexer.Position));
+        return true;
     }
 
     /// <summary>The operator source text exactly as the producer wrote it, so a restore
@@ -662,7 +289,7 @@ internal sealed partial class TextStateModifier
 
     /// <summary>
     /// Split a TJ ARRAY so only the matched substring is shown under
-    /// <paramref name="beforeOps"/>, with <paramref name="afterOps"/> restoring whatever state
+    /// <c>beforeOps</c>, with <c>afterOps</c> restoring whatever state
     /// those changed for the glyphs that follow. The wrapping operators are the caller's: a
     /// fill colour for a recolour, a `Tf` for a font or size change.
     /// The array is cut into up to three arrays shown by their own TJ operators — consecutive
@@ -704,49 +331,8 @@ internal sealed partial class TextStateModifier
         if (arrEnd <= arrStart || arrEnd > original.Length) return null;
 
         // (isString, byteStart, byteEnd, charStart, charLen) in array order.
-        var items = new List<(bool isString, int start, int end, int charStart, int charLen)>();
-        var lexer = new PdfLexer(original) { Position = arrStart };
-        if (lexer.NextToken().Kind != TokenKind.ArrayStart) return null;
-        int chars = 0;
-        while (true)
-        {
-            var itemStart = (int)lexer.Position;
-            var t = lexer.NextToken();
-            if (t.Kind == TokenKind.ArrayEnd) break;
-            var itemEnd = (int)lexer.Position;
-            if (itemEnd > arrEnd) return null;
-            switch (t.Kind)
-            {
-                case TokenKind.LiteralString:
-                {
-                    var bytes = t.BytesValue;
-                    if (bytes is null) return null;
-                    // The literal must be a plain, escape-free (…) run: the char offsets
-                    // below index straight into its bytes.
-                    if (original[itemEnd - 1] != (byte)')') return null;
-                    var innerStart = itemStart;
-                    while (innerStart < itemEnd && original[innerStart] != (byte)'(') innerStart++;
-                    if (innerStart >= itemEnd) return null;
-                    if (itemEnd - 1 - (innerStart + 1) != bytes.Length) return null;
-                    for (int i = innerStart + 1; i < itemEnd - 1; i++)
-                        if (original[i] is 0x5C or 0x28 or 0x29) return null;   // backslash, ( , )
-                    var decodedItem = DecodeTextString(bytes, toUnicode);
-                    if (decodedItem.Length != bytes.Length) return null;
-                    items.Add((true, innerStart + 1, itemEnd - 1, chars, bytes.Length));
-                    chars += bytes.Length;
-                    break;
-                }
-                case TokenKind.Integer:
-                case TokenKind.Real:
-                    items.Add((false, itemStart, itemEnd, chars, 0));
-                    break;
-                case TokenKind.Eof:
-                    return null;
-                default:
-                    return null; // hex string or anything else — not addressable here
-            }
-        }
-        if (chars == 0) return null;
+        var (items, chars) = ScanTjItems(original, arrStart, arrEnd, toUnicode);
+        if (items is null) return null;
 
         var whole = new StringBuilder(chars);
         foreach (var it in items)
@@ -766,44 +352,17 @@ internal sealed partial class TextStateModifier
         if (idx < 0) return null;
         if (idx == 0 && text.Length == all.Length) return null; // whole run → caller wraps
 
-        // Emit the items whose characters fall in [from, to) as one array. A kern number
-        // belongs to the group its FOLLOWING glyph is in, which is where the cursor sits.
-        void EmitGroup(StringBuilder outSb, int from, int to)
-        {
-            outSb.Append('[');
-            foreach (var it in items)
-            {
-                if (!it.isString)
-                {
-                    if (it.charStart >= from && it.charStart < to) AppendRaw(outSb, original, it.start, it.end);
-                    continue;
-                }
-                int s = Math.Max(it.charStart, from);
-                int e = Math.Min(it.charStart + it.charLen, to);
-                if (e <= s) continue;
-                outSb.Append('(');
-                AppendRaw(outSb, original, it.start + (s - it.charStart), it.start + (e - it.charStart));
-                outSb.Append(')');
-            }
-            outSb.Append(']');
-        }
-
-        static void AppendRaw(StringBuilder outSb, byte[] src, int from, int to)
-        {
-            for (int i = from; i < to; i++) outSb.Append((char)src[i]);
-        }
-
         // Lead with a space so the first token never abuts the preceding operator.
         var sb = new StringBuilder(" ");
-        if (idx > 0) { EmitGroup(sb, 0, idx); sb.Append(" TJ "); }
+        if (idx > 0) { EmitGroup(sb, items, original, 0, idx); sb.Append(" TJ "); }
         sb.Append(beforeOps);
-        EmitGroup(sb, idx, idx + text.Length);
+        EmitGroup(sb, items, original, idx, idx + text.Length);
         sb.Append(" TJ ").Append(afterOps);
         // The original TJ keyword that follows this operand shows the tail — which may be
         // empty, and an empty array is a valid (no-op) TJ operand.
-        EmitGroup(sb, idx + text.Length, chars);
+        EmitGroup(sb, items, original, idx + text.Length, chars);
 
-        var replacement = Encoding.Latin1.GetBytes(sb.ToString());
+        var replacement = Compat.Latin1.GetBytes(sb.ToString());
         var result = new byte[original.Length - (arrEnd - arrStart) + replacement.Length];
         Array.Copy(original, 0, result, 0, arrStart);
         Array.Copy(replacement, 0, result, arrStart, replacement.Length);

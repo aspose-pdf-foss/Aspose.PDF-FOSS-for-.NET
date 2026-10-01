@@ -28,7 +28,7 @@ public sealed class OptionalContentGroup
     {
         _dict = new PdfDictionary();
         _dict.Set("Type", new PdfName("OCG"));
-        _dict.Set("Name", new PdfString(System.Text.Encoding.Latin1.GetBytes(name)));
+        _dict.Set("Name", new PdfString(Compat.Latin1.GetBytes(name)));
         Id = id;
         _pendingOperators = [];
     }

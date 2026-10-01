@@ -7,6 +7,9 @@ namespace Aspose.Pdf.Facades;
 /// </summary>
 public sealed class Bookmark
 {
+    /// <summary>Creates an empty bookmark with no title, black title color and no child items.</summary>
+    public Bookmark() { }
+
     /// <summary>The bookmark title.</summary>
     public string? Title { get; set; }
 
@@ -83,4 +86,6 @@ public sealed class Bookmark
 /// </summary>
 public sealed class Bookmarks : List<Bookmark>
 {
+    /// <summary>Creates an empty bookmark collection.</summary>
+    public Bookmarks() { }
 }

@@ -14,10 +14,15 @@ public partial class Table
     /// the grid's declared columns plus their own border pitch, plus the host cell's
     /// explicit padding and border pitch. Probed: a "261 117" host sizes its
     /// second column to the "28.29 60.42 28.29" logo grid's 123 pt pitched width plus
-    /// its own 2 pt border = 125.</summary>
-    private void WidenColumnsForNestedGrids(double[] colWidths)
+    /// its own 2 pt border = 125. The growth stops at the band: a host column keeps
+    /// its width once the grid would push the table past the usable width (probed: a
+    /// "40% 60%" host stays 166 / 249 around a 497 pt nested grid, which is then
+    /// scaled into it - see FitCentredNestedGrid).</summary>
+    private void WidenColumnsForNestedGrids(double[] colWidths, double band)
     {
         if (!GeneratorCellModel) return;
+        double others = 0;
+        foreach (var w in colWidths) others += w;
         for (var ri = 0; ri < Rows.Count; ri++)
         {
             var row = Rows.At(ri);
@@ -35,7 +40,8 @@ public partial class Table
                         if (natural <= 0) continue;
                         var pad = cell.Margin ?? row.DefaultCellPadding ?? DefaultCellPadding;
                         var need = natural + (pad?.Left ?? 0) + (pad?.Right ?? 0) + _columnPitch;
-                        if (need > colWidths[col]) colWidths[col] = need;
+                        if (band > 0) need = Math.Min(need, band - (others - colWidths[col]));
+                        if (need > colWidths[col]) { others += need - colWidths[col]; colWidths[col] = need; }
                     }
                 col += span;
             }
@@ -122,6 +128,11 @@ public partial class Table
     /// <see cref="HtmlCellBorderPt"/>) and switch this off.</summary>
     internal bool CellBorderInPitch { get; set; } = true;
 
+    /// <summary>A header/footer band table: declared columns wider than the band scale
+    /// down in proportion to fill it (probed: "300 200 200" on a 470 pt band draws
+    /// 201.4 / 134.3 / 134.3), where a body table keeps its declared widths.</summary>
+    internal bool FitColumnsToBand { get; set; }
+
     /// <summary>Set on a column-slice clone whose ColumnWidths already carry the
     /// cell-border pitch, so the clone does not add it a second time.</summary>
     internal bool ColumnPitchResolved { get; set; }
@@ -176,7 +187,12 @@ public partial class Table
     /// </summary>
     private Table BuildColumnSliceTable(double[] colWidths, int repeat, int colStart, int colEnd)
     {
-        var band = new Table
+        var sl = new ColumnSliceState();
+        sl.colWidths = colWidths;
+        sl.repeat = repeat;
+        sl.colStart = colStart;
+        sl.colEnd = colEnd;
+        sl.band = new Table
         {
             Border = Border,
             DefaultCellBorder = DefaultCellBorder,
@@ -188,100 +204,36 @@ public partial class Table
             ColumnAdjustment = ColumnAdjustment.Customized,
             Broken = TableBroken.None,
             RepeatingRowsCount = RepeatingRowsCount,
+            RepeatingRowsSkipFirstPage = RepeatingRowsSkipFirstPage,
+            RepeatingFooterRowsCount = RepeatingFooterRowsCount,
+            RepeatingFooterSkipsLastPage = RepeatingFooterSkipsLastPage,
             IsBroken = IsBroken,
             FlowLeftOffset = FlowLeftOffset,
             AutoFitMaxContentCells = AutoFitMaxContentCells,
             CellBorderInPitch = CellBorderInPitch,
             ColumnPitchResolved = true,
         };
-        var widthTokens = new System.Text.StringBuilder();
-        for (var c = 0; c < repeat; c++)
+        sl.widthTokens = new System.Text.StringBuilder();
+        for (var c = 0; c < sl.repeat; c++)
         {
-            if (widthTokens.Length > 0) widthTokens.Append(' ');
-            widthTokens.Append(colWidths[c].ToString("0.###", CultureInfo.InvariantCulture));
+            if (sl.widthTokens.Length > 0) sl.widthTokens.Append(' ');
+            sl.widthTokens.Append(sl.colWidths[c].ToString("0.###", CultureInfo.InvariantCulture));
         }
-        for (var c = colStart; c < colEnd; c++)
+        for (var c = sl.colStart; c < sl.colEnd; c++)
         {
-            if (widthTokens.Length > 0) widthTokens.Append(' ');
-            widthTokens.Append(colWidths[c].ToString("0.###", CultureInfo.InvariantCulture));
+            if (sl.widthTokens.Length > 0) sl.widthTokens.Append(' ');
+            sl.widthTokens.Append(sl.colWidths[c].ToString("0.###", CultureInfo.InvariantCulture));
         }
-        band.ColumnWidths = widthTokens.ToString();
+        sl.band.ColumnWidths = sl.widthTokens.ToString();
 
-        // A row's height is a property of the WHOLE row, not of one slice: a
-        // cell that wraps in the narrow far columns makes the row taller in
-        // EVERY slice (the two-digit report rows wrap in their 55.8 pt columns
-        // and the first slice's rows grow to two lines with the text seated at
-        // the row top). Measure each row against the FULL grid once and stamp
-        // the height on the slice rows as a floor.
-        var fullMap = new int[colWidths.Length];
-        for (var i = 0; i < fullMap.Length; i++) fullMap[i] = i;
+        sl.fullMap = new int[sl.colWidths.Length];
+        for (var i = 0; i < sl.fullMap.Length; i++) sl.fullMap[i] = i;
 
         for (var r = 0; r < Rows.Count; r++)
         {
-            var row = Rows.At(r);
-            double fullRowH = 0;
-            try
-            {
-                var fullPlan = BuildRowPlan(row, colWidths, fullMap);
-                if (fullPlan.LineCount > 0)
-                    fullRowH = (fullPlan.LineCount - 1) * fullPlan.LineHeight
-                        + fullPlan.TightLine + fullPlan.VertPadding;
-            }
-            catch { fullRowH = 0; }
-            var bandRow = band.Rows.Add();
-            bandRow.Border = row.Border;
-            bandRow.DefaultCellBorder = row.DefaultCellBorder;
-            bandRow.DefaultCellPadding = row.DefaultCellPadding;
-            bandRow.DefaultCellTextState = row.DefaultCellTextState;
-            bandRow.BackgroundColor = row.BackgroundColor;
-            bandRow.FixedRowHeight = row.FixedRowHeight;
-            bandRow.MinRowHeight = Math.Max(fullRowH, row.MinRowHeight);
-            bandRow.VerticalAlignment = row.VerticalAlignment;
-
-            // Two passes over the same row: the repeating prefix [0, repeat) and
-            // the slice's own chunk [colStart, colEnd). A repeat-prefix cell keeps
-            // its text in EVERY slice; a chunk cell only where it starts.
-            for (var range = 0; range < 2; range++)
-            {
-                var rs = range == 0 ? 0 : colStart;
-                var re = range == 0 ? repeat : colEnd;
-                if (re <= rs) continue;
-                var gridPos = 0;
-                for (var ci = 0; ci < row.Cells.Count && gridPos < re; ci++)
-                {
-                    var cell = row.Cells.At(ci);
-                    var span = Math.Max(1, cell.ColSpan);
-                    var cellStart = gridPos;
-                    var cellEnd = gridPos + span;
-                    gridPos = cellEnd;
-                    var isStart = range == 0
-                        ? cellStart < repeat
-                        : cellStart >= colStart && cellStart < colEnd;
-                    var overlap = Math.Min(cellEnd, re) - Math.Max(cellStart, rs);
-                    if (overlap <= 0) continue;
-                    var bandCell = new Cell
-                    {
-                        ColSpan = overlap,
-                        RowSpan = cell.RowSpan,
-                        Border = cell.Border,
-                        BackgroundColor = cell.BackgroundColor,
-                        Margin = cell.Margin,
-                        IsNoBorder = cell.IsNoBorder,
-                        DefaultCellTextState = cell.DefaultCellTextState,
-                        IsWordWrapped = cell.IsWordWrapped,
-                        VerticalAlignment = cell.VerticalAlignment,
-                        Alignment = cell.Alignment,
-                        BackgroundImage = cell.BackgroundImage,
-                        SpanCutLeft = cellStart < rs,
-                        SpanCutRight = cellEnd > re,
-                    };
-                    if (isStart)
-                        bandCell.Paragraphs = cell.Paragraphs;
-                    bandRow.Cells.Add(bandCell);
-                }
-            }
+            AddColumnSliceRow(sl, r);
         }
-        return band;
+        return sl.band;
     }
 
     /// <summary>Content height of a row containing CSS line-box cells: the tallest css
@@ -295,9 +247,9 @@ public partial class Table
     /// <see cref="CellImage.LineOffset"/> moved to the first line of the NEXT slice, so
     /// the render pass (which draws an image on the slice covering its line) carries it
     /// there whole.</summary>
-    private double GeneratorImageSliceH(RowPlan plan, int lineIdx, int take, double budget,
-        out bool deferred)
+    private (double result, bool deferred) GeneratorImageSliceH(RowPlan plan, int lineIdx, int take, double budget)
     {
+        bool deferred = default;
         deferred = false;
         double tallest = 0;
         for (var col = 0; col < plan.CellLines.Count; col++)
@@ -315,7 +267,7 @@ public partial class Table
                     if (images is null) continue;
                     foreach (var ci in images)
                     {
-                        if (ci.LineOffset != li) continue;
+                        if (ci.Seated || ci.LineOffset != li) continue;
                         var ciH = ci.BoxHeight > 0 ? ci.BoxHeight : ci.Height;
                         if (ci.FillsBand || own + ciH <= budget + 1e-3) own += ciH;
                         else { ci.LineOffset = lineIdx + take; deferred = true; }
@@ -326,7 +278,7 @@ public partial class Table
             }
             if (own > tallest) tallest = own;
         }
-        return tallest + plan.CellPadV;
+        return (tallest + plan.CellPadV, deferred);
     }
 
     /// <summary>The full height one planned row occupies: its content stack plus its
@@ -341,8 +293,15 @@ public partial class Table
                     ? CssRowContentH(plan)
                     : (plan.LineCount - 1) * plan.LineHeight + plan.TightLine)
               + plan.VertPadding;
-        return plan.Row.MinRowHeight > h ? plan.Row.MinRowHeight : h;
+        var floor = MinRowFloor(plan);
+        return floor > h ? floor : h;
     }
+
+    /// <summary>A row's MinRowHeight floor. A generator cell measures the authored
+    /// height INSIDE its rules: 30 pt rows with 0.5 pt rules pitch 31, with or without
+    /// cell padding (probed); the other dialects floor the whole row.</summary>
+    private double MinRowFloor(RowPlan p) => p.Row.MinRowHeight <= 0 ? 0
+        : p.Row.MinRowHeight + (GeneratorCellModel && !p.Row.MinRowHeightIncludesRules ? p.RuleBand : 0);
 
     /// <summary>Record one image a cell draws, keeping the ones already recorded for that
     /// column — a cell may hold several, each on its own line.</summary>
@@ -421,6 +380,8 @@ public partial class Table
         // nets that against the uniform line grid and can come out zero; a slice priced
         // from the cells own stacks needs the band itself.
         public double CellPadV;
+        // The widest cell rule band (top + bottom stroke) of the row.
+        public double RuleBand;
         public int LineCount;            // max line count across cells; 0 = empty row
         public double MinBlankHeight;    // height for an empty row (FixedRowHeight/MinRowHeight)
         public double ExactTotalH;       // exact row height when a control cell stacks text + box (0 = uniform grid)
@@ -485,10 +446,15 @@ public partial class Table
 
     /// <summary>An <see cref="Image"/> paragraph placed inside a table cell. Carries the
     /// already-read bytes and the resolved display size/alignment so the render pass can
-    /// blit it at the cell's top via <see cref="Page.AddImage(byte[], Rectangle)"/>.</summary>
+    /// blit it at the cell's top via <c>Page.AddImage</c>.</summary>
     private sealed class CellImage
     {
         public byte[] Data = null!;
+
+        /// <summary>A reserved block standing in the cell instead of a picture, with the part
+        /// its caller laid out for the cell: the part is told where the cell put it.</summary>
+        public ReservedBlock? Block;
+        public ReservedPart? Part;
         public double Width;
         public double Height;
         public HorizontalAlignment Align;
@@ -496,6 +462,12 @@ public partial class Table
         /// <summary>Extra x inset from the cell content-left — used when an
         /// aspect-fitted image is centred inside its declared Fix box.</summary>
         public double XOffset;
+
+        /// <summary>Seated from the cell's own line stack (the lines before it at
+        /// their own pitches) this far below its top margin, rather than from
+        /// whole lines of the row's pitch: <see cref="CellPictureBoxesAreExact"/>.</summary>
+        public bool OwnSeat;
+        public double MarginTop;
 
         /// <summary>Height of the BOX the picture occupies in its cell, when that is
         /// larger than the picture itself: an aspect-fitted vector keeps the full
@@ -513,5 +485,12 @@ public partial class Table
         /// render pass seats the image on its own line below them instead of at the cell top
         /// (e.g. a title line above a centred logo).</summary>
         public int LineOffset;
+
+        /// <summary>The picture rides a <see cref="FloatingBox"/> seated in the cell: it is out of
+        /// the cell's flow, books no line and draws from the cell's content origin offset by the
+        /// box's own Left/Top, whatever the row's height.</summary>
+        public bool Seated;
+        public double SeatLeft;
+        public double SeatTop;
     }
 }

@@ -17,20 +17,41 @@ internal static class BidiReorderer
     {
         if (string.IsNullOrEmpty(text) || !ContainsRtl(text))
             return text;
-        return ReorderCore(text, out _);
+        return ReorderCore(text).result;
+    }
+
+    /// <summary>Like <see cref="ReorderIfNeeded(string)"/> but on a LEFT-TO-RIGHT paragraph
+    /// whatever its first strong character: each right-to-left run flips in place and the
+    /// runs keep their logical order, which is how a generated paragraph lays its segments
+    /// out (Arabic, then ".NET not arabic", then Arabic, left to right).</summary>
+    public static string ReorderOnLtrParagraph(string text)
+    {
+        if (string.IsNullOrEmpty(text) || !ContainsRtl(text))
+            return text;
+        return ReorderCore(text, ltrParagraph: true).result;
     }
 
     /// <summary>
     /// Reorder a string from visual order to logical order if it contains RTL characters,
-    /// and return a permutation array where <c>perm[reorderedPos]</c> = original position.
-    /// When no reordering is needed, <paramref name="perm"/> is null.
+    /// with a permutation array where <c>perm[reorderedPos]</c> = original position.
+    /// When no reordering is needed, the permutation is null.
     /// </summary>
-    public static string ReorderIfNeeded(string text, out int[]? perm)
+    public static (string text, int[]? perm) ReorderWithPermutation(string text)
     {
-        perm = null;
         if (string.IsNullOrEmpty(text) || !ContainsRtl(text))
-            return text;
-        return ReorderCore(text, out perm);
+            return (text, null);
+        return ReorderCore(text);
+    }
+
+    /// <summary>Logical text of a RIGHT-TO-LEFT paragraph (a dir="rtl" document) to the visual
+    /// order it draws in, whatever its first strong character: the neutrals between a
+    /// right-to-left word and a Latin word take the paragraph direction, so the Latin word
+    /// lands at the visual left and the word's own letters keep their order. The permutation
+    /// maps every visual position back to its logical one; null when nothing reorders.</summary>
+    public static (string text, int[]? perm) ToVisualOnRtlParagraph(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return (text, null);
+        return ReorderCore(text, rtlParagraph: true);
     }
 
     /// <summary>
@@ -145,16 +166,18 @@ internal static class BidiReorderer
     /// Core UBA pass: compute levels on the input string, reorder, mirror, strip formats.
     /// perm[outPos] = index in the original string.
     /// </summary>
-    private static string ReorderCore(string text, out int[] perm)
+    private static (string result, int[] perm) ReorderCore(string text, bool ltrParagraph = false, bool rtlParagraph = false)
     {
+        int[]? perm = default;
         var len = text.Length;
         var initialTypes = new sbyte[len];
         for (var i = 0; i < len; i++)
             initialTypes[i] = GetBidiType(text[i]);
 
-        // P2/P3: paragraph embedding level from the first strong character.
-        sbyte para = 0;
-        for (var i = 0; i < len; i++)
+        // P2/P3: paragraph embedding level from the first strong character - unless the
+        // caller fixes the paragraph as left-to-right.
+        sbyte para = (sbyte)(rtlParagraph ? 1 : 0);
+        for (var i = 0; i < len && !ltrParagraph && !rtlParagraph; i++)
         {
             var t = initialTypes[i];
             if (t == L) break;
@@ -230,7 +253,7 @@ internal static class BidiReorderer
             pos++;
         }
         perm = pos == len ? outPerm : outPerm[..pos];
-        return new string(outChars, 0, pos);
+        return (new string(outChars, 0, pos), perm);
     }
 
     private static bool IsWhitespaceType(sbyte t) => t == WS || t == BN;

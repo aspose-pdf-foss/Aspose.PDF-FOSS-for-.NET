@@ -13,15 +13,18 @@ public enum CaretSymbol
     Paragraph = 1,
 }
 
+/// <summary>A caret annotation: a mark that shows where text should be inserted.</summary>
 public partial class CaretAnnotation : MarkupAnnotation
 {
     internal CaretAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
+    /// <summary>Creates a caret annotation for <c>document</c> with an empty rectangle; set its rectangle and add it to a page.</summary>
     public CaretAnnotation(Document document) : base(document, new Rectangle(0, 0, 0, 0))
     {
         Dict.Set("Subtype", new PdfName("Caret"));
     }
 
+    /// <summary>Creates a caret annotation on <c>page</c> at <c>rect</c>.</summary>
     public CaretAnnotation(Page page, Rectangle rect) : base(page, rect)
     {
         Dict.Set("Subtype", new PdfName("Caret"));
@@ -68,6 +71,7 @@ public partial class CaretAnnotation : MarkupAnnotation
     private static double G(PdfObject o) => o is PdfReal r ? r.Value : o is PdfInteger i ? i.Value : 0;
 }
 
+/// <summary>A sound annotation: an icon on the page that plays embedded audio when activated.</summary>
 public partial class SoundAnnotation : MarkupAnnotation
 {
     internal SoundAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader)
@@ -76,6 +80,7 @@ public partial class SoundAnnotation : MarkupAnnotation
         Icon = ParseIcon(dict);
     }
 
+    /// <summary>Creates a sound annotation on <c>page</c> at <c>rect</c> that embeds the audio file <c>soundFile</c> with the default sample format (11025 Hz, 1 channel, 8 bits, raw). A missing file embeds no sound data.</summary>
     public SoundAnnotation(Page page, Rectangle rect, string soundFile) : base(page, rect)
     {
         Dict.Set("Type", new PdfName("Annot"));
@@ -85,6 +90,7 @@ public partial class SoundAnnotation : MarkupAnnotation
         AttachSoundStream(_soundData);
     }
 
+    /// <summary>Creates a sound annotation on <c>page</c> at <c>rect</c> that embeds the audio file <c>soundFile</c>, described by the sampling rate, channels, bits and encoding in <c>soundSampleData</c>.</summary>
     public SoundAnnotation(Page page, Rectangle rect, string soundFile, SoundSampleData soundSampleData)
         : base(page, rect)
     {
@@ -111,6 +117,7 @@ public partial class SoundAnnotation : MarkupAnnotation
     public new AnnotationType AnnotationType => AnnotationType.Sound;
 
     private SoundIcon _icon = SoundIcon.Speaker;
+    /// <summary>Gets or sets the icon shown for the annotation (/Name): <c>Speaker</c> (the default) or <c>Mic</c>.</summary>
     public SoundIcon Icon
     {
         get => _icon;
@@ -221,10 +228,12 @@ public partial class SoundAnnotation : MarkupAnnotation
     public override void Accept(AnnotationSelector visitor) { _ = visitor; }
 }
 
+/// <summary>A movie annotation: plays a movie file in a rectangle on the page.</summary>
 public partial class MovieAnnotation : Annotation
 {
     internal MovieAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
+    /// <summary>Creates a movie annotation for <c>document</c> that references the movie file <c>movieFile</c>; the rectangle is empty until set.</summary>
     public MovieAnnotation(Document document, string movieFile) : base(document, new Rectangle(0, 0, 0, 0))
     {
         Dict.Set("Type", new PdfName("Annot"));
@@ -232,6 +241,7 @@ public partial class MovieAnnotation : Annotation
         File = MakeMovieFileSpec(movieFile);
     }
 
+    /// <summary>Creates a movie annotation on <c>page</c> at <c>rect</c> that references the movie file <c>movieFile</c>.</summary>
     public MovieAnnotation(Page page, Rectangle rect, string movieFile) : base(page, rect)
     {
         Dict.Set("Type", new PdfName("Annot"));
@@ -258,7 +268,7 @@ public partial class MovieAnnotation : Annotation
     {
         var d = new PdfDictionary();
         d.Set("Type", new PdfName("Filespec"));
-        d.Set("F", new PdfString(System.Text.Encoding.Latin1.GetBytes(movieFile ?? "")));
+        d.Set("F", new PdfString(Compat.Latin1.GetBytes(movieFile ?? "")));
         d.Set("UF", Forms.Field.EncodePdfTextString(movieFile ?? ""));
         return FileSpecification.FromExistingDict(d, null);
     }
@@ -322,6 +332,7 @@ public partial class MovieAnnotation : Annotation
     }
 }
 
+/// <summary>A screen annotation: a region of the page where media is played, started by a rendition action.</summary>
 public partial class ScreenAnnotation : Annotation
 {
     internal ScreenAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -366,10 +377,12 @@ public partial class ScreenAnnotation : Annotation
     }
 }
 
+/// <summary>A rich-media annotation: embeds video, audio or other media assets and settings for playing them on the page.</summary>
 public partial class RichMediaAnnotation : Annotation
 {
     internal RichMediaAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
+    /// <summary>Creates an empty rich-media annotation on <c>page</c> at <c>rect</c>. Add media with <c>SetContent</c>, then call <c>Update</c>.</summary>
     public RichMediaAnnotation(Page page, Rectangle rect) : base(page, rect)
     {
         Dict.Set("Type", new PdfName("Annot"));
@@ -417,6 +430,7 @@ public partial class RichMediaAnnotation : Annotation
         set => _activateOn = value;
     }
 
+    /// <summary>Gets or sets the Flash variables passed to the player (/FlashVars); null by default. Written into the annotation when <c>Update</c> is called.</summary>
     public string? CustomFlashVariables { get; set; }
 
     private byte[]? _content;
@@ -469,6 +483,7 @@ public partial class RichMediaAnnotation : Annotation
         return InternalReader is not null ? InternalReader.DecodeStream(stream) : stream.RawData;
     }
 
+    /// <summary>Gets or sets the custom player (a SWF file) embedded as the asset <c>CustomPlayer.swf</c>; null by default. Written into the annotation when <c>Update</c> is called.</summary>
     public System.IO.Stream? CustomPlayer
     {
         get => _customPlayer is null ? null : new System.IO.MemoryStream(_customPlayer, writable: false);
@@ -481,6 +496,7 @@ public partial class RichMediaAnnotation : Annotation
         }
     }
 
+    /// <summary>Sets the main media asset from <c>audio</c>, stored under <c>fileName</c>. The file extension sets <c>Type</c> to audio or video. Written into the annotation when <c>Update</c> is called.</summary>
     public void SetContent(string fileName, System.IO.Stream audio)
     {
         if (audio is null) throw new ArgumentNullException(nameof(audio));
@@ -497,6 +513,7 @@ public partial class RichMediaAnnotation : Annotation
         };
     }
 
+    /// <summary>Sets the poster image asset from <c>imageStream</c>; null removes it. Written into the annotation when <c>Update</c> is called.</summary>
     public void SetPoster(System.IO.Stream imageStream)
     {
         if (imageStream is null) { _poster = null; return; }
@@ -505,6 +522,7 @@ public partial class RichMediaAnnotation : Annotation
         _poster = ms.ToArray();
     }
 
+    /// <summary>Adds an extra embedded asset named <c>name</c> with the bytes of <c>data</c>. Written into the annotation when <c>Update</c> is called.</summary>
     public void AddCustomData(string name, System.IO.Stream data)
     {
         if (name is null) throw new ArgumentNullException(nameof(name));
@@ -532,7 +550,7 @@ public partial class RichMediaAnnotation : Annotation
             efDict.Set("F", new PdfStream(efStreamDict, data));
             var spec = new PdfDictionary();
             spec.Set("Type", new PdfName("Filespec"));
-            spec.Set("F", new PdfString(System.Text.Encoding.Latin1.GetBytes(name)));
+            spec.Set("F", new PdfString(Compat.Latin1.GetBytes(name)));
             spec.Set("UF", Forms.Field.EncodePdfTextString(name));
             spec.Set("EF", efDict);
             return spec;
@@ -565,7 +583,7 @@ public partial class RichMediaAnnotation : Annotation
             var names = new PdfArray();
             foreach (var (name, spec) in assets)
             {
-                names.Add(new PdfString(System.Text.Encoding.Latin1.GetBytes(name)));
+                names.Add(new PdfString(Compat.Latin1.GetBytes(name)));
                 names.Add(spec);
             }
             var assetsDict = new PdfDictionary();
@@ -580,7 +598,7 @@ public partial class RichMediaAnnotation : Annotation
             {
                 var flashParams = new PdfDictionary();
                 flashParams.Set("Type", new PdfName("RichMediaParams"));
-                flashParams.Set("FlashVars", new PdfString(System.Text.Encoding.Latin1.GetBytes(CustomFlashVariables)));
+                flashParams.Set("FlashVars", new PdfString(Compat.Latin1.GetBytes(CustomFlashVariables)));
                 instance.Set("Params", flashParams);
             }
             var instances = new PdfArray();

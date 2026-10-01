@@ -23,7 +23,7 @@ internal sealed partial class PdfReader
     {
         _data = data;
         _xref = xref;
-        _parser = new PdfParser(data);
+        _parser = new PdfParser(data) { Lenient = options.LenientMode };
         _options = options;
     }
 
@@ -93,6 +93,24 @@ internal sealed partial class PdfReader
     }
 
     /// <summary>
+    /// Opens a file without believing its cross-reference table: every object is
+    /// found by sweeping the whole file for its own header instead.
+    ///
+    /// A table is a shortcut to what the file already contains, so a file whose
+    /// table is wrong is still a file whose objects are all there. FromBytes
+    /// falls back to this sweep when the table will not parse; this asks for it
+    /// outright, for a caller that has reason to distrust a table that parses
+    /// perfectly well and says the wrong thing.
+    /// </summary>
+    public static PdfReader FromBytesByScan(byte[] data, PdfReaderOptions? options = null)
+    {
+        options ??= new PdfReaderOptions();
+        var reader = new PdfReader(data, RecoverXref(data), options);
+        reader._parser.LengthResolver = reader.ResolveLengthIndirectRef;
+        return reader;
+    }
+
+    /// <summary>
     /// Open an encrypted PDF with a password. Throws if the password is incorrect.
     /// </summary>
     public static PdfReader FromBytes(byte[] data, string password)
@@ -158,6 +176,21 @@ internal sealed partial class PdfReader
     internal void ClearCache()
     {
         if (!SuppressCacheClear) _cache.Clear();
+    }
+
+    /// <summary>The objects resolved so far - taken when a page render begins, for
+    /// <see cref="ClearCacheExcept"/> when it ends.</summary>
+    internal HashSet<(int objNum, int gen)> CachedObjects() => new(_cache.Keys);
+
+    /// <summary>Clear what was resolved after <paramref name="kept"/> was taken. A render frees
+    /// the objects it read for itself; those resolved before it began stay, since the document
+    /// model may hold them - the /Info dictionary, an outline item, a field - and an edit made
+    /// through it afterwards must reach the saved file, not a copy re-read from the source.</summary>
+    internal void ClearCacheExcept(HashSet<(int objNum, int gen)> kept)
+    {
+        if (SuppressCacheClear) return;
+        foreach (var key in _cache.Keys.Where(k => !kept.Contains(k)).ToList())
+            _cache.Remove(key);
     }
 
     private XRefTable? _declaredXref;
@@ -266,7 +299,12 @@ internal sealed partial class PdfReader
                     }
                 }
             }
-            return _catalog ?? throw new Exception("The root object missing or invalid");
+            // A document whose trailer names no usable /Root is not a readable PDF:
+            // report it as a format failure, the way every other unreadable-stream
+            // path here does, rather than as a bare Exception a caller cannot catch
+            // by type.
+            return _catalog
+                ?? throw new InvalidPdfFileFormatException("The root object missing or invalid");
         }
     }
     private PdfDictionary? _catalog;

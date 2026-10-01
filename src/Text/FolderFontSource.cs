@@ -9,6 +9,7 @@ public sealed class FolderFontSource : FontSource
     /// carries; it yields to every source the caller registered.</summary>
     internal bool IsDefaultUserFolder { get; init; }
 
+    /// <summary>Creates a font source that searches the given folder for .ttf, .otf, .ttc and .pfb files; throws when <c>folderPath</c> is <c>null</c>.</summary>
     public FolderFontSource(string folderPath)
     {
         FolderPath = folderPath ?? throw new ArgumentNullException(nameof(folderPath));

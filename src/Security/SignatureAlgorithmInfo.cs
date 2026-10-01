@@ -49,6 +49,8 @@ namespace Aspose.Pdf.Security
         /// <summary>Partial name (leaf) of the signature field.</summary>
         public string SignatureName => _signatureName;
 
+        /// <summary>Creates an algorithm description for the named signature field; a null name is stored as an
+        /// empty string.</summary>
         public SignatureAlgorithmInfo(string signatureName = "")
         {
             _signatureName = signatureName ?? string.Empty;
@@ -88,7 +90,7 @@ namespace Aspose.Pdf.Security
             if (contents is null || contents.Length == 0) return info;
             try
             {
-                if (CmsParser.TryGetSignerAlgorithms(contents, out var digestOid, out var sigOid))
+                if (CmsParser.TryGetSignerAlgorithms(contents) is (var digestOid, var sigOid))
                 {
                     info.DigestHashAlgorithm = MapDigest(digestOid);
                     info.AlgorithmType = sigOid switch
@@ -126,9 +128,9 @@ namespace Aspose.Pdf.Security
             {
                 try
                 {
-                    if (CmsParser.TryGetSignerAlgorithms(contents, out var digestOid, out _))
+                    if (CmsParser.TryGetSignerAlgorithms(contents) is (var digestOid, _))
                         digest = MapDigest(digestOid);
-                    if (Rfc3161.TryGetContentHashAlgorithm(contents, out var ch))
+                    if (Rfc3161.TryGetContentHashAlgorithm(contents) is { } ch)
                         contentDigest = ch;
                 }
                 catch

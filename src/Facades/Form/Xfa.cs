@@ -320,7 +320,7 @@ public sealed partial class Form
         if (dataDoc?.DocumentElement is not null)
             EmitFdfLeaves(dataDoc.DocumentElement, sb, fields);
         sb.Append("] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
-        var bytes = Encoding.Latin1.GetBytes(sb.ToString());
+        var bytes = Compat.Latin1.GetBytes(sb.ToString());
         output.Write(bytes, 0, bytes.Length);
     }
 
@@ -535,7 +535,7 @@ public sealed partial class Form
     {
         var dataDoc = BuildXfaDataDocument();
         if (dataDoc?.DocumentElement is null) return;
-        var text = Encoding.Latin1.GetString(bytes);
+        var text = Compat.Latin1.GetString(bytes);
         foreach (var (name, value) in ParseFdfTV(text))
             SetDataDocValue(dataDoc.DocumentElement, name, value);
         _doc!.Form.ReplaceXfaDatasets(dataDoc);
@@ -607,7 +607,7 @@ public sealed partial class Form
     /// <summary>Strip the <c>[n]</c> occurrence index from every dotted segment
     /// (<c>form1[0].P1[0].Employee[0]</c> → <c>form1.P1.Employee</c>).</summary>
     private static string StripPathIndices(string path)
-        => string.Join('.', path.Split('.').Select(StripIndex));
+        => string.Join(".", path.Split('.').Select(StripIndex));
 
     /// <summary>Extract the document's XFA datasets XML to a stream.</summary>
     public void ExtractXfaData(Stream outputXmlStream)

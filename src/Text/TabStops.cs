@@ -36,11 +36,24 @@ public sealed class TabStop
     /// <summary>Leader character type.</summary>
     public TabLeaderType LeaderType { get; set; } = TabLeaderType.None;
 
+    /// <summary>The character a <see cref="TabAlignmentType.Decimal"/> stop aligns on: what follows
+    /// the tab stands with the first such character at the stop, and ends at the stop when it has
+    /// none. A full stop unless set. Honoured by segments that flow as runs.</summary>
+    public char AnchorCharacter { get; set; } = '.';
+
+    /// <summary>The stroke drawn across the room a tab takes to reach this stop: along the
+    /// baseline, its middle half its line width above it, from where the tab starts to where
+    /// the text after it does. Null draws none. Honoured by segments that flow as runs, where
+    /// it stands in for <see cref="LeaderType"/>.</summary>
+    public GraphInfo? LeaderRule { get; set; }
+
     /// <summary>Whether the stop is locked against further edits. Stored only.</summary>
     public bool IsReadOnly { get; internal set; }
 
+    /// <summary>Creates a left-aligned tab stop at position 0 with no leader.</summary>
     public TabStop() { }
 
+    /// <summary>Creates a left-aligned tab stop at the given position, in points, with no leader.</summary>
     public TabStop(float position) => Position = position;
 }
 
@@ -52,12 +65,17 @@ public sealed class TabStops
 {
     private readonly List<TabStop> _stops = new();
 
+    /// <summary>Creates an empty tab stop collection.</summary>
+    public TabStops() { }
+
     /// <summary>The tab stop entries.</summary>
     public IReadOnlyList<TabStop> Stops => _stops;
 
+    /// <summary>Gets the number of tab stops.</summary>
     public int Count => _stops.Count;
     public bool IsReadOnly => false;
 
+    /// <summary>Gets or sets the tab stop at the given zero-based index.</summary>
     public TabStop this[int index]
     {
         get => _stops[index];

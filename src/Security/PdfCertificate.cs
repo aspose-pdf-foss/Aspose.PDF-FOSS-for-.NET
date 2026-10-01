@@ -81,8 +81,8 @@ public sealed class PdfCertificate
     private static PdfCertificate FromDotNet(byte[] pfxData, string password)
     {
         var flags = System.Security.Cryptography.X509Certificates.X509KeyStorageFlags.Exportable
-                    | System.Security.Cryptography.X509Certificates.X509KeyStorageFlags.EphemeralKeySet;
-        var cert = new System.Security.Cryptography.X509Certificates.X509Certificate2(pfxData, password, flags);
+                    | Compat.EphemeralKeySet;
+        var cert = Compat.LoadPkcs12(pfxData, password, flags);
         var kind = cert.GetKeyAlgorithm() switch
         {
             "1.2.840.10040.4.1" => SignatureKeyKind.Dsa,   // id-dsa
@@ -161,6 +161,32 @@ public sealed class PdfCertificate
     /// most-specific-first, attributes as "{abbrev}={value}" joined with ", ".</summary>
     private static string? ParseSubjectDnFull(byte[] certDer)
     {
+        var parts = SubjectAttributes(certDer);
+        if (parts is null || parts.Count == 0) return null;
+        var texts = new List<string>();
+        foreach (var (abbrev, value) in parts) texts.Add($"{abbrev}={value}");
+        texts.Reverse();
+        return string.Join(", ", texts);
+    }
+
+    /// <summary>The subject's attributes in the order the caller lists them ("CN=trent,
+    /// O=glority" for CN then O), skipping any the certificate does not carry; null when
+    /// none of them is present.</summary>
+    internal string? FormatSubject(IEnumerable<string> abbrevs)
+    {
+        var parts = SubjectAttributes(CertificateDer);
+        if (parts is null) return null;
+        var texts = new List<string>();
+        foreach (var want in abbrevs)
+            foreach (var (abbrev, value) in parts)
+                if (abbrev == want) texts.Add($"{abbrev}={value}");
+        return texts.Count == 0 ? null : string.Join(", ", texts);
+    }
+
+    /// <summary>The subject distinguished name's attributes as (abbreviation, value)
+    /// pairs in DER order; null when the certificate cannot be parsed.</summary>
+    private static List<(string abbrev, string value)>? SubjectAttributes(byte[] certDer)
+    {
         try
         {
             var cert = new Asn1Reader(certDer).ReadSequence();
@@ -173,7 +199,7 @@ public sealed class PdfCertificate
             var subjectDer = tbsCert.ReadRawTlv();
 
             var r = new Asn1Reader(subjectDer).ReadSequence();
-            var parts = new List<string>();
+            var parts = new List<(string abbrev, string value)>();
             while (r.HasData)
             {
                 var set = r.ReadSet();
@@ -193,12 +219,10 @@ public sealed class PdfCertificate
                         "1.2.840.113549.1.9.1" => "E",
                         _ => "OID." + oid,
                     };
-                    parts.Add($"{abbrev}={value}");
+                    parts.Add((abbrev, value));
                 }
             }
-            if (parts.Count == 0) return null;
-            parts.Reverse();
-            return string.Join(", ", parts);
+            return parts;
         }
         catch
         {

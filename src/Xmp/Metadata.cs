@@ -85,7 +85,9 @@ public sealed class Metadata : IDictionary<string, XmpValue>
     public IDictionary<string, XmpPdfAExtensionSchema> ExtensionFields { get; }
         = new Dictionary<string, XmpPdfAExtensionSchema>(StringComparer.Ordinal);
 
-    /// <summary>Get or set a property by raw <c>"prefix:name"</c> key.</summary>
+    /// <summary>Get or set a property by raw <c>"prefix:name"</c> key. A key the packet does not carry reads as
+    /// null: the key is the property's literal name, so <c>"xmp:Title"</c> answers only an <c>xmp:Title</c>
+    /// property, never <c>dc:title</c> or the /Info entry.</summary>
     public XmpValue this[string key]
     {
         get
@@ -93,7 +95,7 @@ public sealed class Metadata : IDictionary<string, XmpValue>
             var structured = _xmp.GetStructured(key);
             if (structured is not null) return structured;
             var raw = _xmp[key];
-            if (raw is null) throw new KeyNotFoundException(key);
+            if (raw is null) return null!;
             // Typed view: numeric / date strings surface as IsInteger/IsDouble/
             // IsDateTime, so a typed add round-trips as its type.
             return XmpMetadata.ParseXmpValue(raw);
@@ -159,7 +161,7 @@ public sealed class Metadata : IDictionary<string, XmpValue>
                && string.Equals(raw, item.Value?.ToStringValue(), StringComparison.Ordinal);
     }
 
-    /// <inheritdoc />
+    /// <summary>Returns <c>true</c> if the XMP metadata contains a property with the given raw key (for example <c>dc:title</c>).</summary>
     public bool ContainsKey(string key) => _xmp.ContainsKey(key);
 
     /// <summary>Copy all key/value pairs into <paramref name="array"/> starting at <paramref name="index"/>.</summary>

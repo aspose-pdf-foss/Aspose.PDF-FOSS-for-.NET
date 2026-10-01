@@ -144,14 +144,14 @@ public class PdfEncryptionWriteTests
         var pdf = PdfBuilder.BuildWithTextContent(contentBytes);
 
         // Verify plaintext is present before encryption
-        Assert.Contains(marker, Encoding.Latin1.GetString(pdf));
+        Assert.Contains(marker, Compat.Latin1.GetString(pdf));
 
         using var doc = Document.Open(pdf);
         doc.Encrypt("user", "owner", algorithm: CryptoAlgorithm.RC4x128);
         var saved = doc.ToArray();
 
         // Plaintext must NOT appear in the encrypted output
-        Assert.DoesNotContain(marker, Encoding.Latin1.GetString(saved));
+        Assert.DoesNotContain(marker, Compat.Latin1.GetString(saved));
 
         // But we can still open and read it
         using var doc2 = Document.Open(saved, "user");
@@ -166,13 +166,13 @@ public class PdfEncryptionWriteTests
         var contentBytes = Encoding.ASCII.GetBytes($"BT /F1 12 Tf 100 700 Td ({marker}) Tj ET");
         var pdf = PdfBuilder.BuildWithTextContent(contentBytes);
 
-        Assert.Contains(marker, Encoding.Latin1.GetString(pdf));
+        Assert.Contains(marker, Compat.Latin1.GetString(pdf));
 
         using var doc = Document.Open(pdf);
         doc.Encrypt("user", "owner", algorithm: CryptoAlgorithm.AESx128);
         var saved = doc.ToArray();
 
-        Assert.DoesNotContain(marker, Encoding.Latin1.GetString(saved));
+        Assert.DoesNotContain(marker, Compat.Latin1.GetString(saved));
 
         using var doc2 = Document.Open(saved, "user");
         Assert.True(doc2.IsEncrypted);
@@ -271,13 +271,13 @@ public class PdfEncryptionWriteTests
         var contentBytes = Encoding.ASCII.GetBytes($"BT /F1 12 Tf 100 700 Td ({marker}) Tj ET");
         var pdf = PdfBuilder.BuildWithTextContent(contentBytes);
 
-        Assert.Contains(marker, Encoding.Latin1.GetString(pdf));
+        Assert.Contains(marker, Compat.Latin1.GetString(pdf));
 
         using var doc = Document.Open(pdf);
         doc.Encrypt("user", "owner", algorithm: CryptoAlgorithm.AESx256);
         var saved = doc.ToArray();
 
-        Assert.DoesNotContain(marker, Encoding.Latin1.GetString(saved));
+        Assert.DoesNotContain(marker, Compat.Latin1.GetString(saved));
 
         using var doc2 = Document.Open(saved, "user");
         Assert.True(doc2.IsEncrypted);

@@ -40,169 +40,26 @@ public sealed partial class PdfAnnotationEditor
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
         var page = doc.Pages.At(pageIndex);
+        // White unless a colour is given.
+        var fill = color is { Length: >= 3 }
+            ? Color.FromRgb(Compat.Clamp(color[0], 0, 1), Compat.Clamp(color[1], 0, 1), Compat.Clamp(color[2], 0, 1))
+            : Color.White;
 
-        // Add a white content stream rectangle to cover the area
+        // Remove for good what the page paints in the area - glyphs, the parts of paths there,
+        // and image pixels there, which take the fill colour - before the cover is drawn over it.
+        Aspose.Pdf.Annotations.ContentRedactor.Apply(page, rect, fill);
+        Aspose.Pdf.Annotations.RedactionAnnotation.MustRewriteWhole(page);
+
         var sb = new StringBuilder();
         sb.Append("q ");
-        if (color is { Length: >= 3 })
-            sb.Append($"{F(color[0])} {F(color[1])} {F(color[2])} rg ");
-        else
-            sb.Append("1 1 1 rg "); // white by default
-
+        sb.Append($"{F(fill.R / 255.0)} {F(fill.G / 255.0)} {F(fill.B / 255.0)} rg ");
         sb.Append($"{F(rect.LLX)} {F(rect.LLY)} {F(rect.Width)} {F(rect.Height)} re f Q");
-        AppendContentStream(page, Encoding.Latin1.GetBytes(sb.ToString()));
-
-        // Redaction must DESTROY the covered pixels, not merely paint over them: an
-        // image extracted from the redacted document has to show the redaction colour
-        // where it intersected the area. Off Windows this used to be skipped entirely -
-        // the cover rectangle hid the area on screen while the original pixels stayed in
-        // the image XObject, so anything that read the image back got the content the
-        // redaction was meant to remove.
-        if (OperatingSystem.IsWindows()) RedactImagesInArea(page, rect, color);
-        else RedactImagesInAreaManaged(page, rect, color);
+        AppendContentStream(page, Compat.Latin1.GetBytes(sb.ToString()));
 
         // Redaction removes form-field widgets covered by the area (they are no longer
         // visible/usable), pruning them from the page /Annots and the AcroForm /Fields.
         RemoveWidgetsInArea(doc, page, rect);
-    }
-
-    /// <summary>The managed half of <see cref="RedactImagesInArea"/>: same placement
-    /// arithmetic and the same rule about which images are baked, with the built-in PNG
-    /// reader and JPEG writer standing in for the platform codec.</summary>
-    private static void RedactImagesInAreaManaged(Page page, Rectangle area, double[]? color)
-    {
-        var absorber = new ImagePlacementAbsorber();
-        try { absorber.Visit(page); } catch { return; }
-
-        foreach (var placement in absorber.ImagePlacements)
-        {
-            var img = placement.Image;
-            if (img is null || img.IsImageMask) continue;
-            // Bilevel scans stay in their native 1-bit encoding, exactly as on Windows.
-            if (img.BitsPerComponent == 1) continue;
-            var r = placement.Rectangle;
-            if (r is null || r.Width <= 0 || r.Height <= 0) continue;
-
-            var ox0 = System.Math.Max(r.LLX, area.LLX);
-            var oy0 = System.Math.Max(r.LLY, area.LLY);
-            var ox1 = System.Math.Min(r.URX, area.URX);
-            var oy1 = System.Math.Min(r.URY, area.URY);
-            if (ox1 <= ox0 || oy1 <= oy0) continue;
-
-            try
-            {
-                var (pix, w, h, hasAlpha) = Facades.PdfFileMend.DecodePng(img.ToPng());
-                var comps = hasAlpha ? 4 : 3;
-                if (w <= 0 || h <= 0 || pix.Length < (long)w * h * comps) continue;
-
-                var px0 = System.Math.Clamp((int)System.Math.Floor((ox0 - r.LLX) / r.Width * w), 0, w);
-                var px1 = System.Math.Clamp((int)System.Math.Ceiling((ox1 - r.LLX) / r.Width * w), 0, w);
-                var py0 = System.Math.Clamp((int)System.Math.Floor((r.URY - oy1) / r.Height * h), 0, h);
-                var py1 = System.Math.Clamp((int)System.Math.Ceiling((r.URY - oy0) / r.Height * h), 0, h);
-                if (px1 <= px0 || py1 <= py0) continue;
-
-                byte fr = 255, fg = 255, fb = 255;
-                if (color is { Length: >= 3 })
-                {
-                    fr = (byte)System.Math.Round(System.Math.Clamp(color[0], 0, 1) * 255);
-                    fg = (byte)System.Math.Round(System.Math.Clamp(color[1], 0, 1) * 255);
-                    fb = (byte)System.Math.Round(System.Math.Clamp(color[2], 0, 1) * 255);
-                }
-
-                // Straight to RGBA, filling the covered block as it goes - the encoder
-                // takes RGBA and the fill is what has to survive into the stored image.
-                var rgba = new byte[(long)w * h * 4];
-                for (var y = 0; y < h; y++)
-                {
-                    var covered = y >= py0 && y < py1;
-                    for (var x = 0; x < w; x++)
-                    {
-                        var d = (y * w + x) * 4;
-                        if (covered && x >= px0 && x < px1)
-                        {
-                            rgba[d] = fr; rgba[d + 1] = fg; rgba[d + 2] = fb; rgba[d + 3] = 255;
-                            continue;
-                        }
-                        var s = (y * w + x) * comps;
-                        rgba[d] = pix[s]; rgba[d + 1] = pix[s + 1]; rgba[d + 2] = pix[s + 2];
-                        rgba[d + 3] = 255;
-                    }
-                }
-
-                // JPEG, for the same reason the Windows path re-encodes as JPEG: a
-                // lossless re-encode of a whole scan page inflates the document.
-                img.ReplaceImageData(IO.JpegEncoderImpl.Encode(rgba, w, h, 75));
-            }
-            catch
-            {
-                // Undecodable image: the cover rectangle still hides the area visually.
-            }
-        }
-    }
-
-    /// <summary>Paint the redaction colour into every raster image whose placement
-    /// intersects <paramref name="area"/>. Stencil masks are left alone (they carry
-    /// no colour to redact; the cover rectangle hides their paint).</summary>
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static void RedactImagesInArea(Page page, Rectangle area, double[]? color)
-    {
-        var absorber = new ImagePlacementAbsorber();
-        try { absorber.Visit(page); } catch { return; }
-
-        foreach (var placement in absorber.ImagePlacements)
-        {
-            var img = placement.Image;
-            if (img is null || img.IsImageMask) continue;
-            // Bilevel scans (CCITT/JBIG2) stay in their native 1-bit encoding: a
-            // contone re-encode of a fax page inflates the document several-fold,
-            // and the cover rectangle already hides the area. Only continuous-tone
-            // images get the colour baked in.
-            if (img.BitsPerComponent == 1) continue;
-            var r = placement.Rectangle;
-            if (r is null || r.Width <= 0 || r.Height <= 0) continue;
-
-            var ox0 = System.Math.Max(r.LLX, area.LLX);
-            var oy0 = System.Math.Max(r.LLY, area.LLY);
-            var ox1 = System.Math.Min(r.URX, area.URX);
-            var oy1 = System.Math.Min(r.URY, area.URY);
-            if (ox1 <= ox0 || oy1 <= oy0) continue;
-
-            try
-            {
-                using var src = new MemoryStream();
-                img.Save(src, System.Drawing.Imaging.ImageFormat.Png);
-                src.Position = 0;
-                using var bmp = new System.Drawing.Bitmap(src);
-                int w = bmp.Width, h = bmp.Height;
-
-                var px0 = System.Math.Clamp((int)System.Math.Floor((ox0 - r.LLX) / r.Width * w), 0, w);
-                var px1 = System.Math.Clamp((int)System.Math.Ceiling((ox1 - r.LLX) / r.Width * w), 0, w);
-                var py0 = System.Math.Clamp((int)System.Math.Floor((r.URY - oy1) / r.Height * h), 0, h);
-                var py1 = System.Math.Clamp((int)System.Math.Ceiling((r.URY - oy0) / r.Height * h), 0, h);
-                if (px1 <= px0 || py1 <= py0) continue;
-
-                var fill = color is { Length: >= 3 }
-                    ? System.Drawing.Color.FromArgb(
-                        (int)System.Math.Round(System.Math.Clamp(color[0], 0, 1) * 255),
-                        (int)System.Math.Round(System.Math.Clamp(color[1], 0, 1) * 255),
-                        (int)System.Math.Round(System.Math.Clamp(color[2], 0, 1) * 255))
-                    : System.Drawing.Color.White;
-                using (var g = System.Drawing.Graphics.FromImage(bmp))
-                using (var b = new System.Drawing.SolidBrush(fill))
-                    g.FillRectangle(b, px0, py0, px1 - px0, py1 - py0);
-
-                // Re-encode as JPEG: the replacement must stay in the same size
-                // class as the original photographic/scan data — a lossless PNG
-                // re-encode of a whole scan page inflates the document several-fold.
-                using var outMs = new MemoryStream();
-                bmp.Save(outMs, System.Drawing.Imaging.ImageFormat.Jpeg);
-                img.ReplaceImageData(outMs.ToArray());
-            }
-            catch
-            {
-                // Undecodable image: the cover rectangle still hides the area visually.
-            }
-        }
+        Aspose.Pdf.Annotations.RedactionAnnotation.RemoveAnnotationsUnder(page, rect);
     }
 
     /// <summary>Remove every Widget annotation whose /Rect intersects <paramref name="area"/>

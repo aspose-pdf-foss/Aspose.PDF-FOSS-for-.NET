@@ -87,6 +87,10 @@ public sealed class AttributeName
     public static readonly AttributeName TextAlign_End = new(AttributeKey.TextAlign, "End");
     public static readonly AttributeName TextAlign_Justify = new(AttributeKey.TextAlign, "Justify");
 
+    public static readonly AttributeName BlockAlign_Before = new(AttributeKey.BlockAlign, "Before");
+    public static readonly AttributeName BlockAlign_Middle = new(AttributeKey.BlockAlign, "Middle");
+    public static readonly AttributeName BlockAlign_After = new(AttributeKey.BlockAlign, "After");
+
     public static readonly AttributeName Height_Auto = new(AttributeKey.Height, "Auto");
     public static readonly AttributeName Width_Auto = new(AttributeKey.Width, "Auto");
 
@@ -98,6 +102,17 @@ public sealed class AttributeName
     public static readonly AttributeName Scope_Row = new(AttributeKey.Scope, "Row");
     public static readonly AttributeName Scope_Column = new(AttributeKey.Scope, "Column");
     public static readonly AttributeName Scope_Both = new(AttributeKey.Scope, "Both");
+
+    public static readonly AttributeName BorderStyle_None = new(AttributeKey.BorderStyle, "None");
+    public static readonly AttributeName BorderStyle_Hidden = new(AttributeKey.BorderStyle, "Hidden");
+    public static readonly AttributeName BorderStyle_Dotted = new(AttributeKey.BorderStyle, "Dotted");
+    public static readonly AttributeName BorderStyle_Dashed = new(AttributeKey.BorderStyle, "Dashed");
+    public static readonly AttributeName BorderStyle_Solid = new(AttributeKey.BorderStyle, "Solid");
+    public static readonly AttributeName BorderStyle_Double = new(AttributeKey.BorderStyle, "Double");
+    public static readonly AttributeName BorderStyle_Groove = new(AttributeKey.BorderStyle, "Groove");
+    public static readonly AttributeName BorderStyle_Ridge = new(AttributeKey.BorderStyle, "Ridge");
+    public static readonly AttributeName BorderStyle_Inset = new(AttributeKey.BorderStyle, "Inset");
+    public static readonly AttributeName BorderStyle_Outset = new(AttributeKey.BorderStyle, "Outset");
 
     /// <summary>The full PDF name (e.g. "Block"). Matches the name written
     /// to the attribute dictionary.</summary>
@@ -259,6 +274,29 @@ public sealed class StructureAttribute
         return new double?[] { rgb.R / 255.0, rgb.G / 255.0, rgb.B / 255.0 };
     }
 
+    /// <summary>The value as the object an attribute dictionary carries for this key; null
+    /// while no value has been set.</summary>
+    internal PdfObject? ToPdf()
+    {
+        switch (_kind)
+        {
+            case Kind.Name:
+                return new PdfName(_name!.Value);
+            case Kind.Number:
+                var number = _number!.Value;
+                return number == Math.Floor(number) ? new PdfInteger((long)number) : new PdfReal(number);
+            case Kind.Array:
+                var array = new PdfArray();
+                foreach (var item in _array!)
+                    array.Add(item is { } n ? new PdfReal(n) : PdfNull.Instance);
+                return array;
+            case Kind.String:
+                return new PdfString(System.Text.Encoding.UTF8.GetBytes(_string ?? string.Empty));
+            default:
+                return null;
+        }
+    }
+
     /// <summary>Build an attribute for <paramref name="key"/> from the raw
     /// PDF value found in an attribute dictionary, or null when the value
     /// can't be interpreted as a known kind. Bypasses the authoring-side
@@ -314,10 +352,21 @@ public sealed class StructureAttributes
 {
     private readonly Dictionary<AttributeKey, StructureAttribute> _attributes = new();
 
+    /// <summary>The attribute dictionary this set was read from, so the entries it does not
+    /// model survive a rewrite; null for a set created by the author.</summary>
+    private PdfDictionary? _source;
+
+    /// <summary>Told after every change an author makes to the set.</summary>
+    private readonly Action? _changed;
+
     /// <summary>The owner (/O) all attributes in this set belong to.</summary>
     internal AttributeOwnerStandard Owner { get; }
 
-    internal StructureAttributes(AttributeOwnerStandard owner) => Owner = owner;
+    internal StructureAttributes(AttributeOwnerStandard owner, Action? changed = null)
+    {
+        Owner = owner;
+        _changed = changed;
+    }
 
     /// <summary>Get the attribute for <paramref name="key"/>, or null.</summary>
     public StructureAttribute? GetAttribute(AttributeKey key)
@@ -334,13 +383,40 @@ public sealed class StructureAttributes
         if (attrOwner != Owner)
             throw new TaggedException($"Attribute owner is '{attrOwner}'. But must be '{Owner}'");
         _attributes[attribute.Key] = attribute;
+        _changed?.Invoke();
+    }
+
+    /// <summary>Drop the attribute for <paramref name="key"/>, if the set holds one.</summary>
+    internal void Remove(AttributeKey key)
+    {
+        var held = _attributes.Remove(key);
+        var stated = _source?.Remove(key.ToString()) ?? false;
+        if (held || stated) _changed?.Invoke();
     }
 
     /// <summary>Add an attribute parsed from the document, without the
     /// owner/value validation the authoring-side <see cref="SetAttribute"/>
     /// applies (the value is already present in the file).</summary>
-    internal void AddParsed(StructureAttribute attribute)
-        => _attributes[attribute.Key] = attribute;
+    internal void AddParsed(StructureAttribute attribute, PdfDictionary source)
+    {
+        _attributes[attribute.Key] = attribute;
+        _source = source;
+    }
+
+    /// <summary>The set as one attribute dictionary: the dictionary it was read from, if any,
+    /// with the attributes held here written over it. Null when there is nothing to write.</summary>
+    internal PdfDictionary? ToPdf()
+    {
+        if (_attributes.Count == 0 && _source is null) return null;
+        var dict = new PdfDictionary();
+        if (_source is not null)
+            foreach (var key in _source.Keys)
+                dict.Set(key, _source.Get(key)!);
+        dict.Set("O", new PdfName(Owner.ToString()));
+        foreach (var (key, attribute) in _attributes)
+            if (attribute.ToPdf() is { } value) dict.Set(key.ToString(), value);
+        return dict;
+    }
 }
 
 /// <summary>
@@ -351,48 +427,87 @@ public sealed class StructureElementAttributes
 {
     private readonly Dictionary<AttributeOwnerStandard, StructureAttributes> _byOwner = new();
 
-    internal StructureElementAttributes() { }
+    /// <summary>The element dictionary the sets belong to and are written back to.</summary>
+    private readonly PdfDictionary _element;
+    private readonly PdfReader? _reader;
 
-    /// <summary>Construct from a loaded structure-element dictionary, parsing
-    /// its /A attribute object(s) into per-owner sets so attributes read from
-    /// an existing document are visible through <see cref="GetAttributes"/>.</summary>
-    internal StructureElementAttributes(PdfDictionary elementDict, PdfReader? reader)
-        => Parse(elementDict, reader);
-
-    private void Parse(PdfDictionary elementDict, PdfReader? reader)
+    /// <summary>The attribute sets of one structure element, read from its /A entry so
+    /// attributes an existing document states are visible through <see cref="GetAttributes"/>.
+    /// Every change an author makes to a set is written straight back to that entry: the
+    /// element dictionary is the object the document saves, so the entry is kept current
+    /// rather than assembled at save time.</summary>
+    internal StructureElementAttributes(PdfDictionary element, PdfReader? reader)
     {
-        var a = reader?.Resolve(elementDict.Get("A")) ?? elementDict.Get("A");
-        switch (a)
+        _element = element;
+        _reader = reader;
+        Parse();
+    }
+
+    private PdfObject? Resolve(PdfObject? obj) => _reader?.Resolve(obj) ?? obj;
+
+    private void Parse()
+    {
+        switch (Resolve(_element.Get("A")))
         {
             case PdfDictionary single:
-                ParseAttributeObject(single, reader);
+                ParseAttributeObject(single);
                 break;
             case PdfArray arr:
                 foreach (var item in arr)
-                    if ((reader?.Resolve(item) ?? item) is PdfDictionary ad)
-                        ParseAttributeObject(ad, reader);
+                    if (Resolve(item) is PdfDictionary ad)
+                        ParseAttributeObject(ad);
                 break;
         }
     }
 
-    private void ParseAttributeObject(PdfDictionary attrDict, PdfReader? reader)
+    private void ParseAttributeObject(PdfDictionary attrDict)
     {
         var ownerName = attrDict.GetName("O");
-        if (!TryParseOwner(ownerName, out var owner)) return;
+        if (TryParseOwner(ownerName) is not { } owner) return;
         var set = GetOrCreate(owner);
         foreach (var key in attrDict.Keys)
         {
             if (key == "O") continue;
             if (!Enum.TryParse<AttributeKey>(key, ignoreCase: false, out var attrKey)) continue;
-            var value = reader?.Resolve(attrDict.Get(key)) ?? attrDict.Get(key);
-            var attr = StructureAttribute.FromPdf(attrKey, value);
-            if (attr is not null) set.AddParsed(attr);
+            var attr = StructureAttribute.FromPdf(attrKey, Resolve(attrDict.Get(key)));
+            if (attr is not null) set.AddParsed(attr, attrDict);
         }
     }
 
-    private static bool TryParseOwner(string? name, out AttributeOwnerStandard owner)
-        => Enum.TryParse(name, ignoreCase: false, out owner)
-           && Enum.IsDefined(typeof(AttributeOwnerStandard), owner);
+    /// <summary>Rewrite the element's /A entry from the sets held here. An attribute
+    /// dictionary whose owner no set models is carried over as it was.</summary>
+    private void Write()
+    {
+        var entries = new List<PdfObject>();
+        var existing = _element.Get("A");
+        foreach (var entry in Resolve(existing) is PdfArray array ? array : existing is null ? [] : [existing])
+        {
+            if (entry is null || Resolve(entry) is not PdfDictionary dict) continue;
+            if (TryParseOwner(dict.GetName("O")) is { } owner && _byOwner.ContainsKey(owner)) continue;
+            entries.Add(entry);
+        }
+        foreach (var set in _byOwner.Values)
+            if (set.ToPdf() is { } dict) entries.Add(dict);
+
+        switch (entries.Count)
+        {
+            case 0:
+                _element.Remove("A");
+                break;
+            case 1:
+                _element.Set("A", entries[0]);
+                break;
+            default:
+                var all = new PdfArray();
+                foreach (var entry in entries) all.Add(entry);
+                _element.Set("A", all);
+                break;
+        }
+    }
+
+    private static AttributeOwnerStandard? TryParseOwner(string? name)
+        => Enum.TryParse(name, ignoreCase: false, out AttributeOwnerStandard owner)
+           && Enum.IsDefined(typeof(AttributeOwnerStandard), owner) ? owner : null;
 
     private StructureAttributes GetOrCreate(AttributeOwnerStandard owner)
         => _byOwner.TryGetValue(owner, out var a) ? a : CreateAttributes(owner);
@@ -406,7 +521,7 @@ public sealed class StructureElementAttributes
     /// <summary>Create (and store) an empty attribute set for <paramref name="owner"/>.</summary>
     public StructureAttributes CreateAttributes(AttributeOwnerStandard owner)
     {
-        var a = new StructureAttributes(owner);
+        var a = new StructureAttributes(owner, Write);
         _byOwner[owner] = a;
         return a;
     }

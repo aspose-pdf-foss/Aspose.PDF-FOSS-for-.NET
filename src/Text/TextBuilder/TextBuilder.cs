@@ -1,4 +1,4 @@
-using Aspose.Pdf.Content;
+﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Text;
@@ -11,6 +11,15 @@ public sealed partial class TextBuilder
 {
     private readonly Page _page;
 
+    /// <summary>Where written operators go, when the caller wants them rather than
+    /// the page. The flow uses it to keep a caller-positioned fragment IN ORDER
+    /// among the lines around it: its page does not exist yet, and appending it
+    /// afterwards would move it to the end of that page's content -- same pixels,
+    /// but the extracted text would read in a different order than the reference's.
+    /// Null, as it is for every other caller, appends to the page as before.</summary>
+    internal Action<byte[]>? ContentSink { get; set; }
+
+    /// <summary>Creates a text builder that writes text onto the given page.</summary>
     public TextBuilder(Page page)
     {
         _page = page;
@@ -25,11 +34,6 @@ public sealed partial class TextBuilder
         _ = operatorCollection;
     }
 
-    /// <summary>
-    /// Append a text fragment to the page.
-    /// Registers a Standard 14 font in the page resources and writes the
-    /// BT … ET content stream.
-    /// </summary>
     /// <summary>Append a batch of text fragments in order.</summary>
     public void AppendText(List<TextFragment> textFragments)
     {
@@ -66,6 +70,7 @@ public sealed partial class TextBuilder
         return gap > 0.2 * fs && gap < 3.0 * fs;
     }
 
+    /// <summary>Writes the fragment's text to the page's content stream at the fragment's <c>Position</c>, using its text state, and registers the font it needs in the page resources.</summary>
     public void AppendText(TextFragment textFragment) => AppendText(textFragment, false);
 
     private void AppendText(TextFragment textFragment, bool addTrailingSpace)
@@ -298,121 +303,24 @@ public sealed partial class TextBuilder
     /// font/size/style: each segment (and each newline-split piece) is its own BT
     /// block in its own font resource; newlines drop one font-size step and re-start
     /// at the fragment X with an empty fragment-font marker run.</summary>
-    private void AppendStyledSegments(TextFragment fragment, ContentStreamBuilder builder,
-        string fragResName, double fontSize, double fragDescentComp, double x, double y)
+    private void AppendStyledSegments(TextFragment fragment, ContentStreamBuilder builder, string fragResName, double fontSize, double fragDescentComp, double x, double y)
     {
-        var lineH = fontSize > 0 ? fontSize : 12.0;
-        double curX = x, curY = y;
-        var lineStarted = false;
+        var ss = new StyledSegmentsState();
+        ss.fragment = fragment;
+        ss.builder = builder;
+        ss.fragResName = fragResName;
+        ss.fontSize = fontSize;
+        ss.fragDescentComp = fragDescentComp;
+        ss.x = x;
+        ss.y = y;
+        ss.lineH = ss.fontSize > 0 ? ss.fontSize : 12.0;
+        ss.curX = ss.x;
+        ss.curY = ss.y;
+        ss.lineStarted = false;
 
-        void EmitMarker()
+        foreach (var seg in ss.fragment.Segments)
         {
-            builder.BeginText();
-            builder.SetFont(fragResName, fontSize > 0 ? fontSize : 12.0);
-            builder.MoveTextPosition(curX, curY - fragDescentComp);
-            builder.ShowText(string.Empty);
-            builder.EndText();
-        }
-
-        foreach (var seg in fragment.Segments)
-        {
-            var segState = seg.TextState;
-            var segText = seg.Text ?? string.Empty;
-            if (segText.Length == 0)
-            {
-                // The parameterless-ctor empty segment surfaces as its own empty run.
-                builder.BeginText();
-                builder.SetFont(fragResName, fontSize > 0 ? fontSize : 12.0);
-                builder.MoveTextPosition(curX, curY - fragDescentComp);
-                builder.ShowText(string.Empty);
-                builder.EndText();
-                continue;
-            }
-
-            var segFs = segState is { FontSizeTouched: true, FontSize: > 0 }
-                ? segState.FontSize
-                : (fontSize > 0 ? fontSize : 12.0);
-            var segFont = segState?.Font is { } sfnt && !ReferenceEquals(sfnt, FontInfo.DefaultHelvetica)
-                ? sfnt
-                : fragment.TextState.Font;
-            var segData = segState?.FontData ?? segFont?.SourceFontData;
-
-            // Styled-face upgrade (Bold/Italic selects the styled family member).
-            if (segState is not null && (segState.IsBold || segState.IsItalic))
-            {
-                var family = segData?.FontName ?? segFont?.FontName ?? segState.FontName;
-                if (!string.IsNullOrEmpty(family) && !Standard14Fonts.IsCoreName(family)
-                    && !family.Contains("Bold", StringComparison.OrdinalIgnoreCase)
-                    && !family.Contains("Italic", StringComparison.OrdinalIgnoreCase))
-                {
-                    var suffix = (segState.IsBold ? " Bold" : string.Empty)
-                        + (segState.IsItalic ? " Italic" : string.Empty);
-                    var spaced = System.Text.RegularExpressions.Regex.Replace(family, "(?<=[a-z])(?=[A-Z])", " ");
-                    var styled = FontRepository.FindFontData(family + suffix)
-                        ?? (spaced != family ? FontRepository.FindFontData(spaced + suffix) : null);
-                    var wantTag = segState.IsBold ? "Bold" : "Italic";
-                    if (styled?.TtfData is not null
-                        && styled.FontName?.Contains(wantTag, StringComparison.OrdinalIgnoreCase) == true)
-                        segData = styled;
-                }
-            }
-
-            var segFg = segState?.ForegroundColor ?? fragment.TextState.ForegroundColor;
-            var lines = segText.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
-            for (var li = 0; li < lines.Length; li++)
-            {
-                if (li > 0)
-                {
-                    curY -= lineH;
-                    curX = x;
-                    lineStarted = false;
-                }
-                if (!lineStarted)
-                {
-                    EmitMarker();
-                    lineStarted = true;
-                }
-                var piece = lines[li];
-                if (piece.Length == 0) continue;
-
-                double segComp = 0;
-                string resName;
-                byte[]? hexIds = null;
-                if (segData?.TtfData is not null)
-                {
-                    (resName, hexIds) = EnsureEmbeddedCIDFont(segData, piece);
-                    var (_, d, _, _) = FontRepository.ReadTtfMetrics(segData.TtfData);
-                    if (d != 0) segComp = d * segFs / 1000.0;
-                }
-                else
-                {
-                    var segMapState = segState ?? fragment.TextState;
-                    resName = EnsureFontResource(MapToStandard14(segMapState));
-                }
-
-                if (segFg is not null)
-                    builder.SetFillColor(segFg.R / 255.0, segFg.G / 255.0, segFg.B / 255.0);
-                builder.BeginText();
-                builder.SetFont(resName, segFs);
-                builder.MoveTextPosition(curX, curY - segComp);
-                if (hexIds is not null) builder.ShowTextHex(hexIds);
-                else builder.ShowText(piece);
-                builder.EndText();
-
-                // Advance the cursor by the piece's measured width in ITS face.
-                double w;
-                try
-                {
-                    if (segData is not null)
-                        w = FontInfo.FromFontData(segData).MeasureString(piece, segFs);
-                    else if (segFont is not null)
-                        w = segFont.MeasureString(piece, segFs);
-                    else
-                        w = piece.Length * segFs * 0.5;
-                }
-                catch { w = piece.Length * segFs * 0.5; }
-                curX += w;
-            }
+            AppendStyledSegment(ss, seg);
         }
     }
 

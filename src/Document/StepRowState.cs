@@ -47,5 +47,30 @@ private sealed class StepRowState
     public bool warnFirstSeg;
     public int pidx;
     public bool psSeenTable;
+    // The col-full generation's acknowledge table stands
+    // UNDER the content: widget cells right-anchored on a
+    // 112.5 pt grid against the sheet's right edge, each
+    // blank over the labels its own cell carries, and the
+    // second label row on a baseline all widgets share.
+    // Above it: a paragraph's own bottom margin, or the
+    // table's 7.5 after a framed box (nothing after the
+    // double-ruled one). All constants are empirical,
+    // exact to 0.01.
+    public double relBoxTop;
+    public double gapAbove;
+    public double relRuleY;
+    public double relBlankBottom;
+    // the shared second label row keys off the lowest
+    // first-row label any widget put down
+    public double tr1Base;
+    public bool anyTr2;
+    public double tr2Base;
+    public double relBottom;
+    public double topY;
+    public Content.ContentStreamBuilder tb2 = null!;
+    public string lres2 = null!;
+    public double tableRight;
+    public double cellX;
+    public bool anyCheckbox;
 }
 }

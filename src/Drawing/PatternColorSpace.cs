@@ -5,4 +5,6 @@ namespace Aspose.Pdf.Drawing;
 /// at render time so concrete subclasses live in Aspose.Pdf only.</summary>
 public class PatternColorSpace
 {
+    /// <summary>Creates a pattern colour-space marker. Patterns are not painted by this library's renderer.</summary>
+    public PatternColorSpace() { }
 }

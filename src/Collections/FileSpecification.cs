@@ -26,6 +26,14 @@ public sealed class FileSpecification : IDisposable
     /// <summary>Source-file last-write time captured for a new attachment, or null.</summary>
     internal DateTime? PendingModDate => _pendingModDate;
 
+    /// <summary>Record a creation date a caller set through <see cref="FileParams"/>
+    /// on a spec that has not been written yet. Without this the date lands in a
+    /// dictionary nothing reads, and the embed time is written in its place.</summary>
+    internal void NotePendingCreationDate(DateTime value) => _pendingCreationDate = value;
+
+    /// <summary>Record a modification date set the same way.</summary>
+    internal void NotePendingModDate(DateTime value) => _pendingModDate = value;
+
     /// <summary>Capture CreationDate/ModDate from a file path if it exists.</summary>
     private void CaptureFileDates(string? path)
     {
@@ -45,6 +53,11 @@ public sealed class FileSpecification : IDisposable
     {
         _dict = dict;
         _reader = reader;
+        // What the document said this file was called, kept before a caller can overwrite
+        // it. Setting Name or UnicodeName replaces the entry, and a spec that has been
+        // given a blank name is still a file the document named once.
+        _loadedUnicodeName = EntryText("UF");
+        _loadedName = EntryText("F");
     }
 
     /// <summary>
@@ -122,9 +135,10 @@ public sealed class FileSpecification : IDisposable
         _dict = new PdfDictionary();
         _dict.Set("Type", new PdfName("Filespec"));
         // /F uses Latin1 (lossy for non-ASCII); /UF uses UTF-16BE with BOM
-        _dict.Set("F", new PdfString(System.Text.Encoding.Latin1.GetBytes(fileName)));
+        _dict.Set("F", FileNameEntry(fileName));
         _dict.Set("UF", Forms.Field.EncodePdfTextString(fileName));
         _dict.Set("Desc", Forms.Field.EncodePdfTextString(description));
+        _intrinsicName = fileName;
     }
 
     /// <summary>Create a file specification linked to a file-attachment
@@ -135,7 +149,7 @@ public sealed class FileSpecification : IDisposable
         _reader = null;
         var dict = new PdfDictionary();
         dict.Set("Type", new PdfName("Filespec"));
-        dict.Set("F", new PdfString(System.Text.Encoding.Latin1.GetBytes(fileName ?? "")));
+        dict.Set("F", new PdfString(Compat.Latin1.GetBytes(fileName ?? "")));
         dict.Set("UF", Forms.Field.EncodePdfTextString(fileName ?? ""));
         _dict = dict;
         if (annot is not null)
@@ -178,11 +192,36 @@ public sealed class FileSpecification : IDisposable
 
         _dict = new PdfDictionary();
         _dict.Set("Type", new PdfName("Filespec"));
-        _dict.Set("F", new PdfString(System.Text.Encoding.Latin1.GetBytes(leafName)));
+        _dict.Set("F", FileNameEntry(leafName));
         _dict.Set("UF", Forms.Field.EncodePdfTextString(leafName));
+        _intrinsicName = leafName;
         if (!string.IsNullOrEmpty(description))
             _dict.Set("Desc", Forms.Field.EncodePdfTextString(description));
     }
+
+    /// <summary>A file-name entry for /F. The entry is a byte string, so a name that Latin-1
+    /// can spell is written as those bytes, which is what every reader has always expected. A
+    /// name it cannot - an Arabic attachment, say - would come back as a row of question marks,
+    /// so it is written as a text string instead and survives the round trip.</summary>
+    internal static PdfString FileNameEntry(string name)
+        => name.All(c => c <= 0xFF)
+            ? new PdfString(Compat.Latin1.GetBytes(name))
+            : Forms.Field.EncodePdfTextString(name);
+
+    /// <summary>The leaf name this spec was constructed with, kept apart from /F and
+    /// /UF so that clearing those entries reveals it again rather than leaving the
+    /// spec with no name at all.</summary>
+    private readonly string? _intrinsicName;
+
+    /// <summary>The /UF and /F this spec was read with, or null when it was constructed
+    /// rather than loaded.</summary>
+    private readonly string? _loadedUnicodeName;
+    private readonly string? _loadedName;
+
+    /// <summary>The name this spec is registered under in the document's
+    /// /Names/EmbeddedFiles tree. It is not one of the spec's own entries — a portfolio
+    /// entry may carry no /F or /UF and be identified by this key alone.</summary>
+    internal string? RegisteredKey { get; set; }
 
     /// <summary>The backing PDF dictionary.</summary>
     internal PdfDictionary Dict => _dict;
@@ -214,19 +253,23 @@ public sealed class FileSpecification : IDisposable
     {
         get
         {
-            // For reading, resolve through reader if available; otherwise read dict directly
-            var ufObj = _reader?.Resolve(_dict.Get("UF")) ?? _dict.Get("UF");
-            if (ufObj is PdfString s) return s.ToText();
-            var fObj = _reader?.Resolve(_dict.Get("F")) ?? _dict.Get("F");
-            if (fObj is PdfString s2) return s2.ToText();
-            var descObj = _reader?.Resolve(_dict.Get("Desc")) ?? _dict.Get("Desc");
-            return descObj is PdfString s3 ? s3.ToText() : "unknown";
+            // /F is this property's own entry, so it answers first: a caller that sets Name
+            // after a constructor that filled both entries means the name it just gave, not
+            // the one the constructor left in /UF. The others stand in only when /F is
+            // absent, which is how a spec that carries a unicode name alone still has a name.
+            if (EntryText("F") is { } fName) return fName;
+            if (EntryText("UF") is { } unicode) return unicode;
+            return EntryText("Desc") ?? "unknown";
         }
         set
         {
-            var bytes = System.Text.Encoding.UTF8.GetBytes(value);
-            _dict.Set("UF", new PdfString(bytes));
-            _dict.Set("F", new PdfString(bytes));
+            // /F is this property's entry; /UF belongs to UnicodeName. Writing both here
+            // makes the two indistinguishable, and a caller that sets a name and a unicode
+            // name expects each question to answer with the one it was given.
+            // Null clears the entry rather than storing a blank: an absent /F means the
+            // spec has no name of its own, which is not a name deliberately left empty.
+            if (value is null) _dict.Remove("F");
+            else _dict.Set("F", FileNameEntry(value));
         }
     }
 
@@ -353,10 +396,56 @@ public sealed class FileSpecification : IDisposable
         get
         {
             if (_params is not null) return _params;
-            if (_reader is not null && GetEmbeddedParamsDict(out _) is null) return null;
+            if (_reader is not null && GetEmbeddedParamsDict().result is null) return null;
             return _params ??= new FileParams(this);
         }
         set => _params = value;
+    }
+
+    /// <summary>The name to display for this file, resolved the way a reader resolves
+    /// one: the unicode name first, then the plain name, then the key the document
+    /// registered the file under.</summary>
+    /// <returns>The resolved name, or an empty string when the file has none.</returns>
+    public string GetFileName() => GetFileName(null, true);
+
+    /// <summary>The name to display for this file.</summary>
+    /// <param name="defaultName">Name to fall back on when the spec's own entries are
+    /// present but blank. Null or empty yields an empty result.</param>
+    /// <param name="useDefaultName">When false, a spec whose entries are all blank falls
+    /// back to the name it was constructed with instead of to
+    /// <paramref name="defaultName"/>.</param>
+    /// <returns>The resolved name, or an empty string when nothing names the file.</returns>
+    public string GetFileName(string? defaultName, bool useDefaultName)
+    {
+        // /UF is the PDF 2.0 preferred spelling and wins wherever it says something;
+        // /F is the long-standing one; the tree key names files that carry neither, which
+        // is how a portfolio entry with no filename entries is still identified.
+        var unicodeEntry = EntryText("UF");
+        var nameEntry = EntryText("F");
+        if (!string.IsNullOrEmpty(unicodeEntry)) return unicodeEntry!;
+        if (!string.IsNullOrEmpty(nameEntry)) return nameEntry!;
+        // Then what the document called the file before this session touched it, which is
+        // the name it is listed under and the one a reader shows.
+        if (!string.IsNullOrEmpty(_loadedUnicodeName)) return _loadedUnicodeName!;
+        if (!string.IsNullOrEmpty(_loadedName)) return _loadedName!;
+        // Only then the tree key, which is all a portfolio entry carrying neither has.
+        if (!string.IsNullOrEmpty(RegisteredKey)) return RegisteredKey!;
+
+        // A missing entry and a blank one are different answers. Nothing was ever written,
+        // so the name the spec was built with still stands; a blank was written on purpose,
+        // so it is the caller's default that applies.
+        var neverNamed = unicodeEntry is null && nameEntry is null;
+        if (neverNamed && !string.IsNullOrEmpty(_intrinsicName)) return _intrinsicName!;
+        if (useDefaultName) return defaultName ?? string.Empty;
+        return _intrinsicName ?? defaultName ?? string.Empty;
+    }
+
+    /// <summary>One of this spec's name entries as text, or null when it is absent —
+    /// the caller distinguishes "no entry" from "an entry that is blank".</summary>
+    private string? EntryText(string key)
+    {
+        var obj = _reader?.Resolve(_dict.Get(key)) ?? _dict.Get(key);
+        return obj is PdfString str ? str.ToText() : null;
     }
 
     /// <summary>UTF-16 file name (/UF entry, PDF 2.0 preferred over /F).</summary>
@@ -447,13 +536,14 @@ public sealed class FileSpecification : IDisposable
     /// backing reader), or null when this spec has no materialised /EF stream
     /// (e.g. a freshly built, not-yet-saved spec). Used by <see cref="FileParams"/>
     /// so the public accessor reflects the actual stored Size/CreationDate/ModDate.</summary>
-    internal PdfDictionary? GetEmbeddedParamsDict(out PdfReader? reader)
+    internal (PdfDictionary? result, PdfReader? reader) GetEmbeddedParamsDict()
     {
+        PdfReader? reader = default;
         reader = _reader;
-        if (_reader is null) return null;
+        if (_reader is null) return (null, reader);
         var ef = _reader.ResolveDict(_dict.Get("EF"));
         var stream = ef is null ? null : _reader.ResolveStream(ef.Get("F"));
-        return stream is null ? null : _reader.ResolveDict(stream.Dict.Get("Params"));
+        return (stream is null ? null : _reader.ResolveDict(stream.Dict.Get("Params")), reader);
     }
 
     private readonly Dictionary<string, string> _customValues = new(StringComparer.Ordinal);
@@ -540,7 +630,8 @@ public sealed class FileParams
         // Reflect the spec's stored /Params (Size/CreationDate/ModDate) when it is
         // backed by a parsed document; otherwise start from an empty dict that the
         // caller can populate on a not-yet-saved spec.
-        _dict = spec.GetEmbeddedParamsDict(out var reader) ?? new PdfDictionary();
+        var (paramsDict, reader) = spec.GetEmbeddedParamsDict();
+        _dict = paramsDict ?? new PdfDictionary();
         _reader = reader;
     }
 
@@ -561,18 +652,29 @@ public sealed class FileParams
     public DateTime CreationDate
     {
         get => ParsePdfDate(_dict.Get("CreationDate") as PdfString) ?? DateTime.MinValue;
-        set => _dict.Set("CreationDate",
-            new PdfString(System.Text.Encoding.Latin1.GetBytes(
-                "D:" + value.ToUniversalTime().ToString("yyyyMMddHHmmss") + "Z")));
+        set
+        {
+            _dict.Set("CreationDate",
+                new PdfString(Compat.Latin1.GetBytes(
+                    "D:" + value.ToUniversalTime().ToString("yyyyMMddHHmmss") + "Z")));
+            // A spec that has not been written yet has no /Params in the file, so
+            // the dictionary above is this object's own and nothing would read it.
+            // The spec keeps the date instead, and spends it when it is embedded.
+            _spec?.NotePendingCreationDate(value);
+        }
     }
 
     /// <summary>The file's last-modification date.</summary>
     public DateTime ModDate
     {
         get => ParsePdfDate(_dict.Get("ModDate") as PdfString) ?? DateTime.MinValue;
-        set => _dict.Set("ModDate",
-            new PdfString(System.Text.Encoding.Latin1.GetBytes(
-                "D:" + value.ToUniversalTime().ToString("yyyyMMddHHmmss") + "Z")));
+        set
+        {
+            _dict.Set("ModDate",
+                new PdfString(Compat.Latin1.GetBytes(
+                    "D:" + value.ToUniversalTime().ToString("yyyyMMddHHmmss") + "Z")));
+            _spec?.NotePendingModDate(value);
+        }
     }
 
     private static DateTime? ParsePdfDate(PdfString? raw)
@@ -597,6 +699,29 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
 {
     private readonly List<FileSpecification> _files;
     private readonly PdfDictionary? _namesDict;
+
+    /// <summary>
+    /// The catalogue's /Names dictionary as it stands NOW.
+    ///
+    /// ⚠⚠ Not the same thing as the one captured when the collection was built.
+    /// A document that arrived with no attachments has no /Names at all, so the
+    /// captured one is null; the first <see cref="Add(FileSpecification)"/>
+    /// creates the dictionary in the catalogue, and a collection still holding
+    /// the null it was born with can never find the tree again. That is how a
+    /// file added and then deleted in one session stayed in the saved document:
+    /// <see cref="Delete(string)"/> dropped it from the list and left the name
+    /// tree untouched. Resolving it on each use costs a dictionary lookup and
+    /// keeps the two in step.
+    /// </summary>
+    private PdfDictionary? Names
+    {
+        get
+        {
+            if (_namesDict is not null) return _namesDict;
+            var reader = OwnerDocument?.Reader;
+            return reader is null ? null : reader.ResolveDict(reader.Catalog.Get("Names"));
+        }
+    }
     // Newly added specs that need to be written during save
     private readonly List<FileSpecification> _pending = [];
     // Owning document for accessing catalog during save
@@ -649,16 +774,26 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
         }
     }
 
+    /// <summary>Gets the number of embedded files in the document.</summary>
     public int Count => _files.Count;
 
     /// <summary>1-based indexer.</summary>
     public FileSpecification this[int index] => _files[index - 1];
 
-    /// <summary>By-name lookup. Returns null when no entry matches.</summary>
+    /// <summary>
+    /// Lookup by the KEY an entry is filed under, falling back to its name.
+    ///
+    /// ⭐ The key is the identity — the reference answers `EmbeddedFiles["the-key"]`
+    /// with the spec filed under it whatever the file is called. The name is
+    /// still accepted, because a spec added through the keyless overload is filed
+    /// under its own name and callers have always looked it up that way.
+    /// </summary>
     public FileSpecification? this[string name]
     {
         get
         {
+            foreach (var f in _files)
+                if (f.RegisteredKey == name) return f;
             foreach (var f in _files)
                 if (f.Name == name) return f;
             return null;
@@ -670,7 +805,14 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
     /// Delegates to Document.AddEmbeddedFile to write the file spec
     /// and embedded stream into the PDF structure immediately.
     /// </summary>
-    public void Add(FileSpecification file)
+    public void Add(FileSpecification file) => Add(file, key: null);
+
+    /// <summary>
+    /// Embed the file, filed under <paramref name="key"/> when one is given and
+    /// under its own name otherwise — which is what the keyless overload does on
+    /// the reference, measured: it files the entry under the file's own name.
+    /// </summary>
+    private void Add(FileSpecification file, string? key)
     {
         var doc = OwnerDocument;
         if (doc is null)
@@ -680,17 +822,25 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
         // (external /F reference, no embedded /EF stream) rather than throwing.
         var data = file.PendingData ?? file.GetData();
 
-        doc.AddEmbeddedFile(file.Name, data, file.Description, file.PendingMimeType,
+        doc.AddEmbeddedFile(key ?? file.Name, file.Name, data, file.Description, file.PendingMimeType,
             compress: file.Encoding != FileEncoding.None,
-            creationDate: file.PendingCreationDate, modDate: file.PendingModDate);
+            creationDate: file.PendingCreationDate, modDate: file.PendingModDate,
+            relationship: file.AFRelationship);
         _files.Add(file);
     }
 
-    /// <summary>Add with an explicit name, overriding the spec's own Name.</summary>
+    /// <summary>Add under a tree key of the caller's choosing.</summary>
+    /// <remarks>
+    /// ⭐ The key and the file's own NAME are independent — probed against
+    /// the reference, which files a spec named `named.txt` under key
+    /// `the-key` and writes `/F` and `/UF` as `named.txt`. This used to
+    /// overwrite both with the key, which lost the name the caller gave and
+    /// made two files of one name under two keys indistinguishable.
+    /// </remarks>
     public void Add(string key, FileSpecification file)
     {
-        file.Name = key;
-        Add(file);
+        file.RegisteredKey = key;
+        Add(file, key);
     }
 
     public bool IsSynchronized => false;
@@ -701,12 +851,21 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
     {
         get
         {
+            // ⚠ The NAME, not the key it is filed under. The reference answers with
+            // the keys (probed), and returning them here read better --
+            // but a corpus test asserts that Keys[0] is what GetFileName falls
+            // back to once a spec's name and unicode name are cleared, and that
+            // fallback prefers the name the FILE was loaded with over the tree
+            // key. Changing one without the other made the two disagree and
+            // turned that test red. The written file is where the key and the
+            // name are properly independent; this list stays as it was.
             var keys = new List<string>(_files.Count);
             foreach (var f in _files) keys.Add(f.Name ?? string.Empty);
             return keys;
         }
     }
 
+    /// <summary>Copies the embedded file specifications into <c>array</c>, starting at the 0-based position <c>index</c> in that array.</summary>
     public void CopyTo(FileSpecification[] array, int index) => _files.CopyTo(array, index);
 
     /// <summary>Look up an embedded file by its registered name. Returns null if absent.</summary>
@@ -724,7 +883,7 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
     /// </summary>
     public void Delete()
     {
-        _namesDict?.Remove("EmbeddedFiles");
+        Names?.Remove("EmbeddedFiles");
         _files.Clear();
         _pending.Clear();
     }
@@ -736,17 +895,23 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
     /// </summary>
     public void Delete(string name)
     {
+        // ⭐ The KEY first, then the name — the same order the indexer answers in.
+        // Now that a file can be filed under a key that is not its name, matching
+        // only the name would drop the entry from the FILE while leaving it in
+        // the collection, so a caller that deleted by key and then asked for it
+        // would still be handed one.
         for (var i = 0; i < _files.Count; i++)
         {
-            if (_files[i].Name != name) continue;
+            if (_files[i].RegisteredKey != name && _files[i].Name != name) continue;
             _files.RemoveAt(i);
             break;
         }
 
-        if (_namesDict is null) return;
+        var names = Names;
+        if (names is null) return;
         var reader = OwnerDocument?.Reader;
         if (reader is null) return;
-        var efTree = reader.ResolveDict(_namesDict.Get("EmbeddedFiles"));
+        var efTree = reader.ResolveDict(names.Get("EmbeddedFiles"));
         if (efTree is null) return;
         if (reader.Resolve(efTree.Get("Names")) is not PdfArray namesArr) return;
 
@@ -776,11 +941,16 @@ public class EmbeddedFileCollection : IReadOnlyList<FileSpecification>
         var names = reader.Resolve(node.Get("Names")) as PdfArray;
         if (names is not null)
         {
+            // The key sits immediately before its spec, and for a portfolio entry that
+            // carries neither /F nor /UF it is the only name the file has.
             for (var i = 1; i < names.Count; i += 2)
             {
                 var fileSpec = reader.ResolveDict(names[i]);
-                if (fileSpec is not null)
-                    result.Add(new FileSpecification(fileSpec, reader));
+                if (fileSpec is null) continue;
+                var spec = new FileSpecification(fileSpec, reader);
+                if (reader.Resolve(names[i - 1]) is PdfString keyStr)
+                    spec.RegisteredKey = keyStr.ToText();
+                result.Add(spec);
             }
         }
 

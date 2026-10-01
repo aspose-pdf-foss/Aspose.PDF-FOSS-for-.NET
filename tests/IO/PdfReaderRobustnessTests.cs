@@ -58,6 +58,37 @@ public class PdfReaderRobustnessTests
     }
 
     [Fact]
+    public void RecoverXref_WrongStartxref_KeepsTheScannedTrailersIdAndInfo()
+    {
+        var reader = PdfReader.FromBytes(WithTrailerKeysAndWrongStartxref("/ID [<01><02>] /Info 1 0 R"),
+            new PdfReaderOptions { RepairXref = true });
+        Assert.NotNull(reader.Catalog);
+        Assert.IsType<PdfArray>(reader.Trailer.Get("ID"));
+        Assert.IsType<PdfIndirectRef>(reader.Trailer.Get("Info"));
+    }
+
+    [Fact]
+    public void RecoverXref_WrongStartxref_DropsAScannedReferenceToAMissingObject()
+    {
+        var reader = PdfReader.FromBytes(WithTrailerKeysAndWrongStartxref("/Info 99 0 R"),
+            new PdfReaderOptions { RepairXref = true });
+        Assert.NotNull(reader.Catalog);
+        Assert.False(reader.Trailer.ContainsKey("Info"));
+    }
+
+    private static byte[] WithTrailerKeysAndWrongStartxref(string keys)
+    {
+        var text = Encoding.ASCII.GetString(PdfBuilder.BuildMinimal());
+        var trailerAt = text.IndexOf("<<", text.IndexOf("trailer", StringComparison.Ordinal), StringComparison.Ordinal);
+        text = text[..(trailerAt + 2)] + keys + " " + text[(trailerAt + 2)..];
+        var number = text.LastIndexOf("startxref", StringComparison.Ordinal) + "startxref".Length;
+        while (!char.IsDigit(text[number])) number++;
+        var end = number;
+        while (char.IsDigit(text[end])) end++;
+        return Encoding.ASCII.GetBytes(text[..number] + "12" + text[end..]);
+    }
+
+    [Fact]
     public void RecoverXref_RepairXrefDisabled_Throws()
     {
         var data = PdfBuilder.BuildMinimal();

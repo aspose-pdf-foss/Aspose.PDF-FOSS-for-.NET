@@ -164,7 +164,7 @@ public partial class Field
         }
 
         if (!needsUnicode)
-            return new PdfString(System.Text.Encoding.Latin1.GetBytes(value));
+            return new PdfString(Compat.Latin1.GetBytes(value));
 
         // UTF-16BE with BOM prefix (0xFE 0xFF)
         byte[] utf16 = System.Text.Encoding.BigEndianUnicode.GetBytes(value);
@@ -178,7 +178,7 @@ public partial class Field
     /// <summary>Set the partial name (/T entry) of this field.</summary>
     internal void SetPartialName(string name)
     {
-        _dict.Set("T", new PdfString(System.Text.Encoding.Latin1.GetBytes(name)));
+        _dict.Set("T", new PdfString(Compat.Latin1.GetBytes(name)));
     }
 
     private FieldType DetermineType()
@@ -299,6 +299,7 @@ public partial class Field
     {
         if (BarcodeField.IsBarcode(dict, reader)) return new BarcodeField(dict, reader);
         var flags = (int)GetInheritedInt(dict, reader, "Ff");
+        if ((flags & FileSelectFlag) != 0) return new FileSelectBoxField(dict, reader);
         return (flags & (1 << 25)) != 0
             ? new RichTextBoxField(dict, reader)
             : new TextBoxField(dict, reader);

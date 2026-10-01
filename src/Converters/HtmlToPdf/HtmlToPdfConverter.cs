@@ -66,10 +66,17 @@ internal static partial class HtmlToPdfConverter
         public bool EmItalic;
         public double MarginTop;
         public double MarginBottom;
+        /// <summary>UA flow: the box's closing margin, which a following margin-less line (bare text, a break, a div) stands below; a margined block collapses its own top margin instead.</summary>
+        public double UaClosingGapPt;
+        /// <summary>The top margin belongs to an element nested inside another block (see BlockStyle.MarginTopNested).</summary>
+        public bool MarginTopNested;
         // Apply MarginTop even at the top of a page (the filing dialect's repeated
         // page-header block keeps its CSS top margin below the page margin).
         public bool MarginTopAlways;
         public double LeftIndent;
+        // A title column declared as a PERCENT of the content width: resolved onto
+        // LeftIndent when the block lays out (the parser has no content width).
+        public double LeftIndentFrac;
         public bool IsListItem;
         // CSS page-break-before:always — start this block on a fresh page.
         public bool PageBreakBefore;
@@ -85,6 +92,14 @@ internal static partial class HtmlToPdfConverter
         public double RightAlignBoxPt;
         public double MaxWidthPt;
         public bool NoAdvanceY;
+        // The field-list dialect: a label's share of the fields box (its wrap box), or the value's
+        // (its indent); the label keeps the row's LAST line for the value beside it
+        public double FieldColumnFrac;
+        public bool FieldLabel;
+        // The element's padding-bottom, spent under its last block (box space, never collapsed)
+        public double PadBottomPt;
+        // This block's float flag came from an ancestor, not from its own declaration.
+        public bool FloatInherited;
         public double PadTop;
         // Unwrapped single-column wrapper-table cell with td align=center: each
         // wrapped line centres over a band this wide starting at the block's own
@@ -117,6 +132,9 @@ internal static partial class HtmlToPdfConverter
         // "</p> <p><br/></p> <p>" sandwich) - it stands a full UA paragraph,
         // margins included, where its table neighbours read none.
         public bool UaSpacerPara;
+        // The text continues a paragraph whose first line was a `<br>` spacer: its margin-top is
+        // the paragraph's, stood once - by a table's break tail where one stood it already.
+        public bool AfterOwnLeadingBreak;
         public bool IsLineBreak;         // a real <br> tag (not a synthetic spacer)
         // Floor on the block's rendered height (from CSS height/min-height).
         // Zero = let the text content alone decide.
@@ -129,6 +147,11 @@ internal static partial class HtmlToPdfConverter
         // 0 = the flow's own default pitch.
         public double LineFactor;
         public bool DeclaredLineFactor;
+        // A percent line-height's factor on the UA flow, inherited as a factor and resolved per block (0 = none)
+        public double UaLineFactor;
+        // A stylesheet's unitless line-height on the calibrated flow: the pitch alone reads
+        // it, so the UA flow's declared-factor seating is not engaged by it.
+        public double SheetLineFactor;
         // <hr>: draw a horizontal rule line in RuleColor / RuleWidth instead
         // of just consuming vertical space.
         public bool IsHorizontalRule;
@@ -153,6 +176,19 @@ internal static partial class HtmlToPdfConverter
         // The element declared ONLY border-top (border:none;border-top:solid …):
         // one rule above the content, no box.
         public bool BorderTopOnly;
+        // A sheet box's border-bottom rule and width (see BlockStyle.BorderBottomWidth).
+        public double BorderBottomWidth;
+        public Color? BorderBottomColor;
+        // The sheet-typography flow paints this block's line box as a band (BlockStyle.SheetBox).
+        public bool SheetBox;
+        // A UA-grid heading box: its rules' widths ride the margins after the sheet/UA margins resolve,
+        // and its padding-top is space between the top rule and the first line.
+        public double UaBoxTopPt;
+        public double UaBoxBottomPt;
+        public double UaPadTopPt;
+        // …and its own top rule (kept apart from the calibrated BorderTopOnly, which a bottom rule overwrites).
+        public double UaRuleTopPt;
+        public Color? UaRuleTopColor;
         // UA-serif flow: a px line-height LINE BOX and the inline span's own
         // margin-left text inset (see BlockStyle.LineBoxPt / TextInsetPt).
         public double LineBoxPt;
@@ -165,6 +201,18 @@ internal static partial class HtmlToPdfConverter
         // text line. Zero = no painted box.
         public double BgBoxWidthPt;
         public double BgBoxHeightPt;
+        // The box height as a fraction of the viewport (`height: 100vh`): the page's
+        // content height, resolved where the box is painted. Zero = a pt height.
+        public double BgBoxHeightVh;
+        // A background image drawn once over the declared box, at its top-left, clipped to
+        // it and sized by `background-size` (see PaintBackgroundImageBox); the bytes are
+        // resolved when the block renders, the natural size read from them.
+        public string? BgImageSrc;
+        public string BgImageSize = "";
+        public byte[]? BgImageBytes;
+        public double BgImageNatWPt, BgImageNatHPt;
+        // The indent of the element that declared the box (a zero width = the content width).
+        public double BgBoxIndentPt;
         // Border-only declared box (UA flow): a border over an inline width ×
         // height with no background strokes its declared box — rounded by
         // BorderRadiusPt — while the content flows inside it. ExplicitHeight
@@ -204,6 +252,18 @@ internal static partial class HtmlToPdfConverter
         public bool PageBreakAfterTable;
         // Fieldset box marker: +1 opens a frame, −1 closes (draws) it.
         public int FsBox;
+        /// <summary>…a framed wrapper DIV's marker instead when its border is set: the border width
+        /// and colour, the content width it declares, and whether its align centres the tables.</summary>
+        public double FrameW;
+        public Color? FrameCol;
+        public double FrameBoxW;
+        public bool FrameCentred;
+        // Container BACKGROUND box marker: +1 opens, −1 closes (fills) it. Emitted only for
+        // a container that paints a background and flushes no line of its own, whose colour
+        // would otherwise be carried by nothing; the open marker holds the fill and its width.
+        public int BgSpan;
+        // A percentage width the container declared, as a fraction; resolved at render.
+        public double BgSpanWidthFrac;
         // This block is a <legend> — it rides the fieldset frame's top edge.
         public bool FsLegend;
         // ALIGN="justify" / text-align:justify — stretch word gaps to the content box.
@@ -221,6 +281,16 @@ internal static partial class HtmlToPdfConverter
         // Inline span colour runs (browser-UA flow): a span's own color scopes
         // to the span — collapsed-coordinate ranges with their ink.
         public System.Collections.Generic.List<(int Start, int Length, Color C)>? ColorRuns;
+        // Inline span SIZE runs (sheet-typography flow): a span class's font-size scopes
+        // to the span - collapsed-coordinate ranges with their size in points. A line
+        // holding one takes the CSS line box of its largest run.
+        public System.Collections.Generic.List<(int Start, int Length, double Pt)>? SizeRuns;
+        // Span-scoped face runs (the Word export's Symbol / Wingdings list label and its Times New
+        // Roman filler on an Arial line): the run draws in its own family, the rest in the block's.
+        public System.Collections.Generic.List<(int Start, int Length, string Fam)>? FamilyRuns;
+        // The block's runs each line at their own face-normal line box (the Word export's 16 pt
+        // label beside a 7 pt filler pitches 18.75, the 7 pt box not stretched to the block's).
+        public bool RunNormalLines;
         // Decoration runs (redline diff dialect): span-scoped strike/underline ink.
         // Kind: 1 = text-decoration underline, 2 = line-through, 3 = border-bottom
         // solid (the added-marker), 4 = border-bottom dashed/dotted (the
@@ -240,6 +310,8 @@ internal static partial class HtmlToPdfConverter
         // underlined RUN inside an otherwise undecorated line. Populated only for
         // callers that asked for inline emphasis runs.
         public System.Collections.Generic.List<(int Start, int Length)>? UnderlineRuns;
+        // <strike>/<s>/<del> runs of the UA flow: a line through the run's text
+        public System.Collections.Generic.List<(int Start, int Length)>? StrikeRuns;
 
         // Inline <i>/<em> ranges within Text (collapsed coordinates) — the
         // browser-UA flow draws these as italic RUNS inside an otherwise regular
@@ -257,6 +329,8 @@ internal static partial class HtmlToPdfConverter
         public string InputValue = "";
         public string? InputName;     // AcroForm field name from the <input> name/id attribute
         public double InputWidth;     // CSS px (0 = fill content width)
+        public double InputWidthFrac; // a class width in percent of the content width, resolved at layout
+        public bool InputInColumn;    // seated beside a title column: the UA input box on the label's line
         public double InputHeight;    // CSS px (0 = one text line)
         public bool InputMultiline;
         public bool InputReadOnly;    // HTML disabled / readonly attribute
@@ -296,17 +370,26 @@ internal static partial class HtmlToPdfConverter
         // load options' custom resource loader (for remote/opaque URIs), a data: URI, or a
         // local file. Width/Height are CSS px (0 = derive from the other / natural size).
         public bool IsImage;
+        // the image is INLINE (no display:block, not floated): a <br> right after it ends the
+        // image's own line and spends no line box
+        public bool ImageInline;
         public string ImageSrc = "";
         public double ImageWidth;
         // An inline `max-width: N%`: the drawn box caps at this share of the
         // content width, and the image never widens the sheet. Zero = none.
         public double ImageMaxWFrac;
         public double ImageHeight;
-        // position:absolute image: seats at page margins + left/top (CSS px),
-        // out of the flow — the cursor never advances for it.
+        // position:absolute image: it leaves the flow entirely (the cursor never advances
+        // for it) and seats at these offsets, in points, from the page's content origin -
+        // see AbsoluteImageSeat.cs for how the containing block puts them there.
         public bool ImageAbsPos;
-        public double ImageAbsLeftPx;
-        public double ImageAbsTopPx;
+        public double ImageAbsLeftPt;
+        public double ImageAbsTopPt;
+        // The fixed-size container this full-bleed page image fills, in points (0 = the image
+        // fills no such band). The raster page export gives every source page one container of
+        // a declared em height holding one PNG, and the flow advances by that BAND, not by the
+        // image - see AbsoluteImageSeat.cs.
+        public double PageBandHeightPt;
         // <img alt="…"> — alternate description, surfaced as a Figure structure
         // element's /Alt when CreateLogicalStructure builds the tag tree.
         public string? ImageAlt;
@@ -339,11 +422,26 @@ internal static partial class HtmlToPdfConverter
         // the draw recovers the card box from the image position and frames it.
         public Color? ImageCardShadow;
         public double ImageCardChromePt;
+        /// <summary>The card frame around a picture: its border colour and width, and how far
+        /// outside the picture the card's outer edge lies (see BlockStyle.CardFrame*).</summary>
+        public Color? ImageCardFrame;
+        public double ImageCardFrameBorderPt;
+        public double ImageCardFrameInsetPt;
 
         // A real <table> (no form inputs) rendered as a column grid at layout time via
         // BuildTableFromHtml + Table.BuildMultiPage. TableHtml carries the raw <table>…</table>.
         public bool IsTable;
         public string TableHtml = "";
+        // The container elements the grid stands INSIDE (the divs open above it, with
+        // their ids and classes): the chain a stylesheet addresses its cells through
+        // (`#right_column TABLE TD`, `.datagrid table th`). Null = no hooked ancestor.
+        public List<CssElem>? CssAncestors;
+        // The typography a wrapper's id/class rule declares over the table (`#divGeral { font-family:
+        // Verdana; font-size: 14px }`): the UA grid draws its cells in it (null / 0 = the flow's).
+        public string? HostFace;
+        public double HostFontPt;
+        // The box the innermost wrapper's id/class rule declares over the table (0 = none).
+        public double HostWidthPt;
         // A floated table (align="left" attribute): float
         // content paints FIRST in the page's content stream (before the normal flow), so its
         // text surfaces as the leading TextFragments. Layout position is unchanged.
@@ -386,6 +484,13 @@ internal static partial class HtmlToPdfConverter
         public double BoxPadSidePt;
         public double BoxMarginBottomPt;
         public double BoxBorderGray;
+        // A box that DECLARES its own size: the border box is drawn at exactly this
+        // content width and height (borders outside it), the inner flow wraps to the
+        // width, and the flow leaves the box at its declared bottom whatever the
+        // content measured. Zero = the box takes the ambient width and its content's
+        // height, as an undeclared one does.
+        public double BoxWidthPt;
+        public double BoxHeightPt;
 
         // A centered search-form (text input + submit buttons + optional side link),
         // extracted from a <form><table> whose flat block layout cannot express the
@@ -409,6 +514,12 @@ internal static partial class HtmlToPdfConverter
         public PositionedSlide? Slide;
         // A flex-row waybill grid drawn at absolute geometry (see FlexGrid).
         public FlexGrid? Flex;
+        // A single-line flex row of painted boxes (see FlexRow).
+        public FlexRow? FlexRow;
+        // A row of percent-width inline-blocks (see InlineRow).
+        public InlineRow? InlineRow;
+        // A preformatted block of verbatim lines (see PreBlock).
+        public PreBlock? Pre;
 
         // A styled inline row (site nav bar, centered footer-link line): runs laid out
         // horizontally on one line, optionally over a full-content-width background bar.
@@ -654,36 +765,38 @@ internal static partial class HtmlToPdfConverter
     /// is one <c>&lt;font&gt;</c> element carrying a face and a legacy size, whose
     /// content is only text and b/strong/u/i/em emphasis. Yields the styled runs
     /// in order; any other structure rejects the parse.</summary>
-    internal static bool TryParseInlineEmphasisFont(string? html, out string face, out double sizePt,
-        out List<(string text, bool bold, bool underline, bool italic)> runs)
+    internal static (string face, double sizePt, List<(string text, bool bold, bool underline, bool italic)> runs)? TryParseInlineEmphasisFont(string? html)
     {
+        string? face = default;
+        double sizePt = default;
+        List<(string text, bool bold, bool underline, bool italic)>? runs = default;
         face = string.Empty;
         sizePt = 0;
         runs = new List<(string, bool, bool, bool)>();
         var s = (html ?? "").Trim();
         var m = Regex.Match(s, @"^<font\s+([^>]*)>(.*)</font>$",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
-        if (!m.Success) return false;
+        if (!m.Success) return null;
         var attrs = m.Groups[1].Value;
         var body = m.Groups[2].Value;
 
         var fm = Regex.Match(attrs, "face\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|(\\S+))",
             RegexOptions.IgnoreCase);
-        if (!fm.Success) return false;
+        if (!fm.Success) return null;
         face = fm.Groups[1].Success ? fm.Groups[1].Value
              : fm.Groups[2].Success ? fm.Groups[2].Value : fm.Groups[3].Value;
 
         var sm = Regex.Match(attrs, "size\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|(\\S+))",
             RegexOptions.IgnoreCase);
-        if (!sm.Success) return false;
+        if (!sm.Success) return null;
         var sizeStr = (sm.Groups[1].Success ? sm.Groups[1].Value
                     : sm.Groups[2].Success ? sm.Groups[2].Value : sm.Groups[3].Value).Trim();
         var dEnd = 0;
         while (dEnd < sizeStr.Length && (char.IsDigit(sizeStr[dEnd])
                || (dEnd == 0 && (sizeStr[0] == '+' || sizeStr[0] == '-')))) dEnd++;
-        if (dEnd == 0 || !int.TryParse(sizeStr[..dEnd], out var scale)) return false;
+        if (dEnd == 0 || !int.TryParse(sizeStr[..dEnd], out var scale)) return null;
         if (sizeStr[0] is '+' or '-') scale = 3 + scale;
-        sizePt = HtmlFontSizeToPt(Math.Clamp(scale, 1, 7));
+        sizePt = HtmlFontSizeToPt(Compat.Clamp(scale, 1, 7));
 
         var bold = 0; var underline = 0; var italic = 0;
         var pos = 0;
@@ -698,7 +811,7 @@ internal static partial class HtmlToPdfConverter
             var lt = body.IndexOf('<', pos);
             if (lt < 0) break;
             var gt = body.IndexOf('>', lt);
-            if (gt < 0) return false;
+            if (gt < 0) return null;
             var tag = body[(lt + 1)..gt].Trim();
             var closing = tag.StartsWith('/');
             var name = (closing ? tag[1..] : tag).Trim().ToLowerInvariant();
@@ -709,23 +822,24 @@ internal static partial class HtmlToPdfConverter
                 case "b": case "strong": bold += delta; break;
                 case "u": underline += delta; break;
                 case "i": case "em": italic += delta; break;
-                default: return false;
+                default: return null;
             }
             pos = gt + 1;
             textStart = pos;
         }
         FlushText(body.Length, runs, bold, underline, italic);
-        return runs.Count > 0;
+        return (runs.Count > 0) ? (face, sizePt, runs) : null;
     }
 
     /// <summary>Extract the rule colour and width for an &lt;hr&gt; from its
     /// inline style. Reads the CSS border shorthand / border-color / color.</summary>
-    private static void ParseHrStyle(Dictionary<string, string>? attrs,
-        out Color? color, out double width)
+    private static (Color? color, double width) ParseHrStyle(Dictionary<string, string>? attrs)
     {
+        Color? color = default;
+        double width = default;
         color = null;
         width = 1;
-        if (attrs is null) return;
+        if (attrs is null) return (color, width);
         attrs.TryGetValue("style", out var style);
         style ??= "";
         // Width from the first pixel length in a border declaration, else the
@@ -741,6 +855,7 @@ internal static partial class HtmlToPdfConverter
             width = sz;
         // Colour: scan the style string (covers border/border-color/color).
         color = ParseCssColor(style);
+        return (color, width);
     }
 
     /// <summary>Emit a CSS box decoration — an optional <paramref name="fill"/> rectangle
@@ -779,6 +894,9 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>…each edge stroked at one css pixel.</summary>
     private const double HrGrooveW = 0.75;
+    /// <summary>The UA fieldset frame's stroke width, read off the reference's content stream
+    /// (`0.75 w` beside its #808080 colour), the same on a legend-less fieldset as a legend-bearing one.</summary>
+    private const double MetricFieldsetFrameW = 0.75;
 
     /// <summary>…and the groove's lit edge, the UA's #555555.</summary>
     private const double HrGrooveGrey = 1.0 / 3.0;
@@ -786,13 +904,16 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Parse HTML into the flat block list used by the layout pass.
     /// Exposed for the in-page HtmlFragment renderer.</summary>
     internal static List<Block> ParseHtmlBlocks(string html, double bodyFontSize = 0,
-        bool inlineEmphasisRuns = false)
+        bool inlineEmphasisRuns = false, bool paragraphMargins = false)
         // A standalone <br> — one with no text pending on its line — is an empty
         // line box, not nothing: `</p><br><br><strong>` opens two blank lines
         // before the heading. The in-page fragment renderer flows raw authored
         // markup, where those breaks ARE the vertical rhythm.
+        // A fragment that asks for paragraph margins takes the UA block rhythm: a <p>
+        // carries 1.12 em above and below (probed against the reference: 13.44 pt at 12 pt,
+        // adjacent paragraphs collapsing to one margin, a <div> carrying none).
         => ParseBlocks(html, null, bodyFontSize: bodyFontSize,
-            inlineEmphasisRuns: inlineEmphasisRuns, brBlankLines: true);
+            inlineEmphasisRuns: inlineEmphasisRuns, brBlankLines: true, uaBlockRhythm: paragraphMargins);
 
     /// <summary>Detect the monospace pre-formatted fragment dialect: ONE top-level
     /// <c>&lt;font style="font-family:courier; font-size:Npt"&gt;</c> whose body is only
@@ -801,17 +922,18 @@ internal static partial class HtmlToPdfConverter
     /// column space and every <c>&lt;br/&gt;</c> a hard line box, so it renders as verbatim
     /// Courier lines rather than through the collapsing block flow. A leading
     /// whitespace-only segment (the <c>&amp;nbsp;&lt;br/&gt;</c> lead-in) occupies no line.</summary>
-    internal static bool TryParseMonoFontLineBoxes(string? html, out double sizePt,
-        out List<List<(string text, bool bold)>> lines)
+    internal static (double sizePt, List<List<(string text, bool bold)>> lines)? TryParseMonoFontLineBoxes(string? html)
     {
+        double sizePt = default;
+        List<List<(string text, bool bold)>>? lines = default;
         sizePt = 0;
         lines = new List<List<(string text, bool bold)>>();
         var s = (html ?? "").Trim();
         var m = Regex.Match(s, @"^<font\s+style\s*=\s*(['""])(?<st>[^'""]*)\1\s*>(?<body>[\s\S]*)</font>$",
             RegexOptions.IgnoreCase);
-        if (!m.Success) return false;
+        if (!m.Success) return null;
         var st = m.Groups["st"].Value;
-        if (!Regex.IsMatch(st, @"font-family\s*:\s*['""]?\s*courier", RegexOptions.IgnoreCase)) return false;
+        if (!Regex.IsMatch(st, @"font-family\s*:\s*['""]?\s*courier", RegexOptions.IgnoreCase)) return null;
         var fsM = Regex.Match(st, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
         sizePt = fsM.Success
             ? double.Parse(fsM.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
@@ -819,7 +941,7 @@ internal static partial class HtmlToPdfConverter
         var body = m.Groups["body"].Value;
         foreach (Match tg in Regex.Matches(body, @"<[^>]*>"))
             if (!Regex.IsMatch(tg.Value, @"^<\s*/?\s*(br|b|strong)\s*/?\s*>$", RegexOptions.IgnoreCase))
-                return false;
+                return null;
 
         var segs = Regex.Split(body, @"<br\s*/?>", RegexOptions.IgnoreCase);
         for (var i = 0; i < segs.Length; i++)
@@ -848,6 +970,6 @@ internal static partial class HtmlToPdfConverter
         }
         // Trailing empty segment after the final <br/> is the end of content, not a blank line.
         while (lines.Count > 0 && lines[^1].Count == 0) lines.RemoveAt(lines.Count - 1);
-        return lines.Count > 1;
+        return (lines.Count > 1) ? (sizePt, lines) : null;
     }
 }

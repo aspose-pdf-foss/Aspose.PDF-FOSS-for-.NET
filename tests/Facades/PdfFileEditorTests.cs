@@ -119,7 +119,7 @@ public class PdfFileEditorTests
         // Page 2 content stream should reference the font name that exists in its own resource dict
         var page2Dict = reader.ResolveDict(kids![1]);
         var contents2 = reader.Resolve(page2Dict!.Get("Contents")) as PdfStream;
-        var contentText = Encoding.Latin1.GetString(contents2!.RawData);
+        var contentText = Compat.Latin1.GetString(contents2!.RawData);
         // Each page keeps its own resources so the font name is preserved as-is
         Assert.Contains("/F1", contentText);
     }
@@ -154,7 +154,7 @@ public class PdfFileEditorTests
 
         // Verify content stream of page 2 uses /Im1
         var contents2 = reader.Resolve(page2Dict.Get("Contents")) as PdfStream;
-        var contentText = Encoding.Latin1.GetString(contents2!.RawData);
+        var contentText = Compat.Latin1.GetString(contents2!.RawData);
         Assert.Contains("/Im1", contentText);
     }
 

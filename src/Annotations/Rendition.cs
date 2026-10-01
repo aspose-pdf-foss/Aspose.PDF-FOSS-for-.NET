@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Annotations;
 /// rendition action. The base class exposes the members common to media and
 /// selector renditions.
 /// </summary>
-public abstract class Rendition
+public abstract partial class Rendition
 {
     internal PdfDictionary Dict { get; }
     internal PdfReader? Reader { get; }
@@ -30,16 +30,34 @@ public abstract class Rendition
         }
     }
 
+    /// <summary>The kind of rendition, read from the dictionary's /S entry each time so a
+    /// dictionary edited in place reports its new kind.</summary>
+    public RenditionType RenditionType => Subtype(Dict) switch
+    {
+        "MR" => RenditionType.Media,
+        "SR" => RenditionType.Selector,
+        _ => RenditionType.Undefined,
+    };
+
     /// <summary>Wrap a rendition dictionary in its typed object (/S: MR = media, SR = selector).</summary>
     internal static Rendition? Create(PdfDictionary? dict, PdfReader? reader)
     {
         if (dict is null) return null;
-        return dict.GetName("S") switch
+        return Subtype(dict) switch
         {
             "SR" => new SelectorRendition(dict, reader),
             _ => new MediaRendition(dict, reader),
         };
     }
+
+    /// <summary>The /S entry as text. A writer that stored the subtype as a string rather
+    /// than a name still means the same subtype, so both spellings are read.</summary>
+    internal static string? Subtype(PdfDictionary dict) => dict.Get("S") switch
+    {
+        PdfName n => n.Value,
+        PdfString s => s.ToText(),
+        _ => null,
+    };
 }
 
 /// <summary>A media rendition (PDF §13.2.3.2) — pairs a media clip with playback parameters.</summary>
@@ -67,7 +85,7 @@ public sealed class SelectorRendition : Rendition
 }
 
 /// <summary>A media clip object (PDF §13.2.4) — the actual media data or section thereof.</summary>
-public abstract class MediaClip
+public abstract partial class MediaClip
 {
     internal PdfDictionary Dict { get; }
     internal PdfReader? Reader { get; }
@@ -82,7 +100,7 @@ public abstract class MediaClip
     internal static MediaClip? Create(PdfDictionary? dict, PdfReader? reader)
     {
         if (dict is null) return null;
-        return dict.GetName("S") switch
+        return Rendition.Subtype(dict) switch
         {
             "MCS" => new MediaClipSection(dict, reader),
             _ => new MediaClipData(dict, reader),

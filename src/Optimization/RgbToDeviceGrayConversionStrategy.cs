@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -11,6 +11,9 @@ namespace Aspose.Pdf;
 /// </summary>
 public sealed class RgbToDeviceGrayConversionStrategy
 {
+    /// <summary>Creates a conversion strategy; call <c>Convert</c> for each page to convert.</summary>
+    public RgbToDeviceGrayConversionStrategy() { }
+
     /// <summary>
     /// Convert all RGB colors to DeviceGray on the given page.
     /// This rewrites the content stream and converts RGB image XObjects to grayscale.
@@ -183,93 +186,7 @@ public sealed class RgbToDeviceGrayConversionStrategy
                         break;
                     }
 
-                    switch (op)
-                    {
-                        // RGB fill: rg r g b -> g gray
-                        case "rg" when operands.Count >= 3:
-                        {
-                            var r = ParseDouble(operands[operands.Count - 3]);
-                            var g = ParseDouble(operands[operands.Count - 2]);
-                            var b = ParseDouble(operands[operands.Count - 1]);
-                            var gray = RgbToGray(r, g, b);
-                            // Write any prefix operands before the last 3
-                            for (int i = 0; i < operands.Count - 3; i++)
-                                output.Append(operands[i]).Append(' ');
-                            output.Append(FormatDouble(gray)).Append(" g\n");
-                            break;
-                        }
-
-                        // RGB stroke: RG R G B -> G gray
-                        case "RG" when operands.Count >= 3:
-                        {
-                            var r = ParseDouble(operands[operands.Count - 3]);
-                            var g = ParseDouble(operands[operands.Count - 2]);
-                            var b = ParseDouble(operands[operands.Count - 1]);
-                            var gray = RgbToGray(r, g, b);
-                            for (int i = 0; i < operands.Count - 3; i++)
-                                output.Append(operands[i]).Append(' ');
-                            output.Append(FormatDouble(gray)).Append(" G\n");
-                            break;
-                        }
-
-                        // Color space selection: cs DeviceRGB -> cs DeviceGray
-                        case "cs" when operands.Count >= 1 && operands[operands.Count - 1] == "/DeviceRGB":
-                        {
-                            for (int i = 0; i < operands.Count - 1; i++)
-                                output.Append(operands[i]).Append(' ');
-                            output.Append("/DeviceGray cs\n");
-                            break;
-                        }
-                        case "CS" when operands.Count >= 1 && operands[operands.Count - 1] == "/DeviceRGB":
-                        {
-                            for (int i = 0; i < operands.Count - 1; i++)
-                                output.Append(operands[i]).Append(' ');
-                            output.Append("/DeviceGray CS\n");
-                            break;
-                        }
-
-                        // sc/scn with 3 operands (RGB context) -> convert to 1 operand
-                        case "sc" or "scn" when operands.Count >= 3:
-                        {
-                            // Check if last 3 operands are numeric
-                            if (TryParseDouble(operands[operands.Count - 3], out var r) &&
-                                TryParseDouble(operands[operands.Count - 2], out var gv) &&
-                                TryParseDouble(operands[operands.Count - 1], out var bv))
-                            {
-                                var gray = RgbToGray(r, gv, bv);
-                                for (int i = 0; i < operands.Count - 3; i++)
-                                    output.Append(operands[i]).Append(' ');
-                                output.Append(FormatDouble(gray)).Append(' ').Append(op).Append('\n');
-                            }
-                            else
-                            {
-                                WriteOriginal(output, operands, op);
-                            }
-                            break;
-                        }
-
-                        case "SC" or "SCN" when operands.Count >= 3:
-                        {
-                            if (TryParseDouble(operands[operands.Count - 3], out var r) &&
-                                TryParseDouble(operands[operands.Count - 2], out var gv) &&
-                                TryParseDouble(operands[operands.Count - 1], out var bv))
-                            {
-                                var gray = RgbToGray(r, gv, bv);
-                                for (int i = 0; i < operands.Count - 3; i++)
-                                    output.Append(operands[i]).Append(' ');
-                                output.Append(FormatDouble(gray)).Append(' ').Append(op).Append('\n');
-                            }
-                            else
-                            {
-                                WriteOriginal(output, operands, op);
-                            }
-                            break;
-                        }
-
-                        default:
-                            WriteOriginal(output, operands, op);
-                            break;
-                    }
+                    ConvertColorOperator(output, operands, op);
 
                     operands.Clear();
                     break;
@@ -284,7 +201,7 @@ public sealed class RgbToDeviceGrayConversionStrategy
         // because EscapeString/WriteInlineImage put PDF literal-string and inline-image
         // bytes into the StringBuilder as (char)b. ASCII would silently rewrite them to '?',
         // dropping every CID-encoded text byte and corrupting inline image data.
-        return Encoding.Latin1.GetBytes(output.ToString());
+        return Compat.Latin1.GetBytes(output.ToString());
     }
 
     private static void WriteOriginal(StringBuilder output, List<string> operands, string op)
@@ -551,8 +468,8 @@ public sealed class RgbToDeviceGrayConversionStrategy
     private static double ParseDouble(string s) =>
         double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : 0;
 
-    private static bool TryParseDouble(string s, out double v) =>
-        double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out v);
+    private static double? TryParseDouble(string s) =>
+        double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
 
     private static string EscapeString(byte[] bytes)
     {
@@ -625,6 +542,98 @@ public sealed class RgbToDeviceGrayConversionStrategy
                 break;
             case TokenKind.Boolean:
                 sb.Append(token.BoolValue ? "true" : "false");
+                break;
+        }
+    }
+
+    /// <summary>One colour operator rewritten to its DeviceGray form: rg/RG to g/G, the RGB colour spaces to DeviceGray, sc/scn components to a gray.</summary>
+    private static void ConvertColorOperator(StringBuilder output, List<string> operands, string op)
+    {
+        switch (op)
+        {
+            // RGB fill: rg r g b -> g gray
+            case "rg" when operands.Count >= 3:
+            {
+                var r = ParseDouble(operands[operands.Count - 3]);
+                var g = ParseDouble(operands[operands.Count - 2]);
+                var b = ParseDouble(operands[operands.Count - 1]);
+                var gray = RgbToGray(r, g, b);
+                // Write any prefix operands before the last 3
+                for (int i = 0; i < operands.Count - 3; i++)
+                    output.Append(operands[i]).Append(' ');
+                output.Append(FormatDouble(gray)).Append(" g\n");
+                break;
+            }
+
+            // RGB stroke: RG R G B -> G gray
+            case "RG" when operands.Count >= 3:
+            {
+                var r = ParseDouble(operands[operands.Count - 3]);
+                var g = ParseDouble(operands[operands.Count - 2]);
+                var b = ParseDouble(operands[operands.Count - 1]);
+                var gray = RgbToGray(r, g, b);
+                for (int i = 0; i < operands.Count - 3; i++)
+                    output.Append(operands[i]).Append(' ');
+                output.Append(FormatDouble(gray)).Append(" G\n");
+                break;
+            }
+
+            // Color space selection: cs DeviceRGB -> cs DeviceGray
+            case "cs" when operands.Count >= 1 && operands[operands.Count - 1] == "/DeviceRGB":
+            {
+                for (int i = 0; i < operands.Count - 1; i++)
+                    output.Append(operands[i]).Append(' ');
+                output.Append("/DeviceGray cs\n");
+                break;
+            }
+            case "CS" when operands.Count >= 1 && operands[operands.Count - 1] == "/DeviceRGB":
+            {
+                for (int i = 0; i < operands.Count - 1; i++)
+                    output.Append(operands[i]).Append(' ');
+                output.Append("/DeviceGray CS\n");
+                break;
+            }
+
+            // sc/scn with 3 operands (RGB context) -> convert to 1 operand
+            case "sc" or "scn" when operands.Count >= 3:
+            {
+                // Check if last 3 operands are numeric
+                if (TryParseDouble(operands[operands.Count - 3]) is { } r &&
+                    TryParseDouble(operands[operands.Count - 2]) is { } gv &&
+                    TryParseDouble(operands[operands.Count - 1]) is { } bv)
+                {
+                    var gray = RgbToGray(r, gv, bv);
+                    for (int i = 0; i < operands.Count - 3; i++)
+                        output.Append(operands[i]).Append(' ');
+                    output.Append(FormatDouble(gray)).Append(' ').Append(op).Append('\n');
+                }
+                else
+                {
+                    WriteOriginal(output, operands, op);
+                }
+                break;
+            }
+
+            case "SC" or "SCN" when operands.Count >= 3:
+            {
+                if (TryParseDouble(operands[operands.Count - 3]) is { } r &&
+                    TryParseDouble(operands[operands.Count - 2]) is { } gv &&
+                    TryParseDouble(operands[operands.Count - 1]) is { } bv)
+                {
+                    var gray = RgbToGray(r, gv, bv);
+                    for (int i = 0; i < operands.Count - 3; i++)
+                        output.Append(operands[i]).Append(' ');
+                    output.Append(FormatDouble(gray)).Append(' ').Append(op).Append('\n');
+                }
+                else
+                {
+                    WriteOriginal(output, operands, op);
+                }
+                break;
+            }
+
+            default:
+                WriteOriginal(output, operands, op);
                 break;
         }
     }

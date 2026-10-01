@@ -21,7 +21,9 @@ public enum BorderSide
 public sealed class BorderInfo
 {
     public BorderSide Side { get; set; }
+    /// <summary>Gets or sets the border line width in points (1/72 inch). Defaults to 1.</summary>
     public double Width { get; set; } = 1;
+    /// <summary>Gets or sets the border line colour. Defaults to black.</summary>
     public Color Color { get; set; } = Color.Black;
 
     // Per-side stroke styling. The public getters lazily materialise a GraphInfo that
@@ -31,9 +33,13 @@ public sealed class BorderInfo
     // forcing creation, so the renderer can tell an explicitly-styled side from a plain one.
     private GraphInfo? _top, _bottom, _left, _right;
 
+    /// <summary>Gets or sets the line style of the top side. Reading it on a fresh border creates a style with this border's <c>Width</c>; assigning it makes the top side draw even if <c>Side</c> does not include it.</summary>
     public GraphInfo Top { get => _top ??= NewSide(); set { _top = value; TopAssigned = true; } }
+    /// <summary>Gets or sets the line style of the bottom side. Reading it on a fresh border creates a style with this border's <c>Width</c>; assigning it makes the bottom side draw even if <c>Side</c> does not include it.</summary>
     public GraphInfo Bottom { get => _bottom ??= NewSide(); set { _bottom = value; BottomAssigned = true; } }
+    /// <summary>Gets or sets the line style of the left side. Reading it on a fresh border creates a style with this border's <c>Width</c>; assigning it makes the left side draw even if <c>Side</c> does not include it.</summary>
     public GraphInfo Left { get => _left ??= NewSide(); set { _left = value; LeftAssigned = true; } }
+    /// <summary>Gets or sets the line style of the right side. Reading it on a fresh border creates a style with this border's <c>Width</c>; assigning it makes the right side draw even if <c>Side</c> does not include it.</summary>
     public GraphInfo Right { get => _right ??= NewSide(); set { _right = value; RightAssigned = true; } }
 
     internal GraphInfo? RawTop => _top;
@@ -64,37 +70,46 @@ public sealed class BorderInfo
         | (LeftAssigned ? BorderSide.Left : BorderSide.None)
         | (RightAssigned ? BorderSide.Right : BorderSide.None);
 
+    /// <summary>Gets or sets the corner radius in points. A value above 0 on a full box border draws a rounded rectangle; 0 (the default) gives square corners.</summary>
     public double RoundedBorderRadius { get; set; }
 
+    /// <summary>Creates a border with no sides selected, 1 point wide and black.</summary>
     public BorderInfo() { }
 
+    /// <summary>Creates a 1-point black border on the given sides.</summary>
     public BorderInfo(BorderSide borderSide) { Side = borderSide; }
 
+    /// <summary>Creates a black border on the given sides with the given width in points.</summary>
     public BorderInfo(BorderSide borderSide, double width)
     {
         Side = borderSide; Width = width;
     }
 
+    /// <summary>Creates a black border on the given sides with the given width in points.</summary>
     public BorderInfo(BorderSide borderSide, float borderWidth)
     {
         Side = borderSide; Width = borderWidth;
     }
 
+    /// <summary>Creates a border on the given sides with the given width in points and colour.</summary>
     public BorderInfo(BorderSide borderSide, double width, Color color)
     {
         Side = borderSide; Width = width; Color = color;
     }
 
+    /// <summary>Creates a border on the given sides with the given width in points and colour.</summary>
     public BorderInfo(BorderSide borderSide, float borderWidth, Color borderColor)
     {
         Side = borderSide; Width = borderWidth; Color = borderColor;
     }
 
+    /// <summary>Creates a 1-point border on the given sides in the given colour.</summary>
     public BorderInfo(BorderSide borderSide, Color borderColor)
     {
         Side = borderSide; Color = borderColor;
     }
 
+    /// <summary>Creates a border on the given sides that uses one line style for all four sides; the width is taken from the style's <c>LineWidth</c>.</summary>
     public BorderInfo(BorderSide borderSide, GraphInfo info)
     {
         Side = borderSide;

@@ -86,7 +86,7 @@ public class OutlineItem
             if (c > 0x7F) { isAscii = false; break; }
 
         if (isAscii)
-            return new PdfString(Encoding.Latin1.GetBytes(value));
+            return new PdfString(Compat.Latin1.GetBytes(value));
 
         var utf16 = Encoding.BigEndianUnicode.GetBytes(value);
         var withBom = new byte[utf16.Length + 2];
@@ -332,33 +332,28 @@ public class OutlineItem
         var pagesDict = _reader.ResolveDict(catalog.Get("Pages"));
         if (pagesDict is null) return 0;
 
-        int pageNum = 0;
-        bool found = false;
-        CountPages(pagesDict, targetPage, ref pageNum, ref found);
+        var (pageNum, found) = CountPages(pagesDict, targetPage, 0);
         return found ? pageNum : 0;
     }
 
-    private void CountPages(Core.PdfDictionary node, Core.PdfDictionary target,
-        ref int pageNum, ref bool found)
+    /// <returns>The pages counted through this subtree, stopping at the target, and whether it was reached.</returns>
+    private (int pageNum, bool found) CountPages(Core.PdfDictionary node, Core.PdfDictionary target, int pageNum)
     {
-        if (found) return;
         var type = node.GetName("Type");
         if (type == "Page")
-        {
-            pageNum++;
-            if (ReferenceEquals(node, target)) found = true;
-            return;
-        }
+            return (pageNum + 1, ReferenceEquals(node, target));
 
         var kids = _reader.Resolve(node.Get("Kids")) as Core.PdfArray;
-        if (kids is null) return;
+        if (kids is null) return (pageNum, false);
         foreach (var kid in kids)
         {
-            if (found) return;
             var kidDict = _reader.ResolveDict(kid);
-            if (kidDict is not null)
-                CountPages(kidDict, target, ref pageNum, ref found);
+            if (kidDict is null) continue;
+            bool found;
+            (pageNum, found) = CountPages(kidDict, target, pageNum);
+            if (found) return (pageNum, true);
         }
+        return (pageNum, false);
     }
 
     /// <summary>Removes the first child outline item.</summary>

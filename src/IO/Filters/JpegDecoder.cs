@@ -16,10 +16,13 @@ internal static partial class JpegDecoder
     /// conversion. Set when the image's PDF dictionary carries an inverting /Decode
     /// array ([1 0 1 0 1 0 1 0]) — the embedder's way of saying the file stores
     /// Adobe-inverted CMYK rather than direct ink values.</param>
+    /// <param name="replicateChroma">Expand subsampled chroma by replicating each sample
+    /// instead of the triangle filter; see <c>ReplicateChroma</c>.</param>
     /// <returns>Decoded pixels (RGB or grayscale), width, height, component count.</returns>
-    public static (byte[] pixels, int width, int height, int components) Decode(byte[] data, bool invertCmyk = false)
+    public static (byte[] pixels, int width, int height, int components) Decode(byte[] data, bool invertCmyk = false,
+        bool replicateChroma = false)
     {
-        var reader = new JpegReader(data) { InvertCmyk = invertCmyk };
+        var reader = new JpegReader(data) { InvertCmyk = invertCmyk, ReplicateChroma = replicateChroma };
         reader.Parse();
         return (reader.Pixels, reader.Width, reader.Height, reader.Components);
     }
@@ -37,6 +40,14 @@ internal static partial class JpegDecoder
 
         /// <summary>Invert CMYK samples before the ink→RGB conversion (/Decode [1 0 …]).</summary>
         public bool InvertCmyk { get; init; }
+
+        /// <summary>Expand subsampled chroma by replicating each sample, not by the triangle filter.</summary>
+        /// <remarks>
+        /// How the reference decodes a JPEG it renders into a printed page image: a 4:2:0 photo
+        /// decoded 1:1 left 4,289 pixels 10 or more levels off the reference's under the triangle
+        /// filter, whose differences were all in chroma, and none replicated.
+        /// </remarks>
+        public bool ReplicateChroma { get; init; }
 
         private ComponentInfo[] _components = [];
         private int[][] _quantTables = new int[4][];

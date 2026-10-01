@@ -50,7 +50,7 @@ public class RsaKeyCrtOrderingTests
         var rsaParams = rsa.ExportParameters(includePrivateParameters: true);
         var swapped = BuildSwappedRsaKey(rsaParams);
 
-        var hash = SHA256.HashData(new byte[] { 0x42, 0x42, 0x42 });
+        var hash = Compat.Sha256(new byte[] { 0x42, 0x42, 0x42 });
         var signature = swapped.SignSha256(hash);
 
         // Verify via the original RSA public key — round-trip proves that
@@ -76,10 +76,10 @@ public class RsaKeyCrtOrderingTests
         // Reinterpret prime1↔prime2 so the parser sees p<q (if .NET gave
         // us p>q, which is the common case). Need to recompute the
         // coefficient (qInv = q^(-1) mod p) for the new labelling.
-        var bigP = new BigInteger(p.P!, isUnsigned: true, isBigEndian: true);
-        var bigQ = new BigInteger(p.Q!, isUnsigned: true, isBigEndian: true);
-        var bigDp = new BigInteger(p.DP!, isUnsigned: true, isBigEndian: true);
-        var bigDq = new BigInteger(p.DQ!, isUnsigned: true, isBigEndian: true);
+        var bigP = Compat.BigIntegerFromUnsignedBigEndian(p.P!);
+        var bigQ = Compat.BigIntegerFromUnsignedBigEndian(p.Q!);
+        var bigDp = Compat.BigIntegerFromUnsignedBigEndian(p.DP!);
+        var bigDq = Compat.BigIntegerFromUnsignedBigEndian(p.DQ!);
 
         // New labels: newP = old Q, newQ = old P  (so newP < newQ if old P>Q)
         var newP = bigQ;
@@ -100,7 +100,7 @@ public class RsaKeyCrtOrderingTests
 
     private static byte[] ToFixedBigEndian(BigInteger value, int len)
     {
-        var raw = value.ToByteArray(isUnsigned: true, isBigEndian: true);
+        var raw = Compat.ToUnsignedBigEndian(value);
         if (raw.Length == len) return raw;
         var padded = new byte[len];
         Array.Copy(raw, 0, padded, len - raw.Length, raw.Length);

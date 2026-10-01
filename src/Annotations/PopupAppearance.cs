@@ -98,7 +98,7 @@ internal static class PopupAppearance
             sb.Append("ET\n");
         }
 
-        var form = new PdfStream(new PdfDictionary(), Encoding.Latin1.GetBytes(sb.ToString()));
+        var form = new PdfStream(new PdfDictionary(), Compat.Latin1.GetBytes(sb.ToString()));
         form.Dict.Set("Type", new PdfName("XObject"));
         form.Dict.Set("Subtype", new PdfName("Form"));
         var bbox = new PdfArray();

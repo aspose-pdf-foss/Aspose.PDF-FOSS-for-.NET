@@ -4,7 +4,6 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Operators;
 using Aspose.Pdf.Shading;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -111,7 +110,7 @@ public sealed partial class Page : IDisposable
 
     private HashSet<Text.TextFragment>? _underlineRemovalFragments;
 
-    /// <summary>A `q / <colour> rg / x y w h re / f / Q` block - the shape every regenerated
+    /// <summary>A `q / &lt;colour> rg / x y w h re / f / Q` block - the shape every regenerated
     /// rule and highlight takes.</summary>
     internal static System.Collections.Generic.List<Operator> DecorationBlock(
         Aspose.Pdf.Color? colour, double x, double y, double w, double h) => new()
@@ -644,15 +643,6 @@ public sealed partial class Page : IDisposable
     }
 
     /// <summary>
-    /// Determines whether the page is blank (has no meaningful content).
-    /// A page is considered blank if it has no content stream or an empty/whitespace-only content stream,
-    /// and no annotations, images, or form XObjects.
-    /// </summary>
-    /// <param name="tolerance">Coverage threshold (0..1). Pages whose drawn area
-    /// is smaller than <paramref name="tolerance"/> count as blank. The current
-    /// implementation does not perform coverage analysis — it returns true only
-    /// when the page has zero visible content, matching <c>tolerance == 0</c>.</param>
-    /// <summary>
     /// Convenience helper: render this page to a PNG and return the bytes
     /// as a <see cref="MemoryStream"/>. Equivalent to wrapping a
     /// <see cref="Aspose.Pdf.Devices.PngDevice"/> + Process(page, stream).
@@ -701,6 +691,12 @@ public sealed partial class Page : IDisposable
     /// TOC information for this page. When set, the page acts as a Table of Contents.
     /// </summary>
     public TocInfo? TocInfo { get; set; }
+
+    /// <summary>The columns the page's paragraphs flow in, left to right: the first is
+    /// filled top to bottom, then the next, and only after the last does the flow go on
+    /// to a new page, whose paragraphs fill the same columns. Columns start at the page's
+    /// left margin; null (the default) lays the paragraphs across the page.</summary>
+    public ColumnInfo? ColumnInfo { get; set; }
 
     /// <summary>
     /// Collection of paragraph objects to add to this page (TextFragment, HtmlFragment, Table, Heading, etc.).
@@ -790,8 +786,16 @@ public sealed partial class Page : IDisposable
         LayerHelper.MergeLayersOnPage(this, newLayerName, _reader);
     }
 
-    /// <summary>Save vector graphics from this page to <paramref name="pathToSave"/>. Stored only.</summary>
-    public bool TrySaveVectorGraphics(string pathToSave) { _ = pathToSave; return false; }
+    /// <summary>Writes the page's vector graphics as one SVG sized to the page; false when the page draws none.</summary>
+    public bool TrySaveVectorGraphics(string pathToSave)
+    {
+        if (string.IsNullOrEmpty(pathToSave)) return false;
+        using var absorber = new Vector.GraphicsAbsorber();
+        absorber.Visit(this);
+        if (absorber.Elements.Count == 0) return false;
+        Vector.SvgWriter.Save(pathToSave, Vector.SvgWriter.Document(absorber.Elements, Rect));
+        return true;
+    }
 
     /// <summary>Diagnostic XML representation of this page. Stored only.</summary>
     public string AsXml() => string.Empty;

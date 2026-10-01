@@ -4,7 +4,6 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Operators;
 using Aspose.Pdf.Shading;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -106,7 +105,9 @@ public sealed partial class Page
         if (!considerRotation)
             return box;
 
-        var rot = RotateDegrees % 360;
+        // A negative /Rotate (a page carrying -90) turns the same way as its positive
+        // equivalent; the remainder keeps the sign, so fold it into 0..359 first.
+        var rot = ((RotateDegrees % 360) + 360) % 360;
         if (rot == 90 || rot == 270)
             return new Rectangle(box.LLX, box.LLY, box.LLX + box.Height, box.LLY + box.Width);
         return box;

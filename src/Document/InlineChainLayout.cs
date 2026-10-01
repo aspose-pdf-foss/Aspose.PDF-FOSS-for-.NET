@@ -15,28 +15,28 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
     /// <summary>Page-level inline-model paragraph: a TextFragment or Image followed
-    /// by IsInLineParagraph members (fragments and images) renders as ONE flowing
-    /// paragraph, and a lone fragment whose segment styles the single-line styled
+    /// by IsInLineParagraph members (fragments, images and graphs) renders as ONE
+    /// flowing paragraph, and a lone fragment whose segment styles the single-line styled
     /// writer cannot carry (decorations, links, an embedded face, a wrap, a note)
     /// takes the same engine instead of the fixed-position stamp. HTML members keep
     /// the HTML join.</summary>
-    private bool TryLayoutInlineChain(List<BaseParagraph> paraList, ref int paraIdx,
-        BaseParagraph para, FlowLayout flow)
+    private bool TryLayoutInlineChain(PageContentLayoutState lc, BaseParagraph para)
     {
         static bool InlineMember(BaseParagraph p) =>
             p is Text.TextFragment { IsInLineParagraph: true, HasExplicitPosition: false, XmlGeneratorModel: false }
-            || p is Image { IsInLineParagraph: true };
+            || p is Image { IsInLineParagraph: true }
+            || p is Drawing.Graph { IsInLineParagraph: true };
 
         if (para is not (Text.TextFragment or Image)) return false;
         if (para is Text.TextFragment { HasExplicitPosition: true } or Text.TextFragment { XmlGeneratorModel: true })
             return false;
         var members = new List<BaseParagraph> { para };
-        var k = paraIdx + 1;
-        for (; k < paraList.Count && InlineMember(paraList[k]); k++) members.Add(paraList[k]);
+        var k = lc.paraIdx + 1;
+        for (; k < lc.pl.paraList.Count && InlineMember(lc.pl.paraList[k]); k++) members.Add(lc.pl.paraList[k]);
         // An inline HTML member belongs to the HTML join.
-        if (k < paraList.Count && paraList[k] is HtmlFragment { IsInLineParagraph: true }) return false;
+        if (k < lc.pl.paraList.Count && lc.pl.paraList[k] is HtmlFragment { IsInLineParagraph: true }) return false;
         if (members.Count == 1
-            && !(para is Text.TextFragment lone && NeedsInlineEngine(lone, flow.CurWidth)))
+            && !(para is Text.TextFragment lone && NeedsInlineEngine(lone, lc.pl.flow.CurWidth)))
             return false;
         // A chain of images alone keeps the legacy shared-line image layout (its
         // per-image alignment model); the inline engine is for text-bearing lines.
@@ -53,35 +53,62 @@ public sealed partial class Document
         for (var g = 0; g < members.Count; g++)
         {
             if (members[g] is Text.TextFragment tf)
-                AppendInlineFragmentRuns(tf, g, runs, notes, flow);
-            else if (members[g] is Image im && LoadInlineImage(im, out var data, out var w, out var h))
+                AppendInlineFragmentRuns(tf, g, runs, notes, lc.pl.flow);
+            else if (members[g] is Image im && LoadInlineImage(im) is (var data, var w, var h))
                 runs.Add(new FlowLayout.InlineRun { ImageData = data, ImageW = w, ImageH = h, Group = g });
+            // An inline Graph is a box of its declared size: it follows the text on the
+            // line with its top on the line top, advances the pen by its width and gives
+            // the line no height (probed: a 150 x 13 graph after a 10 pt fragment sits at
+            // the fragment's end, top on the ascent line, the next inline fragment at
+            // +150 and the wrapped line 10 below).
+            else if (members[g] is Drawing.Graph gr)
+                runs.Add(new FlowLayout.InlineRun
+                {
+                    Graph = gr, ImageData = Array.Empty<byte>(), ImageW = gr.Width, ImageH = gr.Height, Group = g,
+                });
         }
         if (runs.Count == 0) return false;
-        flow.WriteInlineParagraph(runs, align);
+        lc.pl.flow.WriteInlineParagraph(runs, align);
         foreach (var (note, marker, size, end) in notes)
         {
-            if (end) flow.QueueEndNote(note, marker, size);
-            else flow.QueueMarkedFootnote(note, marker, size);
+            if (end) lc.pl.flow.QueueEndNote(note, marker, size);
+            else lc.pl.flow.QueueMarkedFootnote(note, marker, size);
         }
-        paraIdx = k - 1;
+        lc.paraIdx = k - 1;
         return true;
     }
 
     /// <summary>True for a multi-segment fragment with differing segment styles
     /// that the single-line styled writer rejects: a segment link, decoration or
     /// embedded face, a newline, a note, or a total width that needs wrapping.</summary>
+    private const char NewlineChar = (char)10;
+
     private static bool NeedsInlineEngine(Text.TextFragment tf, double width)
     {
         if (tf.Segments is not { Count: > 1 } segs) return false;
         if (tf.TabStops is { Count: > 0 } || tf.TextState.RenderingMode != 0) return false;
+        // A caller who asked for the segments to flow as runs wants the flow's
+        // own wrap (see FlowSegmentedRuns), not the inline model.
+        if (tf.TextState.FormattingOptions is { SegmentsFlowAsRuns: true }) return false;
         foreach (var s in segs)
             if (s.Position is not null) return false;
-        if (!Text.TextBuilder.SegmentStylesDiffer(tf, tf.TextState.FontSize)) return false;
         // A lone fragment with explicit newlines keeps the segment writer (its
-        // per-line marker runs are what the absorber-indexing callers count).
+        // per-line marker runs are what the absorber-indexing callers count) -
+        // unless it carries a LEADING: then its newline segments stand on the
+        // inline model's lines (a newline segment is one 10 pt default line, the
+        // text lines pitch at size + leading), which the segment writer cannot seat.
+        var leaded = tf.TextState.LineSpacing > 0;
+        var newline = false;
         foreach (var s in segs)
-            if ((s.Text ?? string.Empty).IndexOf('\n') >= 0) return false;
+        {
+            if (s.TextState.LineSpacing > 0) leaded = true;
+            if ((s.Text ?? string.Empty).IndexOf(NewlineChar) >= 0) newline = true;
+        }
+        if (newline && leaded) return true;
+        if (!Text.TextBuilder.SegmentStylesDiffer(tf, tf.TextState.FontSize)) return false;
+        if (!leaded)
+            foreach (var s in segs)
+                if ((s.Text ?? string.Empty).IndexOf('\n') >= 0) return false;
         var complex = tf.HyperlinkValue is not null || tf.FootNote is not null || tf.EndNote is not null
                       || tf.TextState.Underline || tf.TextState.IsStrikeOut
                       || tf.TextState.FontData is not null || tf.TextState.Font?.SourceFontData is not null;
@@ -155,8 +182,11 @@ public sealed partial class Document
 
     /// <summary>Raster bytes and placed size (points) of an inline image: the first
     /// frame, at its natural size scaled by ImageScale or the Fix box.</summary>
-    private static bool LoadInlineImage(Image img, out byte[] data, out double width, out double height)
+    private static (byte[] data, double width, double height)? LoadInlineImage(Image img)
     {
+        byte[]? data = default;
+        double width = default;
+        double height = default;
         data = Array.Empty<byte>();
         width = height = 0;
         byte[]? bytes = null;
@@ -171,30 +201,29 @@ public sealed partial class Document
         }
         else
             bytes = img.ReadSourceBytes();
-        if (bytes is null || bytes.Length < 4) return false;
+        if (bytes is null || bytes.Length < 4) return null;
         var isJpeg = bytes[0] == 0xFF && bytes[1] == 0xD8 && !IsProgressiveJpeg(bytes);
         var isPng = bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47;
         var frames = isJpeg || isPng ? new List<byte[]> { bytes } : TryDecodeImageFramesAsPng(bytes);
-        if (frames is null || frames.Count == 0) return false;
+        if (frames is null || frames.Count == 0) return null;
         data = frames[0];
         if (img.FixWidth > 0 && img.FixHeight > 0)
         {
             width = img.FixWidth;
             height = img.FixHeight;
-            return true;
+            return (data, width, height);
         }
-        if (!TryGetImageNaturalSizePt(data, img.IsApplyResolution, out var natW, out var natH) || natW <= 0 || natH <= 0)
-            return false;
+        if (TryGetImageNaturalSizePt(data, img.IsApplyResolution) is not (var natW, var natH) || natW <= 0 || natH <= 0)
+            return null;
         var scale = img.ImageScale > 0 ? img.ImageScale : 1.0;
         width = natW * scale;
         height = natH * scale;
         if (img.FixWidth > 0) { height *= img.FixWidth / width; width = img.FixWidth; }
         else if (img.FixHeight > 0) { width *= img.FixHeight / height; height = img.FixHeight; }
-        return true;
+        return (data, width, height);
     }
 
-    private bool TryLayoutInlineJoinedRun(List<BaseParagraph> paraList, ref int paraIdx,
-        BaseParagraph para, FlowLayout flow)
+    private bool TryLayoutInlineJoinedRun(PageContentLayoutState lc, BaseParagraph para)
     {
         // Consecutive paragraphs chained by IsInLineParagraph render as ONE
         // line: a fragment followed by inline members ("MyBrand" +
@@ -203,137 +232,11 @@ public sealed partial class Document
         // styled runs of a single composite fragment — HTML members take the
         // serif HTML body face; text members keep their own state.
         if (para is Text.TextFragment or HtmlFragment
-            && paraIdx + 1 < paraList.Count
-            && ParagraphInlineFlag(paraList[paraIdx + 1])
-            && InlineJoinable(para, out _, out _))
+            && lc.paraIdx + 1 < lc.pl.paraList.Count
+            && ParagraphInlineFlag(lc.pl.paraList[lc.paraIdx + 1])
+            && InlineJoinable(para) is (_, _))
         {
-            var members = new List<BaseParagraph> { para };
-            var k = paraIdx + 1;
-            for (; k < paraList.Count && ParagraphInlineFlag(paraList[k])
-                   && InlineJoinable(paraList[k], out _, out _); k++)
-                members.Add(paraList[k]);
-            if (members.Count > 1)
-            {
-                var joined = new Text.TextFragment();
-                var anyHtmlStyled = false;
-                foreach (var member in members)
-                {
-                    InlineJoinable(member, out var mText, out var mSerif);
-                    var seg = new Text.TextSegment(mText);
-                    if (member is Text.TextFragment mf)
-                        seg.TextState.ApplyChangesFrom(mf.TextState);
-                    else if (member is HtmlFragment mh
-                        && System.Text.RegularExpressions.Regex.Match(mh.HtmlContent ?? "",
-                            @"<span\b[^>]*style\s*=\s*(['""])(?<s>[^'""]*)\1",
-                            System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-                            is { Success: true } mSty)
-                    {
-                        // an inline HTML member styles its run from its
-                        // outermost span's own CSS
-                        anyHtmlStyled = true;
-                        var css = mSty.Groups["s"].Value;
-                        var fsm2 = System.Text.RegularExpressions.Regex.Match(css,
-                            @"font-size\s*:\s*([\d.]+)\s*(pt|px)",
-                            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                        if (fsm2.Success)
-                        {
-                            var v = double.Parse(fsm2.Groups[1].Value,
-                                System.Globalization.CultureInfo.InvariantCulture);
-                            seg.TextState.FontSize = (float)(fsm2.Groups[2].Value
-                                .Equals("px", StringComparison.OrdinalIgnoreCase) ? v * 0.75 : v);
-                        }
-                        var fam = System.Text.RegularExpressions.Regex.Match(css,
-                            @"font-family\s*:\s*['""]?([^;'""]+)",
-                            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                        if (fam.Success) seg.TextState.FontName = fam.Groups[1].Value.Trim();
-                        var col = System.Text.RegularExpressions.Regex.Match(css,
-                            @"(?<![-\w])color\s*:\s*([^;]+)",
-                            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                        if (col.Success && Converters.HtmlToPdfConverter
-                                .ParseCssColor(col.Groups[1].Value.Trim()) is { } cc)
-                            seg.TextState.ForegroundColor = cc;
-                        if (System.Text.RegularExpressions.Regex.IsMatch(css,
-                                @"font-style\s*:\s*italic",
-                                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-                            seg.TextState.IsItalic = true;
-                        if (System.Text.RegularExpressions.Regex.IsMatch(css,
-                                @"text-decoration\s*:\s*line-through",
-                                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-                            seg.TextState.IsStrikeOut = true;
-                    }
-                    else if (mSerif)
-                        seg.TextState.FontName = "TimesNewRoman";
-                    joined.Segments.Add(seg);
-                }
-                if (flow.TryWriteStyledSegmentsLine(joined))
-                {
-                    paraIdx = k - 1;
-                    return true;
-                }
-                // Too wide for one line: CSS-styled inline members flow as
-                // ONE wrapped paragraph. The first line sets on the leading
-                // the opening fragment declares, the rest on the HTML
-                // 1.12-em rhythm.
-                if (anyHtmlStyled)
-                {
-                    var styRuns2 = new List<FlowLayout.StyledRun>();
-                    double maxFs2 = 0, introLs = 0;
-                    foreach (var member in members)
-                        if (member is Text.TextFragment lsf)
-                        {
-                            if (lsf.TextState.LineSpacing > introLs) introLs = lsf.TextState.LineSpacing;
-                            foreach (Text.TextSegment lss in lsf.Segments)
-                                if (lss.TextState.LineSpacing > introLs) introLs = lss.TextState.LineSpacing;
-                        }
-                    foreach (var seg in joined.Segments)
-                    {
-                        if (string.IsNullOrEmpty(seg.Text)) continue;
-                        var sz = seg.TextState.FontSizeTouched ? (double)seg.TextState.FontSize : 12.0;
-                        if (sz > maxFs2) maxFs2 = sz;
-                        styRuns2.Add(new FlowLayout.StyledRun
-                        {
-                            Text = seg.Text, Size = sz, State = seg.TextState,
-                        });
-                    }
-                    if (styRuns2.Count > 0 && maxFs2 > 0)
-                    {
-                        // members wrap ATOMICALLY: one joins the current line
-                        // only when it fits whole, else it opens the next —
-                        // and a member longer than a full line word-wraps
-                        // alone. Greedy grouping, then one write per line.
-                        double RunWidth(FlowLayout.StyledRun r)
-                        {
-                            var f = r.State.IsItalic ? "Helvetica-Oblique" : "Helvetica";
-                            try
-                            {
-                                return Text.FontRepository.TryFindFont(f)
-                                    ?.MeasureString(r.Text, r.Size) ?? r.Text.Length * r.Size * 0.5;
-                            }
-                            catch { return r.Text.Length * r.Size * 0.5; }
-                        }
-                        var lineGroups = new List<List<FlowLayout.StyledRun>> { new() };
-                        var lw = 0.0;
-                        foreach (var r in styRuns2)
-                        {
-                            var w = RunWidth(r);
-                            if (lineGroups[^1].Count > 0 && lw + w > flow.CurWidth + 0.5)
-                            { lineGroups.Add(new()); lw = 0; }
-                            lineGroups[^1].Add(r);
-                            lw += w;
-                        }
-                        // the first line sets on the leading the opening
-                        // fragment declares (its box closes at the baseline);
-                        // the rest keep the HTML 1.12-em rhythm
-                        var htmlLead = maxFs2 * 0.12;
-                        for (var lg = 0; lg < lineGroups.Count; lg++)
-                            flow.WriteStyledParagraph(lineGroups[lg],
-                                lg == 0 && introLs > 0
-                                    ? introLs - 0.2075 * maxFs2 : htmlLead);
-                        paraIdx = k - 1;
-                        return true;
-                    }
-                }
-            }
+            if (LayoutInlineJoinedRun(lc, para)) return true;
         }
         return false;
     }

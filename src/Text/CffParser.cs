@@ -1,11 +1,11 @@
-namespace Aspose.Pdf.Text;
+﻿namespace Aspose.Pdf.Text;
 
 /// <summary>
 /// Minimal CFF (Compact Font Format) parser that extracts glyph widths from CFF font data.
 /// Handles CFF data embedded in PDF as FontFile3 (Type1C or CIDFontType0C).
 /// Based on Adobe Technical Note #5176 (CFF specification).
 /// </summary>
-internal sealed class CffParser
+internal sealed partial class CffParser
 {
     private readonly byte[] _data;
     private int _glyphCount;
@@ -29,59 +29,51 @@ internal sealed class CffParser
     /// </summary>
     public Dictionary<int, int> ExtractWidths()
     {
-        var widths = new Dictionary<int, int>();
-        if (_data.Length < 4) return widths;
+        var cw = new CffWidthState();
+        cw.widths = new Dictionary<int, int>();
+        if (_data.Length < 4) return cw.widths;
 
-        // Parse header
-        // byte 0: major version
-        // byte 1: minor version
-        // byte 2: header size
-        // byte 3: offSize (absolute offset size)
-        var hdrSize = _data[2];
-        if (hdrSize > _data.Length) return widths;
+        cw.hdrSize = _data[2];
+        if (cw.hdrSize > _data.Length) return cw.widths;
 
-        var pos = (int)hdrSize;
+        cw.pos = (int)cw.hdrSize;
 
         // Skip Name INDEX
-        pos = SkipIndex(pos);
-        if (pos < 0) return widths;
+        cw.pos = SkipIndex(cw.pos);
+        if (cw.pos < 0) return cw.widths;
 
-        // Parse Top DICT INDEX — extract charStrings offset and Private DICT location
-        var topDictIndex = ParseIndex(pos);
-        if (topDictIndex.count == 0) return widths;
+        cw.topDictIndex = ParseIndex(cw.pos);
+        if (cw.topDictIndex.count == 0) return cw.widths;
 
-        pos = topDictIndex.dataEnd;
+        cw.pos = cw.topDictIndex.dataEnd;
 
-        // Parse the first Top DICT
-        var topDictData = ReadIndexEntry(topDictIndex, 0);
-        var topDict = ParseDict(topDictData);
+        cw.topDictData = ReadIndexEntry(cw.topDictIndex, 0);
+        cw.topDict = ParseDict(cw.topDictData);
 
         // Skip String INDEX
-        pos = SkipIndex(pos);
-        if (pos < 0) return widths;
+        cw.pos = SkipIndex(cw.pos);
+        if (cw.pos < 0) return cw.widths;
 
         // Skip Global Subr INDEX
-        pos = SkipIndex(pos);
-        if (pos < 0) return widths;
+        cw.pos = SkipIndex(cw.pos);
+        if (cw.pos < 0) return cw.widths;
 
-        // Get charStrings offset from Top DICT (operator 17)
-        var charStringsOffset = GetDictInt(topDict, 17, 0);
-        if (charStringsOffset == 0) return widths;
+        cw.charStringsOffset = GetDictInt(cw.topDict, 17, 0);
+        if (cw.charStringsOffset == 0) return cw.widths;
 
         // Parse CharStrings INDEX to get glyph count
-        if (charStringsOffset >= _data.Length) return widths;
-        var charStringsIndex = ParseIndex(charStringsOffset);
-        _glyphCount = charStringsIndex.count;
+        if (cw.charStringsOffset >= _data.Length) return cw.widths;
+        cw.charStringsIndex = ParseIndex(cw.charStringsOffset);
+        _glyphCount = cw.charStringsIndex.count;
 
-        // Get Private DICT location from Top DICT (operator 18 = size, offset pair).
-        var privateDictSize = 0;
-        var privateDictOffset = 0;
-        if (topDict.TryGetValue(18, out var privateValues) && privateValues.Count >= 2)
+        cw.privateDictSize = 0;
+        cw.privateDictOffset = 0;
+        if (cw.topDict.TryGetValue(18, out var privateValues) && privateValues.Count >= 2)
         {
-            privateDictSize = (int)privateValues[0];
-            privateDictOffset = (int)privateValues[1];
+            cw.privateDictSize = (int)privateValues[0];
+            cw.privateDictOffset = (int)privateValues[1];
         }
-        else if (topDict.TryGetValue(1236, out var fdArrayVals) && fdArrayVals.Count >= 1)
+        else if (cw.topDict.TryGetValue(1236, out var fdArrayVals) && fdArrayVals.Count >= 1)
         {
             // CID-keyed CFF: the Top DICT has no Private; per-font Private DICTs live in
             // the FDArray (op 12 36). Subset CIDFonts almost always have a single Font
@@ -94,8 +86,8 @@ internal sealed class CffParser
                 var fdDict = ParseDict(ReadIndexEntry(fdArrayIndex, 0));
                 if (fdDict.TryGetValue(18, out var fdPriv) && fdPriv.Count >= 2)
                 {
-                    privateDictSize = (int)fdPriv[0];
-                    privateDictOffset = (int)fdPriv[1];
+                    cw.privateDictSize = (int)fdPriv[0];
+                    cw.privateDictOffset = (int)fdPriv[1];
                 }
             }
         }
@@ -103,32 +95,15 @@ internal sealed class CffParser
         // Parse Private DICT for defaultWidthX (op 20) and nominalWidthX (op 21)
         _defaultWidthX = 0;
         _nominalWidthX = 0;
-        if (privateDictSize > 0 && privateDictOffset > 0 &&
-            privateDictOffset + privateDictSize <= _data.Length)
-        {
-            var privateDictData = new byte[privateDictSize];
-            Array.Copy(_data, privateDictOffset, privateDictData, 0, privateDictSize);
-            var privateDict = ParseDict(privateDictData);
-
-            _defaultWidthX = GetDictInt(privateDict, 20, 0);
-            _nominalWidthX = GetDictInt(privateDict, 21, 0);
-        }
+        ReadCffPrivateDict(cw);
 
         // Extract widths from each charstring
         for (var i = 0; i < _glyphCount; i++)
         {
-            var csData = ReadIndexEntry(charStringsIndex, i);
-            if (csData.Length == 0)
-            {
-                widths[i] = _defaultWidthX;
-                continue;
-            }
-
-            var width = ExtractCharstringWidth(csData);
-            widths[i] = width;
+            ReadCffGlyphWidth(cw, i);
         }
 
-        return widths;
+        return cw.widths;
     }
 
     /// <summary>
@@ -421,7 +396,9 @@ internal sealed class CffParser
             {
                 // Real number (BCD encoded)
                 pos++;
-                operands.Add(ParseBcdReal(dictData, ref pos));
+                double real;
+                (real, pos) = ParseBcdReal(dictData, pos);
+                operands.Add(real);
                 continue;
             }
 
@@ -461,7 +438,8 @@ internal sealed class CffParser
     /// Parse a BCD-encoded real number from DICT data.
     /// Each nibble: 0-9=digit, a='.', b='E', c='E-', d=reserved, e='-', f=end
     /// </summary>
-    internal static double ParseBcdReal(byte[] data, ref int pos)
+    /// <returns>The real number the nibbles encode, and the position after its terminator.</returns>
+    internal static (double value, int pos) ParseBcdReal(byte[] data, int pos)
     {
         var chars = new List<char>();
         var done = false;
@@ -497,12 +475,12 @@ internal sealed class CffParser
             }
         }
 
-        if (chars.Count == 0) return 0;
+        if (chars.Count == 0) return (0, pos);
         var str = new string(chars.ToArray());
-        return double.TryParse(str, System.Globalization.NumberStyles.Float,
+        return (double.TryParse(str, System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out var result)
             ? result
-            : 0;
+            : 0, pos);
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────

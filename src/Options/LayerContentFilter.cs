@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -30,7 +30,7 @@ namespace Aspose.Pdf;
 /// minimal canonical spacing.</item>
 /// </list>
 /// </summary>
-internal static class LayerContentFilter
+internal static partial class LayerContentFilter
 {
     private static readonly HashSet<string> StateOps = new(StringComparer.Ordinal)
     {
@@ -59,160 +59,54 @@ internal static class LayerContentFilter
     /// <paramref name="layerId"/>. <paramref name="layerXObjects"/> lists the
     /// page XObject resource names whose stream carries the layer's /OC.
     /// In Save mode returns null when the page carries no contribution at all.</summary>
-    public static byte[]? Filter(
-        byte[] content, string layerId, IReadOnlyCollection<string> layerXObjects,
-        LayerFilterMode mode = LayerFilterMode.Save)
+    public static byte[]? Filter(byte[] content, string layerId, IReadOnlyCollection<string> layerXObjects, LayerFilterMode mode = LayerFilterMode.Save)
     {
-        var lines = ContentStreamOperatorParser.ParseOperators(content);
-        var ops = new List<(string Operands, string Op)>(lines.Count);
-        foreach (var line in lines)
+        var lf = new LayerFilterState();
+        lf.content = content;
+        lf.layerId = layerId;
+        lf.layerXObjects = layerXObjects;
+        lf.mode = mode;
+        lf.lines = ContentStreamOperatorParser.ParseOperators(lf.content);
+        lf.ops = new List<(string Operands, string Op)>(lf.lines.Count);
+        foreach (var line in lf.lines)
         {
             var idx = line.LastIndexOf(' ');
-            ops.Add(idx < 0 ? (string.Empty, line) : (line[..idx], line[(idx + 1)..]));
+            lf.ops.Add(idx < 0 ? (string.Empty, line) : (line[..idx], line[(idx + 1)..]));
         }
 
-        // First pass (Save only): index of the LAST op contributed via a target BDC block.
-        var lastTarget = -1;
-        var hasDoContribution = false;
-        var ocStack = new List<bool?>();
-        for (var i = 0; i < ops.Count; i++)
-        {
-            var (operands, op) = ops[i];
-            if (op is "BDC" or "BMC")
-            {
-                ocStack.Add(op == "BDC" ? IsTargetOcOperand(operands, layerId) : null);
-                continue;
-            }
-            if (op == "EMC")
-            {
-                if (InTarget(ocStack)) lastTarget = i;
-                if (ocStack.Count > 0) ocStack.RemoveAt(ocStack.Count - 1);
-                continue;
-            }
-            if (InTarget(ocStack)) lastTarget = i;
-            if (op == "Do" && IsTargetDo(operands, layerXObjects)) hasDoContribution = true;
-        }
+        lf.lastTarget = -1;
+        lf.hasDoContribution = false;
+        lf.ocStack = new List<bool?>();
+        ScanLayerTargets(lf);
 
-        if (mode == LayerFilterMode.Save && lastTarget < 0 && !hasDoContribution)
+        if (lf.mode == LayerFilterMode.Save && lf.lastTarget < 0 && !lf.hasDoContribution)
             return null; // the page content carries nothing of this layer
 
-        // A Do-style layer keeps its full trailing context (no tail cut);
-        // Flatten/Delete never cut the tail.
-        var tailStart = mode != LayerFilterMode.Save || lastTarget < 0 || hasDoContribution
-            ? ops.Count
-            : lastTarget + 1;
+        lf.tailStart = lf.mode != LayerFilterMode.Save || lf.lastTarget < 0 || lf.hasDoContribution
+            ? lf.ops.Count
+            : lf.lastTarget + 1;
 
-        var output = new List<(string Operands, string Op)>();
-        void Emit(string operands, string op)
+        lf.output = new List<(string Operands, string Op)>();
+        lf.ocStack.Clear();
+        lf.pathBuffer = new List<(string Operands, string Op)>();
+        lf.tailDepth = 0;
+        for (var i = 0; i < lf.ops.Count; i++)
         {
-            if (CollapseOps.Contains(op) && output.Count > 0 && output[^1].Op == op)
-            {
-                output[^1] = (operands, op);
-                return;
-            }
-            output.Add((operands, op));
+            if (!FilterLayerOperator(lf, i)) break;
         }
 
-        ocStack.Clear();
-        var pathBuffer = new List<(string Operands, string Op)>();
-        var tailDepth = 0;
-        for (var i = 0; i < ops.Count; i++)
+        lf.sb = new StringBuilder();
+        foreach (var (operands, op) in lf.output)
         {
-            var (operands, op) = ops[i];
-            if (op is "BDC" or "BMC")
-            {
-                var isTarget = op == "BDC" && IsTargetOcOperand(operands, layerId);
-                var insideTarget = InTarget(ocStack);
-                ocStack.Add(op == "BDC" ? isTarget : null);
-                // Flatten/Delete keep other layers' markers when they sit OUTSIDE
-                // the target's blocks; Save drops every marker.
-                if (mode != LayerFilterMode.Save && !isTarget && !insideTarget && i < tailStart)
-                    Emit(operands, op);
-                continue;
-            }
-            if (op == "EMC")
-            {
-                bool? wasTarget = null;
-                if (ocStack.Count > 0)
-                {
-                    wasTarget = ocStack[^1];
-                    ocStack.RemoveAt(ocStack.Count - 1);
-                }
-                if (mode != LayerFilterMode.Save && wasTarget != true && !InTarget(ocStack) && i < tailStart)
-                    Emit(string.Empty, "EMC");
-                continue;
-            }
-            if (i >= tailStart)
-            {
-                // Save mode, after the target's last block: only the Qs that
-                // close groups opened before the tail survive.
-                if (op == "q") tailDepth++;
-                else if (op == "Q")
-                {
-                    if (tailDepth > 0) tailDepth--;
-                    else Emit(string.Empty, "Q");
-                }
-                continue;
-            }
-            var inTargetBlock = InTarget(ocStack);
-            var reduceToSkeleton = mode switch
-            {
-                LayerFilterMode.Save => !inTargetBlock,
-                LayerFilterMode.Delete => inTargetBlock,
-                _ => false, // Flatten keeps everything verbatim
-            };
-            if (!reduceToSkeleton)
-            {
-                if (mode == LayerFilterMode.Delete && op == "Do" && IsTargetDo(operands, layerXObjects))
-                    continue; // Delete drops the layer's own XObject draw
-                Emit(operands, op);
-                continue;
-            }
-            // Skeleton region.
-            if (PathConstructionOps.Contains(op) || ClipOps.Contains(op))
-            {
-                pathBuffer.Add((operands, op));
-                continue;
-            }
-            if (PaintOps.Contains(op))
-            {
-                var hadClip = false;
-                foreach (var b in pathBuffer)
-                    if (ClipOps.Contains(b.Op)) { hadClip = true; break; }
-                if (hadClip)
-                {
-                    foreach (var b in pathBuffer) Emit(b.Operands, b.Op);
-                    Emit(string.Empty, "n");
-                }
-                else if (op == "n" && pathBuffer.Count == 0)
-                {
-                    Emit(string.Empty, "n"); // a bare no-op n survives
-                }
-                pathBuffer.Clear();
-                continue;
-            }
-            if (op == "Do" && mode == LayerFilterMode.Save && IsTargetDo(operands, layerXObjects))
-            {
-                Emit(operands, op);
-                continue;
-            }
-            if (StateOps.Contains(op))
-                Emit(operands, op);
-            // everything else (text showing, BT/ET, foreign Do, sh, inline images) drops
-        }
-
-        var sb = new StringBuilder();
-        foreach (var (operands, op) in output)
-        {
-            sb.Append('\n');
+            lf.sb.Append('\n');
             if (operands.Length > 0)
             {
-                sb.Append(SerializeOperands(operands));
-                sb.Append(' ');
+                lf.sb.Append(SerializeOperands(operands));
+                lf.sb.Append(' ');
             }
-            sb.Append(op);
+            lf.sb.Append(op);
         }
-        return Encoding.Latin1.GetBytes(sb.ToString());
+        return Compat.Latin1.GetBytes(lf.sb.ToString());
     }
 
     private static bool InTarget(List<bool?> ocStack)
@@ -255,12 +149,13 @@ internal static class LayerContentFilter
             first = false;
             if (c == '(')
             {
-                var str = ScanParenString(operands, ref i);
+                (var str, i) = ScanParenString(operands, i);
                 sb.Append(ReescapeString(str));
             }
             else if (c == '<' && i + 1 < operands.Length && operands[i + 1] == '<')
             {
-                sb.Append(CanonicalizeDict(ScanBalanced(operands, ref i, "<<", ">>")));
+                (var dict, i) = ScanBalanced(operands, i, "<<", ">>");
+                sb.Append(CanonicalizeDict(dict));
             }
             else if (c == '<')
             {
@@ -271,13 +166,14 @@ internal static class LayerContentFilter
             }
             else if (c == '[')
             {
-                sb.Append(ScanArray(operands, ref i));
+                (var arr, i) = ScanArray(operands, i);
+                sb.Append(arr);
             }
-            else if (c is '-' or '+' or '.' || char.IsAsciiDigit(c))
+            else if (c is '-' or '+' or '.' || Compat.IsAsciiDigit(c))
             {
                 var start = i;
                 i++;
-                while (i < operands.Length && (char.IsAsciiDigit(operands[i]) || operands[i] == '.')) i++;
+                while (i < operands.Length && (Compat.IsAsciiDigit(operands[i]) || operands[i] == '.')) i++;
                 sb.Append(FormatNumber(operands[start..i]));
             }
             else
@@ -319,9 +215,12 @@ internal static class LayerContentFilter
             var c = body[i];
             if (c is ' ' or '\t' or '\r' or '\n') { i++; continue; }
             string tok;
-            if (c == '(') tok = ScanParenString(body, ref i);
+            if (c == '(') (tok, i) = ScanParenString(body, i);
             else if (c == '<' && i + 1 < body.Length && body[i + 1] == '<')
-                tok = CanonicalizeDict(ScanBalanced(body, ref i, "<<", ">>"));
+            {
+                (tok, i) = ScanBalanced(body, i, "<<", ">>");
+                tok = CanonicalizeDict(tok);
+            }
             else if (c == '<')
             {
                 var end = body.IndexOf('>', i);
@@ -329,7 +228,7 @@ internal static class LayerContentFilter
                 tok = body[i..(end + 1)];
                 i = end + 1;
             }
-            else if (c == '[') tok = ScanArray(body, ref i);
+            else if (c == '[') (tok, i) = ScanArray(body, i);
             else if (c == '/')
             {
                 var start = i;
@@ -360,7 +259,8 @@ internal static class LayerContentFilter
         return sb.ToString();
     }
 
-    private static string ScanParenString(string s, ref int i)
+    /// <returns>The literal starting at <paramref name="i"/> and the index just past it.</returns>
+    private static (string token, int end) ScanParenString(string s, int i)
     {
         var start = i;
         var depth = 0;
@@ -376,10 +276,11 @@ internal static class LayerContentFilter
             }
             i++;
         }
-        return s[start..Math.Min(i, s.Length)];
+        return (s[start..Math.Min(i, s.Length)], i);
     }
 
-    private static string ScanBalanced(string s, ref int i, string open, string close)
+    /// <returns>The balanced span starting at <paramref name="i"/> and the index just past it.</returns>
+    private static (string token, int end) ScanBalanced(string s, int i, string open, string close)
     {
         var start = i;
         var depth = 0;
@@ -395,10 +296,11 @@ internal static class LayerContentFilter
             }
             i++;
         }
-        return s[start..Math.Min(i, s.Length)];
+        return (s[start..Math.Min(i, s.Length)], i);
     }
 
-    private static string ScanArray(string s, ref int i)
+    /// <returns>The array starting at <paramref name="i"/> and the index just past it.</returns>
+    private static (string token, int end) ScanArray(string s, int i)
     {
         var start = i;
         var depth = 0;
@@ -408,7 +310,7 @@ internal static class LayerContentFilter
             if (c == '\\') { i += 2; continue; }
             if (c == '(')
             {
-                ScanParenString(s, ref i);
+                (_, i) = ScanParenString(s, i);
                 continue;
             }
             if (c == '[') depth++;
@@ -419,7 +321,7 @@ internal static class LayerContentFilter
             }
             i++;
         }
-        return s[start..Math.Min(i, s.Length)];
+        return (s[start..Math.Min(i, s.Length)], i);
     }
 
     /// <summary>Decode a raw paren-string literal and re-escape it the way the

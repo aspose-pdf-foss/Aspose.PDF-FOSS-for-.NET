@@ -9,118 +9,20 @@ internal static partial class HtmlToPdfConverter
     /// to <paramref name="s"/> for an element with tag <paramref name="tag"/> and the
     /// given attributes. Type rule first, then each class (left-to-right) — matching the
     /// simple cascade the converter needs for font-family / size.</summary>
-    private static void ApplyCssRules(IReadOnlyDictionary<string, Dictionary<string, string>>? css,
-        string tag, Dictionary<string, string>? attrs, BlockStyle s, bool metricLayout = false,
-        bool coverStyles = false, bool floatFlow = false)
+    private static void ApplyCssRules(IReadOnlyDictionary<string, Dictionary<string, string>>? css, string tag, Dictionary<string, string>? attrs, BlockStyle s, bool metricLayout = false, bool coverStyles = false, bool floatFlow = false)
     {
-        if (css is null || css.Count == 0) return;
-        void ApplySelector(string selector)
-        {
-            if (!css.TryGetValue(selector, out var decls)) return;
-            foreach (var kv in decls)
-            {
-                // page-break-before:always — a genuine pagination directive, honoured here.
-                if (kv.Key == "page-break-before"
-                    && kv.Value.Contains("always", StringComparison.OrdinalIgnoreCase))
-                    s.PageBreakBefore = true;
-                else if (kv.Key == "page-break-after"
-                    && kv.Value.Contains("always", StringComparison.OrdinalIgnoreCase))
-                    s.PageBreakAfter = true;
-                // Print-authored cover documents (a body{margin:0} page with an
-                // explicit page-break-after separator): the cover classes' OWN type
-                // scale and physical-unit margins ARE the layout — the calibrated
-                // exclusion below would put the whole cover at the page top.
-                // …and the float flow takes its sizes from the sheet as well: the
-                // certificate's whole type scale is authored there - `.certificate`
-                // sizes the body at 14 px (which is what its table cells render at) and
-                // `#title` at 11 px (which is what makes its h1 2em = 16.5 pt).
-                else if ((coverStyles || floatFlow) && kv.Key == "font-size")
-                    ApplyDeclaration(kv.Key, kv.Value, s);
-                else if (coverStyles && kv.Key == "margin")
-                {
-                    // TryParseLength deliberately rejects zero (callers treat 0 as
-                    // "absent") — a shorthand's explicit 0 slots must still parse.
-                    static bool CoverLen(string v, out double pt)
-                    {
-                        if (TryParseLength(v, out pt)) return true;
-                        if (Regex.IsMatch(v.Trim(), @"^0(px|pt|em|rem|in|cm|mm)?$",
-                                RegexOptions.IgnoreCase)) { pt = 0; return true; }
-                        return false;
-                    }
-                    var mParts = kv.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (mParts.Length >= 1 && CoverLen(mParts[0], out var cmT))
-                    {
-                        s.MarginTop = cmT;
-                        // The cover's margin-top positions it on PAGE 1's fresh page —
-                        // it must survive the flow's page-top margin suppression.
-                        if (cmT > 0) s.MarginTopAlways = true;
-                        var cmB = cmT;
-                        if (mParts.Length >= 3 && CoverLen(mParts[2], out var cmB3)) cmB = cmB3;
-                        s.MarginBottom = cmB;
-                    }
-                }
-                else if (coverStyles && kv.Key == "line-height"
-                         && double.TryParse(kv.Value.Trim(), System.Globalization.NumberStyles.Float,
-                             System.Globalization.CultureInfo.InvariantCulture, out var clhF)
-                         && clhF > 0)
-                    s.LineFactor = clhF;
-                // Apply only layout-NEUTRAL font properties from <style> rules.
-                // Size/margin/height/indent from a stylesheet are deliberately NOT
-                // applied: the converter historically ignored <style> blocks entirely,
-                // and honouring those here would shift wrapping/pagination and break
-                // documents whose page count is asserted. font-family/weight/style
-                // don't affect the metrics WordWrap uses, so they're safe to apply.
-                // Font props + box decoration (background/border) are layout-NEUTRAL —
-                // they change only the drawn ink, not the wrap metric or pagination — so
-                // they're safe to apply from a stylesheet. Size/margin/height stay excluded.
-                if (kv.Key is "font-family" or "font-weight" or "font-style" or "color"
-                    or "background-color" or "background"
-                    or "border" or "border-color" or "border-width"
-                    or "border-top" or "border-bottom" or "border-left" or "border-right"
-                    // float only RECORDS a flag; the flows that ignore floats are unaffected.
-                    or "float")
-                    ApplyDeclaration(kv.Key, kv.Value, s);
-                // The metric flow reproduces the CSS-driven layout, so for it
-                // the layout properties ARE the spec: stylesheet font sizes, MARGIN-LEFT
-                // class indents, and centering all apply.
-                else if (metricLayout && kv.Key is "font-size" or "margin-left" or "padding-left"
-                             or "padding-bottom")
-                    ApplyDeclaration(kv.Key, kv.Value, s);
-                else if (metricLayout && kv.Key == "text-align")
-                    s.AlignCenter = kv.Value.Trim().Equals("center", StringComparison.OrdinalIgnoreCase);
-            }
-            // A tiny data-URI tile repeated over an explicitly sized element paints
-            // as one uniform fill (the 1×1-GIF tiling-pattern idiom). The fill and
-            // the declared box travel together — neither applies without the other,
-            // so a rule that carries only layout properties still changes nothing.
-            if (DataUriTileFill(decls) is { } tileFill
-                && decls.TryGetValue("width", out var bbw) && TryParseLength(bbw, out var bbwPt)
-                && decls.TryGetValue("height", out var bbh) && TryParseLength(bbh, out var bbhPt))
-            {
-                s.BackgroundColor = tileFill;
-                s.BgBoxWidthPt = bbwPt;
-                s.BgBoxHeightPt = bbhPt;
-                s.ExplicitHeight = Math.Max(s.ExplicitHeight, bbhPt);
-            }
-            // A solid (or alpha-composited) background over a declared width × height
-            // is the same painted-box model: the fill and the declared box travel
-            // together, with any border drawn as the box's chrome.
-            else if ((decls.TryGetValue("background-color", out var pbBg)
-                      || decls.TryGetValue("background", out pbBg))
-                && ParseCssColor(pbBg) is { } pbFill
-                && !(pbFill.R >= 250 && pbFill.G >= 250 && pbFill.B >= 250)
-                && decls.TryGetValue("width", out var pbw) && TryParseLength(pbw, out var pbwPt)
-                && decls.TryGetValue("height", out var pbh) && TryParseLength(pbh, out var pbhPt))
-            {
-                s.BackgroundColor = pbFill;
-                s.BgBoxWidthPt = pbwPt;
-                s.BgBoxHeightPt = pbhPt;
-                s.ExplicitHeight = Math.Max(s.ExplicitHeight, pbhPt);
-            }
-        }
-        var tagLower = tag.ToLowerInvariant();
-        ApplySelector(tagLower);
-        if (attrs is not null && attrs.TryGetValue("class", out var cls) && !string.IsNullOrWhiteSpace(cls))
+        var cq = new CssRulesApplyState();
+        cq.css = css;
+        cq.tag = tag;
+        cq.attrs = attrs;
+        cq.s = s;
+        cq.metricLayout = metricLayout;
+        cq.coverStyles = coverStyles;
+        cq.floatFlow = floatFlow;
+        if (cq.css is null || cq.css.Count == 0) return;
+        cq.tagLower = cq.tag.ToLowerInvariant();
+        ApplyCssSelector(cq, cq.tagLower);
+        if (cq.attrs is not null && cq.attrs.TryGetValue("class", out var cls) && !string.IsNullOrWhiteSpace(cls))
             foreach (var c in cls.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {
                 // Styled-article dialect: the responsive GRID classes model the
@@ -128,19 +30,19 @@ internal static partial class HtmlToPdfConverter
                 // paddings exactly, and the print layout nets the
                 // whole family to zero. Skip their box rules rather than
                 // accumulate one side of a pair (content sits at x=90).
-                if (s.ArticleRhythm && Regex.IsMatch(c,
+                if (cq.s.ArticleRhythm && Regex.IsMatch(c,
                         @"^(container(-\w+)?|row|col(-\w+)*|split|[mp][slxeytb]?-(\w+-)?\d)$",
                         RegexOptions.IgnoreCase))
                     continue;
-                ApplySelector("." + c);
-                ApplySelector(tagLower + "." + c); // compound "tag.class" (e.g. h1.page)
+                ApplyCssSelector(cq, "." + c);
+                ApplyCssSelector(cq, cq.tagLower + "." + c); // compound "tag.class" (e.g. h1.page)
             }
         // An id is at least as specific as any class — an "#elem { … }" rule
         // resolves for the element that carries the id, through the same
         // restricted property subset every other selector form gets.
-        if (attrs is not null && attrs.TryGetValue("id", out var idAttr)
+        if (cq.attrs is not null && cq.attrs.TryGetValue("id", out var idAttr)
             && !string.IsNullOrWhiteSpace(idAttr))
-            ApplySelector("#" + idAttr.Trim());
+            ApplyCssSelector(cq, "#" + idAttr.Trim());
     }
 
     /// <summary>Parse a tiny subset of CSS from the document's &lt;style&gt; blocks into
@@ -187,6 +89,101 @@ internal static partial class HtmlToPdfConverter
             }, RegexOptions.IgnoreCase);
     }
 
+    /// <summary>The legacy HTML-comment wrapper round a style block's text (<c>&lt;!-- … --&gt;</c>)
+    /// hides nothing from a stylesheet parser, yet the flat parser keeps reading the first rule's
+    /// selector as <c>&lt;!-- span.cls_007</c> - the calibrated flows were measured that way. The
+    /// absolutely positioned page reads its class rules from a document with the markers removed.</summary>
+    private static string StripStyleCommentMarkers(string html)
+        => Regex.Replace(html, @"(<style\b[^>]*>)([\s\S]*?)(</style>)",
+            m => m.Groups[1].Value + m.Groups[2].Value.Replace("<!--", " ").Replace("-->", " ") + m.Groups[3].Value,
+            RegexOptions.IgnoreCase);
+
+    /// <summary>An ELEMENT rule of the sheet by its tag, read through the legacy comment wrapper too:
+    /// the flat parser keys a sheet's first rule as <c>&lt;!-- td</c> (see StripStyleCommentMarkers),
+    /// and a law that reads the tag rule must still find it there. The calibrated flows keep their
+    /// own plain lookups.</summary>
+    /// <summary>A rule of the sheet keyed as the legacy comment wrapper leaves its FIRST rule (`&lt;!-- H2`):
+    /// the flat parser keeps the marker in the key, and a law that needs the rule finds it here (measured
+    /// on the enterprise summary: `H2 { Arial 18px bold }` drew the UA serif 18 until it did).</summary>
+    private static Dictionary<string, string>? CommentWrappedRule(IReadOnlyDictionary<string, Dictionary<string, string>>? css, string key)
+    {
+        if (css is null) return null;
+        foreach (var kv in css)
+        {
+            var k = kv.Key.TrimStart();
+            if (k.StartsWith("<!--", StringComparison.Ordinal) && k.Substring(4).Trim().Equals(key, StringComparison.OrdinalIgnoreCase))
+                return kv.Value;
+        }
+        return null;
+    }
+
+    private static Dictionary<string, string>? ElementRule(IReadOnlyDictionary<string, Dictionary<string, string>>? css, string tag)
+    {
+        if (css is null) return null;
+        if (css.TryGetValue(tag, out var rule)) return TableDescendantRule(css, tag, rule);
+        foreach (var kv in css)
+        {
+            var key = kv.Key.TrimStart();
+            if (!key.StartsWith("<!--", StringComparison.Ordinal)) continue;
+            if (key.Substring(4).Trim().Equals(tag, StringComparison.OrdinalIgnoreCase)) return TableDescendantRule(css, tag, kv.Value);
+        }
+        return TableDescendantRule(css, tag, null);
+    }
+
+    /// <summary>A cell's element rule with the sheet's `table td` / `tr td` style descendant rules
+    /// folded in: a cell always stands in a table and a row, so such a rule reaches every cell as
+    /// the bare element rule does (probed on the state analysis: `table td { white-space: nowrap }`
+    /// keeps every cell on one line and grows the sheet to the grid).</summary>
+    private static Dictionary<string, string>? TableDescendantRule(IReadOnlyDictionary<string, Dictionary<string, string>> css, string tag, Dictionary<string, string>? rule)
+    {
+        if (tag is not ("td" or "th")) return rule;
+        Dictionary<string, string>? merged = null;
+        foreach (var kv in css)
+        {
+            var parts = kv.Key.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 || !parts[^1].Equals(tag, StringComparison.OrdinalIgnoreCase)) continue;
+            var plain = true;
+            for (var i = 0; i < parts.Length - 1 && plain; i++)
+                plain = parts[i].ToLowerInvariant() is "table" or "tbody" or "thead" or "tfoot" or "tr";
+            if (!plain) continue;
+            merged ??= rule is null ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) : new Dictionary<string, string>(rule, StringComparer.OrdinalIgnoreCase);
+            foreach (var d in kv.Value) merged[d.Key] = d.Value;
+        }
+        return merged ?? rule;
+    }
+
+    /// <summary>The first class the body tag carries, or null.</summary>
+    private static string? BodyClassName(string html)
+    {
+        var m = Regex.Match(html, @"<body\b[^>]*\bclass\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    /// <summary>A selector chain rooted at the body's own class, keyed by its tail: the root is
+    /// dropped, and so is every wrapper on the way that adds no selectivity - a bare `div`, a `div.X`
+    /// the document carries once, the table structure tags - while a classed table or any other
+    /// part stays. Null when the chain is not body-rooted or still names more than two parts
+    /// (probed on the change-control print sheet: `.ev-print > div.fields table th` is every th,
+    /// `.ev-print > div.fields table.text-content tr > td` the text-content grid's cells alone).</summary>
+    private static string? FlattenBodyClassChain(string key, string bodyClass, string html)
+    {
+        var parts = Regex.Split(key.Trim(), @"\s*>\s*|\s+");
+        if (parts.Length < 2 || !parts[0].Equals("." + bodyClass, StringComparison.OrdinalIgnoreCase)) return null;
+        var kept = new List<string>();
+        for (var i = 1; i < parts.Length - 1; i++)
+        {
+            var p = parts[i];
+            if (p.Equals("div", StringComparison.OrdinalIgnoreCase)
+                || p.ToLowerInvariant() is "tbody" or "thead" or "tfoot" or "tr") continue;
+            if (Regex.Match(p, @"^div\.([\w-]+)$", RegexOptions.IgnoreCase) is { Success: true } wrap
+                && Regex.Matches(html, @"class\s*=\s*[""'][^""']*\b" + Regex.Escape(wrap.Groups[1].Value) + @"\b", RegexOptions.IgnoreCase).Count == 1)
+                continue;
+            kept.Add(p);
+        }
+        kept.Add(parts[^1]);
+        return kept.Count > 2 ? null : string.Join(" ", kept);
+    }
+
     internal static Dictionary<string, Dictionary<string, string>> ParseStyleSheet(string html)
     {
         var result = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
@@ -200,9 +197,15 @@ internal static partial class HtmlToPdfConverter
             foreach (Match cv in Regex.Matches(cssText, @"(--[\w-]+)\s*:\s*([^;}]+)"))
                 vars[cv.Groups[1].Value] = cv.Groups[2].Value.Trim();
         }
+        var bodyClass = BodyClassName(html);
         foreach (Match block in Regex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
         {
             var css = Regex.Replace(block.Groups[1].Value, @"/\*[\s\S]*?\*/", "");
+            // (the legacy HTML comment wrapper round a sheet is not part of its first selector - a
+            // rule keyed `<!-- H2` reaches no heading; measured on the enterprise summary, whose
+            // `H2 { Arial 18px bold }` drew the UA serif 18)
+            // (the legacy comment wrapper stays in the FIRST rule's key: the calibrated flows read it
+            // that way; a law that needs the rule reads it through CommentWrappedRule)
             // @media groups resolve for the PRINT target: screen-only groups drop
             // whole, every other group unwraps in place — its rules then merge in
             // document order (a trailing @media print block overrides the base).
@@ -232,6 +235,13 @@ internal static partial class HtmlToPdfConverter
                 foreach (var sel in selectors.Split(','))
                 {
                     var key = sel.Trim();
+                    // A chain rooted at the BODY's own class reaches every element its tail names
+                    // through the wrappers it walks: the tail alone keys it (a pseudo-class on the
+                    // tail kept), so the print sheet's `.ev-print > div.fields table th` rules
+                    // its th cells and `.ev-print h1` its heading.
+                    var bodyChain = false;
+                    if (bodyClass is not null && FlattenBodyClassChain(key, bodyClass, html) is { } flat)
+                    { key = flat; bodyChain = true; }
                     // A child chain through table structure (".cls > tbody > tr > td") says
                     // the same thing as the descendant form the parser already collapses
                     // (".cls tr td" → ".cls td"): tbody/thead/tfoot/tr add no selectivity
@@ -241,7 +251,7 @@ internal static partial class HtmlToPdfConverter
                     key = Regex.Replace(key, @"\s*>\s*(tbody|thead|tfoot|tr)\b", " ",
                         RegexOptions.IgnoreCase);
                     key = Regex.Replace(key, @"\s*>\s*(t[dh])\b", " $1", RegexOptions.IgnoreCase);
-                    if (key.Length == 0 || key.IndexOfAny(new[] { '>', '+', '~', ':', '[' }) >= 0)
+                    if (key.Length == 0 || key.IndexOfAny(bodyChain ? new[] { '>', '+', '~', '[' } : new[] { '>', '+', '~', ':', '[' }) >= 0)
                         continue;
                     // Simple type / class / id selectors, plus two-part descendant
                     // selectors ("#gbz .gbzt") normalized to a single space — the
@@ -252,6 +262,11 @@ internal static partial class HtmlToPdfConverter
                     // inside a tr, so the middle part adds no selectivity.
                     if (parts.Length == 3 && parts[1] is "tr" or "tbody" or "thead" or "tfoot")
                         parts = new[] { parts[0], parts[2] };
+                    // (…and a chain from the table through its cell to the cell's content
+                    // ("table td p") collapses the table the same way: a cell always stands in one)
+                    if (parts.Length == 3 && parts[0].Equals("table", StringComparison.OrdinalIgnoreCase)
+                        && parts[1].ToLowerInvariant() is "td" or "th")
+                        parts = new[] { parts[1], parts[2] };
                     if (parts.Length > 2) continue;
                     key = string.Join(" ", parts);
                     if (!result.TryGetValue(key, out var existing))
@@ -298,7 +313,7 @@ internal static partial class HtmlToPdfConverter
     private const double SeparateBorderSpacingPt = 1.5;
 
     /// <summary>The UA's default <c>td {{ padding: 1px }}</c> in points.</summary>
-    private const double UaCellPadPt = 0.75;
+    internal const double UaCellPadPt = 0.75;
 
     /// <summary>The UA's initial font size (16 px) in points — the em a body-level
     /// length resolves against when the stylesheet declares no size of its own.</summary>
@@ -396,7 +411,7 @@ internal static partial class HtmlToPdfConverter
         if (data is null) return null;
         // GDI+ sampling is Windows-only (the repo-wide System.Drawing convention);
         // elsewhere the badge simply doesn't render, like any other unloadable asset.
-        if (!OperatingSystem.IsWindows()) return null;
+        if (!Compat.IsWindows()) return null;
         try
         {
 #pragma warning disable CA1416
@@ -425,28 +440,54 @@ internal static partial class HtmlToPdfConverter
         };
     }
 
-    private static bool TryParseLength(string s, out double pts)
+    /// <summary>A rule's padding as (top, right, bottom, left) points: the shorthand first, then any
+    /// side LONGHAND over it. A stylesheet that only ever writes <c>padding-left</c>/<c>padding-right</c>
+    /// declares the cell's box just as a shorthand does, and reading the shorthand alone loses it.</summary>
+    private static (double T, double R, double B, double L) ChainPadSidesPt(
+        IReadOnlyDictionary<string, string> decls, double fontPt, bool readLonghands)
     {
-        pts = 0;
+        var (t, r, b, l) = decls.TryGetValue("padding", out var sh)
+            ? ChainPadPt(sh, fontPt) : (0, 0, 0, 0);
+        if (!readLonghands) return (t, r, b, l);
+        double Side(string name, double had)
+            => decls.TryGetValue(name, out var v) ? Math.Max(0, ChainLenPt(v, fontPt)) : had;
+        return (Side("padding-top", t), Side("padding-right", r),
+                Side("padding-bottom", b), Side("padding-left", l));
+    }
+
+    /// <summary>The em base a sheet's percent body size sets for this conversion (0 = the legacy 11 pt).</summary>
+    [ThreadStatic] private static double SheetEmBasePt;
+
+    private static double? TryParseLength(string s)
+    {
+        double pts = 0;
         // Accept "13px" / "10pt" / "1em" / ".875rem" / "6.25in" — CSS permits a
         // bare leading dot. Reject percent / calc / etc.
         var m = Regex.Match(s, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*(px|pt|em|rem|in|cm|mm)?$", RegexOptions.IgnoreCase);
-        if (!m.Success) return false;
+        if (!m.Success) return null;
         var n = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         var unit = m.Groups[2].Success ? m.Groups[2].Value.ToLowerInvariant() : "px";
         pts = unit switch
         {
             "pt" => n,
             "px" => n * 0.75,          // 96dpi: 1px = 0.75pt
-            "em" => n * 11,            // against our default body 11pt
+            // (…or against the body's PERCENT size when the sheet declares one - the hospital letter's
+            //  `body { font-size: 62.5% }` sizes its 1.02em cells 7.65 pt, probed; a px/pt body keeps the legacy 11)
+            "em" => n * (SheetEmBasePt > 0 ? SheetEmBasePt : 11),
             "rem" => n * CssRootFontPt,
             "in" => n * 72,
             "cm" => n * 72 / 2.54,
             "mm" => n * 72 / 25.4,
             _ => n,
         };
-        return pts > 0;
+        return pts > 0 ? pts : null;
     }
+
+    /// <summary>True for an explicit zero length (<c>0</c>, <c>0px</c>, <c>0.0em</c>) — the
+    /// one value <see cref="TryParseLength"/> cannot hand back, because its null means
+    /// "no usable length" to every caller that reads a default through it.</summary>
+    private static bool IsZeroLength(string s) =>
+        Regex.IsMatch(s, @"^-?0+(?:\.0+)?\s*(?:px|pt|em|rem|in|cm|mm|%)?$", RegexOptions.IgnoreCase);
 
     private static void MarkInline(Stack<BlockStyle> stack, string fontRes)
     {
@@ -462,6 +503,12 @@ internal static partial class HtmlToPdfConverter
         if (fontRes == "F2") top.EmBold = true;
         else if (fontRes == "F3") top.EmItalic = true;
     }
+
+    /// <summary>`font-size: smaller`, the UA sheet's size for sub and sup: one step down the
+    /// scale, i.e. the size divided by the 1.2 ratio between neighbouring steps. Measured against
+    /// the reference on a marked stretch of a 12 pt serif line: it draws 132.95 pt wide at the
+    /// block's own size and 110.88 in the reference, and 132.95 / 1.2 = 110.79.</summary>
+    private const double SubSupFontScale = 1.0 / 1.2;
 
     private static void MarkInlineSize(Stack<BlockStyle> stack, double factor)
     {
@@ -510,7 +557,7 @@ internal static partial class HtmlToPdfConverter
             {
                 // A leading +N/-N is relative to the default size 3.
                 if (st[0] is '+' or '-') sz = 3 + sz;
-                sz = Math.Clamp(sz, 1, 7);
+                sz = Compat.Clamp(sz, 1, 7);
                 stack.Peek().LegacyFontPt = HtmlFontSizeToPt(sz);
                 stack.Peek().LegacyFontSized = true;
             }
@@ -520,7 +567,7 @@ internal static partial class HtmlToPdfConverter
         if (color is not null) top.ForeColor = color;
     }
 
-    /// <summary>Legacy HTML <font size="N"> (1-7) → point size. Size 3 is the browser
+    /// <summary>Legacy HTML &lt;font size="N"> (1-7) → point size. Size 3 is the browser
     /// default "medium" (16px = 12pt); the curve follows the classic HTML mapping.</summary>
     private static double HtmlFontSizeToPt(int size) => size switch
     {
@@ -756,10 +803,10 @@ internal static partial class HtmlToPdfConverter
     /// <c>:first</c> page's) off its style blocks. Only sheets that reach paper are
     /// read — a <c>media="screen"</c> block styles the flow but never sizes the sheet.
     /// Returns false when the document declares no page rule at all.</summary>
-    private static bool TryReadCssPageRule(string html, out CssPageRule rule)
+    private static CssPageRule? TryReadCssPageRule(string html)
     {
-        rule = default;
-        if (html.IndexOf("@page", StringComparison.OrdinalIgnoreCase) < 0) return false;
+        CssPageRule rule = default;
+        if (html.IndexOf("@page", StringComparison.OrdinalIgnoreCase) < 0) return null;
 
         double w = 0, h = 0;
         double? ml = null, mr = null, mt = null, mb = null, firstTop = null;
@@ -798,7 +845,7 @@ internal static partial class HtmlToPdfConverter
                             { landscape = true; continue; }
                             if (string.Equals(tk, "portrait", StringComparison.OrdinalIgnoreCase)) continue;
                             if (CssPageSizes.TryGetValue(tk, out var named)) { w = named.W; h = named.H; continue; }
-                            if (TryParseLength(tk, out var lp)) lens.Add(lp);
+                            if (TryParseLength(tk) is { } lp) lens.Add(lp);
                         }
                         if (lens.Count == 2) { w = lens[0]; h = lens[1]; }
                         else if (lens.Count == 1) { w = lens[0]; h = lens[0]; }
@@ -810,7 +857,7 @@ internal static partial class HtmlToPdfConverter
                 {
                     var m = Regex.Match(body, @"\bmargin-" + prop + @"\s*:\s*([^;}]+)",
                         RegexOptions.IgnoreCase);
-                    return m.Success && TryParseLength(m.Groups[1].Value.Trim(), out var v) ? v : null;
+                    return m.Success && TryParseLength(m.Groups[1].Value.Trim()) is { } v ? v : null;
                 }
                 // The `margin` shorthand's 1-to-4 values seed every side the longhands
                 // do not restate (CSS top / right / bottom / left order).
@@ -822,7 +869,7 @@ internal static partial class HtmlToPdfConverter
                         .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
                     var vals = new List<double>();
                     foreach (var p in parts)
-                        if (TryParseLength(p, out var pv)) vals.Add(pv);
+                        if (TryParseLength(p) is { } pv) vals.Add(pv);
                         else vals.Clear();
                     if (vals.Count is 1) { sT = sR = sB = sL = vals[0]; }
                     else if (vals.Count is 2) { sT = sB = vals[0]; sR = sL = vals[1]; }
@@ -844,7 +891,7 @@ internal static partial class HtmlToPdfConverter
             MarginLeftPt = ml, MarginRightPt = mr, MarginTopPt = mt, MarginBottomPt = mb,
             FirstMarginTopPt = firstTop,
         };
-        return rule.Any;
+        return (rule.Any) ? rule : null;
     }
 
     private static readonly HashSet<string> InlineRowTags = new(StringComparer.OrdinalIgnoreCase)

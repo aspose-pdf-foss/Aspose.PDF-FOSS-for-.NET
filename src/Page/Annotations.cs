@@ -4,7 +4,6 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Operators;
 using Aspose.Pdf.Shading;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -84,8 +83,10 @@ public sealed partial class Page
 
             // Sticky-note (/Text) annotations render as a fixed-size icon anchored at
             // their rectangle, so a content resize leaves their rect in place rather
-            // than scaling it with the content.
-            if (annotDict.GetName("Subtype") == "Text") continue;
+            // than scaling it with the content. A /Watermark is stuck to the page the
+            // same way: it is stamped over whatever the page ends up holding, and a
+            // caller that does want it moved has ChangeAfterResize for that.
+            if (annotDict.GetName("Subtype") is "Text" or "Watermark") continue;
 
             // Transform /Rect
             var rectArr = _reader.Resolve(annotDict.Get("Rect")) as PdfArray;

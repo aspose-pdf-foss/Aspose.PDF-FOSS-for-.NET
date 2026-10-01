@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using System.Text;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
@@ -26,13 +26,7 @@ public sealed partial class Document
     /// <summary>Re-encode every ≤256-colour DCTDecode DeviceRGB image in the page's
     /// XObject resources as /Indexed /DeviceRGB with a 256-slot palette. See the
     /// conversion step 12c note for the measured behaviour.</summary>
-    private static byte[] FlatDctFlate(byte[] data)
-    {
-        using var ms = new MemoryStream();
-        using (var z = new System.IO.Compression.ZLibStream(ms, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
-            z.Write(data, 0, data.Length);
-        return ms.ToArray();
-    }
+    private static byte[] FlatDctFlate(byte[] data) => IO.Filters.ManagedDeflater.DeflateZlib(data);
 
     private void PalettizeFlatDctImages(Page page)
     {
@@ -353,151 +347,43 @@ public sealed partial class Document
     private byte[]? RewriteNotdefShows(byte[] contentBytes, PdfDictionary resources,
         PdfFormatConversionOptions options, int pageNumber, bool strip)
     {
-        var fonts = _reader.ResolveDict(resources.Get("Font"));
+        var nd = new NotdefRewriteState();
+        nd.contentBytes = contentBytes;
+        nd.resources = resources;
+        nd.options = options;
+        nd.pageNumber = pageNumber;
+        nd.strip = strip;
+        var fonts = _reader.ResolveDict(nd.resources.Get("Font"));
         if (fonts is null) return null;
+        nd.fonts = fonts;
 
-        // code→glyph-name table per font resource; null = skip the font. Only Type1
-        // faces qualify: their glyph lookup is NAME-keyed through the encoding, so a
-        // control code with no name is a certain .notdef reference. A TrueType font
-        // (esp. a subset with no /Encoding) addresses glyphs through its internal
-        // cmap where low codes can be REAL glyphs, and composite (Type0) fonts use
-        // multi-byte codes — no verdict is possible from the font dict alone.
-        var encodings = new Dictionary<string, string?[]?>(StringComparer.Ordinal);
-        string?[]? EncodingFor(string fontName)
+        nd.encodings = new Dictionary<string, string?[]?>(StringComparer.Ordinal);
+        nd.text = Compat.Latin1.GetString(nd.contentBytes);
+        nd.deletions = new List<(int start, int end)>();
+        nd.lastName = null;      // most recent /Name token (Tf operand)
+        nd.currentFont = null;   // font selected by the last Tf
+        nd.operandStart = -1;        // offset of the first operand token since the last operator
+        nd.strings = new List<byte[]>(); // string operands gathered since the last operator
+        nd.pos = 0;
+
+        while (nd.pos < nd.text.Length)
         {
-            if (encodings.TryGetValue(fontName, out var cached)) return cached;
-            string?[]? names = null;
-            if (_reader.ResolveDict(fonts.Get(fontName)) is { } fontDict
-                && fontDict.GetName("Subtype") is "Type1" or "MMType1")
-                names = Devices.SoftwarePageRenderer.ResolveEncoding(fontDict, _reader);
-            encodings[fontName] = names;
-            return names;
+            if (!ScanNotdefToken(nd)) break;
         }
+        if (nd.inlineImage) return null;
 
-        var text = System.Text.Encoding.Latin1.GetString(contentBytes);
-        var deletions = new List<(int start, int end)>();
-        string? lastName = null;      // most recent /Name token (Tf operand)
-        string? currentFont = null;   // font selected by the last Tf
-        int operandStart = -1;        // offset of the first operand token since the last operator
-        var strings = new List<byte[]>(); // string operands gathered since the last operator
-        var pos = 0;
+        if (nd.deletions.Count == 0) return null;
 
-        void BeginOperand(int at) { if (operandStart < 0) operandStart = at; }
-        void EndOperator() { operandStart = -1; strings.Clear(); }
-
-        while (pos < text.Length)
+        nd.output = new List<byte>(nd.contentBytes.Length);
+        nd.copyFrom = 0;
+        foreach (var (start, end) in nd.deletions)
         {
-            var c = text[pos];
-            if (char.IsWhiteSpace(c)) { pos++; continue; }
-            if (c is '[' or ']' or '{' or '}') { BeginOperand(pos); pos++; continue; }
-            if (c == '%') // comment to end-of-line
-            {
-                while (pos < text.Length && text[pos] != '\n' && text[pos] != '\r') pos++;
-                continue;
-            }
-            if (c == '(') // literal string, with escapes and balanced parens
-            {
-                BeginOperand(pos);
-                var end = pos + 1;
-                var depth = 1;
-                while (end < text.Length && depth > 0)
-                {
-                    var sc = text[end];
-                    if (sc == '\\') end++;
-                    else if (sc == '(') depth++;
-                    else if (sc == ')') depth--;
-                    end++;
-                }
-                strings.Add(DecodeLiteralStringBytes(text, pos + 1, end - 1));
-                pos = end; continue;
-            }
-            if (c == '<')
-            {
-                if (pos + 1 < text.Length && text[pos + 1] == '<') // dict
-                { BeginOperand(pos); pos += 2; continue; }
-                BeginOperand(pos);
-                var end = text.IndexOf('>', pos + 1);
-                if (end < 0) end = text.Length - 1;
-                strings.Add(DecodeHexStringBytes(text, pos + 1, end));
-                pos = end + 1; continue;
-            }
-            if (c == '>' && pos + 1 < text.Length && text[pos + 1] == '>')
-            { BeginOperand(pos); pos += 2; continue; }
-            if (c == '/') // name token
-            {
-                BeginOperand(pos);
-                var end = pos + 1;
-                while (end < text.Length && !char.IsWhiteSpace(text[end])
-                       && text[end] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
-                    end++;
-                lastName = text[(pos + 1)..end];
-                pos = end; continue;
-            }
-
-            // Regular token (number or operator).
-            {
-                var end = pos;
-                while (end < text.Length && !char.IsWhiteSpace(text[end])
-                       && text[end] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
-                    end++;
-                // A stray delimiter byte (an unbalanced ')' or a lone '>') yields an
-                // empty token with end == pos — skip the byte or the scan never advances.
-                if (end == pos) { pos++; continue; }
-                var token = text[pos..end];
-                var isNumber = char.IsAsciiDigit(token[0]) || token[0] is '+' or '-' or '.';
-                if (isNumber) { BeginOperand(pos); pos = end; continue; }
-
-                switch (token)
-                {
-                    case "BI":
-                        return null; // inline image: bail out, keep original bytes
-                    case "Tf":
-                        currentFont = lastName;
-                        break;
-                    case "Tj" or "TJ" when strings.Count > 0 && currentFont is not null
-                        && EncodingFor(currentFont) is { } names:
-                    {
-                        var sawCode = false;
-                        var allNotdef = true;
-                        foreach (var s in strings)
-                            foreach (var b in s)
-                            {
-                                sawCode = true;
-                                if (b >= 0x20 || names[b] is not (null or ".notdef"))
-                                { allNotdef = false; break; }
-                            }
-                        if (sawCode && allNotdef)
-                        {
-                            options.ConversionLog.Add(new PdfAViolation
-                            {
-                                Rule = "NotdefGlyph",
-                                Description = $"Page {pageNumber} text show operator references only the .notdef glyph"
-                                    + (strip ? " — operator removed." : "."),
-                                PageNumber = pageNumber,
-                            });
-                            if (strip && operandStart >= 0)
-                                deletions.Add((operandStart, end));
-                        }
-                        break;
-                    }
-                }
-                EndOperator();
-                pos = end;
-            }
+            for (var i = nd.copyFrom; i < start; i++) nd.output.Add(nd.contentBytes[i]);
+            nd.output.Add((byte)' '); // keep neighbouring tokens separated
+            nd.copyFrom = end;
         }
-
-        if (deletions.Count == 0) return null;
-
-        var output = new List<byte>(contentBytes.Length);
-        var copyFrom = 0;
-        foreach (var (start, end) in deletions)
-        {
-            for (var i = copyFrom; i < start; i++) output.Add(contentBytes[i]);
-            output.Add((byte)' '); // keep neighbouring tokens separated
-            copyFrom = end;
-        }
-        for (var i = copyFrom; i < contentBytes.Length; i++) output.Add(contentBytes[i]);
-        return output.ToArray();
+        for (var i = nd.copyFrom; i < nd.contentBytes.Length; i++) nd.output.Add(nd.contentBytes[i]);
+        return nd.output.ToArray();
     }
 
     /// <summary>Decode the raw bytes of a literal PDF string body (between the outer
@@ -610,124 +496,29 @@ public sealed partial class Document
     /// whose binary payload this tokenizer does not model).</summary>
     private byte[]? RewriteAlphaZeroPaint(byte[] contentBytes, PdfDictionary resources)
     {
-        var extGStates = _reader.ResolveDict(resources.Get("ExtGState"));
-        if (extGStates is null) return null;
+        var az = new AlphaZeroRewriteState();
+        az.extGStates = _reader.ResolveDict(resources.Get("ExtGState"));
+        if (az.extGStates is null) return null;
 
-        var fillZero = new HashSet<string>(StringComparer.Ordinal);
-        var strokeZero = new HashSet<string>(StringComparer.Ordinal);
-        var fillSet = new HashSet<string>(StringComparer.Ordinal);   // gs entries that SET ca (any value)
-        var strokeSet = new HashSet<string>(StringComparer.Ordinal); // gs entries that SET CA
-        foreach (var key in extGStates.Keys)
-        {
-            var gs = _reader.ResolveDict(extGStates.Get(key));
-            if (gs is null) continue;
-            if (gs.Get("ca") is not null)
-            {
-                fillSet.Add(key);
-                if (AlphaValue(gs.Get("ca")) == 0.0) fillZero.Add(key);
-            }
-            if (gs.Get("CA") is not null)
-            {
-                strokeSet.Add(key);
-                if (AlphaValue(gs.Get("CA")) == 0.0) strokeZero.Add(key);
-            }
-        }
+        var (fillZero, strokeZero, fillSet, strokeSet) = CollectAlphaZeroStates(az.extGStates);
         if (fillZero.Count == 0 && strokeZero.Count == 0) return null;
 
-        var text = System.Text.Encoding.Latin1.GetString(contentBytes);
-        var output = new StringBuilder(text.Length);
-        var stack = new Stack<(bool fill0, bool stroke0)>();
-        bool fill0 = false, stroke0 = false;
-        string? lastName = null;
-        var changed = false;
-        var pos = 0;
+        az.text = Compat.Latin1.GetString(contentBytes);
+        az.output = new StringBuilder(az.text.Length);
+        az.stack = new Stack<(bool fill0, bool stroke0)>();
+        az.fill0 = false;
+        az.stroke0 = false;
+        az.lastName = null;
+        az.changed = false;
+        az.pos = 0;
 
-        while (pos < text.Length)
+        while (az.pos < az.text.Length)
         {
-            var c = text[pos];
-            // Delimiters and non-token content are copied verbatim.
-            if (char.IsWhiteSpace(c) || c is '[' or ']' or '{' or '}')
-            { output.Append(c); pos++; continue; }
-            if (c == '%') // comment to end-of-line
-            {
-                var eol = pos;
-                while (eol < text.Length && text[eol] != '\n' && text[eol] != '\r') eol++;
-                output.Append(text, pos, eol - pos); pos = eol; continue;
-            }
-            if (c == '(') // literal string, with escapes and balanced parens
-            {
-                var end = pos + 1;
-                var depth = 1;
-                while (end < text.Length && depth > 0)
-                {
-                    var sc = text[end];
-                    if (sc == '\\') end++;
-                    else if (sc == '(') depth++;
-                    else if (sc == ')') depth--;
-                    end++;
-                }
-                output.Append(text, pos, end - pos); pos = end; continue;
-            }
-            if (c == '<')
-            {
-                if (pos + 1 < text.Length && text[pos + 1] == '<') // dict
-                { output.Append("<<"); pos += 2; continue; }
-                var end = text.IndexOf('>', pos + 1);
-                if (end < 0) end = text.Length - 1;
-                output.Append(text, pos, end - pos + 1); pos = end + 1; continue;
-            }
-            if (c == '>' && pos + 1 < text.Length && text[pos + 1] == '>')
-            { output.Append(">>"); pos += 2; continue; }
-            if (c == '/') // name token
-            {
-                var end = pos + 1;
-                while (end < text.Length && !char.IsWhiteSpace(text[end])
-                       && text[end] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
-                    end++;
-                lastName = text[(pos + 1)..end];
-                output.Append(text, pos, end - pos); pos = end; continue;
-            }
-
-            // Regular token (number or operator).
-            {
-                var end = pos;
-                while (end < text.Length && !char.IsWhiteSpace(text[end])
-                       && text[end] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
-                    end++;
-                var token = text[pos..end];
-                string? replacement = null;
-                switch (token)
-                {
-                    case "BI":
-                        return null; // inline image: bail out, keep original bytes
-                    case "q":
-                        stack.Push((fill0, stroke0));
-                        break;
-                    case "Q":
-                        if (stack.Count > 0) (fill0, stroke0) = stack.Pop();
-                        break;
-                    case "gs" when lastName is not null:
-                        if (fillZero.Contains(lastName)) fill0 = true;
-                        else if (fillSet.Contains(lastName)) fill0 = false;
-                        if (strokeZero.Contains(lastName)) stroke0 = true;
-                        else if (strokeSet.Contains(lastName)) stroke0 = false;
-                        break;
-                    case "f" or "F" or "f*" when fill0:
-                    case "S" or "s" when stroke0:
-                    case "B" or "B*" or "b" or "b*" when fill0 && stroke0:
-                        replacement = "n";
-                        break;
-                    case "B" or "B*" when fill0: replacement = "S"; break;
-                    case "b" or "b*" when fill0: replacement = "s"; break;
-                    case "B" or "B*" or "b" or "b*" when stroke0: replacement = "f"; break;
-                }
-                if (replacement is not null) { output.Append(replacement); changed = true; }
-                else output.Append(token);
-                pos = end;
-            }
+            if (!RewriteAlphaZeroToken(az, fillZero, strokeZero, fillSet, strokeSet)) break;
         }
 
-        return changed ? System.Text.Encoding.Latin1.GetBytes(output.ToString()) : null;
+        if (az.bailOut) return null;
+        return az.changed ? Compat.Latin1.GetBytes(az.output.ToString()) : null;
     }
 
     /// <summary>
@@ -906,7 +697,7 @@ public sealed partial class Document
         smDict.Set("Height", new PdfInteger(1));
         smDict.Set("ColorSpace", new PdfName("DeviceGray"));
         smDict.Set("BitsPerComponent", new PdfInteger(8));
-        var data = new byte[] { (byte)Math.Round(Math.Clamp(alpha, 0.0, 1.0) * 255.0) };
+        var data = new byte[] { (byte)Math.Round(Compat.Clamp(alpha, 0.0, 1.0) * 255.0) };
         smDict.Set("Length", new PdfInteger(data.Length));
 
         var objNum = AllocateObjectNumber();
@@ -968,5 +759,122 @@ public sealed partial class Document
                 });
             }
         }
+    }
+
+    /// <summary>The ExtGStates that set a zero alpha, fill or stroke, and those that set any alpha at all.</summary>
+    private (HashSet<string> fillZero, HashSet<string> strokeZero, HashSet<string> fillSet, HashSet<string> strokeSet) CollectAlphaZeroStates(PdfDictionary extGStates)
+    {
+        HashSet<string>? fillZero = default;
+        HashSet<string>? strokeZero = default;
+        HashSet<string>? fillSet = default;
+        HashSet<string>? strokeSet = default;
+        fillZero = new HashSet<string>(StringComparer.Ordinal);
+        strokeZero = new HashSet<string>(StringComparer.Ordinal);
+        fillSet = new HashSet<string>(StringComparer.Ordinal);   // gs entries that SET ca (any value)
+        strokeSet = new HashSet<string>(StringComparer.Ordinal); // gs entries that SET CA
+        foreach (var key in extGStates.Keys)
+        {
+            var gs = _reader.ResolveDict(extGStates.Get(key));
+            if (gs is null) continue;
+            if (gs.Get("ca") is not null)
+            {
+                fillSet.Add(key);
+                if (AlphaValue(gs.Get("ca")) == 0.0) fillZero.Add(key);
+            }
+            if (gs.Get("CA") is not null)
+            {
+                strokeSet.Add(key);
+                if (AlphaValue(gs.Get("CA")) == 0.0) strokeZero.Add(key);
+            }
+        }
+        return (fillZero, strokeZero, fillSet, strokeSet);
+    }
+
+    /// <summary>One token of the content: names remembered, the q/Q stack followed, a gs that zeroes an alpha noted, and a paint under a zero alpha dropped.</summary>
+    private bool RewriteAlphaZeroToken(AlphaZeroRewriteState az, HashSet<string> fillZero, HashSet<string> strokeZero, HashSet<string> fillSet, HashSet<string> strokeSet)
+    {
+        var c = az.text[az.pos];
+        // Delimiters and non-token content are copied verbatim.
+        if (char.IsWhiteSpace(c) || c is '[' or ']' or '{' or '}')
+        { az.output.Append(c); az.pos++; return true; }
+        if (c == '%') // comment to end-of-line
+        {
+            var eol = az.pos;
+            while (eol < az.text.Length && az.text[eol] != '\n' && az.text[eol] != '\r') eol++;
+            az.output.Append(az.text, az.pos, eol - az.pos); az.pos = eol; return true;
+        }
+        if (c == '(') // literal string, with escapes and balanced parens
+        {
+            var end = az.pos + 1;
+            var depth = 1;
+            while (end < az.text.Length && depth > 0)
+            {
+                var sc = az.text[end];
+                if (sc == '\\') end++;
+                else if (sc == '(') depth++;
+                else if (sc == ')') depth--;
+                end++;
+            }
+            az.output.Append(az.text, az.pos, end - az.pos); az.pos = end; return true;
+        }
+        if (c == '<')
+        {
+            if (az.pos + 1 < az.text.Length && az.text[az.pos + 1] == '<') // dict
+            { az.output.Append("<<"); az.pos += 2; return true; }
+            var end = az.text.IndexOf('>', az.pos + 1);
+            if (end < 0) end = az.text.Length - 1;
+            az.output.Append(az.text, az.pos, end - az.pos + 1); az.pos = end + 1; return true;
+        }
+        if (c == '>' && az.pos + 1 < az.text.Length && az.text[az.pos + 1] == '>')
+        { az.output.Append(">>"); az.pos += 2; return true; }
+        if (c == '/') // name token
+        {
+            var end = az.pos + 1;
+            while (end < az.text.Length && !char.IsWhiteSpace(az.text[end])
+                   && az.text[end] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
+                end++;
+            az.lastName = az.text[(az.pos + 1)..end];
+            az.output.Append(az.text, az.pos, end - az.pos); az.pos = end; return true;
+        }
+
+        // Regular token (number or operator).
+        {
+            var end = az.pos;
+            while (end < az.text.Length && !char.IsWhiteSpace(az.text[end])
+                   && az.text[end] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
+                end++;
+            var token = az.text[az.pos..end];
+            string? replacement = null;
+            switch (token)
+            {
+                case "BI":
+                    az.bailOut = true; // inline image: bail out, keep original bytes
+                    return false;
+                case "q":
+                    az.stack.Push((az.fill0, az.stroke0));
+                    break;
+                case "Q":
+                    if (az.stack.Count > 0) (az.fill0, az.stroke0) = az.stack.Pop();
+                    break;
+                case "gs" when az.lastName is not null:
+                    if (fillZero.Contains(az.lastName)) az.fill0 = true;
+                    else if (fillSet.Contains(az.lastName)) az.fill0 = false;
+                    if (strokeZero.Contains(az.lastName)) az.stroke0 = true;
+                    else if (strokeSet.Contains(az.lastName)) az.stroke0 = false;
+                    break;
+                case "f" or "F" or "f*" when az.fill0:
+                case "S" or "s" when az.stroke0:
+                case "B" or "B*" or "b" or "b*" when az.fill0 && az.stroke0:
+                    replacement = "n";
+                    break;
+                case "B" or "B*" when az.fill0: replacement = "S"; break;
+                case "b" or "b*" when az.fill0: replacement = "s"; break;
+                case "B" or "B*" or "b" or "b*" when az.stroke0: replacement = "f"; break;
+            }
+            if (replacement is not null) { az.output.Append(replacement); az.changed = true; }
+            else az.output.Append(token);
+            az.pos = end;
+        }
+        return true;
     }
 }

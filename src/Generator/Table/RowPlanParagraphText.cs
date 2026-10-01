@@ -25,6 +25,7 @@ public partial class Table
         pp.fragCssDesc = 0;
         pp.fragKeepBlank = false;
         pp.fragCssForce = false;
+        pp.fragHangingBreakSpace = (paragraph as TextFragment)?.TextState.FormattingOptions?.HangingBreakSpace ?? false;
         pp.lineAlign = pc.cellAlign;
         pp.htmlCssBoxPx = 0;
         pp.htmlBoxedDivLineH = 0;
@@ -40,7 +41,7 @@ public partial class Table
         if (pp.htmlBoxedDivLineH > 0) pp.thisLineHeight = pp.htmlBoxedDivLineH;
         pp.fragLeading = XmlGeneratorModel
             ? XmlLineSpacing
-            : CallerLineSpacing(paragraph);
+            : CallerLineSpacing(paragraph, pc.cell, row);
         if (pp.fragLeading > 0) pp.thisLineHeight = pp.fragFontSize + pp.fragLeading;
         pp.runBoxH = CssRunBoxes && pp.fragLineH > 0 ? pp.fragLineH : 0.0;
         // With a CSS line box, a SINGLE-line cell also occupies the box
@@ -52,6 +53,17 @@ public partial class Table
         // text). Emit it as one blank line so the row's height
         // budget includes the spacer — dropping it here would
         // collapse vertical padding that tests rely on.
+        // A UA-boxed grid's paragraph margin is a silent spacer box above its first line,
+        // whichever arm lays the text out (the browser's collapsed block margin).
+        // A UA-boxed grid's paragraph margin is a silent spacer box above its first line,
+        // whichever arm lays the text out (the browser's collapsed block margin).
+        if (UaCellBoxes && ParagraphMargin(paragraph) is { Top: > 0 } uaMargin)
+            pc.lines.Add(new CellLine { Text = "", FontSize = pp.fragFontSize, BoxH = uaMargin.Top, Align = pp.lineAlign, MarginSpacer = true });
+        // A paragraph whose segments flow as runs wraps them together, each drawn
+        // in its own size, face and colour, every line boxed by its largest run.
+        // (Before the empty-text spacer: a paragraph of one picture has no text and
+        // is a line of its own, not a blank one.)
+        if (PlanSegmentRunsText(pp, paragraph, pc, rp)) return true;
         if (PlanEmptyText(pp, paragraph, pc, row)) return true;
 
         // Arabic/RTL cell text: the table draws cells with a single Standard-14 font in
@@ -136,13 +148,15 @@ public partial class Table
         // A paragraph's own vertical margin is a silent spacer box above its
         // first line (the converter hands the COLLAPSED value — max of this
         // top and the previous paragraph's bottom).
-        if (NestedTableRender && ParagraphMargin(paragraph) is { Top: > 0 } pMargin)
+        if ((NestedTableRender || HtmlSheetParagraphMargins || UaCellBoxes) && ParagraphMargin(paragraph) is { Top: > 0 } pMargin)
             pc.lines.Add(new CellLine { Text = "", FontSize = pp.fragFontSize, BoxH = pMargin.Top, Align = pp.lineAlign });
         pp.genDefaultFace = GeneratorDialect && !XmlGeneratorModel && !pp.fragBold && !pp.fragItalic
             && (paragraph is not TextFragment mtf
-                || ResolveGeneratorCellFace(mtf, pc.cell, row) is null);
-        pp.genMeas = pp.htmlMeas ?? (pp.genDefaultFace
-            ? new Func<string, double>(s => MeasureWidthExactAfm(s, pp.fragFontSize))
+                || GeneratorCellTtf(mtf, pc.cell, row, pp.fragBold, pp.fragItalic) is null);
+        // A fragment naming a Standard-14 face wraps on that face's advances.
+        pp.genMeas = pp.htmlMeas
+            ?? (pp.fragBaseFont is { } namedFace ? Text.TextPaginator.CreateMeasurer(namedFace, pp.fragFontSize, null)
+            : pp.genDefaultFace ? new Func<string, double>(s => MeasureWidthExactAfm(s, pp.fragFontSize))
             : null);
         PlanTextSegments(pp, pc);
         // WrapLinesCount keeps only the fragment's first N wrapped lines.

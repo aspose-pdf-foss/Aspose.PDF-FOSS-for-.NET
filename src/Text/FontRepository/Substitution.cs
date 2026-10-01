@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using System;
 ﻿
 namespace Aspose.Pdf.Text;
 
@@ -41,120 +43,9 @@ public partial class FontRepository
         var curTtf = current?.SourceFontData?.TtfData;
         if (curTtf is { Length: > 0 } && Covers(curTtf, probe)) return null;
 
-        // Metric-only current font (Standard-14 — no physical program): ReplaceFonts asks
-        // for a physical face, so its host surrogate is the first candidate. This is why
-        // a default-font fragment reports "Arial" (Helvetica's host face) after save.
-        if (curTtf is null)
-        {
-            // Greek or Arabic in a Standard-14 fragment draws in the host's serif
-            // face (Times New Roman), not in the sans surrogate: the whole fragment
-            // moves to it, so its narrower Latin re-wraps every line.
-            if (HasGreekOrArabic(probe))
-            {
-                var serif = FindFontData("Times New Roman")?.TtfData
-                            ?? SystemFontResolver.Resolve("Times New Roman");
-                if (serif is { Length: > 0 } && Covers(serif, probe))
-                    return MakeSubstituteFontData(serif);
-            }
-            var host = SystemFontResolver.Resolve(current?.FontName ?? "Helvetica");
-            if (host is { Length: > 0 } && Covers(host, probe))
-                return MakeSubstituteFontData(host);
-        }
-
-        // Registered sources (folder/file/memory) — first covering face wins. The
-        // sources the CALLER registered come before the default per-user fonts
-        // folder: a FolderFontSource supplying FangSong must beat an Arial Unicode
-        // MS the user happens to have installed. Name-resolution-only sources (a
-        // harness pre-registering data folders so faces resolve BY NAME) are not
-        // caller intent and stay out of coverage scans entirely.
-        foreach (var source in _sources)
-        {
-            if (source.NameResolutionOnly) continue;
-            if (source is FolderFontSource { IsDefaultUserFolder: true }) continue;
-            foreach (var face in source.EnumerateFaces())
-            {
-                var ttf = face.TtfData;
-                if (ttf is { Length: > 0 } && Covers(ttf, probe))
-                    return face;
-            }
-        }
-
-        // Han text prefers the platform's named CJK face over any broad-coverage
-        // font a per-user folder happens to hold: with Arial Unicode MS installed
-        // per-user AND no caller-registered source, SimSun is still substituted
-        // for Simplified-Han text (measured on this machine).
-        if (HasHanIdeographs(probe))
-        {
-            var hanFace = CjkFallbackFont.ResolveEmbeddableBytes(text);
-            if (hanFace is { Length: > 0 } && Covers(hanFace, probe))
-                return MakeSubstituteFontData(hanFace);
-        }
-
-        // Name-resolution-only sources (the harness's pre-registered test-data
-        // folders) stand in for faces the expected environment has installed
-        // (the symbol-text template renders in DejaVu, which ships in the test
-        // data). They join the scan here - after the caller's own sources and the
-        // Han preference (so SimFang can never hijack a Han substitution), but
-        // before the per-user folder (so test-data DejaVu beats a per-user
-        // Ubuntu, exactly as an installed DejaVu would).
-        foreach (var source in _sources)
-        {
-            if (!source.NameResolutionOnly) continue;
-            foreach (var face in source.EnumerateFaces())
-            {
-                var ttf = face.TtfData;
-                if (ttf is { Length: > 0 } && Covers(ttf, probe))
-                    return face;
-            }
-        }
-
-        // The default per-user fonts folder ranks after all registered sources.
-        foreach (var source in _sources)
-        {
-            if (source.NameResolutionOnly) continue;
-            if (source is not FolderFontSource { IsDefaultUserFolder: true }) continue;
-            foreach (var face in source.EnumerateFaces())
-            {
-                var ttf = face.TtfData;
-                if (ttf is { Length: > 0 } && Covers(ttf, probe))
-                    return face;
-            }
-        }
-
-        // Host Arial: broad Latin/Cyrillic/Greek/Vietnamese coverage.
-        var arial = SystemFontResolver.Resolve("Arial");
-        if (arial is { Length: > 0 } && Covers(arial, probe))
-            return MakeSubstituteFontData(arial);
-
-        // Script-matched system CJK face (already normalized to a standalone sfnt).
-        var cjk = CjkFallbackFont.ResolveEmbeddableBytes(text);
-        if (cjk is { Length: > 0 } && Covers(cjk, probe))
-            return MakeSubstituteFontData(cjk);
-
-        // Plane-2 ideographs (CJK Unified Ideographs Extension B and later) live in
-        // the "-ExtB" faces. MingLiU-ExtB first: it also carries Latin, so a run
-        // mixing ideographs and ASCII draws wholly in it; SimSun-ExtB has the
-        // ideographs alone.
-        if (HasSupplementaryIdeographs(probe))
-            foreach (var candidate in new[] { "MingLiU-ExtB", "SimSun-ExtB" })
-            {
-                var face = SystemFontResolver.Resolve(candidate);
-                if (face is { Length: > 0 } && Covers(face, probe))
-                    return MakeSubstituteFontData(face);
-            }
-
-        // Broad-coverage host faces for the remaining scripts (Thai, Hebrew,
-        // Georgian, …) that neither Arial nor the CJK faces carry. Tahoma and
-        // Segoe UI ship wide script coverage on Windows; the trailing names are
-        // legacy super-fonts kept for older installs.
-        foreach (var candidate in new[]
-                 { "Tahoma", "Segoe UI", "Leelawadee UI", "Microsoft Sans Serif", "Arial Unicode MS" })
-        {
-            var face = SystemFontResolver.Resolve(candidate);
-            if (face is { Length: > 0 } && Covers(face, probe))
-                return MakeSubstituteFontData(face);
-        }
-
+        if (SubstituteFromCurrentFace(probe, curTtf, current) is { } own) return own;
+        if (SubstituteFromSources(probe, text) is { } registered) return registered;
+        if (SubstituteFromHostFaces(probe, text) is { } host) return host;
         return null;
     }
 
@@ -289,7 +180,11 @@ public partial class FontRepository
     // (Romanian comma-below letters come back in it), and it is the widest-covering
     // of the default Windows serif/sans pair.
     private static readonly string[] CoveringFallbackFonts =
-        { "Times New Roman", "Arial", "Segoe UI", "Tahoma", "Microsoft Sans Serif", "Calibri" };
+        { "Times New Roman", "Arial", "Segoe UI", "Tahoma", "Microsoft Sans Serif", "Calibri",
+          // The wide faces the reference reaches for a script the Latin ones lack: an
+          // Indic line requested in Arial lays out on Arial Unicode MS's 1.3398 em pitch
+          // and a Gothic one on Segoe UI Historic's 1.3301 em (measured 2026-09-07).
+          "Arial Unicode MS", "Segoe UI Historic" };
 
     private static readonly Dictionary<string, Font?> CoveringFallbackCache = new(StringComparer.OrdinalIgnoreCase);
 
@@ -341,6 +236,89 @@ public partial class FontRepository
             foreach (var cp in missing)
                 if (!map.TryGetValue(cp, out var g) || g == 0) { covers = false; break; }
             if (covers) return font;
+        }
+        return null;
+    }
+
+    // ── script faces: the face a line is DRAWN in when its resolved face cannot shape it ──
+    /// <summary>The script tag of a character in an Indic block (both the northern scripts the
+    /// shaper handles and the southern ones it leaves alone), null outside them.</summary>
+    private static string? IndicScriptTagOf(int cp) => cp switch
+    {
+        >= 0x0900 and <= 0x097F => "deva",
+        >= 0x0980 and <= 0x09FF => "beng",
+        >= 0x0A00 and <= 0x0A7F => "guru",
+        >= 0x0A80 and <= 0x0AFF => "gujr",
+        >= 0x0B00 and <= 0x0B7F => "orya",
+        >= 0x0B80 and <= 0x0BFF => "taml",
+        >= 0x0C00 and <= 0x0C7F => "telu",
+        >= 0x0C80 and <= 0x0CFF => "knda",
+        >= 0x0D00 and <= 0x0D7F => "mlym",
+        >= 0x0D80 and <= 0x0DFF => "sinh",
+        _ => null,
+    };
+
+    /// <summary>The OpenType 2 tag of a script (the newer Indic shaping model), which a
+    /// face may carry instead of the original one.</summary>
+    private static readonly Dictionary<string, string> IndicScriptTag2 = new(StringComparer.Ordinal)
+    {
+        ["deva"] = "dev2", ["beng"] = "bng2", ["guru"] = "gur2", ["gujr"] = "gjr2", ["orya"] = "ory2",
+        ["taml"] = "tml2", ["telu"] = "tel2", ["knda"] = "knd2", ["mlym"] = "mlm2",
+    };
+
+    /// <summary>The installed system face a script is drawn in when the requested face
+    /// cannot shape it (the Windows script faces).</summary>
+    private static readonly Dictionary<string, string> ScriptFaceNames = new(StringComparer.Ordinal)
+    {
+        ["deva"] = "Mangal", ["beng"] = "Vrinda", ["guru"] = "Raavi", ["gujr"] = "Shruti", ["orya"] = "Kalinga",
+        ["taml"] = "Latha", ["telu"] = "Gautami", ["knda"] = "Tunga", ["mlym"] = "Kartika", ["sinh"] = "Iskoola Pota",
+    };
+
+    private static readonly Dictionary<string, Font?> ScriptFaceCache = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The face a line is DRAWN in when the face it resolved to covers its characters but
+    /// carries no GSUB rules for their script: the reference hands such a line to the system
+    /// face of that script, keeps the paragraph's own line pitch, seats the baseline the
+    /// drawing face's descent above the line box and clips the paragraph to that face's
+    /// descriptor extent. Measured 2026-09-07 on the reference generator: Telugu through
+    /// Arial Unicode MS (which has the glyphs but no `telu` GSUB) draws in Gautami, while
+    /// Devanagari, Tamil and Kannada (whose GSUB it does carry) stay in Arial Unicode MS.
+    /// Null when every script of the text is one the face can shape, or no system face is
+    /// installed for it.
+    /// </summary>
+    internal static Font? ResolveScriptShapingFont(byte[] face, string text)
+    {
+        if (string.IsNullOrEmpty(text) || face is not { Length: > 12 }) return null;
+        // Only a line made of the script alone is handed off: one Latin letter - or a
+        // no-break space - among Telugu words keeps the whole line in the resolved face,
+        // unshaped (measured: "hello" + Telugu and Telugu + NBSP + Telugu both stay in
+        // Arial Unicode MS, Telugu + space + Telugu goes to Gautami).
+        HashSet<string>? scripts = null;
+        foreach (var ch in text)
+        {
+            if (ch is ' ' or '\t' or '\r' or '\n') continue;
+            if (IndicScriptTagOf(ch) is { } tag) (scripts ??= new HashSet<string>(StringComparer.Ordinal)).Add(tag);
+            else return null;
+        }
+        if (scripts is null) return null;
+        HashSet<string> shaped;
+        try { shaped = OpenType.OtfLayout.Open(face)?.Scripts("GSUB") ?? new HashSet<string>(StringComparer.Ordinal); }
+        catch { return null; }
+        foreach (var tag in scripts)
+        {
+            if (shaped.Contains(tag) || (IndicScriptTag2.TryGetValue(tag, out var tag2) && shaped.Contains(tag2))) continue;
+            if (!ScriptFaceNames.TryGetValue(tag, out var faceName)) continue;
+            Font? font;
+            bool cached;
+            lock (ScriptFaceCache) cached = ScriptFaceCache.TryGetValue(faceName, out font);
+            if (!cached)
+            {
+                try { font = TryFindFont(faceName); }
+                catch { font = null; }
+                lock (ScriptFaceCache) ScriptFaceCache[faceName] = font;
+            }
+            if (font?.SourceFontData?.TtfData is { Length: > 12 }) return font;
         }
         return null;
     }

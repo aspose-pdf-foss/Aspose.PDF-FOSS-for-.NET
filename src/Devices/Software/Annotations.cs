@@ -16,6 +16,9 @@ public sealed partial class SoftwarePageRenderer
     /// appearance derived from /QuadPoints. Other subtypes carry an /AP appearance stream
     /// which we don't yet rasterise.
     /// </summary>
+    private const int SoftwareAnnotHiddenFlag = 0x02;
+    private const int SoftwareAnnotNoViewFlag = 0x20;
+
     private static void DrawAnnotations(RenderContext ctx, PdfDictionary pageDict)
     {
         var annots = ctx.Reader.Resolve(pageDict.Get("Annots")) as PdfArray;
@@ -24,9 +27,10 @@ public sealed partial class SoftwarePageRenderer
         {
             var annot = ctx.Reader.ResolveDict(item);
             if (annot is null) continue;
-            // Skip annotations that are hidden (bit 2 of /F). Bits are 1-indexed in the spec.
+            // Skip annotations that are Hidden (bit 2 of /F) or NoView (bit 6: not
+            // displayed, a no-print watermark stamp carries it). Bits are 1-indexed in the spec.
             var flags = (int)annot.GetInt("F");
-            if ((flags & 0x02) != 0) continue;
+            if ((flags & SoftwareAnnotHiddenFlag) != 0 || (flags & SoftwareAnnotNoViewFlag) != 0) continue;
             var subtype = annot.GetName("Subtype");
             if (subtype == "Highlight")
             {

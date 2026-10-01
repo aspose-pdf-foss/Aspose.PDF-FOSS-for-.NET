@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -73,138 +73,74 @@ internal static partial class HtmlToPdfConverter
 
     private static Document? TryRenderPortalShell(string html)
     {
-        if (html.IndexOf("id=\"wrapper\"", System.StringComparison.OrdinalIgnoreCase) < 0
-            || html.IndexOf("id=\"banner\"", System.StringComparison.OrdinalIgnoreCase) < 0
-            || html.IndexOf("id=\"col2\"", System.StringComparison.OrdinalIgnoreCase) < 0
-            || html.IndexOf("class=\"welcome\"", System.StringComparison.OrdinalIgnoreCase) < 0
-            || html.IndexOf("sButton", System.StringComparison.Ordinal) < 0) return null;
+        var po = new PortalShellRenderState();
+        po.html = html;
+        if (po.html.IndexOf("id=\"wrapper\"", System.StringComparison.OrdinalIgnoreCase) < 0
+            || po.html.IndexOf("id=\"banner\"", System.StringComparison.OrdinalIgnoreCase) < 0
+            || po.html.IndexOf("id=\"col2\"", System.StringComparison.OrdinalIgnoreCase) < 0
+            || po.html.IndexOf("class=\"welcome\"", System.StringComparison.OrdinalIgnoreCase) < 0
+            || po.html.IndexOf("sButton", System.StringComparison.Ordinal) < 0) return null;
 
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        double Px(string s) => double.Parse(s, inv) * 0.75;
-
-        // The wrapper's declared px width is the content box; without it the
-        // page cannot grow and this is a different document.
-        var wrapM = Regex.Match(html, @"#wrapper\s*\{[^}]*(?<![-\w])width\s*:\s*([\d.]+)\s*px",
+        po.inv = System.Globalization.CultureInfo.InvariantCulture;
+        po.wrapM = Regex.Match(po.html, @"#wrapper\s*\{[^}]*(?<![-\w])width\s*:\s*([\d.]+)\s*px",
             RegexOptions.IgnoreCase);
-        if (!wrapM.Success) return null;
-        var wrapPt = Px(wrapM.Groups[1].Value);
+        if (!po.wrapM.Success) return null;
+        po.wrapPt = PortalPx(po, po.wrapM.Groups[1].Value);
 
-        var hdrM = Regex.Match(html, @"#header\s*\{[^}]*(?<![-\w])height\s*:\s*([\d.]+)\s*px",
+        po.hdrM = Regex.Match(po.html, @"#header\s*\{[^}]*(?<![-\w])height\s*:\s*([\d.]+)\s*px",
             RegexOptions.IgnoreCase);
-        var headerPt = hdrM.Success ? Px(hdrM.Groups[1].Value) : 41.25;
+        po.headerPt = po.hdrM.Success ? PortalPx(po, po.hdrM.Groups[1].Value) : 41.25;
 
-        // The print sheet's body border-top (colour fixed black in this class).
-        var barM = Regex.Match(html, @"(?<![-\w])body\s*\{[^}]*border-top\s*:\s*solid\s+([\d.]+)\s*px",
+        po.barM = Regex.Match(po.html, @"(?<![-\w])body\s*\{[^}]*border-top\s*:\s*solid\s+([\d.]+)\s*px",
             RegexOptions.IgnoreCase);
-        var barPt = barM.Success ? Px(barM.Groups[1].Value) : 7.5;
+        po.barPt = po.barM.Success ? PortalPx(po, po.barM.Groups[1].Value) : 7.5;
 
-        // Canvas + wrapper colours, straight from their rules.
-        (double R, double G, double B) CssColor(string selector, (double, double, double) fallback)
-        {
-            var m = Regex.Match(html, Regex.Escape(selector)
-                + @"\s*\{[^}]*background(?:-color)?\s*:\s*#(?<h>[0-9a-fA-F]{3,6})",
-                RegexOptions.IgnoreCase);
-            if (!m.Success) return fallback;
-            var hx = m.Groups["h"].Value;
-            if (hx.Length == 3) hx = $"{hx[0]}{hx[0]}{hx[1]}{hx[1]}{hx[2]}{hx[2]}";
-            return (System.Convert.ToInt32(hx[..2], 16) / 255.0,
-                    System.Convert.ToInt32(hx[2..4], 16) / 255.0,
-                    System.Convert.ToInt32(hx[4..6], 16) / 255.0);
-        }
-        var canvas = CssColor("html", (226 / 255.0, 226 / 255.0, 226 / 255.0));
-        var wrapBg = CssColor("#wrapper", (0.8, 0.8, 0.8));
+        po.canvas = PortalCssColor(po, "html", (226 / 255.0, 226 / 255.0, 226 / 255.0));
+        po.wrapBg = PortalCssColor(po, "#wrapper", (0.8, 0.8, 0.8));
 
-        // The .85em body on the 16 px base: 13.6 px = 10.2 pt.
-        var fs = 10.2;
-        var bodyFsM = Regex.Match(html, @"(?<![-\w])body\s*\{[^}]*font-size\s*:\s*(\.?[\d.]+)\s*em",
+        po.fs = 10.2;
+        po.bodyFsM = Regex.Match(po.html, @"(?<![-\w])body\s*\{[^}]*font-size\s*:\s*(\.?[\d.]+)\s*em",
             RegexOptions.IgnoreCase);
-        if (bodyFsM.Success && double.TryParse(bodyFsM.Groups[1].Value,
-                System.Globalization.NumberStyles.Float, inv, out var bodyEm) && bodyEm > 0)
-            fs = bodyEm * 16.0 * 0.75;
+        if (po.bodyFsM.Success && double.TryParse(po.bodyFsM.Groups[1].Value,
+                System.Globalization.NumberStyles.Float, po.inv, out var bodyEm) && bodyEm > 0)
+            po.fs = bodyEm * 16.0 * 0.75;
 
-        var pageW = System.Math.Max(PsA4WidthPt, PsMarginLr * 2 + wrapPt);
-        var pageH = PsA4HeightPt;
-        var left = PsMarginLr;
-        var right = left + wrapPt;
-        var top = PsMarginTb;
-        var bottom = pageH - PsMarginTb;
+        po.pageW = System.Math.Max(PsA4WidthPt, PsMarginLr * 2 + po.wrapPt);
+        po.pageH = PsA4HeightPt;
+        po.left = PsMarginLr;
+        po.right = po.left + po.wrapPt;
+        po.top = PsMarginTb;
+        po.bottom = po.pageH - PsMarginTb;
 
-        var doc = new Document();
-        var page = doc.Pages.Add(pageW, pageH);
-        EnsureFonts(page);
-        var resByFace = new Dictionary<string, string>(System.StringComparer.Ordinal);
-        var sb = new StringBuilder();
-        void Rect(double x, double yTop, double w, double h, (double R, double G, double B) c)
-            => sb.Append(string.Create(inv,
-                $"q {c.R:0.###} {c.G:0.###} {c.B:0.###} rg {x:F2} {pageH - yTop - h:F2} {w:F2} {h:F2} re f Q\n"));
-
+        po.doc = new Document();
+        po.page = po.doc.Pages.Add(po.pageW, po.pageH);
+        EnsureFonts(po.page);
+        po.resByFace = new Dictionary<string, string>(System.StringComparer.Ordinal);
+        po.sb = new StringBuilder();
         // The canvas fills the content box; the chrome layers over it.
-        Rect(left, top, wrapPt, bottom - top, canvas);
-        Rect(left, top, wrapPt, barPt, (0, 0, 0));                       // body border-top
-        var headerTop = top + barPt;
-        Rect(left, headerTop, wrapPt, headerPt, (1, 1, 1));              // #header's own white
-        var bannerTop = headerTop + headerPt;
-        Rect(left, bannerTop, wrapPt, PsCol2InputTopPt + PsCol2InputHPt - bannerTop, wrapBg);
+        PortalRect(po, po.left, po.top, po.wrapPt, po.bottom - po.top, po.canvas);
+        PortalRect(po, po.left, po.top, po.wrapPt, po.barPt, (0, 0, 0));                       // body border-top
+        po.headerTop = po.top + po.barPt;
+        PortalRect(po, po.left, po.headerTop, po.wrapPt, po.headerPt, (1, 1, 1));              // #header's own white
+        po.bannerTop = po.headerTop + po.headerPt;
+        PortalRect(po, po.left, po.bannerTop, po.wrapPt, PsCol2InputTopPt + PsCol2InputHPt - po.bannerTop, po.wrapBg);
 
-        // The header search input (float-cleared) and its empty submit bevel.
-        var inpX = left + PsHdrInputLeftPx * 0.75;
-        var inpTop = headerTop + PsHdrInputLiftPt;
-        void SunkenBox(double x, double yTop, double w, double h)
-        {
-            Rect(x, yTop, w, h, (0.25, 0.25, 0.25));
-            Rect(x + 1.0, yTop + 1.0, w - 2.0, h - 2.0, (1, 1, 1));
-        }
-        SunkenBox(inpX, inpTop, PsInputWPt, PsHdrInputHPt);
-        var subX = inpX + PsInputWPt + PsSubmitGapPt;
-        var subTop = inpTop + PsSubmitDropPt;
-        Rect(subX, subTop, PsSubmitWPt, PsSubmitHPt, (0.25, 0.25, 0.25));
-        Rect(subX + 0.5, subTop + 0.5, PsSubmitWPt - 1.0, PsSubmitHPt - 1.0, (0.75, 0.75, 0.75));
-        Rect(subX + 2.0, subTop + 2.0, PsSubmitWPt - 4.0, PsSubmitHPt - 4.0, (0.66, 0.66, 0.66));
+        po.inpX = po.left + PsHdrInputLeftPx * 0.75;
+        po.inpTop = po.headerTop + PsHdrInputLiftPt;
+        PortalSunkenBox(po, po.inpX, po.inpTop, PsInputWPt, PsHdrInputHPt);
+        po.subX = po.inpX + PsInputWPt + PsSubmitGapPt;
+        po.subTop = po.inpTop + PsSubmitDropPt;
+        PortalRect(po, po.subX, po.subTop, PsSubmitWPt, PsSubmitHPt, (0.25, 0.25, 0.25));
+        PortalRect(po, po.subX + 0.5, po.subTop + 0.5, PsSubmitWPt - 1.0, PsSubmitHPt - 1.0, (0.75, 0.75, 0.75));
+        PortalRect(po, po.subX + 2.0, po.subTop + 2.0, PsSubmitWPt - 4.0, PsSubmitHPt - 4.0, (0.66, 0.66, 0.66));
 
-        // The .welcome list: bullets + items in the body face and ink.
-        var items = new List<string>();
-        var welcomeM = Regex.Match(html,
+        po.items = new List<string>();
+        po.welcomeM = Regex.Match(po.html,
             @"class=""welcome""[^>]*>(?<b>[\s\S]*?)</ul\s*>", RegexOptions.IgnoreCase);
-        if (welcomeM.Success)
-            foreach (Match li in Regex.Matches(welcomeM.Groups["b"].Value,
-                         @"<li\b[^>]*>(?<t>[\s\S]*?)</li\s*>", RegexOptions.IgnoreCase))
-                items.Add(Regex.Replace(DecodeEntities(
-                    Regex.Replace(li.Groups["t"].Value, "<[^>]+>", "")), @"\s+", " ").Trim());
+        RenderPortalPanels(po);
 
-        sb.Append(string.Create(inv, $"q {PsInk:0.###} {PsInk:0.###} {PsInk:0.###} rg\n"));
-        page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
-        sb.Clear();
-        var textX = left + PsListIndentPt;
-        for (var i = 0; i < items.Count; i++)
-        {
-            var glyphTop = bannerTop + PsListFirstGlyphDropPt + i * PsListPitchPt;
-            var baseline = pageH - (glyphTop + PsCapHeight * fs);
-            EmitGridsterText(page, resByFace, fs, textX, baseline, items[i], "Arial");
-            var cy = pageH - (glyphTop + PsBulletDropPt);
-            var r = PsBulletRadiusPt;
-            sb.Append(string.Create(inv,
-                $"{textX - PsBulletLeftOfTextPt - r:F2} {cy - r:F2} {2 * r:F2} {2 * r:F2} re f\n"));
-        }
-        page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString() + "Q\n"));
-        sb.Clear();
-
-        // The #col2 input row at the content edge, and the Go bevel.
-        SunkenBox(left, PsCol2InputTopPt, PsInputWPt, PsCol2InputHPt);
-        var goX = left + PsInputWPt + PsGoGapPt;
-        Rect(goX, PsCol2InputTopPt, PsGoWPt, PsGoHPt, (0.25, 0.25, 0.25));
-        Rect(goX + 0.5, PsCol2InputTopPt + 0.5, PsGoWPt - 1.0, PsGoHPt - 1.0, (0.83, 0.83, 0.83));
-        Rect(goX + 2.0, PsCol2InputTopPt + 2.0, PsGoWPt - 4.0, PsGoHPt - 4.0, (0.94, 0.94, 0.94));
-        var goValM = Regex.Match(html, @"<input\b[^>]*value=""(?<v>[^""]+)""[^>]*type=""submit""[^>]*>|<input\b[^>]*type=""submit""[^>]*value=""(?<v>[^""]+)""[^>]*>",
-            RegexOptions.IgnoreCase);
-        var goLabel = goValM.Success ? goValM.Groups["v"].Value : "Go";
-        var goLabelW = MeasureFaceText("Arial", goLabel, PsGoLabelPt);
-        EmitGridsterText(page, resByFace, PsGoLabelPt,
-            goX + (PsGoWPt - goLabelW) / 2,
-            pageH - (PsGoGlyphTopPt + PsCapHeight * PsGoLabelPt),
-            goLabel, "Arial");
-
-        page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
-        PruneUnusedFonts(doc);
-        return doc;
+        po.page.AddContentStream(Encoding.ASCII.GetBytes(po.sb.ToString()));
+        PruneUnusedFonts(po.doc);
+        return po.doc;
     }
 }

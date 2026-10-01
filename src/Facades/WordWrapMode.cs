@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.IO.Compression;
 using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.Text;

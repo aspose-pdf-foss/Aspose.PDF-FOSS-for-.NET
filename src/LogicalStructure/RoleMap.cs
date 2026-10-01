@@ -22,15 +22,16 @@ internal sealed class RoleMap
         return map;
     }
 
-    internal bool TryGet(string customTag, out string standardType)
+    internal string? TryGet(string customTag)
     {
+        string? standardType = default;
         if (_structTreeRoot.Get("RoleMap") is PdfDictionary map && map.GetName(customTag) is { } v)
         {
             standardType = v;
-            return true;
+            return standardType;
         }
         standardType = string.Empty;
-        return false;
+        return null;
     }
 
     internal void Set(string customTag, string standardType)

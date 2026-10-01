@@ -27,13 +27,12 @@ internal static class SignerChainTrust
 {
     private const int MaxChainLength = 16;
 
-    /// <summary>True when <paramref name="certificatesDer"/>[0] (the signer) chains
-    /// to a trusted root under the rules above. <paramref name="reason"/> names the
-    /// first failure for diagnostics.</summary>
-    public static bool IsTrusted(IReadOnlyList<byte[]> certificatesDer, DateTime verificationTime, out string reason)
+    /// <summary>Null when <paramref name="certificatesDer"/>[0] (the signer) chains
+    /// to a trusted root under the rules above; otherwise the first failure, named
+    /// for diagnostics.</summary>
+    public static string? UntrustedReason(IReadOnlyList<byte[]> certificatesDer, DateTime verificationTime)
     {
-        reason = string.Empty;
-        if (certificatesDer.Count == 0) { reason = "no signer certificate"; return false; }
+        if (certificatesDer.Count == 0) { return "no signer certificate"; }
 
         var embedded = new List<X509Certificate2>();
         try
@@ -42,8 +41,7 @@ internal static class SignerChainTrust
         }
         catch (Exception ex)
         {
-            reason = "unreadable certificate: " + ex.Message;
-            return false;
+            return "unreadable certificate: " + ex.Message;
         }
 
         // Certificate validity bounds surface as local-kind DateTimes while the
@@ -53,36 +51,32 @@ internal static class SignerChainTrust
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (var depth = 0; depth < MaxChainLength; depth++)
         {
-            if (!visited.Add(current.Thumbprint)) { reason = "certificate loop"; return false; }
+            if (!visited.Add(current.Thumbprint)) { return "certificate loop"; }
             if (at < current.NotBefore.ToUniversalTime() || at > current.NotAfter.ToUniversalTime())
             {
-                reason = $"'{current.Subject}' not valid at the signing time";
-                return false;
+                return $"'{current.Subject}' not valid at the signing time";
             }
 
             if (IsSelfSigned(current))
             {
-                if (InRootStores(current.Thumbprint)) return true;
-                reason = $"self-signed '{current.Subject}' is not a trusted root";
-                return false;
+                if (InRootStores(current.Thumbprint)) return null;
+                return $"self-signed '{current.Subject}' is not a trusted root";
             }
 
             // A trusted root that directly issued the current certificate anchors
             // the chain; an intermediate continues it.
             var root = FindIssuer(current, RootStoreCertificates());
-            if (root is not null) return true;
+            if (root is not null) return null;
 
             var issuer = FindIssuer(current, embedded.Where(c => !ReferenceEquals(c, current)))
                          ?? FindIssuer(current, MachineIntermediates());
             if (issuer is null)
             {
-                reason = $"no issuer found for '{current.Subject}' (partial chain)";
-                return false;
+                return $"no issuer found for '{current.Subject}' (partial chain)";
             }
             current = issuer;
         }
-        reason = "chain too long";
-        return false;
+        return "chain too long";
     }
 
     private static X509Certificate2? FindIssuer(X509Certificate2 child, IEnumerable<X509Certificate2> candidates)
@@ -114,7 +108,7 @@ internal static class SignerChainTrust
             if (issuer.GetRSAPublicKey() is { } rsa)
                 return rsa.VerifyData(tbs, signature, hash.Value, RSASignaturePadding.Pkcs1);
             if (issuer.GetECDsaPublicKey() is { } ec)
-                return ec.VerifyData(tbs, signature, hash.Value, DSASignatureFormat.Rfc3279DerSequence);
+                return Compat.VerifyDataDer(ec, tbs, signature, hash.Value);
             return false;
         }
         catch
@@ -178,7 +172,5 @@ internal static class SignerChainTrust
         foreach (var c in certs) yield return c;
     }
 
-#pragma warning disable SYSLIB0057
-    private static X509Certificate2 Load(byte[] der) => new(der);
-#pragma warning restore SYSLIB0057
+    private static X509Certificate2 Load(byte[] der) => Compat.LoadCertificate(der);
 }

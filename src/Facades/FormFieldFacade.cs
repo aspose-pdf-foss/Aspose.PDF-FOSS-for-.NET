@@ -41,6 +41,9 @@ public sealed class FormFieldFacade
     public const int CheckBoxStyleSquare = 5;
     public const int CheckBoxStyleStar = 6;
 
+    /// <summary>Creates a field appearance description with default values (Helvetica font, WinAnsi encoding).</summary>
+    public FormFieldFacade() { }
+
     /// <summary>The caption (alternate name / tooltip / TU entry) of the field.</summary>
     public string? Caption { get; set; }
 

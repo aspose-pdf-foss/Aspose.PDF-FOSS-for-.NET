@@ -9,110 +9,27 @@ public sealed partial class ParagraphAbsorber
     /// </summary>
     private static List<TextLine> GroupIntoLines(List<TextFragment> fragments)
     {
-        var lines = new List<TextLine>();
-        var sorted = fragments.OrderByDescending(f => GetY(f)).ThenBy(f => GetX(f)).ToList();
+        var gl = new GroupLinesState();
+        gl.fragments = fragments;
+        gl.lines = new List<TextLine>();
+        gl.sorted = gl.fragments.OrderByDescending(f => GetY(f)).ThenBy(f => GetX(f)).ToList();
 
-        foreach (var frag in sorted)
+        foreach (var frag in gl.sorted)
         {
-            if (frag.Rectangle is null) continue;
-            var fragMidY = (frag.Rectangle.LLY + frag.Rectangle.URY) / 2;
-            var fragHeight = frag.Rectangle.Height;
-            var tolerance = Math.Max(fragHeight * 0.5, 1.0);
-
-            var found = false;
-            for (var i = lines.Count - 1; i >= 0; i--)
-            {
-                // The join window is the LINE's own half-height, not only the joining
-                // fragment's: a superscript citation run (fs 5.9 riding high on a
-                // 10.3 pt CJK line) must land on the line whose band covers it — the
-                // reference keys each line by (median, half-height) of the line.
-                // The fragment-based tolerance stays as the floor so nothing that
-                // joined before stops joining.
-                var lineTol = Math.Max((lines[i].MaxY - lines[i].MinY) * 0.5, tolerance);
-                if (Math.Abs(lines[i].MidY - fragMidY) <= lineTol)
-                {
-                    lines[i].Fragments.Add(frag);
-                    lines[i].Recalc();
-                    found = true;
-                    break;
-                }
-            }
-
-            if (!found)
-            {
-                var line = new TextLine();
-                line.Fragments.Add(frag);
-                line.Recalc();
-                lines.Add(line);
-            }
+            GroupFragmentIntoLine(gl, frag);
         }
 
         // Sort fragments within each line left-to-right
-        foreach (var line in lines)
+        foreach (var line in gl.lines)
             line.Fragments.Sort((a, b) => GetX(a).CompareTo(GetX(b)));
 
-        // Split lines with large horizontal gaps into separate lines.
-        // This handles multi-column layouts where fragments at the same Y are in different columns.
-        var splitLines = new List<TextLine>();
-        foreach (var line in lines)
+        gl.splitLines = new List<TextLine>();
+        foreach (var line in gl.lines)
         {
-            if (line.Fragments.Count <= 1)
-            {
-                splitLines.Add(line);
-                continue;
-            }
-
-            // Detect column gaps adaptively:
-            // Collect all horizontal gaps within this line, then look for a natural break point.
-            // If there's a clear gap between word-level spacing and column-level spacing, use it.
-            var gaps = new List<double>();
-            for (var i = 1; i < line.Fragments.Count; i++)
-            {
-                var prev = line.Fragments[i - 1];
-                var curr = line.Fragments[i];
-                var prevRight = prev.Rectangle?.URX ?? GetX(prev);
-                var currLeft = curr.Rectangle?.LLX ?? GetX(curr);
-                var gap = currLeft - prevRight;
-                if (gap > 0) gaps.Add(gap);
-            }
-
-            double gapThreshold;
-            if (gaps.Count > 2)
-            {
-                gaps.Sort();
-                var medianGap = gaps[gaps.Count / 2];
-                // Column gaps should be significantly larger than word gaps
-                gapThreshold = Math.Max(medianGap * 3, line.AvgFontSize * 2);
-            }
-            else
-            {
-                gapThreshold = line.AvgFontSize * 3;
-            }
-            var currentSplit = new TextLine();
-            currentSplit.Fragments.Add(line.Fragments[0]);
-
-            for (var i = 1; i < line.Fragments.Count; i++)
-            {
-                var prev = line.Fragments[i - 1];
-                var curr = line.Fragments[i];
-                var prevRight = prev.Rectangle?.URX ?? GetX(prev);
-                var currLeft = curr.Rectangle?.LLX ?? GetX(curr);
-                var gap = currLeft - prevRight;
-
-                if (gap > gapThreshold)
-                {
-                    currentSplit.Recalc();
-                    splitLines.Add(currentSplit);
-                    currentSplit = new TextLine();
-                }
-                currentSplit.Fragments.Add(curr);
-            }
-
-            currentSplit.Recalc();
-            splitLines.Add(currentSplit);
+            SplitGroupedLine(gl, line);
         }
 
-        return splitLines;
+        return gl.splitLines;
     }
 
     /// <summary>
@@ -146,210 +63,29 @@ public sealed partial class ParagraphAbsorber
 
     private static List<MarkupParagraph> GroupIntoParagraphs(List<TextLine> lines, double pageBodyRight = double.NaN)
     {
-        if (lines.Count == 0) return [];
-
-        static string LineText(TextLine l) => string.Concat(l.Fragments.Select(f => f.Text));
-
-        static bool LeadsWithCapital(string s, out int capIdx)
-        {
-            // Skip whitespace AND non-letter marks (bullets, dashes) — a bullet
-            // item "• ESRI shape…" leads with the capital E. Digits stop the scan
-            // (T-numeric owns numbered lines). A Han ideograph lead counts as a
-            // capital: a CJK paragraph opens on its 2-em first-line indent
-            // (measured on a two-column paper — every split lands on
-            // an ideograph-led indented line, and same-edge CJK lines never split).
-            for (var k = 0; k < s.Length; k++)
-            {
-                var c = s[k];
-                if (char.IsUpper(c) || c is >= '一' and <= '鿿' or >= '㐀' and <= '䶿') { capIdx = k; return true; }
-                if (char.IsLetter(c) || char.IsDigit(c)) { capIdx = k; return false; }
-            }
-            capIdx = -1; return false;
-        }
-
-        static bool LeadsWithLowercase(string s)
-        {
-            foreach (var c in s)
-            {
-                if (char.IsLetter(c)) return char.IsLower(c);
-                if (char.IsDigit(c)) return false;
-            }
-            return true; // no letter or digit at all: never a paragraph lead
-        }
-
-        // The lead before the capital is a MARK - an opening quotation mark,
-        // bracket, guillemet or apostrophe - and nothing else: a dash ("-Asp.Net")
-        // or a bullet glyph leads a list item, and consecutive items stay in one
-        // paragraph.
-        static bool LeadsWithMark(string s, int capIdx)
-        {
-            var any = false;
-            for (var k = 0; k < capIdx; k++)
-            {
-                var c = s[k];
-                if (char.IsWhiteSpace(c)) continue;
-                var cat = char.GetUnicodeCategory(c);
-                var isMark = cat is System.Globalization.UnicodeCategory.OpenPunctuation
-                    or System.Globalization.UnicodeCategory.InitialQuotePunctuation
-                    or System.Globalization.UnicodeCategory.FinalQuotePunctuation
-                    || c is '"' or '\'';
-                if (!isMark) return false;
-                any = true;
-            }
-            return any;
-        }
-
-        // A bullet-led line opens a hanging list item: its continuation lines sit
-        // at the text indent, so the usual first-line-indent trigger does not
-        // apply inside it, and leaving the item is itself a paragraph boundary.
-        static bool BulletLead(string s)
-        {
-            foreach (var c in s)
-            {
-                if (char.IsWhiteSpace(c)) continue;
-                return "■□▪▫●○•‣◦·★☆►▶".IndexOf(c) >= 0;
-            }
-            return false;
-        }
-
-        // First token is a pure number ("1", "12", "1.2", "1,2") and a capital
-        // letter follows it on the line.
-        static bool NumericLead(string s)
-        {
-            var t = s.TrimStart();
-            var k = 0;
-            while (k < t.Length && (char.IsDigit(t[k]) || ((t[k] == '.' || t[k] == ',')
-                   && k + 1 < t.Length && char.IsDigit(t[k + 1])))) k++;
-            if (k == 0 || (k < t.Length && !char.IsWhiteSpace(t[k]))) return false;
-            while (k < t.Length && char.IsWhiteSpace(t[k])) k++;
-            return k < t.Length && char.IsUpper(t[k]);
-        }
+        var gp = new ParagraphGroupState();
+        gp.lines = lines;
+        gp.pageBodyRight = pageBodyRight;
+        if (gp.lines.Count == 0) return [];
 
         if (GridDebug)
-            foreach (var l in lines)
+            foreach (var l in gp.lines)
                 Console.Error.WriteLine($"[line] mid={l.MidY:F3} y={l.MinY:F3}..{l.MaxY:F3} x={l.MinX:F1} n={l.Fragments.Count} '{LineText(l)[..Math.Min(20, LineText(l).Length)]}'");
-        var paragraphs = new List<MarkupParagraph>();
-        var currentLines = new List<TextLine> { lines[0] };
-        var paraLeft = lines[0].MinX;
-        // The section's own right edge: a line is judged "short" against the
-        // column it sits in, not the page body (a centred heading in a middle
-        // column is not short by two columns' worth).
-        var sectionRight = lines.Max(l => l.MaxX);
-        // The T-space right edge is the PAGE body's right margin (a section may be
-        // narrower than the column it sits in).
-        var bodyRight = double.IsNaN(pageBodyRight) ? lines.Max(l => l.MaxX) : pageBodyRight;
+        gp.paragraphs = new List<MarkupParagraph>();
+        gp.currentLines = new List<TextLine> { gp.lines[0] };
+        gp.paraLeft = gp.lines[0].MinX;
+        gp.sectionRight = gp.lines.Max(l => l.MaxX);
+        gp.bodyRight = double.IsNaN(gp.pageBodyRight) ? gp.lines.Max(l => l.MaxX) : gp.pageBodyRight;
 
-        for (var i = 1; i < lines.Count; i++)
+        for (var i = 1; i < gp.lines.Count; i++)
         {
-            var prev = lines[i - 1];
-            var curr = lines[i];
-            var f = curr.AvgFontSize > 0 ? curr.AvgFontSize : 12;
-            var prevF = prev.AvgFontSize > 0 ? prev.AvgFontSize : 12;
-            var text = LineText(curr);
-            var prevRaw = LineText(prev);
-            var prevText = prevRaw.TrimEnd();
-            var capital = LeadsWithCapital(text, out var capIdx);
-
-            // T-indent presumes left-aligned flow. A block that is NOT left-aligned
-            // but IS right- or centre-aligned (a right-ragged-left header)
-            // scatters its left edges by design, so an "indent" there carries no
-            // meaning. A single-line paragraph classifies as left-aligned.
-            // The paragraph's left-edge SCATTER separates flow text from
-            // right-/centre-placed header blocks: a first-line indent leaves a
-            // small (≤ ~4 em) scatter, while a right-anchored header
-            // block scatters most of its width.
-            double leftScatter = 0;
-            foreach (var pl in currentLines)
-                leftScatter = Math.Max(leftScatter, pl.MinX - paraLeft);
-            var suppressIndent = leftScatter > 4 * f;
-            // Inside a bullet item the continuation edge IS an indent relative to
-            // the bullet column, so T-indent stays quiet there ("■English…" item's
-            // capital-led "United Nations…" continuation).
-            var paraBullet = BulletLead(LineText(currentLines[0]));
-            var currBullet = BulletLead(text);
-            var tIndent = capital && !suppressIndent && !paraBullet && curr.MinX > paraLeft + 0.55 * f;
-            // T-outdent: a hanging-indent paragraph (first line outdented, continuation
-            // lines indented — bullet/definition lists) starts anew when a line begins
-            // LEFT of the continuation edge (consecutive "■ …" list items).
-            var tOutdent = false;
-            if (capital && currentLines.Count >= 2)
-            {
-                var contLeft = double.MaxValue;
-                for (var li = 1; li < currentLines.Count; li++)
-                    contLeft = Math.Min(contLeft, currentLines[li].MinX);
-                tOutdent = curr.MinX < contLeft - 0.55 * f;
-            }
-            var tNumeric = prevText.EndsWith(".") && NumericLead(text);
-            // T-font: a pronounced font-size change is a boundary of its own — a
-            // 13.3-pt heading line ("Officer") against the 8-pt list body below it.
-            // The sizes compared are the CURRENT line's first fragment against the
-            // PREVIOUS line's last fragment (the font-size rule) — a line
-            // AVERAGE dragged down by superscript citation runs must not read as a
-            // size change (the ［11-18］ citations).
-            var currLeadF = curr.Fragments.Count > 0 && curr.Fragments[0].FontSize > 0
-                ? (double)curr.Fragments[0].FontSize : f;
-            var prevTailF = prev.Fragments.Count > 0 && prev.Fragments[^1].FontSize > 0
-                ? (double)prev.Fragments[^1].FontSize : prevF;
-            var tFont = capital && Math.Max(currLeadF, prevTailF) > 1.25 * Math.Min(currLeadF, prevTailF);
-            // T-bullet: a bullet line always OPENS a list item, and a non-bullet
-            // line returning to the bullet column CLOSES one ("■Place: …" followed
-            // by "Closing Date: …" at the same left edge).
-            var tBullet = currBullet && !paraBullet
-                          || paraBullet && currBullet && curr.MinX < paraLeft + 0.55 * f
-                          || paraBullet && !currBullet && capital && curr.MinX < paraLeft + 0.55 * f;
-            // The literal whitespace that separates the paragraphs may sit at the
-            // START of this line or (with our line assembly) as the TRAILING space
-            // run of the previous one; the right-edge gap is measured to the
-            // previous line's ink (trailing spaces excluded).
-            var trailingSpaces = prevRaw.Length - prevText.Length;
-            var prevInkRight = prev.MaxX - trailingSpaces * 0.25 * prevF;
-            var tSpace = capital && capIdx > 0 && text.Length > 0 && char.IsWhiteSpace(text[0])
-                         && (bodyRight - prevInkRight) > 1.5 * prevF;
-            // T-shift: after a SHORT line (ink ending more than ShortLineGapEm of its
-            // size before the section's right edge) a capital-led line that starts
-            // anywhere but on the previous line's left edge opens a paragraph - the
-            // reference splits "Senior" / "Macro-Economist" (outdent 35) and
-            // "Finance" / "Officer" (indent 3.7) but keeps "Senior Specialist in" /
-            // "International Labour Standards" (gap 2.9 em) together. Probed on
-            // equal-pitch Courier lines: a 4 em gap splits at a 1 pt shift either
-            // way, a 3 em gap does not, and a same-edge line never splits this way.
-            var prevShort = (sectionRight - prevInkRight) > ShortLineGapEm * prevF;
-            // A lead that is not a capital (a digit, a bracketed number) needs a
-            // shift of whole ems: a page number "6" half an em under a short last
-            // line joins the paragraph (it is kept), a "(100) HAMBURG"
-            // row outdented by 290 pt under "DEPARTURE PAGE :" opens one.
-            var shift = Math.Abs(curr.MinX - prev.MinX);
-            var tShift = prevShort
-                         && (capital ? shift >= Math.Max(MinShiftPt, MinShiftEm * f)
-                                     : !LeadsWithLowercase(text) && shift >= LargeShiftEm * f);
-
-            // T-mark: a line that OPENS with a mark - a quotation mark, bracket,
-            // guillemet, apostrophe - and then a capital letter starts a paragraph
-            // on its own, with no indent and no gap (a newspaper quote paragraph
-            // '"As a general rule ...' right under 'can be used. '). Probed on the
-            // reference with equal-width lines: “As / "Pi / «Gamma / (Kappa / 'Alpha
-            // all split; “1984, ‘theta and a bare capital (Theta) do not.
-            var tMark = capital && capIdx > 0 && !currBullet && LeadsWithMark(text, capIdx);
-
-            if (GridDebug)
-                Console.Error.WriteLine($"[para] minX={curr.MinX:F1} paraLeft={paraLeft:F1} f={f:F1} cap={capital} scat={leftScatter:F0} supp={suppressIndent} tI={tIndent} tN={tNumeric} tS={tSpace} tO={tOutdent} tF={tFont} tB={tBullet} tM={tMark} tSh={tShift} '{text[..Math.Min(24, text.Length)]}'");
-            if (tIndent || tNumeric || tSpace || tOutdent || tFont || tBullet || tMark || tShift)
-            {
-                paragraphs.Add(BuildParagraph(currentLines));
-                currentLines = [curr];
-                paraLeft = curr.MinX;
-            }
-            else
-            {
-                currentLines.Add(curr);
-                paraLeft = Math.Min(paraLeft, curr.MinX);
-            }
+            GroupParagraphLine(gp, i);
         }
 
-        if (currentLines.Count > 0)
-            paragraphs.Add(BuildParagraph(currentLines));
+        if (gp.currentLines.Count > 0)
+            gp.paragraphs.Add(BuildParagraph(gp.currentLines));
 
-        return paragraphs;
+        return gp.paragraphs;
     }
 
     /// <summary>Re-join a paragraph's per-line fragments into text, consulting the page's

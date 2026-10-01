@@ -449,7 +449,7 @@ public sealed partial class Form : IDisposable
             if (tIdx < 0) yield break;
             int open = fdf.IndexOf('(', tIdx);
             if (open < 0) yield break;
-            var name = ReadFdfLiteral(fdf, open, out int afterName);
+            (var name, int afterName) = ReadFdfLiteral(fdf, open);
             // Look for an immediately following /V (allow whitespace between).
             int vIdx = fdf.IndexOf("/V", afterName, StringComparison.Ordinal);
             string value = "";
@@ -460,7 +460,7 @@ public sealed partial class Form : IDisposable
                 int vOpen = fdf.IndexOf('(', vIdx);
                 if (vOpen >= 0)
                 {
-                    value = ReadFdfLiteral(fdf, vOpen, out next);
+                    (value, next) = ReadFdfLiteral(fdf, vOpen);
                 }
             }
             yield return (name, value);

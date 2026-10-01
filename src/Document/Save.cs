@@ -14,6 +14,11 @@ namespace Aspose.Pdf;
 
 public sealed partial class Document : IDisposable
 {
+    /// <summary>Set once content was removed for good (a redaction, a sanitization): the document
+    /// is then never saved as an incremental update, which would keep what was removed in the
+    /// revision before it.</summary>
+    internal bool MustRewriteWhole { get; set; }
+
     /// <summary>
     /// Serialize the document into a fresh byte array.
     /// </summary>
@@ -21,7 +26,7 @@ public sealed partial class Document : IDisposable
     {
         FireBeforePageGenerateEvents();
 
-        if (_sourceStream is not null && _sourceStream.CanWrite)
+        if (_sourceStream is not null && _sourceStream.CanWrite && !MustRewriteWhole)
         {
             SaveIncremental(_sourceStream);
             _sourceStream.Seek(0, SeekOrigin.Begin);
@@ -51,7 +56,7 @@ public sealed partial class Document : IDisposable
         => _actions ??= new Annotations.DocumentActionCollection(this);
 
     /// <summary>Delegate fired when the renderer fails to resolve a font
-    /// referenced by a content stream. <paramref name="originalFont"/> is
+    /// referenced by a content stream. <c>originalFont</c> is
     /// the font that couldn't be loaded; <paramref name="newFont"/> is the
     /// substitute the renderer fell back to. Real wiring lives in the
     /// FontResolver path — when this event has subscribers, the resolver
@@ -127,7 +132,7 @@ public sealed partial class Document : IDisposable
         if (string.IsNullOrEmpty(options.SpecialFolderForAllImages))
             return (filesDir, filesUrl);
         var imagesDir = Path.GetFullPath(options.SpecialFolderForAllImages);
-        var rel = Path.GetRelativePath(string.IsNullOrEmpty(htmlDir) ? "." : htmlDir, imagesDir)
+        var rel = Compat.GetRelativePath(string.IsNullOrEmpty(htmlDir) ? "." : htmlDir, imagesDir)
             .Replace(Path.DirectorySeparatorChar, '/');
         return (imagesDir, rel == "." ? "" : rel);
     }
@@ -273,11 +278,27 @@ public sealed partial class Document : IDisposable
     /// <summary>Rebuild the page tree so each subtree has <paramref name="nodesNumInSubtrees"/> children. Stored only.</summary>
     public void PageNodesToBalancedTree(byte nodesNumInSubtrees) { _ = nodesNumInSubtrees; }
 
-    /// <summary>Remove all metadata. Stored only — clears /Info and /Metadata in a future change.</summary>
-    public void RemoveMetadata() { }
+    /// <summary>Remove all metadata: the document information and every XMP packet - the
+    /// document's, and those of its pages, images, fonts and forms.</summary>
+    public void RemoveMetadata() =>
+        new Security.HiddenDataSanitization.HiddenDataSanitizer(
+            new Security.HiddenDataSanitization.HiddenDataSanitizationOptions { RemoveMetadata = true }).Sanitize(this);
 
-    /// <summary>Remove PDF/UA compliance markers. Stored only.</summary>
-    public void RemovePdfUaCompliance() { }
+    /// <summary>
+    /// Withdraw the document's claim to PDF/UA-1 conformance: the pdfuaid entries in the
+    /// XMP packet and the extension schema that declares them. The accessibility work
+    /// itself - the structure tree, the title, the tagging - is left exactly as it is; only
+    /// the claim goes, which is what a producer that is no longer willing to stand behind
+    /// the claim needs.
+    /// </summary>
+    public void RemovePdfUaCompliance()
+    {
+        if (!HasMetadata) return;
+        var xmp = GetOrCreateXmpMetadata();
+        foreach (var key in xmp.Keys.Where(k => k.StartsWith("pdfuaid:", StringComparison.Ordinal)).ToList())
+            xmp.Remove(key);
+        xmp.RemoveExtensionSchema("pdfuaid");
+    }
 
     /// <summary>Flatten transparency to opaque graphics. Stored only — no-op in FOSS.</summary>
     public void FlattenTransparency() { }
@@ -531,7 +552,7 @@ public sealed partial class Document : IDisposable
     /// become the target of a parameterless Save().</summary>
     public Document(string filename, LoadOptions options) : this(SourceToPdfBytes(filename, options))
     {
-        if (options is not (HtmlLoadOptions or SvgLoadOptions or TxtLoadOptions or MdLoadOptions))
+        if (options is not (HtmlLoadOptions or SvgLoadOptions or TxtLoadOptions or MdLoadOptions or PsLoadOptions))
             FileName = filename;
     }
 
@@ -541,6 +562,7 @@ public sealed partial class Document : IDisposable
         SvgLoadOptions s => SvgConvertToPdfBytes(Converters.SvgToPdfConverter.Convert(path, s)),
         TxtLoadOptions t => Converters.TxtToPdfConverter.Convert(path, t),
         MdLoadOptions m => Converters.MarkdownToPdfConverter.Convert(path, m).ToArray(),
+        PsLoadOptions p => Converters.PsToPdfConverter.ConvertToBytes(path, p),
         _ => File.ReadAllBytes(path),
     };
 
@@ -553,6 +575,7 @@ public sealed partial class Document : IDisposable
             SvgLoadOptions s => SvgConvertToPdfBytes(Converters.SvgToPdfConverter.Convert(data, s)),
             TxtLoadOptions t => Converters.TxtToPdfConverter.Convert(data, t),
             MdLoadOptions m => Converters.MarkdownToPdfConverter.Convert(data, m).ToArray(),
+            PsLoadOptions p => Converters.PsToPdfConverter.ConvertToBytes(data, p),
             _ => data,
         };
     }
@@ -571,6 +594,27 @@ public sealed partial class Document : IDisposable
     /// the page's object number is decided, before the catalog is serialized.
     /// </summary>
     internal List<(PdfDictionary Element, Page Page)> PendingStructPgFixups { get; } = new();
+
+    private (int Count, PdfDictionary? Last, Dictionary<PdfDictionary, Page> ByElement, Dictionary<PdfDictionary, Page> ByPage)? _pendingStructPgMap;
+
+    /// <summary><see cref="PendingStructPgFixups"/> by element and by page dictionary, built once
+    /// for as long as the list stays as it is (reading every cell of a large table asks it again).</summary>
+    internal (Dictionary<PdfDictionary, Page> ByElement, Dictionary<PdfDictionary, Page> ByPage) PendingStructPgMap()
+    {
+        var list = PendingStructPgFixups;
+        var last = list.Count > 0 ? list[^1].Element : null;
+        if (_pendingStructPgMap is { } known && known.Count == list.Count && ReferenceEquals(known.Last, last))
+            return (known.ByElement, known.ByPage);
+        var byElement = new Dictionary<PdfDictionary, Page>();
+        var byPage = new Dictionary<PdfDictionary, Page>();
+        foreach (var (element, page) in list)
+        {
+            byElement[element] = page;
+            byPage.TryAdd(page.Dict, page);
+        }
+        _pendingStructPgMap = (list.Count, last, byElement, byPage);
+        return (byElement, byPage);
+    }
 
     /// <summary>
     /// Allocate the next available object number for new objects.

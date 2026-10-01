@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Text;
 /// Resolves Standard 14 and common PDF font names to system TrueType font files.
 /// Cross-platform: searches macOS, Linux, and Windows font directories.
 /// </summary>
-internal static class SystemFontResolver
+internal static partial class SystemFontResolver
 {
     private static readonly Dictionary<string, byte[]?> _cache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly object _lock = new();
@@ -17,16 +17,8 @@ internal static class SystemFontResolver
     /// Try to load TrueType font data for a PDF base font name.
     /// Returns null if the font cannot be found on the system.
     /// </summary>
-    public static byte[]? Resolve(string baseFontName) =>
-        Resolve(baseFontName, out _);
-
-    /// <summary>
-    /// Try to load TrueType font data for a PDF base font name.
-    /// Also reports a horizontal scale factor for condensed/narrow font substitution.
-    /// </summary>
-    public static byte[]? Resolve(string baseFontName, out double horizontalScale)
+    public static byte[]? Resolve(string baseFontName)
     {
-        horizontalScale = 1.0;
         baseFontName = NormalizeBaseFontName(baseFontName);
         // No horizontal scaling needed when the correct narrow font is available
 
@@ -37,6 +29,10 @@ internal static class SystemFontResolver
         }
 
         var data = FindFont(baseFontName);
+        // A hyphen that is part of the family ("MS-UIGothic" for MS UI Gothic) rather than
+        // the family-style separator: the name read without it.
+        if (data is null && baseFontName.Contains('-'))
+            data = FindFont(baseFontName.Replace("-", ""));
 
         lock (_lock)
         {
@@ -53,9 +49,9 @@ internal static class SystemFontResolver
     /// italic angle. The FixedPitch flag is frequently set incorrectly, so it is only honoured
     /// when the /Widths array confirms near-uniform advances. Returns null if nothing resolves.
     /// </summary>
-    internal static byte[]? ResolveDescriptorSubstitute(
-        PdfDictionary fontDict, PdfDictionary descriptor, PdfReader reader, out double horizontalScale)
+    internal static (byte[]? result, double horizontalScale) ResolveDescriptorSubstitute(PdfDictionary fontDict, PdfDictionary descriptor, PdfReader reader)
     {
+        double horizontalScale = default;
         horizontalScale = 1.0;
         long flags = descriptor.GetInt("Flags");
         var name = fontDict.GetName("BaseFont") ?? descriptor.GetName("FontName") ?? string.Empty;
@@ -64,7 +60,7 @@ internal static class SystemFontResolver
         // custom pictographs, so a Helvetica/Times substitute would draw wrong glyphs. Such
         // fonts keep their previous behaviour (render nothing) rather than render garbage.
         bool symbolic = (flags & 0x4) != 0 && (flags & 0x20) == 0;
-        if (symbolic) return null;
+        if (symbolic) return (null, horizontalScale);
 
         bool serif = (flags & 0x2) != 0;
         bool italic = (flags & 0x40) != 0
@@ -85,7 +81,7 @@ internal static class SystemFontResolver
             (false, true) => "-Italic",
             _ => string.Empty,
         };
-        return Resolve(family + style, out horizontalScale);
+        return (Resolve(family + style), horizontalScale);
     }
 
     private static double AsDouble(PdfObject? obj) => obj switch
@@ -161,19 +157,22 @@ internal static class SystemFontResolver
         // Map PDF Standard 14 names to common system font names/files
         var (fileName, familyName, isBold, isItalic) = MapFontName(name);
 
-        foreach (var dir in FontDirectories().SelectMany(WithSubdirectories))
-        {
-            if (!Directory.Exists(dir)) continue;
+        var dirs = FontDirectories().SelectMany(WithSubdirectories).Where(Directory.Exists).ToList();
 
-            // Try exact file name match
-            if (fileName is not null && FindCandidateInDir(dir, fileName) is { } mapped)
-                return LoadFont(mapped, familyName, isBold, isItalic);
+        // Try exact file name match
+        if (fileName is not null)
+            foreach (var dir in dirs)
+                if (FindCandidateInDir(dir, fileName) is { } mapped)
+                    return LoadFont(mapped, familyName, isBold, isItalic);
 
-            // Try common variations
-            foreach (var candidate in GetCandidateFiles(familyName, isBold, isItalic))
+        // Try common variations, best candidate first in whichever directory holds it: a stand-in
+        // must not win because its directory is searched earlier. Arial Narrow installed for the
+        // user lives in the per-user font directory, and Arial - its last-resort stand-in - in
+        // the system one, which is searched first; the reference drew the user's Arial Narrow.
+        foreach (var candidate in GetCandidateFiles(familyName, isBold, isItalic))
+            foreach (var dir in dirs)
                 if (FindCandidateInDir(dir, candidate) is { } path)
                     return LoadFont(path, familyName, isBold, isItalic);
-        }
 
         return null;
     }
@@ -186,9 +185,10 @@ internal static class SystemFontResolver
     /// sibling FindFontFile has carried this exact retry all along.</summary>
     private static string? FindCandidateInDir(string dir, string fileName)
     {
+        if (!CanNameAFile(fileName)) return null;
         var path = Path.Combine(dir, fileName);
         if (File.Exists(path)) return path;
-        if (OperatingSystem.IsWindows()) return null; // NTFS already matched case-blind
+        if (Compat.IsWindows()) return null; // NTFS already matched case-blind
         string[] entries;
         try { entries = Directory.GetFiles(dir); }
         catch { return null; }
@@ -198,12 +198,34 @@ internal static class SystemFontResolver
         return null;
     }
 
+    /// <summary>Whether <paramref name="fileName"/> could name a file on this platform at
+    /// all. Every candidate here is built from a font name the DOCUMENT chose, so it can
+    /// carry a character no file name may hold. The two runtimes disagree about what
+    /// happens next: .NET Framework's <see cref="Path.Combine(string, string)"/> throws
+    /// ArgumentException ("Illegal characters in path"), while .NET Core builds the
+    /// impossible path and lets <see cref="File.Exists(string)"/> answer false - so the
+    /// same PDF converted on one target and died inside the font lookup on the other.
+    /// Answering it here makes both say the only sensible thing: no such file.</summary>
+    private static bool CanNameAFile(string fileName) =>
+        fileName.IndexOfAny(InvalidFileNameChars) < 0;
+
+    private static readonly char[] InvalidFileNameChars = Path.GetInvalidFileNameChars();
+
     private static (string? fileName, string familyName, bool isBold, bool isItalic) MapFontName(string name)
     {
         // Detect style from suffix
         var lower = name.ToLowerInvariant();
         var bold = lower.Contains("bold");
         var italic = lower.Contains("italic") || lower.Contains("oblique");
+        // Oblique is a style only the standard faces are named with. Anywhere else the reference
+        // finds no style in it at all: Verdana-Oblique, Verdana-BoldOblique, Arial-BoldOblique,
+        // Tahoma-BoldOblique and a form's Helvetica-Narrow-BoldOblique all print upright and
+        // regular, where -Bold, -Italic and -BoldItalic keep their styles.
+        if (lower.Contains("oblique") && !Standard14Fonts.IsStandard14(name))
+        {
+            bold = false;
+            italic = false;
+        }
 
         // Extract base family by removing style suffixes and common noise
         var family = name;
@@ -267,82 +289,27 @@ internal static class SystemFontResolver
         {
             return ("ZapfDingbats.ttf", "ZapfDingbats", false, false);
         }
-        else if (family.Equals("Tahoma", StringComparison.OrdinalIgnoreCase))
+        else if (family.Replace(" ", "").Equals(MicrosoftSansSerifFamily, StringComparison.OrdinalIgnoreCase)
+                 && FindFontFile(MicrosoftSansSerifFile) is not null)
         {
-            // Tahoma ships with Windows; nothing to do but keep family name as-is so
-            // GetCandidateFiles tries tahoma.ttf / Tahoma.ttf.
+            // Where the host has it, Microsoft Sans Serif is its own single face for every style:
+            // the reference printed a title in "Microsoft Sans Serif,Bold" in micross.ttf's regular
+            // outlines, not in a bold stand-in. Without the file the family is aliased below.
+            return (MicrosoftSansSerifFile, "Microsoft Sans Serif", false, false);
         }
-        else if (family.Equals("TrebuchetMS", StringComparison.OrdinalIgnoreCase) ||
-                 family.Equals("Trebuchet MS", StringComparison.OrdinalIgnoreCase) ||
-                 family.Equals("TrebuchetMS-Bold", StringComparison.OrdinalIgnoreCase))
+        else
         {
-            family = "Trebuchet MS";
-        }
-        else if (family.StartsWith("Verdana", StringComparison.OrdinalIgnoreCase))
-        {
-            family = "Verdana";
-        }
-        else if (family.StartsWith("Calibri", StringComparison.OrdinalIgnoreCase))
-        {
-            family = "Calibri";
-        }
-        else if (family.StartsWith("Cambria", StringComparison.OrdinalIgnoreCase))
-        {
-            family = "Cambria";
-        }
-        else if (family.StartsWith("Georgia", StringComparison.OrdinalIgnoreCase))
-        {
-            family = "Georgia";
-        }
-        else if (family.Replace(" ", "").StartsWith("MicrosoftSansSerif", StringComparison.OrdinalIgnoreCase))
-        {
-            // Microsoft Sans Serif (Windows micross.ttf, regular only) is metrically
-            // close to Arial/Helvetica and lacks separate bold/italic files. Alias it to
-            // Helvetica so every style resolves (arial*.ttf on Windows, Liberation/DejaVu
-            // on Linux) instead of dropping the text when the named font can't be found.
-            fileName = "Helvetica.ttc";
-            family = "Helvetica";
-        }
-        else if (family.StartsWith("Univers", StringComparison.OrdinalIgnoreCase))
-        {
-            // Univers is a Linotype font that doesn't ship with Windows or macOS by
-            // default. Fall back to Helvetica/Arial — metrically close enough that
-            // the text is at least readable instead of rendering as a blank box.
-            fileName = "Helvetica.ttc";
-            family = "Helvetica";
-        }
-        else if (family.Replace(" ", "").StartsWith("CenturyGothic", StringComparison.OrdinalIgnoreCase))
-        {
-            // Century Gothic (a geometric sans) doesn't ship with Windows; without an
-            // alias its non-embedded text drops entirely (the whole letter body
-            // rendered blank). Fall back to Helvetica/Arial so the text
-            // renders — another sans-serif, metrically close enough to be legible.
-            fileName = "Helvetica.ttc";
-            family = "Helvetica";
-        }
-        else if (family.Replace(" ", "").StartsWith("YuGothic", StringComparison.OrdinalIgnoreCase))
-        {
-            // Yu Gothic / Yu Gothic UI family. Each weight lives in a specific
-            // YuGoth*.ttc, and the UI and non-UI faces WITHIN a collection have
-            // different glyph orders — so for a Type0/Identity CID (content codes are
-            // the authoring face's glyph ids) the EXACT face must be embedded, not just
-            // one of the right weight. Map the PDF name to its collection file and the
-            // precise face name; ExtractFromTtc then matches that face by name.
-            var key = name.Replace(" ", "").Replace(",", "");
-            (fileName, family) =
-                  key.StartsWith("YuGothicUISemibold", StringComparison.OrdinalIgnoreCase) ? ("YuGothB.ttc", "Yu Gothic UI Semibold")
-                : key.StartsWith("YuGothicUISemilight", StringComparison.OrdinalIgnoreCase) ? ("YuGothR.ttc", "Yu Gothic UI Semilight")
-                : key.StartsWith("YuGothicUILight", StringComparison.OrdinalIgnoreCase) ? ("YuGothL.ttc", "Yu Gothic UI Light")
-                : key.StartsWith("YuGothicUIBold", StringComparison.OrdinalIgnoreCase) ? ("YuGothB.ttc", "Yu Gothic UI Bold")
-                : key.StartsWith("YuGothicUI", StringComparison.OrdinalIgnoreCase) ? ("YuGothM.ttc", "Yu Gothic UI Regular")
-                : key.StartsWith("YuGothicMedium", StringComparison.OrdinalIgnoreCase) ? ("YuGothM.ttc", "Yu Gothic Medium")
-                : key.StartsWith("YuGothicLight", StringComparison.OrdinalIgnoreCase) ? ("YuGothL.ttc", "Yu Gothic Light")
-                : key.StartsWith("YuGothicBold", StringComparison.OrdinalIgnoreCase) ? ("YuGothB.ttc", "Yu Gothic Bold")
-                : ("YuGothR.ttc", "Yu Gothic Regular");
+            (fileName, family) = AliasVendorFamily(name, family, fileName);
         }
 
         return (fileName, family, bold, italic);
     }
+
+    /// <summary>The family name of Windows' Microsoft Sans Serif, spaces removed.</summary>
+    private const string MicrosoftSansSerifFamily = "MicrosoftSansSerif";
+
+    /// <summary>Microsoft Sans Serif's one font file: the family ships in a regular face only.</summary>
+    private const string MicrosoftSansSerifFile = "micross.ttf";
 
     private static IEnumerable<string> GetCandidateFiles(string family, bool bold, bool italic)
     {
@@ -382,12 +349,31 @@ internal static class SystemFontResolver
             yield return $"{family}.otf";
         }
 
-        // Windows-specific short filenames (lowercase, no spaces, ASCII abbreviations).
-        // These are the file names Windows actually ships in C:\Windows\Fonts; they
-        // don't follow the family-name convention so the generic candidates above miss
-        // them. Mapping the well-known families fixes PDFs that name a system
-        // font (Arial Black, Trebuchet, Arial Narrow) without embedding it.
-        var winShort = (family, bold, italic) switch
+        var winShort = WindowsShortFileName(family, bold, italic);
+        if (winShort is not null) yield return winShort;
+
+        foreach (var alias in StandardFamilyAliases(family, bold, italic, style)) yield return alias;
+
+        foreach (var linux in LinuxEquivalents(family, bold, italic)) yield return linux;
+
+        // Last-resort bare-family fallbacks (deferred from above when a style was
+        // requested) so a regular face renders rather than nothing when no styled file
+        // exists. The collection is tried here too: a collection that DOES carry the
+        // requested style still answers correctly, it just no longer outranks a
+        // dedicated styled file.
+        if (style.Length > 0)
+        {
+            yield return $"{family}.ttc";
+            yield return $"{family}.ttf";
+            yield return $"{family}.otf";
+        }
+    }
+
+    /// <summary>The file Windows ships for a well-known family and style: the names in
+    /// C:\Windows\Fonts do not follow the family-name convention, so the generic
+    /// candidates miss them. Null when the family is not one of the mapped ones.</summary>
+    private static string? WindowsShortFileName(string family, bool bold, bool italic) =>
+        (family, bold, italic) switch
         {
             // CJK system faces (collection files with non-family file names).
             ("MS Gothic", _, _) or ("MS-Gothic", _, _) or ("MSGothic", _, _) => "msgothic.ttc",
@@ -439,6 +425,10 @@ internal static class SystemFontResolver
             ("Georgia", true, false) => "georgiab.ttf",
             ("Georgia", false, true) => "georgiai.ttf",
             ("Georgia", true, true) => "georgiaz.ttf",
+            ("Comic Sans MS", false, false) => "comic.ttf",
+            ("Comic Sans MS", true, false) => "comicbd.ttf",
+            ("Comic Sans MS", false, true) => "comici.ttf",
+            ("Comic Sans MS", true, true) => "comicz.ttf",
             ("Cambria", false, false) => "cambria.ttc",
             ("Cambria", true, _) => "cambriab.ttf",
             ("Segoe UI Emoji", _, _) or ("SegoeUIEmoji", _, _) => "seguiemj.ttf",
@@ -452,8 +442,12 @@ internal static class SystemFontResolver
             ("Segoe UI", true, true) => "segoeuiz.ttf",
             _ => null,
         };
-        if (winShort is not null) yield return winShort;
 
+    /// <summary>The metric-compatible aliases of the standard families: Arial for
+    /// Helvetica and Arial Narrow, Times New Roman for Times, Courier New for Courier,
+    /// each in the requested style.</summary>
+    private static IEnumerable<string> StandardFamilyAliases(string family, bool bold, bool italic, string style)
+    {
         // Arial Narrow is shipped in Office (ARIALN*.TTF) but not always in the
         // base Windows fonts directory. When ARIALN.TTF isn't there, fall back
         // to regular arial.ttf — the line spacing / hinting will be off (Arial
@@ -516,41 +510,6 @@ internal static class SystemFontResolver
             yield return $"cour{courierStyle}.ttf";
             yield return $"Courier New{(courierStyle.Length > 0 ? " " + style : "")}.ttf";
         }
-
-        // Linux liberation/dejavu equivalents
-        if (family is "Helvetica" or "Arial")
-        {
-            var lf = bold ? (italic ? "LiberationSans-BoldItalic" : "LiberationSans-Bold")
-                : (italic ? "LiberationSans-Italic" : "LiberationSans-Regular");
-            yield return $"{lf}.ttf";
-            var df = bold ? (italic ? "DejaVuSans-BoldOblique" : "DejaVuSans-Bold")
-                : (italic ? "DejaVuSans-Oblique" : "DejaVuSans");
-            yield return $"{df}.ttf";
-        }
-        else if (family is "Times" or "Times New Roman")
-        {
-            var lf = bold ? (italic ? "LiberationSerif-BoldItalic" : "LiberationSerif-Bold")
-                : (italic ? "LiberationSerif-Italic" : "LiberationSerif-Regular");
-            yield return $"{lf}.ttf";
-        }
-        else if (family is "Courier" or "Courier New")
-        {
-            var lf = bold ? (italic ? "LiberationMono-BoldItalic" : "LiberationMono-Bold")
-                : (italic ? "LiberationMono-Italic" : "LiberationMono-Regular");
-            yield return $"{lf}.ttf";
-        }
-
-        // Last-resort bare-family fallbacks (deferred from above when a style was
-        // requested) so a regular face renders rather than nothing when no styled file
-        // exists. The collection is tried here too: a collection that DOES carry the
-        // requested style still answers correctly, it just no longer outranks a
-        // dedicated styled file.
-        if (style.Length > 0)
-        {
-            yield return $"{family}.ttc";
-            yield return $"{family}.ttf";
-            yield return $"{family}.otf";
-        }
     }
 
     /// <summary>A configured font root plus every directory beneath it. Distributions nest
@@ -582,7 +541,7 @@ internal static class SystemFontResolver
     /// </summary>
     internal static string? FindFontFile(string fileName)
     {
-        if (string.IsNullOrEmpty(fileName)) return null;
+        if (string.IsNullOrEmpty(fileName) || !CanNameAFile(fileName)) return null;
         if (_fontFilePaths.TryGetValue(fileName, out var cached)) return cached;
         string? found = null;
         foreach (var root in FontDirectories())

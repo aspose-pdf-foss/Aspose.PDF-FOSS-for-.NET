@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -52,108 +52,41 @@ internal static partial class HtmlToPdfConverter
 
     private static Document? TryRenderGridsterDashboard(string html, double pageHeight)
     {
-        if (!html.Contains("pdf-widget-container", System.StringComparison.Ordinal)
-            || !html.Contains("gs-w", System.StringComparison.Ordinal)) return null;
+        var gd = new GridsterDashboardState();
+        gd.html = html;
+        gd.pageHeight = pageHeight;
+        if (!gd.html.Contains("pdf-widget-container", System.StringComparison.Ordinal)
+            || !gd.html.Contains("gs-w", System.StringComparison.Ordinal)) return null;
 
-        var items = ParseGridsterItems(html);
-        if (items.Count == 0) return null;
-        var widgets = items.FindAll(i => i.IsWidget);
-        if (widgets.Count == 0) return null;
+        gd.items = ParseGridsterItems(gd.html);
+        if (gd.items.Count == 0) return null;
+        gd.widgets = gd.items.FindAll(i => i.IsWidget);
+        if (gd.widgets.Count == 0) return null;
 
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        double Px(double v) => v * GridsterPxPt;
+        gd.inv = System.Globalization.CultureInfo.InvariantCulture;
+        gd.marginLeft = 96.0;
+        gd.marginRight = 72.0;
+        gd.originX = gd.marginLeft + GdPx(GridsterContainerPadPx);
+        gd.widestPx = 0;
+        foreach (var w in gd.widgets) gd.widestPx = System.Math.Max(gd.widestPx, w.LeftPx + w.WidthPx);
+        gd.pageWidth = gd.originX + GdPx(gd.widestPx + GridsterContainerPadPx) + gd.marginRight;
 
-        // Page: the widest widget's right edge plus the container padding, between
-        // the document's own margins (the HTML defaults this dialect keeps).
-        const double marginLeft = 96.0, marginRight = 72.0;
-        var originX = marginLeft + Px(GridsterContainerPadPx);
-        double widestPx = 0;
-        foreach (var w in widgets) widestPx = System.Math.Max(widestPx, w.LeftPx + w.WidthPx);
-        var pageWidth = originX + Px(widestPx + GridsterContainerPadPx) + marginRight;
+        gd.doc = new Document();
+        gd.page = gd.doc.Pages.Add(gd.pageWidth, gd.pageHeight);
+        EnsureFonts(gd.page);
+        gd.resByFace = new Dictionary<string, string>(System.StringComparer.Ordinal);
+        gd.sb = new StringBuilder();
 
-        var doc = new Document();
-        var page = doc.Pages.Add(pageWidth, pageHeight);
-        EnsureFonts(page);
-        var resByFace = new Dictionary<string, string>(System.StringComparer.Ordinal);
-        var sb = new StringBuilder();
+        gd.originY = 96.0 + GdPx(GridsterContainerPadPx + 10.0);
 
-        // The gridster's own top: the page margin plus the container's padding and
-        // the .pdf-gridster-container padding-top (10 px).
-        var originY = 96.0 + Px(GridsterContainerPadPx + 10.0);
-
-        foreach (var w in widgets)
+        foreach (var w in gd.widgets)
         {
-            var boxX = originX + Px(w.LeftPx);
-            var boxTop = originY + Px(w.TopPx);
-            var boxW = Px(w.WidthPx);
-
-            var controls = ParseGridsterItems(w.Html);
-            controls.RemoveAll(c => c.IsWidget);
-
-            // The box hugs its content: caption band + the deepest control row +
-            // the body's bottom padding.
-            double deepestPx = 0;
-            foreach (var c in controls) deepestPx = System.Math.Max(deepestPx, c.TopPx + c.HeightPx);
-            var boxH = Px(GridsterCaptionBandPx + deepestPx + GridsterBodyPadBottomPx);
-
-            // Border box (1 px, rgb(28,42,67)), stroked on its centre line.
-            var bw = Px(GridsterBoxBorderPx);
-            sb.Append(string.Create(inv,
-                $"q {28 / 255.0:0.###} {42 / 255.0:0.###} {67 / 255.0:0.###} RG {bw:0.##} w " +
-                $"{boxX + bw / 2:F2} {pageHeight - boxTop - bw / 2:F2} " +
-                $"{boxW - bw:F2} {-(boxH - bw):F2} re S Q\n"));
-
-            // Caption: 18 px Arial Bold, 5 px in from the box, on the band.
-            var caption = FirstClassText(w.Html, "pdf-widget-name");
-            if (caption.Length > 0)
-            {
-                var capSize = Px(GridsterCaptionPx);
-                var capX = boxX + Px(GridsterBoxBorderPx + 5.0);
-                var capBase = boxTop + Px(GridsterBoxBorderPx + 5.0) + capSize;
-                EmitGridsterText(page, resByFace, capSize, capX, pageHeight - capBase,
-                    caption, "Arial,Bold");
-            }
-
-            var bodyTop = boxTop + Px(GridsterCaptionBandPx);
-            foreach (var c in controls)
-            {
-                var cx = boxX + Px(GridsterBoxBorderPx + c.LeftPx);
-                var cTop = bodyTop + Px(c.TopPx);
-                var cW = Px(c.WidthPx);
-
-                var label = FirstClassText(c.Html, "pdf-field-label");
-                var value = FirstClassText(c.Html, "pdf-label-control");
-
-                // The red control box fills the value half of the control.
-                var valX = cx + Px(GridsterLabelColPx);
-                var valW = cW - Px(GridsterLabelColPx);
-                if (valW > 0)
-                    sb.Append(string.Create(inv,
-                        $"q 1 0 0 rg {valX:F2} {pageHeight - cTop - Px(c.HeightPx):F2} " +
-                        $"{valW:F2} {Px(c.HeightPx):F2} re f Q\n"));
-
-                // Label: 16 px Arial, its baseline at the row's own 3 px pad + ascent.
-                var labSize = Px(GridsterLabelPx);
-                var labBase = cTop + Px(3.0) + labSize * ArialAscentEm;
-                if (label.Length > 0)
-                    EmitGridsterText(page, resByFace, labSize, cx, pageHeight - labBase,
-                        label, "Arial");
-
-                // Value: 10.5 pt Arial, RIGHT-aligned inside the red box (probed:
-                // every value's right edge lands on the box's right inset).
-                if (value.Length > 0 && valW > 0)
-                {
-                    var vw = MeasureFaceText("Arial", value, GridsterValuePt);
-                    var vx = valX + valW - vw;
-                    EmitGridsterText(page, resByFace, GridsterValuePt, vx,
-                        pageHeight - (labBase + GridsterValueDropPt), value, "Arial");
-                }
-            }
+            RenderGridsterWidget(gd, w);
         }
 
-        page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
-        PruneUnusedFonts(doc);
-        return doc;
+        gd.page.AddContentStream(Encoding.ASCII.GetBytes(gd.sb.ToString()));
+        PruneUnusedFonts(gd.doc);
+        return gd.doc;
     }
 
     /// <summary>Draw one positioned run in a Standard-14-named face, registering the
@@ -177,7 +110,7 @@ internal static partial class HtmlToPdfConverter
         (double R, double G, double B) ink)
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
-        page.AddContentStream(System.Text.Encoding.ASCII.GetBytes(string.Create(inv,
+        page.AddContentStream(System.Text.Encoding.ASCII.GetBytes(Compat.Format(inv,
             $"q {ink.R:0.###} {ink.G:0.###} {ink.B:0.###} rg\n")));
         EmitGridsterText(page, resByFace, size, x, y, text, face);
         page.AddContentStream(System.Text.Encoding.ASCII.GetBytes("Q\n"));

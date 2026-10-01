@@ -8,12 +8,21 @@ namespace Aspose.Pdf.IO.Filters;
 /// </summary>
 internal static class CcittFaxDecodeFilter
 {
+    /// <summary>Decodes CCITT fax-encoded data into packed 1-bit rows.</summary>
+    /// <param name="data">The encoded bytes.</param>
+    /// <param name="parms">The filter's /DecodeParms dictionary (K, Columns, Rows and so on); null uses the defaults.</param>
     /// <param name="group4ColumnShift">
     /// When true (the default, for CCITT image XObjects), Group 4 lines are shifted one
     /// column left on output to match the producer convention noted in <see cref="DecodeGroup4"/>.
     /// JBIG2's embedded MMR data is strict T.6 without that quirk, so it passes false.
     /// </param>
-    public static byte[] Decode(byte[] data, PdfDictionary? parms, bool group4ColumnShift = true)
+    public static byte[] Decode(byte[] data, PdfDictionary? parms, bool group4ColumnShift = true) =>
+        Decode(data, parms, group4ColumnShift, null);
+
+    /// <summary><see cref="Decode(byte[], PdfDictionary?, bool)"/>, also telling, row by row,
+    /// whether each decoded line was coded one-dimensionally (always for K = 0, by its tag bit
+    /// for K &gt; 0, never for Group 4).</summary>
+    internal static byte[] Decode(byte[] data, PdfDictionary? parms, bool group4ColumnShift, List<bool>? oneDimensionalRows)
     {
         var k = parms is not null ? (int)parms.GetInt("K", 0) : 0;
         var columns = parms is not null ? (int)parms.GetInt("Columns", 1728) : 1728;
@@ -28,17 +37,18 @@ internal static class CcittFaxDecodeFilter
         if (k == 0)
         {
             // Group 3 1D
-            DecodeGroup31D(reader, columns, rows, encodedByteAlign, output, rowBytes);
+            DecodeGroup31D(reader, columns, rows, encodedByteAlign, output, rowBytes, oneDimensionalRows);
         }
         else if (k > 0)
         {
             // Group 3 2D
-            DecodeGroup32D(reader, columns, rows, k, encodedByteAlign, output, rowBytes);
+            DecodeGroup32D(reader, columns, rows, encodedByteAlign, output, rowBytes, oneDimensionalRows);
         }
         else
         {
             // Group 4 (k < 0)
             DecodeGroup4(reader, columns, rows, encodedByteAlign, output, rowBytes, group4ColumnShift);
+            for (var row = 0; oneDimensionalRows is not null && row < output.Count / rowBytes; row++) oneDimensionalRows.Add(false);
         }
 
         // Invert if BlackIs1 is false (default: white=0, black=1 in CCITT,
@@ -53,7 +63,7 @@ internal static class CcittFaxDecodeFilter
     }
 
     private static void DecodeGroup31D(CcittBitReader reader, int columns, int rows,
-        bool byteAlign, List<byte> output, int rowBytes)
+        bool byteAlign, List<byte> output, int rowBytes, List<bool>? oneDimensionalRows)
     {
         var maxRows = rows > 0 ? rows : int.MaxValue;
         for (var row = 0; row < maxRows; row++)
@@ -66,15 +76,18 @@ internal static class CcittFaxDecodeFilter
             if (!Decode1DLine(reader, line, columns))
                 break;
             OutputLine(line, output, rowBytes);
+            oneDimensionalRows?.Add(true);
         }
     }
 
+    /// <summary>Mixed Group 3 lines: each line's tag bit (T.4 §4.2.1) says how it is coded,
+    /// 1 one-dimensionally, 0 two-dimensionally against the line above. K only bounds how
+    /// many two-dimensional lines an encoder may run; the decoder follows the tags.</summary>
     private static void DecodeGroup32D(CcittBitReader reader, int columns, int rows,
-        int k, bool byteAlign, List<byte> output, int rowBytes)
+        bool byteAlign, List<byte> output, int rowBytes, List<bool>? oneDimensionalRows)
     {
         var maxRows = rows > 0 ? rows : int.MaxValue;
         var refLine = new bool[columns];
-        var kCounter = 0;
 
         for (var row = 0; row < maxRows; row++)
         {
@@ -88,18 +101,17 @@ internal static class CcittFaxDecodeFilter
             var tag = reader.ReadBit();
             if (tag < 0) break;
 
-            if (tag == 1 || kCounter >= k - 1)
+            if (tag == 1)
             {
                 if (!Decode1DLine(reader, line, columns)) break;
-                kCounter = 0;
             }
             else
             {
                 if (!Decode2DLine(reader, refLine, line, columns)) break;
-                kCounter++;
             }
 
             OutputLine(line, output, rowBytes);
+            oneDimensionalRows?.Add(tag == 1);
             Array.Copy(line, refLine, columns);
         }
     }
@@ -252,7 +264,7 @@ internal static class CcittFaxDecodeFilter
 
                     var b1 = FindB1(refLine, a0, isWhite, columns);
                     var a1 = b1 + offset;
-                    a1 = Math.Clamp(a1, 0, columns);
+                    a1 = Compat.Clamp(a1, 0, columns);
 
                     if (!isWhite)
                     {

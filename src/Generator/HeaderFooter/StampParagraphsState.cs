@@ -1,6 +1,5 @@
 ﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -18,6 +17,8 @@ private sealed class StampParagraphsState
     // PageInfo → the 90 pt Generator default), header top = 0 — a header
     // paragraph's first baseline hangs just below the physical page top.
     public double mTop;
+    /// <summary>The header's text members stacked so far: each one's box (size + leading), the next seats under them.</summary>
+    public double headerStackH;
     public double mBottom;
     public double mLeft;
     // Footer band law (isolated on the plain Image/TextFragment
@@ -47,6 +48,16 @@ private sealed class StampParagraphsState
     // after it (such fragments render inline, with no gap).
     public double lastTextY;
     public double lastTextEndX;
+    // The seat of a stamped table: its top edge, and the bottom bound the
+    // multi-page build must respect (a plain footer table grows downward into
+    // the margin, so its bound reaches below the page).
+    public double tableTop;
+    public double footerBottomBound;
+    // Per-page working clones of interactive fields in a footer table:
+    // the SAME footer renders on every page, and each page must carry
+    // its own field + widget (one AcroForm field per page, all at the
+    // same footer rectangle).
+    public List<(Cell cell, int idx, Aspose.Pdf.Forms.CheckboxField proto, Aspose.Pdf.Forms.CheckboxField clone)>? fieldSwaps;
     // The stamping inputs, captured from the method parameters.
     public Page page = null!;
     public bool isHeader;

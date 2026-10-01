@@ -1,17 +1,11 @@
 ﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
 
 public sealed partial class HeaderFooter
 {
-    /// <summary>Render the report header's DATA REGION: nested inline-block percentage
-    /// columns of label/value rows (labels bold, right-aligned in the box their css
-    /// gives them), background bands, checkbox rows, and grey-framed fieldsets whose
-    /// legend rides the frame. Returns the height
-    /// consumed; draw:false only measures (columns bottom-align on the tallest sibling).</summary>
     // ── report-dialect geometry ─────────────────────────────────────────────
     // Every value is an empirical constant of this band layout, holding
     // wherever the document repeats the shape.
@@ -357,6 +351,11 @@ public sealed partial class HeaderFooter
         return true;
     }
 
+    /// <summary>Render the report header's DATA REGION: nested inline-block percentage
+    /// columns of label/value rows (labels bold, right-aligned in the box their css
+    /// gives them), background bands, checkbox rows, and grey-framed fieldsets whose
+    /// legend rides the frame. Returns the height
+    /// consumed; a null page only measures (columns bottom-align on the tallest sibling).</summary>
     private static double RenderReportRegion(Page? page, ContentStreamBuilder? b, string html,
         double x, double w, double yTopBase, bool inFieldset, string? boldRes, string? plainRes)
     {

@@ -5,7 +5,7 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.Facades;
 using Aspose.Pdf.Text;
 
-namespace Aspose.Pdf.Stamps;
+namespace Aspose.Pdf;
 
 public partial class TextStamp
 {

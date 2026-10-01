@@ -1,10 +1,39 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
+    /// <summary>An inline-block class rule whose width is a percent share: a column of the flow.</summary>
+    /// <summary>A family rule on a heading or an inline element (`h1 { font-family: Arial }`,
+    /// `a { font-family: 'Arial Black' }`) dresses those runs alone: the reference draws them in
+    /// that face at their UA size inside the same flow (probed: h1 ArialBold 24, h2 CourierNewBold
+    /// 18, a ArialBlack 12), so such a rule does not take the document off the UA flow.</summary>
+    private static bool IsRunScopedFamilySelector(string selector)
+        => Regex.IsMatch(selector.Trim().TrimStart('<', '!', '-', ' '),
+            @"^(?:h[1-6]|a|span|b|i|em|strong|small|big|u|s|label|font|sup|sub|code|tt)(?:\s*,\s*(?:h[1-6]|a|span|b|i|em|strong|small|big|u|s|label|font|sup|sub|code|tt))*$",
+            RegexOptions.IgnoreCase);
+
+    /// <summary>A selector addressing a form control only (input, textarea, select, button).</summary>
+    private static bool IsControlSelector(string selector)
+        => Regex.IsMatch(selector.Trim(), @"^(?:input|textarea|select|button)(?:\[[^\]]*\]|\.[\w-]+|:[\w-]+)*(?:\s*,\s*(?:input|textarea|select|button)(?:\[[^\]]*\]|\.[\w-]+|:[\w-]+)*)*$", RegexOptions.IgnoreCase);
+
+    private static bool IsInlineBlockColumnRule(Dictionary<string, string> rule)
+        => rule.TryGetValue("display", out var d)
+            && d.Trim().Equals("inline-block", StringComparison.OrdinalIgnoreCase)
+            && rule.TryGetValue("width", out var w) && PercentFraction(w) > 0;
+
+    /// <summary>A CSS percent value as a fraction (0 when the value is not a percent).</summary>
+    private static double PercentFraction(string value)
+    {
+        var m = Regex.Match(value, @"^\s*([\d.]+)\s*%\s*$");
+        return m.Success && double.TryParse(m.Groups[1].Value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var pct) && pct > 0
+            ? pct / 100.0 : 0;
+    }
+
     /// <summary>One character's advance in the named face at full font-unit
     /// precision, in milli-em (units/upm×1000). Characters the face cannot map
     /// fall back to the Times New Roman metric (the CSS fallback face a viewer
@@ -78,12 +107,16 @@ internal static partial class HtmlToPdfConverter
         var start = 0;
         for (var i = 0; i < text.Length; i++)
         {
-            if (text[i] == ' ')
+            // (a zero-width space is a break opportunity that draws nothing - measured on the case
+            // report: `zzzzz&#8203;zzzzz` chains wrap at the joins and their column shrinks to a chunk)
+            if (text[i] is ' ' or '\u200B')
             {
                 if (i > start) yield return text[start..i];
                 start = i + 1;
             }
-            else if (text[i] == '-')
+            // (a hyphen opens a break AFTER itself only when it follows the word's own ink: a leading
+            // minus binds to its number - the returns grid's `-1.1%` stays whole)
+            else if (text[i] == '-' && i > start)
             {
                 yield return text[start..(i + 1)];
                 start = i + 1;
@@ -98,8 +131,9 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A CSS font-size value in points: absolute keywords at the UA's
     /// px mapping (small = 13px, medium = 16px, ...), the relative keywords
     /// against the UA 16px base, or any parseable length.</summary>
-    private static bool TryParseCssFontSize(string v, out double pt)
+    private static double? TryParseCssFontSize(string v)
     {
+        double pt = default;
         pt = v.Trim().ToLowerInvariant() switch
         {
             "xx-small" => 9 * 0.75,
@@ -113,23 +147,24 @@ internal static partial class HtmlToPdfConverter
             "smaller" => 13.33 * 0.75,
             _ => 0,
         };
-        if (pt > 0) return true;
-        return TryParseLength(v, out pt) && pt > 0;
+        if (pt > 0) return pt;
+        if (System.Text.RegularExpressions.Regex.IsMatch(v.Trim(), @"^0+(?:\.0+)?\s*(?:px|pt|em|rem|in|cm|mm)?$")) return 0;
+        return (TryParseLength(v) is { } len && (pt = len) > 0) ? pt : null;
     }
 
     /// <summary>Parse a legacy font size attribute ("2", "+1", "-1") to points.
     /// A signed value is relative to the default size 3.</summary>
-    private static bool TryParseHtmlFontSize(string raw, out double pt)
+    private static double? TryParseHtmlFontSize(string raw)
     {
-        pt = 0;
+        double pt = 0;
         raw = raw.Trim();
-        if (raw.Length == 0) return false;
+        if (raw.Length == 0) return null;
         var rel = raw[0] is '+' or '-';
         if (!int.TryParse(raw, System.Globalization.NumberStyles.AllowLeadingSign,
-                System.Globalization.CultureInfo.InvariantCulture, out var n)) return false;
-        var idx = Math.Clamp(rel ? 3 + n : n, 1, 7);
+                System.Globalization.CultureInfo.InvariantCulture, out var n)) return null;
+        var idx = Compat.Clamp(rel ? 3 + n : n, 1, 7);
         pt = HtmlFontSizeLadderPx[idx - 1] * 0.75;
-        return true;
+        return pt;
     }
 
     /// <summary>Concatenate two `style` attribute values, keeping the FIRST declaration
@@ -165,6 +200,8 @@ internal static partial class HtmlToPdfConverter
         // parse-error recovery): form generators emit "&#8202<div".
         text = Regex.Replace(text, @"&#(\d+)(?![\d;])", m =>
             int.TryParse(m.Groups[1].Value, out var code) ? char.ConvertFromUtf32(Cp1252Ref(code)) : m.Value);
+        if (text.Contains('&'))
+            text = Regex.Replace(text, @"&(nbsp|amp|lt|gt|quot|copy|reg)(?![;A-Za-z0-9])", "&$1;", RegexOptions.IgnoreCase);
         return text.Contains('&') ? System.Net.WebUtility.HtmlDecode(text) : text;
     }
 
@@ -234,7 +271,7 @@ internal static partial class HtmlToPdfConverter
         (double, double)? m = null;
         try
         {
-            var ttf = Text.FontRepository.GetTtfData(family);
+            var ttf = Text.FontRepository.GetTtfData(family) ?? (BaseFamilyOf(family) is { } wmBase ? Text.FontRepository.GetTtfData(wmBase) : null);
             if (ttf is not null)
             {
                 var tp = new Text.TrueTypeParser(ttf);
@@ -263,7 +300,7 @@ internal static partial class HtmlToPdfConverter
             if (em.Success)
                 return double.Parse(em.Groups[1].Value,
                     System.Globalization.CultureInfo.InvariantCulture) * emPt;
-            return v == "0" ? 0 : TryParseLength(v, out var pt) ? pt : 0;
+            return v == "0" ? 0 : TryParseLength(v) is { } pt ? pt : 0;
         }
         double top = 0, right = 0, bottom = 0, left = 0;
         var sh = Regex.Match(decl, @"(?<![-\w])margin\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
@@ -489,12 +526,143 @@ internal static partial class HtmlToPdfConverter
         return c;
     }
 
-    private static double EstimateNestedTableHeight(string html, double rowPitch)
+    /// <summary>A nested grid's height by its rows: a row with text is one line pitch, a bare
+    /// spacer row (no text, no nested grid) only its padding band, nested grids recursing.</summary>
+    private static double EstimateNestedTableHeight(string html, double rowPitch, double bareRowPitch)
     {
-        var inner = ExtractNestedTables(html, out var subs);
-        var h = Regex.Matches(inner, @"<tr\b", RegexOptions.IgnoreCase).Count * rowPitch;
-        foreach (var sub in subs) h += EstimateNestedTableHeight(sub, rowPitch);
+        (var inner, var subs) = ExtractNestedTables(html);
+        // The grid's OWN border-spacing paces it: one band above the first row and one under
+        // every row. A nested grid declaring `cellspacing="0"` therefore stands shorter than
+        // its default-spaced sibling, and the two are what decide which of them centres in
+        // their shared row band (measured on the complaint report: 51.0 against 45.0).
+        var s = MetricNestedSpacingPt(inner);
+        var h = s;
+        foreach (Match rm in Regex.Matches(inner, @"<tr\b[^>]*>([\s\S]*?)(?=<tr\b|</table|$)", RegexOptions.IgnoreCase))
+        {
+            var rowText = DecodeEntities(Regex.Replace(rm.Groups[1].Value, "<[^>]+>", " ")).Trim();
+            h += (rowText.Length > 0 || Regex.IsMatch(rm.Groups[1].Value, @"<table\b|<img\b", RegexOptions.IgnoreCase)
+                ? rowPitch : bareRowPitch) + s;
+        }
+        foreach (var sub in subs) h += EstimateNestedTableHeight(sub, rowPitch, bareRowPitch);
         return h;
+    }
+
+    /// <summary>A nested grid's own border-spacing in points: its `cellspacing` attribute when
+    /// it states one - zero included - and the UA's 2 px otherwise.</summary>
+    private static double MetricNestedSpacingPt(string html)
+    {
+        var tag = Regex.Match(html, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        if (!tag.Success) return MetricDefaultSpacingPt;
+        var cs = Regex.Match(tag.Value, @"cellspacing\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+        return cs.Success && PresentationalLengthPt(cs.Groups[1].Value) is { } csv
+            ? csv : MetricDefaultSpacingPt;
+    }
+
+    /// <summary>The user agent's own border-spacing: 2 px.</summary>
+    private const double MetricDefaultSpacingPt = 1.5;
+    /// <summary>The UA's own cell padding: 1 px.</summary>
+    private const double UaCellPaddingPt = 0.75;
+
+    /// <summary>The user agent's own cell padding: 1 px.</summary>
+    private const double MetricDefaultPaddingPt = 0.75;
+
+    /// <summary>The chrome a table nested in another grid's cell stands past: the host grid's
+    /// cellspacing plus its cellpadding (the UA's 2 px + 1 px where it states none); zero for a
+    /// table at the flow's top level.</summary>
+    private static double HostCellChromePt(string html, int tableIndex)
+    {
+        // the nearest unclosed <table> before this one is its host
+        var depth = 0;
+        foreach (Match m in Regex.Matches(html[..tableIndex], @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.RightToLeft))
+        {
+            if (m.Groups[1].Value.Length > 0) { depth++; continue; }
+            if (depth > 0) { depth--; continue; }
+            return TableLeftChromePt(m.Value);
+        }
+        return 0;
+    }
+
+    /// <summary>A table's left chrome in points - its cellspacing plus its cellpadding, the UA's
+    /// 2 px + 1 px where the tag states none - the inset its first ink stands past.</summary>
+    private static double TableLeftChromePt(string tableHtml)
+    {
+        var (s, p) = TableSpacingAndPaddingPt(tableHtml);
+        return s + p;
+    }
+
+    /// <summary>A table's chrome as INK - before its first column, between two columns and past
+    /// the last: the frame its border attribute or its own border style draws, the cell rules the
+    /// attribute adds, the border-spacing and the cell padding. A plain table's trailing padding
+    /// and spacing are not ink (probed: three min-floor columns page 96 + 2.25 + Σ + 2 × 3 + 90 =
+    /// 1346.14 plain; 1354.39 under border=1 cellpadding=1 cellspacing=2, the frame's box being
+    /// the ink; 1212.91 under a thin solid frame with cellpadding=4 cellspacing=0).</summary>
+    private static (double Lead, double Gap, double Trail) TableInkChromePt(string tableHtml, IReadOnlyDictionary<string, Dictionary<string, string>>? css = null)
+    {
+        var (s, p) = TableSpacingAndPaddingPt(tableHtml);
+        var tag = Regex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        double frame = 0, rule = 0;
+        // A sheet that COLLAPSES the grid and rules its cells (`table { border-collapse: collapse }
+        // table td { border: 1px solid; padding: 0 }`): every column boundary is one shared rule,
+        // the cells' own padding stands inside it, and the frame is that same rule (probed on the
+        // state analysis: text seats 0.75 in from the grid's edge, 0.75 apart across a boundary,
+        // and the sheet ends 0.75 past the last cell's ink).
+        if (css is not null && ElementRule(css, "td") is { } tdRule
+            && (ElementRule(css, "table") is { } tRule && tRule.TryGetValue("border-collapse", out var tbc) && tbc.Contains("collapse", StringComparison.OrdinalIgnoreCase)
+                || tdRule.TryGetValue("border-collapse", out var cbc) && cbc.Contains("collapse", StringComparison.OrdinalIgnoreCase))
+            && tdRule.TryGetValue("border", out var tdBorder) && CssBorderShorthand(tdBorder.Trim()) is { } tdSide && tdSide.W > 0)
+        {
+            var cp = tdRule.TryGetValue("padding", out var tdPad) && TryParseLength(tdPad.Trim().Split(' ')[0]) is { } tdPadPt ? tdPadPt
+                : IsZeroLength(tdPad ?? "") ? 0.0 : p;
+            return (tdSide.W + cp, 2 * cp + tdSide.W, tdSide.W + cp);
+        }
+        if (tag.Success)
+        {
+            var ba = Regex.Match(tag.Value, @"\bborder\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+            if (ba.Success && double.TryParse(ba.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var bpx) && bpx > 0)
+            { frame = bpx * PxPt; rule = PxPt; }
+            var st = Regex.Match(tag.Value, @"\bstyle\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+            if (st.Success && TableStyleFrameWidthPt(st.Groups[1].Value) is { } fw) frame = fw;
+        }
+        return (frame + s + rule + p, 2 * p + 2 * rule + s, frame > 0 ? p + rule + s + frame : 0);
+    }
+
+    /// <summary>The frame a table's inline style draws: a border shorthand's width, or its
+    /// border-width (thin / medium / thick or a length) under a border-style that is not none.</summary>
+    private static double? TableStyleFrameWidthPt(string style)
+    {
+        var sh = Regex.Match(style, @"(?<![-\w])border\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        if (sh.Success && CssBorderShorthand(sh.Groups[1].Value.Trim()) is { } side) return side.W;
+        var bs = Regex.Match(style, @"(?<![-\w])border-style\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        if (!bs.Success || Regex.IsMatch(bs.Groups[1].Value, @"^\s*(none|hidden)\b", RegexOptions.IgnoreCase)) return null;
+        var bw = Regex.Match(style, @"(?<![-\w])border-width\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        return bw.Success ? CssBorderWidthOf(bw.Groups[1].Value.Trim().Split(' ')[0]) : CssBorderMediumPt;
+    }
+
+    /// <summary>A table's cellspacing and cellpadding in points, the UA's 2 px and 1 px where
+    /// the tag states none.</summary>
+    private static (double Spacing, double Padding) TableSpacingAndPaddingPt(string tableHtml)
+    {
+        var tag = Regex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        double s = MetricDefaultSpacingPt, p = MetricDefaultPaddingPt;
+        if (!tag.Success) return (s, p);
+        var cs = Regex.Match(tag.Value, @"cellspacing\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+        if (cs.Success && PresentationalLengthPt(cs.Groups[1].Value) is { } csv) s = csv;
+        var cp = Regex.Match(tag.Value, @"cellpadding\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+        if (cp.Success && PresentationalLengthPt(cp.Groups[1].Value) is { } cpv) p = cpv;
+        return (s, p);
+    }
+
+    /// <summary>A presentational spacing attribute (`cellspacing`, `cellpadding`) in points: a bare
+    /// number is pixels, a CSS length keeps its unit, zero is zero; null when the value is not a
+    /// length. Probed on the reference: `cellspacing="2.50cm"` insets the grid 70.87 pt on every
+    /// side and `1in` 72, exactly as `10` insets it 7.5.</summary>
+    private static double? PresentationalLengthPt(string value)
+    {
+        var v = value.Trim();
+        if (v.Length == 0) return null;
+        if (IsZeroLength(v)) return 0.0;
+        return TryParseLength(v);
     }
 
     /// <summary>Metric-flow table renderer: real HTML table geometry — default
@@ -527,12 +695,33 @@ internal static partial class HtmlToPdfConverter
             "Arial", "Helvetica", "Verdana", "Times New Roman", "Courier New",
             "Courier", "Tahoma", "Georgia", "Trebuchet MS", "Calibri", "SimSun",
             "MS Gothic",
+            // (probed on the safety data sheet: the engine embeds Arial Black and Arial Narrow for
+            // the header's `<font face>` tags where an unknown face falls to the UA serif)
+            "Arial Black", "Arial Narrow",
         };
 
     // The image viewport: a cell photo wider than this draws
     // scaled down to it, preserving aspect (measured on the SSRS report export:
     // the 1024×768 px JPEG — 768 pt natural — lands exactly 612×459 pt, the
-    // 8.5 in viewport width, and the sheet widens to hold it).
+    // 8.5 in viewport width, and the sheet widens to hold it). That 612 is the
+    // report sheet's own `img { max-width: 612pt }`: the cap is the rule's value
+    // (a 175 mm rule caps the same photo at 496.06 × 372.05), this the fallback.
     private const double JpegViewportPt = 612.0;
 
+    /// <summary>The sheet's `img` rule max-width in points, when it is an absolute length.</summary>
+    private static double? ImgRuleMaxWidthPt(IReadOnlyDictionary<string, Dictionary<string, string>>? css)
+        => css is not null && css.TryGetValue("img", out var imgRule)
+            && imgRule.TryGetValue("max-width", out var mw) ? TryParseLength(mw.Trim()) : null;
+
+
+    /// <summary>The family a width-variant name falls back to when the variant is not
+    /// installed: "Arial Narrow", "Arial Black", "Roboto Condensed" draw as their base family
+    /// (a sans stays a sans) rather than dropping to the flow's serif.</summary>
+    private static string? BaseFamilyOf(string family)
+    {
+        foreach (var suffix in new[] { " Narrow", " Condensed", " Black", " Light", " Semibold", " Medium" })
+            if (family.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) && family.Length > suffix.Length)
+                return family.Substring(0, family.Length - suffix.Length);
+        return null;
+    }
 }

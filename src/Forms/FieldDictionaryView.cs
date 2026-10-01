@@ -14,6 +14,12 @@ internal sealed class FieldDictionaryView
     private readonly PdfDictionary _dict;
     private readonly PdfReader _reader;
 
+    /// <summary>The dictionary this view reads.</summary>
+    internal PdfDictionary Dictionary => _dict;
+
+    /// <summary>The reader that resolves the dictionary's indirect entries.</summary>
+    internal PdfReader Reader => _reader;
+
     internal FieldDictionaryView(PdfDictionary dict, PdfReader reader)
     {
         _dict = dict;
@@ -21,7 +27,7 @@ internal sealed class FieldDictionaryView
     }
 
     // One canonical view per underlying dictionary: the corpus compares
-    // EngineDict instances across wrappers of the same annotation by
+    // dictionary views across wrappers of the same annotation by
     // ReferenceEquals, so two Annotation objects over one dict must hand back
     // the same view instance.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfDictionary, FieldDictionaryView> Canonical = new();
@@ -34,8 +40,9 @@ internal sealed class FieldDictionaryView
     {
         get
         {
-            var v = _reader.Resolve(_dict.Get(key));
-            return v is null ? null : new FieldDictionaryEntry(v, _reader);
+            var raw = _dict.Get(key);
+            var v = _reader.Resolve(raw);
+            return v is null ? null : new FieldDictionaryEntry(v, _reader, (raw as PdfIndirectRef)?.ObjectNumber ?? 0);
         }
     }
 
@@ -49,11 +56,18 @@ internal sealed class FieldDictionaryEntry
     private readonly PdfObject _obj;
     private readonly PdfReader _reader;
 
-    internal FieldDictionaryEntry(PdfObject obj, PdfReader reader)
+    internal FieldDictionaryEntry(PdfObject obj, PdfReader reader, int objectNumber = 0)
     {
         _obj = obj;
         _reader = reader;
+        ObjectNumber = objectNumber;
     }
+
+    /// <summary>The indirect object number the entry was reached through, 0 for a direct value.</summary>
+    internal int ObjectNumber { get; }
+
+    /// <summary>Whether the entry is the null object.</summary>
+    internal bool IsNullObject => _obj is PdfNull;
 
     /// <summary>View the entry as a PDF string. Throws when the entry is not a string.</summary>
     public RawPdfStringView ToPdfString() =>
@@ -107,8 +121,13 @@ internal sealed class FieldDictionaryArrayView
     {
         get
         {
-            var v = _reader.Resolve(_arr[index]);
-            return v is null ? null : new FieldDictionaryEntry(v, _reader);
+            var raw = _arr[index];
+            var v = _reader.Resolve(raw);
+            // A reference to an object the file does not carry (a destination slot never
+            // written) resolves to the null object, as the PDF model says it must.
+            if (v is null && raw is PdfIndirectRef dangling)
+                return new FieldDictionaryEntry(PdfNull.Instance, _reader, dangling.ObjectNumber);
+            return v is null ? null : new FieldDictionaryEntry(v, _reader, (raw as PdfIndirectRef)?.ObjectNumber ?? 0);
         }
     }
 }
@@ -119,6 +138,8 @@ internal sealed class PdfNumberView
     private readonly double _value;
     internal PdfNumberView(double value) => _value = value;
     public PdfNumberView ToNumber() => this;
+    /// <summary>The number itself (the corpus reads <c>.ToNumber().Value</c> as well).</summary>
+    public double Value => _value;
     public double ToDouble() => _value;
     public int ToInt() => (int)_value;
     public override string ToString() => _value.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -132,7 +153,7 @@ internal sealed class RawPdfStringView
 
     internal RawPdfStringView(PdfString s) => _s = s;
 
-    public override string ToString() => System.Text.Encoding.Latin1.GetString(_s.Value);
+    public override string ToString() => Compat.Latin1.GetString(_s.Value);
 
     /// <summary>The decoded text of the string (the shape the corpus reads as
     /// <c>.ToPdfString().String</c>).</summary>

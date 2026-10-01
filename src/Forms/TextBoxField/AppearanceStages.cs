@@ -1,0 +1,448 @@
+﻿using System.Collections;
+using Aspose.Pdf.Annotations;
+using Aspose.Pdf.Core;
+using Aspose.Pdf.IO;
+
+namespace Aspose.Pdf.Forms;
+
+public partial class TextBoxField
+{
+// A step of the text box's appearance regeneration.
+    // Build the appearance content stream. Encode the text as Windows-1252 (WinAnsi)
+    // — the appearance font is declared with /WinAnsiEncoding — so "smart" code points
+    // (— • œ Ÿ … the 0x80-0x9F range) survive instead of being lost by Latin1, which
+    // can't represent them. WinAnsi agrees with Latin1 on ASCII and 0xA0-0xFF, so plain
+    // values are unaffected.
+    // A composite /DA font (embedded CJK face in /DR) shows its value as
+    // 2-byte glyph-id hex strings under Identity-H — but only when the value
+    // actually NEEDS it (chars beyond WinAnsi): Latin-fillable text keeps the
+    // Cp1252 literal path even when the /DA names a composite face.
+    private static string ShowOp(TextBoxAppearanceState ap, string s)
+    {
+        if (ap.compositeCmap is not null)
+        {
+            var sb = new System.Text.StringBuilder(s.Length * 4 + 2);
+            sb.Append('<');
+            foreach (var ch in s)
+                sb.Append((ap.compositeCmap.TryGetValue(ch, out var gid) ? gid : 0).ToString("X4"));
+            sb.Append('>');
+            return sb.ToString();
+        }
+        if (ap.uniFontDict is not null)
+        {
+            var (_, hex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
+                ap.uniFontDict, ap.uniTtf!, ap.uniFamily, Aspose.Pdf.Text.BidiText.ToVisualOrder(s));
+            var sb = new System.Text.StringBuilder(hex.Length * 2 + 2);
+            sb.Append('<');
+            foreach (var b in hex) sb.Append(b.ToString("X2"));
+            sb.Append('>');
+            return sb.ToString();
+        }
+        var esc = s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+        return $"({esc})";
+    }
+
+    /// <summary>Wrap the content in a form XObject with the box, rotation and resources, and install it as the normal appearance.</summary>
+    private void WriteAppearanceStream(TextBoxAppearanceState ap)
+    {
+        _uniAppearanceTtf = null;
+        ap.contentBytes = Aspose.Pdf.Text.Cp1252.GetBytes(ap.content);
+
+        ap.apStream = new PdfStream(new PdfDictionary(), ap.contentBytes);
+        ap.apStream.Dict.Set("Type", new PdfName("XObject"));
+        ap.apStream.Dict.Set("Subtype", new PdfName("Form"));
+        ap.bboxArr = new PdfArray();
+        ap.bboxArr.Add(new PdfReal(0)); ap.bboxArr.Add(new PdfReal(0));
+        ap.bboxArr.Add(new PdfReal(ap.w)); ap.bboxArr.Add(new PdfReal(ap.h));
+        ap.apStream.Dict.Set("BBox", ap.bboxArr);
+        ApplyAppearanceRotation(ap.apStream, ap.apRotation);
+
+        ap.resolvedRes = null;
+        ap.existingAp = Reader.ResolveDict(Dict.Get("AP"));
+        if (ap.existingAp is not null)
+        {
+            var existingN = Reader.ResolveStream(ap.existingAp.Get("N"));
+            if (existingN is not null)
+                ap.resolvedRes = Reader.ResolveDict(existingN.Dict.Get("Resources"));
+        }
+        if (ap.uniFontDict is not null)
+        {
+            // The embedded fallback face IS the appearance's font set — carrying the
+            // old WinAnsi resources over would just shadow it.
+            var uniResDict = new PdfDictionary();
+            uniResDict.Set("Font", ap.uniFontDict);
+            ap.apStream.Dict.Set("Resources", uniResDict);
+            // A font embedded for a fill lives in the AcroForm default resources
+            // too (Acrobat's convention) — document-level font enumeration only
+            // walks page resources and /DR, not appearance streams.
+            MirrorFillFontIntoDr(ap.uniFontDict.Get(ap.uniRes));
+        }
+        else
+        {
+            // A simple (non-composite) /DR font that carries its own program metrics
+            // (TrueType Verdana, Arial, …) is referenced verbatim: the synthesized
+            // /Type1 stand-in would make renderers substitute a default face with
+            // different metrics for any non-Standard-14 family.
+            PdfDictionary? apFont = null;
+            if (ap.compositeCmap is not null)
+                apFont = AppearanceFontFromDr(ap.fontName);
+            else if (ResolveDrFontDict(ap.fontName) is { } drSimple && drSimple.GetName("Subtype") == "TrueType")
+                apFont = drSimple;
+            ap.apStream.Dict.Set("Resources", BuildTextAppearanceResources(ap.fontName, ap.resolvedRes, apFont));
+        }
+
+        ap.newApDict = new PdfDictionary();
+        ap.oldApDict = Reader.ResolveDict(Dict.Get("AP"));
+        if (ap.oldApDict is not null)
+        {
+            foreach (var key in ap.oldApDict.Keys)
+            {
+                if (key == "N") continue; // we're replacing /N
+                ap.newApDict.Set(key, ap.oldApDict.Get(key)!);
+            }
+        }
+        ap.newApDict.Set("N", ap.apStream);
+        Dict.Set("AP", ap.newApDict);
+        _apAutoGenerated = true;
+    }
+
+    /// <summary>The single-line body: one baseline, the value folded onto it and aligned by the quadding.</summary>
+    private void BuildSingleLineBody(TextBoxAppearanceState ap, string text)
+    {
+        // A single-line field paints its value on one baseline: fold line
+        // breaks (a whitespace-only import, a pasted CRLF) into spaces so
+        // no control byte reaches the shown string.
+        text = text.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ');
+
+        // Horizontal alignment from /Q (0=left, 1=centre, 2=right). Right/centre
+        // fields offset the baseline start by the measured run width.
+        double tx = 2;
+        int q = (int)Dict.GetInt("Q");
+        if (q is 1 or 2 && text.Length > 0)
+        {
+            double textEm = 0;
+            foreach (char c in text) textEm += GetGlyphWidthEm(c, ap.fontName);
+            double textWidth = textEm * ap.fontSize;
+            tx = q == 2 ? System.Math.Max(2, ap.w - textWidth - 2)
+                       : System.Math.Max(2, (ap.w - textWidth) / 2);
+        }
+        // Single-line vertical centring: the line slot (height L) centres in
+        // the box and the baseline sits the descender depth above its bottom.
+        // The composite generator keeps its legacy optical-centre baseline.
+        var slComposite = ap.compositeCmap is not null
+                          || ResolveDrFontDict(ap.fontName)?.GetName("Subtype") == "Type0";
+        // A style-named face centres its single line on the box above and seats
+        // the baseline at its foot - no descender term: measured exactly on
+        // Helvetica (30.255 at 10 pt, 24.51 at 20) and on every other face probed.
+        var slStyleNamed = StyleNamedFace && !slComposite
+                           && StyleLineHeightPt is null && DsLineHeightPt() is null
+                           && DrEmbeddedFaceProgram(ap.fontName) is null;
+        var slY = slComposite
+            ? ap.h / 2 - ap.fontSize * 0.3
+            : slStyleNamed
+                ? (ap.h - ap.fontSize * StyleFaceSingleLineBoxEm(ap.fontName, ap.fontSize)) / 2
+                : (ap.h - (StyleLineHeightPt ?? DsLineHeightPt() ?? ApLineHeight(ap.fontName, ap.fontSize))) / 2
+                  + ap.fontSize * ApDescent(ap.fontName) / 1000.0;
+        ap.textBody = $"{Format(tx)} {Format(slY)} Td\n{ShowOp(ap, text)} Tj\n";
+    }
+
+    /// <summary>Emit the wrapped lines from the first baseline down, each aligned by the quadding, stopping below the box.</summary>
+    private void EmitMultilineBody(TextBoxAppearanceState ap, string[] lines, double firstY, double lineHeight)
+    {
+        int mq = (int)Dict.GetInt("Q");
+        double LineX(string line)
+        {
+            if (mq is not (1 or 2) || line.Length == 0) return 2;
+            double em = 0;
+            foreach (char c in line) em += GetGlyphWidthEm(c, ap.fontName);
+            var lw = em * ap.fontSize;
+            return mq == 2 ? System.Math.Max(2, ap.w - lw - 2)
+                           : System.Math.Max(2, (ap.w - lw) / 2);
+        }
+
+        var bt = new System.Text.StringBuilder();
+        double prevX = LineX(lines.Length > 0 ? lines[0] : "");
+        bt.Append($"{Format(prevX)} {Format(firstY)} Td\n");
+        for (int li = 0; li < lines.Length; li++)
+        {
+            // Lines whose baseline falls below the box are clipped away by the
+            // appearance BBox; stop emitting them so the visible appearance
+            // matches regardless of whether a renderer honours the BBox clip.
+            if (firstY - li * lineHeight < 0) break;
+            if (li > 0)
+            {
+                var x = LineX(lines[li]);
+                bt.Append($"{Format(x - prevX)} {Format(-lineHeight)} Td\n");
+                prevX = x;
+            }
+            bt.Append($"{ShowOp(ap, lines[li])} Tj\n");
+        }
+        ap.textBody = bt.ToString();
+    }
+
+    /// <summary>The multiline body: wrap the value to the box, seat the first baseline by the face's metrics and emit the lines.</summary>
+    private void BuildMultilineBody(TextBoxAppearanceState ap, string text)
+    {
+        // A COMPOSITE /DR font goes through a different generator than the
+        // simple-font path: it keeps the legacy pitch/first-line model
+        // (1.15× size, typo-descent seat) and the w−4 wrap the composite
+        // appearance was calibrated against. Keyed on the /DR font's own
+        // subtype — an ASCII value through a Type0 face takes it too.
+        var legacyComposite = ap.compositeCmap is not null
+            || ResolveDrFontDict(ap.fontName)?.GetName("Subtype") == "Type0";
+
+        // Word-wrap the value into the usable width (W−2 for the simple-font
+        // generator; the glyph run may reach the right inset); explicit
+        // '\n'/'\r' always breaks; line text is kept verbatim.
+        var rawLines = WrapMultilineText(text, ap.fontName, ap.fontSize, legacyComposite ? ap.w - 4 : ap.w - 2);
+        if (!legacyComposite)
+        {
+            // A value that ENDS with a line break contributes exactly one
+            // trailing empty segment, which is discarded; a value with no
+            // space anywhere collapses its empty segments entirely.
+            if (rawLines.Count > 0 && rawLines[^1].Length == 0
+                && (text.EndsWith("\n") || text.EndsWith("\r")))
+                rawLines.RemoveAt(rawLines.Count - 1);
+            if (!text.Contains(' '))
+                rawLines = rawLines.Where(l => l.Length > 0).ToList();
+        }
+        // A PLAIN multiline field trims trailing whitespace at each line
+        // break; a RICH-TEXT field (Ff bit 26) keeps the line verbatim —
+        // its trailing space belongs to the /RV run (the expected /AP
+        // shows "Value to be filled in " with the space on the rich field
+        // and "Value to be filled in" on the plain one).
+        var lines = rawLines.ToArray();
+        if (!IsRichText)
+            for (int li = 0; li < lines.Length; li++)
+                lines[li] = lines[li].TrimEnd();
+
+        // A /DA font the caller OPENED (its program travels with the field)
+        // paces the block on the size itself, not on the face's bbox: the
+        // pitch is a flat 1.2 em and the first line box hangs one em from
+        // the inner top with the baseline riding the face's own typographic
+        // descent above that box's bottom. A font named rather than opened
+        // (Standard-14, a system family) keeps the bbox model below, whose
+        // pitch is the font PROGRAM's head-bbox height × size (the /DR
+        // FontFile2 face, an AFM box for Standard-14, else the system face).
+        // Both measured; an explicit style line-height
+        // (rich-text fields) outranks either. An opened face always lands in
+        // the resources as a COMPOSITE wrapper (see Form.BuildType0Font); a
+        // simple TrueType font whose program the document's own producer
+        // shipped is a named face to the reference and keeps the bbox model
+        // (measured 2026-09-07 on a letter whose /DR Arial carries its
+        // FontFile2: the block paces at the face's 1.331 em bbox height with
+        // the first baseline one line under the inner top, not at 1.2 em).
+        var authoredFace = legacyComposite ? DrEmbeddedFaceProgram(ap.fontName) : null;
+        // A face the caller NAMED in a Style string paces by its own line pitch
+        // (StyleFacePitchEm); a face loaded into /DR keeps the bbox model.
+        var styleNamed = StyleNamedFace && authoredFace is null && !legacyComposite;
+        var lineHeight = StyleLineHeightPt ?? DsLineHeightPt() ?? (authoredFace is not null
+            ? ap.fontSize * AuthoredFacePitchEm
+            : legacyComposite
+                ? ap.fontSize * 1.15
+                : styleNamed
+                    ? ap.fontSize * StyleFacePitchEm(ap.fontName, ap.fontSize)
+                    : ApLineHeight(ap.fontName, ap.fontSize));
+        // First baseline: 2pt below the box top's line slot — H − 2 − L.
+        // The composite generator instead seats the first line box at the
+        // top with the baseline a typographic descent above its bottom.
+        var firstY = authoredFace is not null
+            ? ap.h - WidgetBorderInset - ap.fontSize
+                + System.Math.Abs(
+                    Aspose.Pdf.Text.FontRepository.ReadTtfTypoDescentEm(authoredFace)) * ap.fontSize
+            : legacyComposite
+                ? ap.h - lineHeight - ReadTypoDescentEm(ap.fontName) * ap.fontSize
+                : styleNamed && StyleLineHeightPt is null
+                    // A style-named block hangs its first baseline one FONT SIZE
+                    // below the box top, whatever the face: measured 62 / 52 / 65
+                    // in a 72 pt box at 10 / 20 / 7 pt, identical across every face
+                    // probed.
+                    ? ap.h - ap.fontSize
+                    : ap.h - 2 - lineHeight;
+
+        // TextVerticalAlignment shifts the whole line block down by the
+        // unused vertical slack (all of it for Bottom, half for Center).
+        // Only meaningful while the block actually fits the box.
+        var slack = ap.h - lines.Length * lineHeight;
+        if (slack > 0)
+        {
+            if (TextVerticalAlignment == VerticalAlignment.Center) firstY -= slack / 2;
+            else if (TextVerticalAlignment == VerticalAlignment.Bottom) firstY -= slack;
+        }
+
+        // Per-line quadding from /Q (0=left, 1=centre, 2=right): each line's
+        // start x is offset by its own measured width — right/centre-aligned
+        // multiline values (e.g. RTL paragraphs) line up on their margin.
+        EmitMultilineBody(ap, lines, firstY, lineHeight);
+    }
+
+    /// <summary>Auto-size a zero /DA size, honour FitIntoRectangle and the multiline shrink, then the global clamps.</summary>
+    private void FitAppearanceFontSize(TextBoxAppearanceState ap, string text)
+    {
+        if (ap.fontSize <= 0)
+        {
+            if (IsMultiline && text.Length > 0)
+            {
+                // Multiline auto-size: the value word-wraps inside the box, so the largest
+                // fitting size is the one whose wrapped lines each fit the inner width AND
+                // whose stacked line boxes fit the inner height.
+                ap.fontSize = AutoFitMultilineSize(text, ap.w, ap.h, ap.fontName);
+            }
+            else
+            {
+                // Single-line auto-size: the largest size whose run still fits the inner
+                // box, matching the standard viewer's variable-text fitting. Both axes carry
+                // a 3-unit inset. The width limit measures the run at its real per-glyph
+                // advances (DR /Widths → embedded hmtx → Core-14 AFM) with a small
+                // reserved inter-glyph allowance; the height limit
+                // scales the inner height by a font factor that steps at 7pt (this
+                // step is what the fitted size depends on).
+                // The inset is one unit plus the border on both sides: 3 for the
+                // usual 1-unit /BS border, 1 for a border-less widget (a generator
+                // text box: 20 pt high -> 15.4252 pt, 80 pt wide -> 27.5747 pt cap
+                // for "Green", probed 2026-08-23).
+                var inset = AutoSizeInset();
+                if (text.Length == 0)
+                {
+                    // An empty value has nothing to fit: the builder default size.
+                    ap.fontSize = EmptyValueAutoSize;
+                }
+                else
+                {
+                    double textEm = 0;
+                    foreach (char c in text) textEm += GetGlyphWidthEm(c, ap.fontName);
+                    if (textEm <= 0) textEm = System.Math.Max(1, text.Length) * 0.5;
+                    var widthCap = (ap.w - inset) / (textEm * 1.031);
+                    var hInner = ap.h - inset;
+                    var heightCap = 0.82809 * hInner;
+                    if (heightCap >= 7) heightCap = 0.811851 * hInner;
+                    ap.fontSize = System.Math.Max(4, System.Math.Min(widthCap, heightCap));
+                }
+            }
+        }
+        else if (TextBoxField.FitIntoRectangle && !IsMultiline && text.Length > 0)
+        {
+            // FitIntoRectangle: shrink the /DA size so the value fits the widget — measure
+            // the run at its real per-glyph advances (DR /Widths → embedded hmtx → system
+            // face) and cap to whichever of the inner width / height is binding. Never grow
+            // beyond the nominal /DA size.
+            double textEm = 0;
+            foreach (char c in text) textEm += GetGlyphWidthEm(c, ap.fontName);
+            if (textEm <= 0) textEm = text.Length * 0.5;
+            var widthCap = (ap.w - 4) / textEm;
+            var heightCap = ap.h * 0.83;
+            ap.fontSize = System.Math.Max(4, System.Math.Min(ap.fontSize, System.Math.Min(widthCap, heightCap)));
+        }
+        else if (IsMultiline && text.Length > 0 && this is not RichTextBoxField
+                 && (!Scrollable || Field.FitIntoRectangle || TextBoxField.FitIntoRectangle))
+        {
+            // (Rich text is exempt: a rich-text field keeps its /DA size
+            // even when the value overflows a DoNotScroll box — a 3-line 20 pt value
+            // in a 72 pt box still steps its lines at the full 20 pt pitch.)
+            // A multiline value that OVERFLOWS its box shrinks to fit when the field
+            // cannot scroll (DoNotScroll, /Ff bit 24) or FitIntoRectangle asks for it:
+            // a 10 pt /DA re-sizes down to ~8 for a three-line value in
+            // a 36 pt box rather than dropping the lines below the border.
+            // The fitted size budgets each display line 1.5 em of BOX height —
+            // fs = h / (1.5 · n) — measured EXACT (a 36.003 pt box
+            // holding three lines fits at 36.003/4.5 = 8.000667). n depends on the
+            // size through soft wrap, so the law is applied to a fixed point; the
+            // /DA size stays a ceiling, and only a value whose drawn stack would
+            // lose lines (h − 2 < n · line pitch, the emit cull below) shrinks.
+            var nDa = System.Math.Max(1, WrapMultilineText(text, ap.fontName, ap.fontSize, ap.w - 2).Count);
+            if (ap.h - 2 < nDa * ApLineHeight(ap.fontName, ap.fontSize))
+            {
+                var n = nDa;
+                for (var iter = 0; iter < 4; iter++)
+                {
+                    var s = System.Math.Max(4, ap.h / (1.5 * n));
+                    var n2 = System.Math.Max(1, WrapMultilineText(text, ap.fontName, s, ap.w - 2).Count);
+                    if (n2 == n) { n = n2; break; }
+                    n = n2;
+                }
+                var fitted = System.Math.Max(4, ap.h / (1.5 * n));
+                if (fitted < ap.fontSize) ap.fontSize = fitted;
+            }
+        }
+
+        // Honour the global TextBoxField auto-fit clamps, but ONLY over a size the field
+        // worked out for itself: they bound the AUTO-FIT, not the document. A /DA that
+        // names its own size keeps it - measured with the globals
+        // pinned to 15/15, where a 10 pt field still writes "Tf 10" and steps its lines by
+        // 10 pt. Applying them unconditionally let one field''s clamp follow the process
+        // into every later document, because the properties are STATIC.
+        if (!DaFontSizePinned)
+        {
+            if (TextBoxField.MinFontSize > 0) ap.fontSize = System.Math.Max(ap.fontSize, TextBoxField.MinFontSize);
+            if (TextBoxField.MaxFontSize > 0) ap.fontSize = System.Math.Min(ap.fontSize, TextBoxField.MaxFontSize);
+        }
+    }
+
+    /// <summary>Read the /DA font and size, the box, its rotation and the composite or Unicode face the value needs.</summary>
+    private void ResolveAppearanceInputs(TextBoxAppearanceState ap, string text)
+    {
+        ap.da = ResolveInheritedDa() ?? "/Helv 12 Tf 0 g";
+        ap.fontName = "Helv";
+        ap.fontSize = 12;
+        ap.daParts = ap.da.Split(' ', System.StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < ap.daParts.Length; i++)
+        {
+            if (ap.daParts[i] == "Tf" && i >= 2)
+            {
+                ap.fontName = ap.daParts[i - 2].TrimStart('/');
+                double.TryParse(ap.daParts[i - 1], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out ap.fontSize);
+            }
+        }
+
+        ap.rectArr = Reader.Resolve(Dict.Get("Rect")) as PdfArray;
+        ap.llx = 0;
+        ap.lly = 0;
+        ap.urx = 100;
+        ap.ury = 20;
+        if (ap.rectArr is { Count: >= 4 })
+        {
+            var r = Rectangle.FromPdfArray(ap.rectArr);
+            ap.llx = r.LLX; ap.lly = r.LLY; ap.urx = r.URX; ap.ury = r.URY;
+        }
+        ap.w = ap.urx - ap.llx;
+        ap.h = ap.ury - ap.lly;
+
+        ap.apRotation = AppearanceRotation();
+        if (ap.apRotation is 90 or 270) (ap.w, ap.h) = (ap.h, ap.w);
+
+        ap.needsComposite = false;
+        foreach (var ch in text) if (ch > 'ÿ') { ap.needsComposite = true; break; }
+        ap.drFontDict = ap.needsComposite ? ResolveDrFontDict(ap.fontName) : null;
+        ap.compositeCmap = LoadCompositeCmap(ap.drFontDict);
+
+        ap.uniTtf = null;
+        ap.uniFamily = "";
+        ap.uniFontDict = null;
+        ap.uniRes = "";
+        if (ap.needsComposite && ap.compositeCmap is null)
+        {
+            ap.uniFamily = NormalizeStdFontName(ap.fontName);
+            ap.uniTtf = Aspose.Pdf.Text.SystemFontResolver.Resolve(ap.uniFamily)
+                     ?? Aspose.Pdf.Text.SystemFontResolver.Resolve("Arial");
+            // The /DA face must actually cover the value's beyond-WinAnsi chars —
+            // a CJK fill through a Latin /DA font needs a script face instead.
+            if ((ap.uniTtf is not { Length: > 12 } || !CoversBeyondAnsi(ap.uniTtf, text))
+                && TextStamp.TryResolveCjkTtf(text) is { } cjk)
+            {
+                ap.uniTtf = cjk.ttf;
+                ap.uniFamily = cjk.name;
+            }
+            if (ap.uniTtf is { Length: > 12 })
+            {
+                ap.uniFontDict = new PdfDictionary();
+                (ap.uniRes, _) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(ap.uniFontDict, ap.uniTtf, ap.uniFamily, "");
+                _uniAppearanceTtf = ap.uniTtf;
+            }
+            else
+            {
+                ap.uniTtf = null;
+            }
+        }
+    }
+}

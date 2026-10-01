@@ -23,7 +23,11 @@ public partial class Annotation
         _states = new AppearanceDictionary();
 
         var ap = _reader.ResolveDict(_dict.Get("AP"));
-        if (ap is null) return;
+        if (ap is null)
+        {
+            AddEmptyNormalAppearanceToDrawInto();
+            return;
+        }
 
         foreach (var key in ap.Keys)
         {
@@ -53,7 +57,55 @@ public partial class Annotation
                 }
             }
         }
+
+        if (!_appearance!.ContainsKey("N")) AddEmptyNormalAppearanceToDrawInto();
     }
+
+    /// <summary>Give a freshly made watermark an empty normal appearance for its maker to draw into.
+    ///
+    /// A watermark is nothing but the appearance it carries: no page content stands behind it and no
+    /// reader synthesises a face for one, so asking a new watermark for <c>Appearance["N"]</c> is how
+    /// its picture gets drawn (an image placed with its own operators, say). Handing back nothing
+    /// leaves the caller with no way to give it one at all. An annotation READ from a document keeps
+    /// exactly what it has - only one created here, which no document backs yet, is given the empty
+    /// form; and nothing else is given one, because every other kind of annotation either draws from
+    /// its own geometry or is painted for it at save time.
+    ///
+    /// The form is wrapped with the page's reader rather than this annotation's empty one, since that
+    /// is what carries the owning document: operators added through <see cref="XForm.Contents"/> are
+    /// registered on the document and written back into the stream as it saves, so with no document
+    /// behind them everything drawn into the form would be dropped on the way out.
+    /// </summary>
+    private void AddEmptyNormalAppearanceToDrawInto()
+    {
+        if (_dict.GetName("Subtype") != "Watermark") return;
+        if (!ReferenceEquals(_reader, IO.PdfReader.Empty)) return;
+
+        var streamDict = new PdfDictionary();
+        streamDict.Set("Type", new PdfName("XObject"));
+        streamDict.Set("Subtype", new PdfName("Form"));
+        var box = Rect;
+        var bbox = new PdfArray();
+        bbox.Add(new PdfReal(0));
+        bbox.Add(new PdfReal(0));
+        bbox.Add(new PdfReal(box is null ? 0 : box.URX - box.LLX));
+        bbox.Add(new PdfReal(box is null ? 0 : box.URY - box.LLY));
+        streamDict.Set("BBox", bbox);
+        streamDict.Set("Resources", new PdfDictionary());
+
+        var stream = new Core.PdfStream(streamDict, System.Array.Empty<byte>());
+        var ap = _reader.ResolveDict(_dict.Get("AP")) ?? new PdfDictionary();
+        ap.Set("N", stream);
+        _dict.Set("AP", ap);
+
+        var form = new XForm(stream, PageReader());
+        _appearance!["N"] = form;
+        _states!["N"] = form;
+    }
+
+    /// <summary>The reader of the page this annotation was made for, which is the one that knows the
+    /// owning document; the annotation's own empty reader when it was made for no page.</summary>
+    private IO.PdfReader PageReader() => (_creationPage ?? _ownerPage)?.Reader ?? _reader;
 
     /// <summary>Acrobat's /DA short font aliases mapped to their Standard-14 PostScript
     /// base font (PDF 32000 §12.7.3.3). Used to declare a synthesised appearance font when
@@ -263,8 +315,13 @@ public partial class Annotation
         helv.Set("Type", new PdfName("Font"));
         helv.Set("Subtype", new PdfName("Type1"));
         helv.Set("BaseFont", new PdfName("Helvetica"));
+        var heBo = new PdfDictionary();
+        heBo.Set("Type", new PdfName("Font"));
+        heBo.Set("Subtype", new PdfName("Type1"));
+        heBo.Set("BaseFont", new PdfName("Helvetica-Bold"));
         var fonts = new PdfDictionary();
         fonts.Set("Helv", helv);
+        fonts.Set("HeBo", heBo);
         var res = new PdfDictionary();
         res.Set("Font", fonts);
         form.Set("Resources", res);
@@ -282,7 +339,8 @@ public partial class Annotation
     /// paths — a subtype missing from one of them silently vanishes on that path.</summary>
     internal static bool CanSynthesiseAppearance(Annotation annotation) =>
         annotation is SquareAnnotation or CircleAnnotation or TextAnnotation
-                   or HighlightAnnotation or PolyAnnotation or LineAnnotation;
+                   or HighlightAnnotation or PolyAnnotation or LineAnnotation
+                   or InkAnnotation;
 
     private PdfStream? ResolveAppearanceStream()
     {
@@ -365,7 +423,7 @@ public partial class Annotation
     private System.Drawing.Color? ReadMkColor(PdfDictionary mk, string key)
     {
         if (_reader.Resolve(mk.Get(key)) is not PdfArray arr || arr.Count == 0) return null;
-        int To255(double v) => (int)System.Math.Round(System.Math.Clamp(v, 0, 1) * 255);
+        int To255(double v) => (int)System.Math.Round(Compat.Clamp(v, 0, 1) * 255);
         double[] v = new double[arr.Count];
         for (int i = 0; i < arr.Count; i++) v[i] = PdfArrayHelper.GetDouble(arr, i);
         return arr.Count switch

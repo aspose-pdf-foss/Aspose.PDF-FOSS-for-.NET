@@ -127,7 +127,7 @@ public class SvgDeviceTests
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("<path", svg);
-        Assert.Contains("fill=\"#ff0000\"", svg);
+        Assert.Contains("fill=\"#ff0000FF\"", svg);
     }
 
     [Fact]
@@ -156,8 +156,8 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#ff0000\"", svg);
-        Assert.Contains("fill=\"#000000\"", svg);
+        Assert.Contains("fill=\"#ff0000FF\"", svg);
+        Assert.Contains("fill=\"#000000FF\"", svg);
     }
 
     [Fact]
@@ -169,7 +169,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("stroke=\"#0000ff\"", svg);
+        Assert.Contains("stroke=\"#0000ffFF\"", svg);
     }
 
     [Fact]
@@ -182,8 +182,8 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#ff0000\"", svg);
-        Assert.Contains("stroke=\"#0000ff\"", svg);
+        Assert.Contains("fill=\"#ff0000FF\"", svg);
+        Assert.Contains("stroke=\"#0000ffFF\"", svg);
     }
 
     [Fact]
@@ -306,8 +306,8 @@ public class SvgDeviceTests
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("fill-rule=\"evenodd\"", svg);
-        Assert.Contains("fill=\"#ff0000\"", svg);
-        Assert.Contains("stroke=\"#00ff00\"", svg);
+        Assert.Contains("fill=\"#ff0000FF\"", svg);
+        Assert.Contains("stroke=\"#00ff00FF\"", svg);
     }
 
     [Fact]
@@ -320,7 +320,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#00ffff\"", svg);
+        Assert.Contains("fill=\"#00ffffFF\"", svg);
     }
 
     [Fact]
@@ -333,7 +333,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("stroke=\"#ff00ff\"", svg);
+        Assert.Contains("stroke=\"#ff00ffFF\"", svg);
     }
 
     [Fact]
@@ -346,7 +346,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#000000\"", svg);
+        Assert.Contains("fill=\"#000000FF\"", svg);
     }
 
     [Fact]
@@ -358,7 +358,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("stroke=\"#808080\"", svg);
+        Assert.Contains("stroke=\"#808080FF\"", svg);
     }
 
     [Fact]
@@ -370,7 +370,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#808080\"", svg);
+        Assert.Contains("fill=\"#808080FF\"", svg);
     }
 
     [Fact]
@@ -462,8 +462,8 @@ public class SvgDeviceTests
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
         // First fill red, after Q restore fill is back to black (default)
-        Assert.Contains("fill=\"#ff0000\"", svg);
-        Assert.Contains("fill=\"#000000\"", svg);
+        Assert.Contains("fill=\"#ff0000FF\"", svg);
+        Assert.Contains("fill=\"#000000FF\"", svg);
     }
 
     [Fact]
@@ -479,7 +479,7 @@ public class SvgDeviceTests
         Assert.Contains("stroke-dasharray=\"5,3\"", svg);
         // After Q, the second stroke should NOT have dasharray
         // Count occurrences of stroke-dasharray — should be exactly 1
-        var count = svg.Split("stroke-dasharray").Length - 1;
+        var count = svg.Split(new[] { "stroke-dasharray" }, StringSplitOptions.None).Length - 1;
         Assert.Equal(1, count);
     }
 
@@ -493,8 +493,8 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#00ff00\"", svg);
-        Assert.Contains("stroke=\"#ff0000\"", svg);
+        Assert.Contains("fill=\"#00ff00FF\"", svg);
+        Assert.Contains("stroke=\"#ff0000FF\"", svg);
     }
 
     [Fact]
@@ -509,8 +509,8 @@ public class SvgDeviceTests
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("<path", svg);
         Assert.Contains("Z", svg); // path should be closed
-        Assert.Contains("fill=\"#00ff00\"", svg);
-        Assert.Contains("stroke=\"#ff0000\"", svg);
+        Assert.Contains("fill=\"#00ff00FF\"", svg);
+        Assert.Contains("stroke=\"#ff0000FF\"", svg);
     }
 
     [Fact]

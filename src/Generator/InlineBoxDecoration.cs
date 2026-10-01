@@ -22,6 +22,9 @@ internal sealed class InlineBoxDecoration
     /// title plate ends ≈2 pt short of its cell).</summary>
     internal const double PackEdgeInsetPt = 2.0;
 
+    /// <summary>The box spans the cell's CONTENT box exactly (an &lt;hr> rule), seated at the
+    /// line top less <see cref="InsetV"/>; <see cref="XOff"/> and <see cref="Width"/> are unread.</summary>
+    public bool SpanCell;
     /// <summary>Box left edge relative to the line's text origin.</summary>
     public double XOff;
     /// <summary>Full box width (pads + text + optional circle).</summary>

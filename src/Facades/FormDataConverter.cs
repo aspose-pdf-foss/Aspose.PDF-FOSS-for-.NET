@@ -79,7 +79,7 @@ public class FormDataConverter
         if (sourceFdf is null) throw new System.ArgumentNullException(nameof(sourceFdf));
         if (destXml is null) throw new System.ArgumentNullException(nameof(destXml));
         if (sourceFdf.CanSeek) sourceFdf.Position = 0;
-        using var sr = new StreamReader(sourceFdf, System.Text.Encoding.UTF8, leaveOpen: true);
+        using var sr = Compat.LeaveOpenReader(sourceFdf, System.Text.Encoding.UTF8);
         var text = sr.ReadToEnd();
         var sw = new StreamWriter(destXml, System.Text.Encoding.UTF8);
         sw.WriteLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");

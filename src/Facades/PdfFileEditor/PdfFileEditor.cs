@@ -48,6 +48,9 @@ public sealed partial class PdfFileEditor
     /// <summary>Error message for a page range where start > end.</summary>
     public const string E_WRONG_PAGE_RANGE = "Page range start must not be greater than end";
 
+    /// <summary>Creates a file editor with default settings.</summary>
+    public PdfFileEditor() { }
+
     // ── ResizeContents ────────────────────────────────────────────────────────
 
     // ── File-path overloads ─────────────────────────────────────────────────
@@ -119,21 +122,6 @@ public sealed partial class PdfFileEditor
             if (reader.ResolveDict(entry) is { } d && d.GetName("Type") is null or "StructElem")
                 yield return (d, srcNum);
         }
-    }
-
-    /// <summary>Flatten a number tree (leaf /Nums, intermediate /Kids) into key-value pairs.</summary>
-    private static IEnumerable<(int Key, PdfObject Value)> NumberTreeEntries(
-        PdfDictionary? node, PdfReader reader)
-    {
-        if (node is null) yield break;
-        if (reader.Resolve(node.Get("Nums")) is PdfArray nums)
-            for (var i = 0; i + 1 < nums.Count; i += 2)
-                if (reader.Resolve(nums[i]) is PdfInteger key)
-                    yield return ((int)key.Value, nums[i + 1]);
-        if (reader.Resolve(node.Get("Kids")) is PdfArray kids)
-            foreach (var kid in kids)
-                foreach (var entry in NumberTreeEntries(reader.ResolveDict(kid), reader))
-                    yield return entry;
     }
 
 }

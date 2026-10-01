@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Text;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
@@ -6,7 +6,11 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf;
 
-public sealed class OutlineCollection : Outlines, System.Collections.Generic.IEnumerable<OutlineItem>
+/// <summary>
+/// The top-level bookmarks (outline items) of a document, backed by its <c>/Outlines</c> tree. Obtained from
+/// <c>Document.Outlines</c>; indexes are 1-based.
+/// </summary>
+public sealed partial class OutlineCollection : Outlines, System.Collections.Generic.IEnumerable<OutlineItem>
 {
     private readonly PdfDictionary _dict;
     private readonly PdfReader _reader;
@@ -245,6 +249,8 @@ public sealed class OutlineCollection : Outlines, System.Collections.Generic.IEn
     /// </summary>
     internal void Finalize(Document doc)
     {
+        var ol = new OutlineFinalizeState();
+        ol.doc = doc;
         if (!_dirty) return;
         if (_items is null || _items.Count == 0)
         {
@@ -255,92 +261,36 @@ public sealed class OutlineCollection : Outlines, System.Collections.Generic.IEn
             return;
         }
 
-        // Allocate object numbers for all items (flat list)
-        var flatItems = new List<(OutlineItem item, int objNum)>();
-        var baseObjNum = doc.AllocateObjectNumber();
-        var outlinesObjNum = baseObjNum++;
+        ol.flatItems = new List<(OutlineItem item, int objNum)>();
+        ol.baseObjNum = ol.doc.AllocateObjectNumber();
+        ol.outlinesObjNum = ol.baseObjNum++;
 
-        void Flatten(IReadOnlyList<OutlineItem> items)
-        {
-            foreach (var item in items)
-            {
-                flatItems.Add((item, baseObjNum++));
-                if (item.Children.Count > 0)
-                    Flatten((IReadOnlyList<OutlineItem>)item.Children);
-            }
-        }
-        Flatten(_items);
+        Flatten(ol, _items);
 
-        // Build item → objNum map
-        var objMap = new Dictionary<OutlineItem, int>(ReferenceEqualityComparer.Instance);
-        foreach (var (item, objNum) in flatItems)
-            objMap[item] = objNum;
+        ol.objMap = new Dictionary<OutlineItem, int>(ReferenceEqualityComparer.Instance);
+        foreach (var (item, objNum) in ol.flatItems)
+            ol.objMap[item] = objNum;
 
         // Write each outline item as a new object
-        foreach (var (item, objNum) in flatItems)
+        foreach (var (item, objNum) in ol.flatItems)
         {
-            var dict = new PdfDictionary();
-
-            // Title (PDFDocEncoding for ASCII, UTF-16BE BOM for non-ASCII)
-            dict.Set("Title", OutlineItem.EncodePdfText(item.Title ?? string.Empty));
-
-            // Parent
-            var parentItem = FindParent(item);
-            var parentObjNum = parentItem is not null && objMap.ContainsKey(parentItem)
-                ? objMap[parentItem]
-                : outlinesObjNum;
-            dict.Set("Parent", new PdfIndirectRef(parentObjNum, 0));
-
-            // Prev / Next siblings
-            var siblings = parentItem is not null
-                ? (IReadOnlyList<OutlineItem>)parentItem.Children
-                : (IReadOnlyList<OutlineItem>)_items;
-            var idx = IndexOf(siblings, item);
-            if (idx > 0)
-                dict.Set("Prev", new PdfIndirectRef(objMap[siblings[idx - 1]], 0));
-            if (idx < siblings.Count - 1)
-                dict.Set("Next", new PdfIndirectRef(objMap[siblings[idx + 1]], 0));
-
-            // First / Last children
-            if (item.Children.Count > 0)
-            {
-                dict.Set("First", new PdfIndirectRef(objMap[item.Children[0]], 0));
-                dict.Set("Last", new PdfIndirectRef(objMap[item.Children[^1]], 0));
-                // PDF /Count semantics: visible-descendant magnitude, negated
-                // while the node is closed (so Open state survives reload).
-                var count = item.VisibleMagnitude;
-                dict.Set("Count", new PdfInteger(item.IsOpen ? count : -count));
-            }
-
-            // Copy /Dest or /A from the original dict if available
-            if (item.Dict is not null)
-            {
-                var sourceReader = item.Reader;
-                CopyEntryIfPresent(item.Dict, dict, "Dest", sourceReader, doc);
-                CopyEntryIfPresent(item.Dict, dict, "A", sourceReader, doc);
-                CopyEntryIfPresent(item.Dict, dict, "C", sourceReader, doc);
-                CopyEntryIfPresent(item.Dict, dict, "F", sourceReader, doc);
-            }
-
-            doc.AddNewObject(objNum, dict);
+            WriteOutlineItem(ol, item, objNum);
         }
 
-        // Build /Outlines root dict — /Count is the total number of visible
-        // items: every top-level item plus open items' visible descendants.
-        var rootCount = 0;
+        ol.rootCount = 0;
         foreach (var item in _items)
         {
-            rootCount++;
-            if (item.IsOpen) rootCount += item.VisibleMagnitude;
+            ol.rootCount++;
+            if (item.IsOpen) ol.rootCount += item.VisibleMagnitude;
         }
-        var outlinesDict = new PdfDictionary();
-        outlinesDict.Set("Type", new PdfName("Outlines"));
-        outlinesDict.Set("First", new PdfIndirectRef(objMap[_items[0]], 0));
-        outlinesDict.Set("Last", new PdfIndirectRef(objMap[_items[^1]], 0));
-        outlinesDict.Set("Count", new PdfInteger(rootCount));
+        ol.outlinesDict = new PdfDictionary();
+        ol.outlinesDict.Set("Type", new PdfName("Outlines"));
+        ol.outlinesDict.Set("First", new PdfIndirectRef(ol.objMap[_items[0]], 0));
+        ol.outlinesDict.Set("Last", new PdfIndirectRef(ol.objMap[_items[^1]], 0));
+        ol.outlinesDict.Set("Count", new PdfInteger(ol.rootCount));
 
-        doc.AddNewObject(outlinesObjNum, outlinesDict);
-        doc.Reader.Catalog.Set("Outlines", new PdfIndirectRef(outlinesObjNum, 0));
+        ol.doc.AddNewObject(ol.outlinesObjNum, ol.outlinesDict);
+        ol.doc.Reader.Catalog.Set("Outlines", new PdfIndirectRef(ol.outlinesObjNum, 0));
 
         _dirty = false;
     }

@@ -3,6 +3,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.LogicalStructure;
 
+/// <summary>A generic inline structure element (tag <c>/Span</c>).</summary>
 public sealed class SpanElement : StructureElement
 {
     internal SpanElement() : base("Span") { }

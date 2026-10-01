@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -143,440 +143,49 @@ internal static partial class HtmlToPdfConverter
             || !html.Contains("auditReportTwoColumnDiv", StringComparison.OrdinalIgnoreCase)
             || !html.Contains("auditReportTitleMain", StringComparison.OrdinalIgnoreCase))
             return null;
-        // Roboto ships WITH the document rather than the system, registered as a
-        // folder source under its file name. Ask for the installed face by name -
-        // a plain repository lookup answers with a substitute whose advances run
-        // over a percent wide, which is enough to move a line break.
-        var reg = Text.FontRepository.FaceInstalled("Roboto-Regular")
+        var ar = new AuditReportState();
+        ar.reg = (Text.FontRepository.FaceInstalled("Roboto-Regular")
             ? Text.FontRepository.GetTtfData("Roboto-Regular")
             : Text.FontRepository.FaceInstalled("Roboto")
                 ? Text.FontRepository.GetTtfData("Roboto")
-                : null;
-        if (reg is null) return null;
+                : null)!;
+        if (ar.reg is null) return null;
 
-        var bodyM = Regex.Match(html, @"<body\b[^>]*>([\s\S]*)</body", RegexOptions.IgnoreCase);
-        var body = bodyM.Success ? bodyM.Groups[1].Value : html;
+        ar.bodyM = Regex.Match(html, @"<body\b[^>]*>([\s\S]*)</body", RegexOptions.IgnoreCase);
+        ar.body = ar.bodyM.Success ? ar.bodyM.Groups[1].Value : html;
 
-        var pageW = CtMarginXPt + CtContentWPt + CtMarginXPt;
-        var left = CtMarginXPt;
-        var top = CtMarginYPt;
-        var bottom = CtSheetHPt - CtMarginYPt;
+        ar.pageW = CtMarginXPt + CtContentWPt + CtMarginXPt;
+        ar.left = CtMarginXPt;
+        ar.top = CtMarginYPt;
+        ar.bottom = CtSheetHPt - CtMarginYPt;
 
-        var items = new List<CtItem>();
-        var rows = new List<(int Sheet, double Top)>();
-        var fills = new List<(int Sheet, double X, double Top, double W, double H, Color C)>();
-        var rules = new List<(int Sheet, double X0, double X1, double Y, Color C)>();
-        var sheet = 0;
-        var y = top;
-        var sheetHasGrid = false;
-        // a section may split into floated columns; while one is open the
-        // percentages resolve against IT rather than the sheet
-        var colLeft = left;
-        var colWidth = CtContentWPt;
-        var colRowTop = 0.0;
-        var colDeepest = 0.0;
-        var colSheet = -1;
-        var inCols = false;
+        ar.items = new List<CtItem>();
+        ar.rows = new List<(int Sheet, double Top)>();
+        ar.fills = new List<(int Sheet, double X, double Top, double W, double H, Color C)>();
+        ar.rules = new List<(int Sheet, double X0, double X1, double Y, Color C)>();
+        ar.sheet = 0;
+        ar.y = ar.top;
+        ar.sheetHasGrid = false;
+        ar.colLeft = ar.left;
+        ar.colWidth = CtContentWPt;
+        ar.colRowTop = 0.0;
+        ar.colDeepest = 0.0;
+        ar.colSheet = -1;
+        ar.inCols = false;
 
-        var doc = new Document();
-        var pages = new List<Page>();
-        Page PageAt(int i)
+        ar.doc = new Document();
+        ar.pages = new List<Page>();
+        ar.pendingMain = 0.0;
+        ar.mainOpen = false;
+
+        foreach (var (cls, inner, meta) in CtBlocks(ar.body))
         {
-            while (pages.Count <= i)
-            {
-                var p = doc.Pages.Add(pageW, CtSheetHPt);
-                EnsureFonts(p);
-                pages.Add(p);
-            }
-            return pages[i];
+            if (!LayoutAuditBlock(ar, cls, inner, meta)) break;
         }
 
-        double Measure(byte[] ttf, string s, double size)
-        {
-            if (s.Length == 0) return 0;
-            if (PageAt(0).Dict.Get("Resources") is not Core.PdfDictionary res
-                || res.Get("Font") is not Core.PdfDictionary fd) return s.Length * size * 0.5;
-            return Text.Type0FontEmbedder.MeasureText(fd, ttf, "RobotoRegular", s, size,
-                stripSpacesInBaseFont: true);
-        }
-
-        List<string> Wrap(string text, double width, double size)
-        {
-            var outp = new List<string>();
-            var cur = "";
-            foreach (var w in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var t = cur.Length == 0 ? w : cur + " " + w;
-                if (cur.Length > 0 && Measure(reg, t, size) > width) { outp.Add(cur); cur = w; }
-                else cur = t;
-            }
-            if (cur.Length > 0) outp.Add(cur);
-            if (outp.Count == 0) outp.Add("");
-            return outp;
-        }
-
-        // a splittable run of lines: each line moves to the next sheet on its own
-        void Lines(IEnumerable<string> lines, double x, double size, Color ink)
-        {
-            foreach (var ln in lines)
-            {
-                if (y + CtLineH(size) > bottom) { sheet++; y = top; sheetHasGrid = false; }
-                if (ln.Length > 0)
-                    items.Add(new CtItem
-                    {
-                        Sheet = sheet, Y = y + CtHalf(size), X = x, Size = size,
-                        Text = ln, Ink = ink,
-                    });
-                y += CtLineH(size);
-            }
-        }
-
-        void Atomic(double h, double padTop, double x, double size, string text, Color ink)
-        {
-            if (y + h > bottom) { sheet++; y = top; sheetHasGrid = false; }
-            if (text.Length > 0)
-                items.Add(new CtItem
-                {
-                    Sheet = sheet, Y = y + padTop + CtHalf(size), X = x, Size = size,
-                    Text = text, Ink = ink,
-                });
-            y += h;
-        }
-
-        double TextX() => colLeft + colWidth * CtTextIndentFrac;
-        double TextWrap() => colWidth * CtTextWrapFrac;
-        var pendingMain = 0.0;
-        var mainOpen = false;
-
-        // .auditReportHeadingMain's own 5px padding-bottom, paid once its
-        // heading and body text have been placed
-        void CloseMain()
-        {
-            if (!mainOpen) return;
-            mainOpen = false;
-            y += CtMainPadBotPt;
-        }
-
-        foreach (var (cls, inner, meta) in CtBlocks(body))
-        {
-            switch (cls)
-            {
-                case "auditReportTitleMain":
-                    y = CtTitleTopPt;
-                    Atomic(CtTitlePadTopPt + CtLineH(30) + CtTitlePadBotPt + CtTitleMarginPt,
-                        CtTitlePadTopPt, left + CtTitleLeftPt, 30, CtFlat(inner), CtHeadInk);
-                    break;
-                case "auditReportTitleSub":
-                    Atomic(CtLineH(16) + CtTitleSubMarginPt, 0, left + CtTitleLeftPt, 16,
-                        CtFlat(inner), CtHeadInk);
-                    y += CtBreakDivPt;
-                    break;
-                case "auditReportHeading":
-                    CloseMain();
-                    Atomic(CtHeadPadTopPt + CtLineH(27) + CtHeadPadBotPt + CtHeadMarginPt,
-                        CtHeadPadTopPt, left, 27, CtFlat(inner), CtHeadInk);
-                    break;
-                case "auditReportHeadingMain":
-                    CloseMain();
-                    pendingMain = CtMainPadTopPt;
-                    mainOpen = true;
-                    break;
-                case "auditReportSubHeading":
-                {
-                    y += pendingMain;
-                    pendingMain = 0;
-                    var wrapTop = y;
-                    Atomic(CtSubHeadPadTopPt + CtLineH(19) + CtSubHeadPadBotPt,
-                        CtSubHeadPadTopPt,
-                        colLeft + (inCols
-                            ? colWidth * CtTextIndentFrac + colWidth * CtIconColFrac + CtIconGapPt
-                            : CtSubHeadIndentPt),
-                        19, CtFlat(inner), CtBlue);
-                    // the section's own icon float is taller than its heading
-                    y = Math.Max(y, wrapTop + CtIconBoxPt);
-                    break;
-                }
-                case "auditReportSubSubHeading":
-                {
-                    CloseMain();
-                    var wrapTop = y;
-                    // a section may shorten its own and its icon's padding inline
-                    var pad = CtInlinePadTop(meta, "auditReportSubSubHeading", CtSubSubPadTopPt);
-                    var iconPad = CtInlinePadTop(meta, "auditReportSubSubHeadingImageDiv",
-                        CtSubIconPadTopPt);
-                    Atomic(pad + CtLineH(16), pad, left + CtSubSubIndentPt, 16,
-                        CtFlat(inner), CtBlue);
-                    y = Math.Max(y, wrapTop + iconPad + CtSubIconBoxPt - CtSubIconPadTopPt);
-                    break;
-                }
-                case "auditReportText":
-                    y += CtTextPadTopPt;
-                    Lines(CtSegments(inner).SelectMany(t => Wrap(t, TextWrap(), 12)),
-                        TextX(), 12, CtInk);
-                    y += CtTextPadBotPt;
-                    break;
-                case "auditReportSubText":
-                    Lines(CtSegments(inner).SelectMany(t => Wrap(t, colWidth, 12)),
-                        colLeft + CtSubTextIndentPt, 12, CtInk);
-                    y += CtSubTextPadBotPt;
-                    break;
-                case "auditReportTableDiv":
-                {
-                    var tableLeft = left + CtContentWPt * CtTableMarginFrac;
-                    var tableW = CtContentWPt * CtTableWidthFrac;
-                    y += CtTableMarginTopPt;
-                    foreach (var cells in CtTableRows(inner))
-                    {
-                        if (cells.Count == 0) continue;
-                        // the nine- and three-column grids share the 6px cell
-                        // padding that sets their row heights
-                        var nine = cells[0].Cls.Contains("NineColumn", StringComparison.Ordinal)
-                            || cells[0].Cls.Contains("ThreeColumn", StringComparison.Ordinal);
-                        var small = cells[0].Cls.Contains("NineColumn", StringComparison.Ordinal);
-                        // a header row is the one whose cells declare the label
-                        // classes - the grid's own first cell says "Headerlabel"
-                        // rather than "Toplabel", so both have to count
-                        var head = cells.Exists(c =>
-                            c.Cls.Contains("oplabel", StringComparison.Ordinal)
-                            || c.Cls.Contains("Headerlabel", StringComparison.Ordinal));
-                        var rowH = nine
-                            ? (small && head ? CtNineHeadRowPt : CtNineValueRowPt)
-                            : (head ? CtHeadRowPt : CtValueRowPt);
-                        if (y + rowH > bottom) { sheet++; y = top; sheetHasGrid = false; }
-                        var cx = tableLeft;
-                        for (var ci = 0; ci < cells.Count; ci++)
-                        {
-                            var (ccls, scls, txt) = cells[ci];
-                            var cw = tableW * CtColFrac(ccls);
-                            var size = small && head ? 9.0 : 12.0;
-                            var leftCol = ci == 0;
-                            // the cell sits half a spacing in from its column
-                            var bx = cx + CtCellSpacePt / 2;
-                            // a highlighted row names its own colour on the cell
-                            var inlineBg = CtInlineBg(ccls);
-                            if (inlineBg is { } ib)
-                                fills.Add((sheet, cx, y, cw + CtCellSpacePt,
-                                    rowH - CtCellSpacePt, ib));
-                            else if (leftCol)
-                                fills.Add((sheet, cx, y, cw + CtCellSpacePt,
-                                    rowH - CtCellSpacePt, CtCellBg));
-                            var drop = nine
-                                ? (small && head ? CtNineHeadDropPt : CtNineValueDropPt)
-                                : (head ? CtHeadDropPt : CtValueDropPt);
-                            if (txt.Length > 0)
-                            {
-                                var tw = Measure(reg, txt, size);
-                                // the three-column grid's spans are 100% wide and
-                                // centre their own text, first column included
-                                var centred = !leftCol
-                                    || ccls.Contains("ThreeColumn", StringComparison.Ordinal);
-                                var tx = centred
-                                    ? bx + (cw - tw) / 2
-                                    : bx + (nine ? CtNineCellPadLeftPt : CtCellPadLeftPt);
-                                items.Add(new CtItem
-                                {
-                                    Sheet = sheet, Y = y + drop, X = tx, Size = size,
-                                    Text = txt,
-                                    Ink = head ? (leftCol && !nine ? CtBlack : CtBlue) : CtBlack,
-                                });
-                            }
-                            // the cell's own borders: a solid blue pair around a
-                            // header, a dotted grey under a value row
-                            var ruleC = head ? CtBlue : CtDotRule;
-                            if (head)
-                                rules.Add((sheet, cx, cx + cw,
-                                    y + CtRulePt / 2,
-                                    leftCol && !nine ? CtCellBg : CtBlue));
-                            rules.Add((sheet, cx, cx + cw,
-                                y + rowH - CtCellSpacePt - CtRulePt / 2, ruleC));
-                            cx += cw + CtCellSpacePt;
-                        }
-                        y += rowH;
-                        sheetHasGrid = true;
-                    }
-                    break;
-                }
-                case "col":
-                {
-                    var frac = CtColumnFrac(inner);
-                    if (frac >= 1.0 || frac <= 0)
-                    {
-                        // the row closes on its deepest column, but only when
-                        // that column ended on THIS sheet - a column that spilled
-                        // has already carried the flow forward
-                        if (inCols && colSheet == sheet) y = Math.Max(y, colDeepest);
-                        inCols = false;
-                        colLeft = left;
-                        colWidth = CtContentWPt;
-                        break;
-                    }
-                    if (!inCols)
-                    {
-                        colRowTop = y;
-                        colDeepest = y;
-                        colSheet = sheet;
-                        inCols = true;
-                        colLeft = left;
-                    }
-                    else if (colSheet == sheet)
-                    {
-                        colDeepest = Math.Max(colDeepest, y);
-                        y = colRowTop;
-                        colLeft += colWidth;
-                    }
-                    else
-                    {
-                        colRowTop = y;
-                        colDeepest = y;
-                        colSheet = sheet;
-                        colLeft += colWidth;
-                    }
-                    colWidth = CtContentWPt * frac;
-                    break;
-                }
-                case "costbox":
-                {
-                    var bx = colLeft + colWidth * CtCostMarginFrac;
-                    var bw = colWidth * CtCostWidthFrac;
-                    var by = y + CtCostColPadTopPt;
-                    fills.Add((sheet, bx, by, bw, CtCostHeaderPt, CtBlue));
-                    fills.Add((sheet, bx, by + CtCostHeaderPt, bw, CtCostBodyPt, CtRowBg));
-                    var cy = by + CtCostHeaderPadPt;
-                    var first = true;
-                    foreach (var (txt, size, padTop) in CtCostLines(inner))
-                    {
-                        if (!first) cy += padTop;
-                        var w = Measure(reg, txt, size);
-                        items.Add(new CtItem
-                        {
-                            Sheet = sheet, Y = cy, X = bx + (bw - w) / 2, Size = size,
-                            Text = txt, Ink = first ? CtWhite : CtBlack,
-                        });
-                        cy += CtLineH(size);
-                        if (first) { cy = by + CtCostHeaderPt; first = false; }
-                    }
-                    y = by + CtCostHeaderPt + CtCostBodyPt;
-                    break;
-                }
-                case "pagebreak":
-                    // A `page-break-before` is taken only where it would part a
-                    // finished grid or chart from the next analysis part; one
-                    // that merely interrupts running prose is passed over, which
-                    // is the expected treatment of the five inside the
-                    // narrative half of the report.
-                    if (sheetHasGrid
-                        && (inner.Contains("auditReportHeading\"", StringComparison.Ordinal)
-                            || inner.Contains("data-highcharts-chart", StringComparison.Ordinal)))
-                    {
-                        CloseMain();
-                        sheet++;
-                        y = top;
-                        sheetHasGrid = false;
-                    }
-                    break;
-                case "chartpair":
-                    break;
-                case "chart":
-                {
-                    var h = CtChartHeight(inner);
-                    if (h > 0)
-                    {
-                        if (y + h > bottom) { sheet++; y = top; sheetHasGrid = false; }
-                        y += h;
-                        sheetHasGrid = true;
-                    }
-                    break;
-                }
-                case "auditReportTwoColumnDiv":
-                {
-                    CloseMain();
-                    var h = 2 * CtRowPadPt + CtLineH(14);
-                    if (y + CtRowMarginPt + h > bottom) { sheet++; y = top; sheetHasGrid = false; }
-                    y += CtRowMarginPt;
-                    rows.Add((sheet, y));
-                    var (lab, val) = CtRowPair(inner);
-                    var rowL = left + CtContentWPt * CtRowIndentFrac;
-                    var rowW = CtContentWPt * CtRowWidthFrac;
-                    items.Add(new CtItem
-                    {
-                        Sheet = sheet, Y = y + CtRowPadPt + CtHalf(14),
-                        X = rowL + rowW * CtRowPadLeftFrac, Size = 14, Text = lab, Ink = CtBlack,
-                    });
-                    var vw = Measure(reg, val, 14);
-                    items.Add(new CtItem
-                    {
-                        Sheet = sheet, Y = y + CtRowPadPt + CtHalf(14),
-                        X = rowL + rowW * (CtRowLabelFrac + CtRowPadLeftFrac)
-                            + (rowW * CtRowValueFrac - vw) / 2,
-                        Size = 14, Text = val, Ink = CtWhite,
-                    });
-                    y += h;
-                    break;
-                }
-            }
-        }
-
-        // ── emit ────────────────────────────────────────────────────────────
-        var invc = System.Globalization.CultureInfo.InvariantCulture;
-        var ops = new List<(int Sheet, int Layer, int Seq, string Text)>();
-        var seq = 0;
-
-        string Rgb(Color c, string op)
-            => string.Create(invc,
-                $"{c.R / 255.0:0.###} {c.G / 255.0:0.###} {c.B / 255.0:0.###} {op} ");
-
-        foreach (var (rs, rt) in rows)
-        {
-            PageAt(rs);
-            var rowL = left + CtContentWPt * CtRowIndentFrac;
-            var rowW = CtContentWPt * CtRowWidthFrac;
-            var labW = rowW * (CtRowLabelFrac + CtRowPadLeftFrac);
-            var h = 2 * CtRowPadPt + CtLineH(14);
-            ops.Add((rs, CtLayerFill, seq++, string.Create(invc,
-                $"q {Rgb(CtRowBg, "rg")}{rowL:0.##} {CtSheetHPt - rt - h:0.##} "
-                + $"{labW:0.##} {h:0.##} re f Q")));
-            ops.Add((rs, CtLayerFill, seq++, string.Create(invc,
-                $"q {Rgb(CtBlue, "rg")}{rowL + labW:0.##} {CtSheetHPt - rt - h:0.##} "
-                + $"{rowW * CtRowValueFrac:0.##} {h:0.##} re f Q")));
-        }
-
-        foreach (var (fs, fx, ft, fw, fh, fc) in fills)
-        {
-            PageAt(fs);
-            ops.Add((fs, CtLayerFill, seq++, string.Create(invc,
-                $"q {Rgb(fc, "rg")}{fx:0.##} {CtSheetHPt - ft - fh:0.##} "
-                + $"{fw:0.##} {fh:0.##} re f Q")));
-        }
-        foreach (var (rs, x0, x1, ry, rc) in rules)
-        {
-            PageAt(rs);
-            ops.Add((rs, CtLayerRule, seq++, string.Create(invc,
-                $"q {Rgb(rc, "RG")}{CtRulePt:0.##} w {x0:0.##} {CtSheetHPt - ry:0.##} m "
-                + $"{x1:0.##} {CtSheetHPt - ry:0.##} l S Q")));
-        }
-
-        foreach (var it in items)
-        {
-            var pg = PageAt(it.Sheet);
-            if (pg.Dict.Get("Resources") is not Core.PdfDictionary res
-                || res.Get("Font") is not Core.PdfDictionary fd) continue;
-            var (rn, hex) = Text.Type0FontEmbedder.Embed(fd, reg, "RobotoRegular", it.Text,
-                stripSpacesInBaseFont: true);
-            var baseline = it.Y + it.Size * CtAscEm;
-            ops.Add((it.Sheet, CtLayerText, seq++, string.Create(invc,
-                $"BT {Rgb(it.Ink, "rg")}/{rn} {it.Size:0.##} Tf 1 0 0 1 {it.X:0.##} "
-                + $"{CtSheetHPt - baseline:0.##} Tm ")
-                + "<" + System.Convert.ToHexString(hex) + "> Tj ET"));
-        }
-
-        foreach (var g in ops.GroupBy(o => o.Sheet))
-        {
-            var sb = new StringBuilder();
-            foreach (var o in g.OrderBy(o => o.Layer).ThenBy(o => o.Seq))
-                sb.Append(o.Text).Append('\n');
-            pages[g.Key].AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
-        }
-        return doc;
+        ar.invc = System.Globalization.CultureInfo.InvariantCulture;
+        EmitAuditReport(ar);
+        return ar.doc;
     }
 
     private static string CtFlat(string frag)

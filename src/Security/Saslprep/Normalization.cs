@@ -4,7 +4,7 @@
 /// Unicode Normalization Form KC (NFKC) applied by the SASLprep (RFC 4013)
 /// profile. Delegates to the framework normalizer, which implements the
 /// canonical/compatibility decomposition + canonical composition that
-/// <see cref="Stringprep"/> requires in its normalization step.
+/// <c>Stringprep</c> requires in its normalization step.
 /// </summary>
 internal static class Normalization
 {

@@ -297,9 +297,9 @@ public sealed partial class PdfToHtmlConverter
     /// <summary>Naive CMYK→RGB (the same additive mapping the render devices use
     /// for k/K without an ICC profile).</summary>
     private static (double, double, double) CmykToRgb(double c, double m, double y, double k) =>
-        ((1 - Math.Clamp(c, 0, 1)) * (1 - Math.Clamp(k, 0, 1)),
-         (1 - Math.Clamp(m, 0, 1)) * (1 - Math.Clamp(k, 0, 1)),
-         (1 - Math.Clamp(y, 0, 1)) * (1 - Math.Clamp(k, 0, 1)));
+        ((1 - Compat.Clamp(c, 0, 1)) * (1 - Compat.Clamp(k, 0, 1)),
+         (1 - Compat.Clamp(m, 0, 1)) * (1 - Compat.Clamp(k, 0, 1)),
+         (1 - Compat.Clamp(y, 0, 1)) * (1 - Compat.Clamp(k, 0, 1)));
 
     /// <summary>
     /// Registry of rotated-text CSS classes for one HTML document. Each distinct
@@ -551,7 +551,7 @@ public sealed partial class PdfToHtmlConverter
             case "URI":
                 return actionDict.Get("URI") switch
                 {
-                    PdfString s => Encoding.Latin1.GetString(s.Value),
+                    PdfString s => Compat.Latin1.GetString(s.Value),
                     PdfName n => n.Value,
                     _ => null,
                 };
@@ -562,9 +562,9 @@ public sealed partial class PdfToHtmlConverter
                 // /F may be a bare path string or a file-specification dict.
                 var f = actionDict.Get("F");
                 string? path = f is PdfString fs
-                    ? Encoding.Latin1.GetString(fs.Value)
+                    ? Compat.Latin1.GetString(fs.Value)
                     : reader.ResolveDict(f)?.Get("F") is PdfString fes
-                        ? Encoding.Latin1.GetString(fes.Value)
+                        ? Compat.Latin1.GetString(fes.Value)
                         : null;
                 return path?.Replace('\\', '/');
             default:
@@ -596,11 +596,11 @@ public sealed partial class PdfToHtmlConverter
     private static string? ActionTextValue(PdfObject? obj, PdfReader reader)
     {
         if (reader.Resolve(obj) is PdfString s)
-            return Encoding.Latin1.GetString(s.Value);
+            return Compat.Latin1.GetString(s.Value);
         try
         {
             var stream = reader.ResolveStream(obj);
-            if (stream is not null) return Encoding.Latin1.GetString(reader.DecodeStream(stream));
+            if (stream is not null) return Compat.Latin1.GetString(reader.DecodeStream(stream));
         }
         catch { /* undecodable JS stream — treat as no target */ }
         return null;
@@ -650,7 +650,7 @@ public sealed partial class PdfToHtmlConverter
                 return vals;
             }
             var d = new double[comps];
-            Array.Fill(d, dflt);
+            Compat.Fill(d, dflt);
             return d;
         }
         var c0 = ReadArr("C0", 0.0);
@@ -660,7 +660,7 @@ public sealed partial class PdfToHtmlConverter
 
         return t =>
         {
-            var f = Math.Pow(Math.Clamp(t, 0, 1), n);
+            var f = Math.Pow(Compat.Clamp(t, 0, 1), n);
             double C(int i) => c0[i] + f * (c1[i] - c0[i]);
             return comps switch
             {
@@ -673,26 +673,28 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>RGB from an sc/scn/SC/SCN operand list: 1 numeric = gray,
     /// 3 = RGB, 4 = CMYK; anything else (e.g. a /Pattern name) is not a colour.</summary>
-    private static bool TryColorComponents(List<PdfObject> operands,
-        out double r, out double g, out double b)
+    private static (double r, double g, double b)? TryColorComponents(List<PdfObject> operands)
     {
+        double r = default;
+        double g = default;
+        double b = default;
         r = g = b = 0;
         var nums = new List<double>(4);
         foreach (var o in operands)
         {
             if (o is PdfInteger or PdfReal) nums.Add(Num(o));
-            else return false;
+            else return null;
         }
         switch (nums.Count)
         {
-            case 1: r = g = b = nums[0]; return true;
-            case 3: r = nums[0]; g = nums[1]; b = nums[2]; return true;
+            case 1: r = g = b = nums[0]; return (r, g, b);
+            case 3: r = nums[0]; g = nums[1]; b = nums[2]; return (r, g, b);
             case 4:
                 r = (1 - Math.Min(1, nums[0] + nums[3]));
                 g = (1 - Math.Min(1, nums[1] + nums[3]));
                 b = (1 - Math.Min(1, nums[2] + nums[3]));
-                return true;
-            default: return false;
+                return (r, g, b);
+            default: return null;
         }
     }
 

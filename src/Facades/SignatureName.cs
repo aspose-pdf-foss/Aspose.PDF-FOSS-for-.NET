@@ -18,6 +18,7 @@ public sealed class SignatureName
     /// form but have not been signed yet.</summary>
     public bool HasSignature => _hasSignature;
 
+    /// <summary>Creates a signature name with empty <c>Name</c> and <c>FullName</c> and no signature.</summary>
     public SignatureName() { }
 
     internal SignatureName(string fullName, string name, bool hasSignature)

@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -8,7 +8,7 @@ namespace Aspose.Pdf;
 /// <summary>
 /// Extension methods over <see cref="Page"/> that manipulate the page content stream.
 /// </summary>
-public static class PageExtensions
+public static partial class PageExtensions
 {
     /// <summary>
     /// Duplicate every vector path on the page whose painted geometry intersects
@@ -83,150 +83,34 @@ public static class PageExtensions
         }
     }
 
-    private static void Collect(byte[] streamBytes, Rectangle region,
-        double deltaX, double deltaY, StringBuilder dup)
+    private static void Collect(byte[] streamBytes, Rectangle region, double deltaX, double deltaY, StringBuilder dup)
     {
-        var lexer = new PdfLexer(streamBytes);
-        var operands = new List<PdfObject>();
-        var ctm = Mat.Identity;
-        var ctmStack = new Stack<Mat>();
-        var gs = new GState();
-        var gsStack = new Stack<GState>();
+        var rc = new RegionCollectState();
+        rc.streamBytes = streamBytes;
+        rc.region = region;
+        rc.deltaX = deltaX;
+        rc.deltaY = deltaY;
+        rc.dup = dup;
+        rc.lexer = new PdfLexer(rc.streamBytes);
+        rc.operands = new List<PdfObject>();
+        rc.ctm = Mat.Identity;
+        rc.ctmStack = new Stack<Mat>();
+        rc.gs = new GState();
+        rc.gsStack = new Stack<GState>();
 
-        var path = new StringBuilder();           // raw construction ops of the current path
-        bool started = false;                      // any geometry recorded for the current path
-        double minX = 0, minY = 0, maxX = 0, maxY = 0, curX = 0, curY = 0;
-        bool inText = false;
-
-        void ResetPath() { path.Clear(); started = false; }
-
-        void Pt(double x, double y)
-        {
-            if (!started) { minX = maxX = x; minY = maxY = y; started = true; return; }
-            if (x < minX) minX = x; if (y < minY) minY = y;
-            if (x > maxX) maxX = x; if (y > maxY) maxY = y;
-        }
-
-        void EmitIfIntersecting(string paintOp)
-        {
-            if (started)
-            {
-                // Project the user-space path bbox through the active CTM to page space.
-                var (x1, y1) = ctm.Apply(minX, minY);
-                var (x2, y2) = ctm.Apply(maxX, minY);
-                var (x3, y3) = ctm.Apply(maxX, maxY);
-                var (x4, y4) = ctm.Apply(minX, maxY);
-                double pmnX = Math.Min(Math.Min(x1, x2), Math.Min(x3, x4));
-                double pmnY = Math.Min(Math.Min(y1, y2), Math.Min(y3, y4));
-                double pmxX = Math.Max(Math.Max(x1, x2), Math.Max(x3, x4));
-                double pmxY = Math.Max(Math.Max(y1, y2), Math.Max(y3, y4));
-                bool hit = pmnX <= region.URX && pmxX >= region.LLX
-                        && pmnY <= region.URY && pmxY >= region.LLY;
-                if (hit)
-                {
-                    // Reproduce the path translated by (deltaX, deltaY) in page space:
-                    // page-point' = (p x CTM) x Translate. Emitting Translate then CTM
-                    // composes the effective matrix CTM x Translate from the page base.
-                    dup.Append("q\n");
-                    dup.Append("1 0 0 1 ").Append(F(deltaX)).Append(' ').Append(F(deltaY)).Append(" cm\n");
-                    dup.Append(F(ctm.A)).Append(' ').Append(F(ctm.B)).Append(' ').Append(F(ctm.C)).Append(' ')
-                       .Append(F(ctm.D)).Append(' ').Append(F(ctm.E)).Append(' ').Append(F(ctm.F)).Append(" cm\n");
-                    gs.EmitInto(dup);
-                    dup.Append(path);
-                    dup.Append(paintOp).Append("\nQ\n");
-                }
-            }
-            ResetPath();
-        }
+        rc.path = new StringBuilder();           // raw construction ops of the current path
+        rc.started = false;                      // any geometry recorded for the current path
+        rc.minX = 0;
+        rc.minY = 0;
+        rc.maxX = 0;
+        rc.maxY = 0;
+        rc.curX = 0;
+        rc.curY = 0;
+        rc.inText = false;
 
         while (true)
         {
-            var t = lexer.NextToken();
-            if (t.Kind == TokenKind.Eof) break;
-            switch (t.Kind)
-            {
-                case TokenKind.Integer: operands.Add(new PdfInteger(t.IntValue)); break;
-                case TokenKind.Real: operands.Add(new PdfReal(t.RealValue)); break;
-                case TokenKind.LiteralString: operands.Add(new PdfString(t.BytesValue!)); break;
-                case TokenKind.HexString: operands.Add(new PdfString(t.BytesValue!, isHex: true)); break;
-                case TokenKind.Name: operands.Add(new PdfName(t.StringValue!)); break;
-                case TokenKind.ArrayStart: operands.Add(ParseArray(lexer)); break;
-                case TokenKind.Keyword:
-                {
-                    var op = t.StringValue!;
-                    switch (op)
-                    {
-                        case "q":
-                            ctmStack.Push(ctm); gsStack.Push(gs.Clone()); break;
-                        case "Q":
-                            if (ctmStack.Count > 0) ctm = ctmStack.Pop();
-                            if (gsStack.Count > 0) gs = gsStack.Pop();
-                            break;
-                        case "cm" when operands.Count >= 6:
-                            ctm = new Mat(Num(operands[0]), Num(operands[1]), Num(operands[2]),
-                                          Num(operands[3]), Num(operands[4]), Num(operands[5])).Multiply(ctm);
-                            break;
-
-                        case "BT": inText = true; ResetPath(); break;
-                        case "ET": inText = false; break;
-
-                        // Graphics-state setters — remember the latest of each kind.
-                        case "w": gs.Width = OpLine(operands, op); break;
-                        case "J": gs.Cap = OpLine(operands, op); break;
-                        case "j": gs.Join = OpLine(operands, op); break;
-                        case "M": gs.Miter = OpLine(operands, op); break;
-                        case "d": gs.Dash = OpLine(operands, op); break;
-                        case "CS": gs.StrokeCs = OpLine(operands, op); break;
-                        case "cs": gs.FillCs = OpLine(operands, op); break;
-                        case "G" or "RG" or "K" or "SC" or "SCN": gs.StrokeColor = OpLine(operands, op); break;
-                        case "g" or "rg" or "k" or "sc" or "scn": gs.FillColor = OpLine(operands, op); break;
-
-                        // Path construction (ignore inside text objects).
-                        case "m" when !inText && operands.Count >= 2:
-                            curX = Num(operands[0]); curY = Num(operands[1]); Pt(curX, curY);
-                            path.Append(OpLine(operands, op)).Append('\n'); break;
-                        case "l" when !inText && operands.Count >= 2:
-                            curX = Num(operands[0]); curY = Num(operands[1]); Pt(curX, curY);
-                            path.Append(OpLine(operands, op)).Append('\n'); break;
-                        case "c" when !inText && operands.Count >= 6:
-                            Pt(Num(operands[0]), Num(operands[1])); Pt(Num(operands[2]), Num(operands[3]));
-                            curX = Num(operands[4]); curY = Num(operands[5]); Pt(curX, curY);
-                            path.Append(OpLine(operands, op)).Append('\n'); break;
-                        case "v" when !inText && operands.Count >= 4:
-                            Pt(curX, curY); Pt(Num(operands[0]), Num(operands[1]));
-                            curX = Num(operands[2]); curY = Num(operands[3]); Pt(curX, curY);
-                            path.Append(OpLine(operands, op)).Append('\n'); break;
-                        case "y" when !inText && operands.Count >= 4:
-                            Pt(Num(operands[0]), Num(operands[1]));
-                            curX = Num(operands[2]); curY = Num(operands[3]); Pt(curX, curY);
-                            path.Append(OpLine(operands, op)).Append('\n'); break;
-                        case "re" when !inText && operands.Count >= 4:
-                        {
-                            double x = Num(operands[0]), y = Num(operands[1]),
-                                   w = Num(operands[2]), h = Num(operands[3]);
-                            Pt(x, y); Pt(x + w, y + h); curX = x; curY = y;
-                            path.Append(OpLine(operands, op)).Append('\n'); break;
-                        }
-                        case "h" when !inText:
-                            path.Append("h\n"); break;
-                        case "W" or "W*" when !inText:
-                            // Keep clip operators inside the duplicated path so the copy
-                            // clips itself the same way; never duplicate a clip-only path.
-                            path.Append(op).Append('\n'); break;
-
-                        // Painting operators end the path.
-                        case "S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*":
-                            EmitIfIntersecting(op); break;
-                        case "n":
-                            ResetPath(); break;
-                    }
-                    operands.Clear();
-                    break;
-                }
-                default:
-                    operands.Clear();
-                    break;
-            }
+            if (!CollectRegionOperator(rc)) break;
         }
     }
 

@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -305,112 +305,69 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     /// </summary>
     public Field Add(Field field, string partialName, int pageNumber)
     {
-        if (field is null) throw new ArgumentNullException(nameof(field));
-        var reader = _reader ?? OwnerDocument?.Reader;
-        if (reader is null)
+        var fa = new FieldAddState();
+        fa.field = field;
+        fa.partialName = partialName;
+        fa.pageNumber = pageNumber;
+        if (fa.field is null) throw new ArgumentNullException(nameof(fa.field));
+        fa.reader = _reader ?? OwnerDocument?.Reader;
+        if (fa.reader is null)
             throw new InvalidOperationException("Cannot add fields to an empty form.");
 
-        // Copy the source field dict (except /Kids, rebuilt below) and rename it.
-        var newDict = new PdfDictionary();
-        foreach (var key in field.Dict.Keys)
+        fa.newDict = new PdfDictionary();
+        foreach (var key in fa.field.Dict.Keys)
         {
             if (key == "Kids") continue;
-            var val = field.Dict.Get(key);
-            if (val is not null) newDict.Set(key, val);
+            var val = fa.field.Dict.Get(key);
+            if (val is not null) fa.newDict.Set(key, val);
         }
-        newDict.Set("T", new PdfString(System.Text.Encoding.Latin1.GetBytes(partialName)));
+        fa.newDict.Set("T", new PdfString(Compat.Latin1.GetBytes(fa.partialName)));
 
-        // Rebuild /Kids as independent copies of each source widget so that
-        // editing a copied widget's /Rect does not mutate the original.
-        var srcKids = reader.Resolve(field.Dict.Get("Kids")) as PdfArray;
-        var newKids = new PdfArray();
-        var copiedWidgets = new List<PdfDictionary>();
-        if (srcKids is not null)
+        fa.srcKids = fa.reader.Resolve(fa.field.Dict.Get("Kids")) as PdfArray;
+        fa.newKids = new PdfArray();
+        fa.copiedWidgets = new List<PdfDictionary>();
+        if (fa.srcKids is not null)
         {
-            foreach (var k in srcKids)
-            {
-                if (reader.Resolve(k) is not PdfDictionary srcKid) continue;
-                var newKid = new PdfDictionary();
-                foreach (var kk in srcKid.Keys)
-                {
-                    var kv = srcKid.Get(kk);
-                    if (kv is not null) newKid.Set(kk, kv);
-                }
-                newKids.Add(newKid);
-                copiedWidgets.Add(newKid);
-            }
+            CopyAddedFieldKids(fa);
         }
-        if (newKids.Count > 0) newDict.Set("Kids", newKids);
+        if (fa.newKids.Count > 0) fa.newDict.Set("Kids", fa.newKids);
 
-        var newField = Field.Create(newDict, reader);
-        newField.OwnerDocument = OwnerDocument;
+        fa.newField = Field.Create(fa.newDict, fa.reader);
+        fa.newField.OwnerDocument = OwnerDocument;
 
-        // Register in the AcroForm /Fields array.
-        var catalog = reader.Catalog;
-        var acroForm = reader.ResolveDict(catalog.Get("AcroForm"));
-        if (acroForm is null)
+        fa.catalog = fa.reader.Catalog;
+        fa.acroForm = fa.reader.ResolveDict(fa.catalog.Get("AcroForm"));
+        if (fa.acroForm is null)
         {
-            acroForm = new PdfDictionary();
-            catalog.Set("AcroForm", acroForm);
+            fa.acroForm = new PdfDictionary();
+            fa.catalog.Set("AcroForm", fa.acroForm);
         }
-        var fieldsArray = reader.Resolve(acroForm.Get("Fields")) as PdfArray;
-        if (fieldsArray is null)
+        fa.fieldsArray = fa.reader.Resolve(fa.acroForm.Get("Fields")) as PdfArray;
+        if (fa.fieldsArray is null)
         {
-            fieldsArray = new PdfArray();
-            acroForm.Set("Fields", fieldsArray);
+            fa.fieldsArray = new PdfArray();
+            fa.acroForm.Set("Fields", fa.fieldsArray);
         }
-        fieldsArray.Add(newDict);
-        acroForm.Set("NeedAppearances", PdfBoolean.True);
-        EnsureDefaultResources(acroForm);
+        fa.fieldsArray.Add(fa.newDict);
+        fa.acroForm.Set("NeedAppearances", PdfBoolean.True);
+        EnsureDefaultResources(fa.acroForm);
 
-        // Bind the widget(s) to the target page's /Annots.
-        var pages = new PageCollection(reader);
-        PdfDictionary? pageDict = null;
-        if (pageNumber >= 1 && pageNumber <= pages.Count)
+        fa.pages = new PageCollection(fa.reader);
+        fa.pageDict = null;
+        if (fa.pageNumber >= 1 && fa.pageNumber <= fa.pages.Count)
         {
-            pageDict = pages[pageNumber].Dict;
-            var annots = pageDict.Get("Annots") as PdfArray;
-            if (annots is null)
-            {
-                annots = new PdfArray();
-                pageDict.Set("Annots", annots);
-            }
-
-            if (copiedWidgets.Count > 0)
-            {
-                foreach (var widget in copiedWidgets)
-                {
-                    widget.Set("P", pageDict);
-                    widget.Set("Parent", newDict);
-                    annots.Add(widget);
-                }
-            }
-            else
-            {
-                // Single-widget field merged into the field dict.
-                newDict.Set("P", pageDict);
-                annots.Add(newDict);
-            }
+            PlaceAddedFieldOnPage(fa);
         }
 
-        _fields.Add(newField);
+        _fields.Add(fa.newField);
 
-        // Mark dirty so incremental save persists the new field/annots.
-        var doc = OwnerDocument;
-        if (doc is not null)
+        fa.doc = OwnerDocument;
+        if (fa.doc is not null)
         {
-            var acroFormObjNum = doc.FindObjectNumber(acroForm);
-            if (acroFormObjNum > 0)
-                doc.MarkDirty(acroFormObjNum, acroForm);
-            if (pageDict is not null)
-            {
-                var pageObjNum = doc.FindObjectNumber(pageDict);
-                if (pageObjNum > 0)
-                    doc.MarkDirty(pageObjNum, pageDict);
-            }
+            RegisterAddedField(fa);
         }
 
-        return newField;
+        return fa.newField;
     }
 
     /// <summary>Append a fresh widget appearance to a field on a specific page within a rectangle.</summary>

@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -12,150 +12,33 @@ internal static partial class SvgToPdfConverter
 {
     private static void RenderText(XmlElement elem, Ctx ctx, Dictionary<string, string> style, double[] ctm)
     {
-        var sb = ctx.Surface.Sb;
-        sb.Append("q\n");
-        var transform = elem.GetAttribute("transform");
-        var tmMatrix = ParseMatrixOnly(transform);
-        // A pure matrix() transform is applied through the text matrix (Tm) in
-        // EmitRun — emitting it as a cm too would double the translation.
-        var newCtm = tmMatrix is null ? ApplyTransform(elem, sb, ctm) : ctm;
-        ApplyClipPath(style, ctx, newCtm);
-        ApplyMask(style, ctx, newCtm);
+        var sx = new SvgTextRenderState();
+        sx.elem = elem;
+        sx.ctx = ctx;
+        sx.style = style;
+        sx.ctm = ctm;
+        sx.sb = sx.ctx.Surface.Sb;
+        sx.sb.Append("q\n");
+        sx.transform = sx.elem.GetAttribute("transform");
+        sx.tmMatrix = ParseMatrixOnly(sx.transform);
+        // The round-trip shortcut below only applies to THIS library's own PDF-to-SVG
+        // export, which never pairs a text transform with x/y (position lives entirely
+        // in the matrix's e/f - see SvgDevice.EmitTextRun's rotated-text branch). A
+        // third-party SVG (Raphael, D3, ...) commonly carries BOTH an ordinary x/y and
+        // an (often identity) transform="matrix(...)" on the same <text> - for that
+        // shape the matrix is just another CTM term, not the position, and treating it
+        // as the round-trip case drops x/y entirely and stacks every run at the origin.
+        if (sx.tmMatrix is not null && (sx.elem.HasAttribute("x") || sx.elem.HasAttribute("y")))
+            sx.tmMatrix = null;
+        sx.newCtm = sx.tmMatrix is null ? ApplyTransform(sx.elem, sx.sb, sx.ctm) : sx.ctm;
+        ApplyClipPath(sx.style, sx.ctx, sx.newCtm);
+        ApplyMask(sx.style, sx.ctx, sx.newCtm);
 
-        // Walk the text content: direct text nodes and tspan children, tracking the
-        // current text position.
-        double curX = GetFirstLen(elem, "x", ctx.VpW);
-        double curY = GetFirstLen(elem, "y", ctx.VpH);
+        sx.curX = GetFirstLen(sx.elem, "x", sx.ctx.VpW);
+        sx.curY = GetFirstLen(sx.elem, "y", sx.ctx.VpH);
 
-        void EmitRun(string text, XmlElement source, Dictionary<string, string> runStyle)
-        {
-            if (text.Length == 0) return;
-            // U+A880 is the exporter's PUA stand-in for a space-like glyph slot
-            // (see SvgDevice.ShowText); map it back to a plain space on import.
-            text = text.Replace('ꢀ', ' ');
-            if (text.Trim().Length == 0) return;
-
-            var fontSize = ParseLength(Prop(runStyle, "font-size"));
-            if (fontSize <= 0) fontSize = 16;
-
-            // Non-WinAnsi text (Arabic, Hebrew, Cyrillic, CJK, …) cannot be written with a
-            // Standard-14 face — it would flatten to '?'. Route it through an embedded Type0
-            // face (RTL runs shaped to visual order first). uniTtf == null => the run keeps
-            // the Standard-14 path below.
-            // A family the DOCUMENT itself ships (@font-face, inline or from a linked
-            // stylesheet) is embedded and used as-is — that is the whole point of
-            // shipping it, and a Standard-14 substitute would draw the wrong typeface.
-            byte[]? uniTtf = ResolveDeclaredFace(ctx, Prop(runStyle, "font-family"));
-            var declaredFaceName = uniTtf is null ? null : DeclaredFaceName(ctx, Prop(runStyle, "font-family"));
-            if (uniTtf is null && NeedsUnicodeSvg(text)) uniTtf = ResolveSvgUnicodeTtf(text);
-            var display = text;
-            if (uniTtf is not null)
-                display = IsPureRtlSvg(text) ? ToVisualRtlSvg(text)
-                    : Text.BidiReorderer.ContainsRtl(text) ? VisualizeMixedRtlSvg(text) : text;
-
-            var baseFont = MapFont(runStyle);
-            var fontDict = GetOrCreate(ctx.Surface.Resources, "Font");
-            var fontRes = uniTtf is null ? EnsureFontResource(ctx, baseFont) : "";
-
-            var embedName = declaredFaceName ?? "SvgUni";
-            var width = uniTtf is null
-                ? MeasureText(text, baseFont, fontSize)
-                : Text.Type0FontEmbedder.MeasureText(fontDict, uniTtf, embedName, display, fontSize,
-                    stripSpacesInBaseFont: true, resNameHint: NextCompositeResName(fontDict));
-            var anchor = Prop(runStyle, "text-anchor");
-            var x = curX;
-            if (anchor == "middle") x -= width / 2;
-            else if (anchor == "end") x -= width;
-
-            var visible = Prop(runStyle, "visibility") != "hidden";
-            if (visible)
-            {
-                var fillVal = Prop(runStyle, "fill");
-                double fr = 0, fg = 0, fb = 0;
-                var noFill = IsNoPaint(fillVal);
-                if (!noFill && ParseUrlRef(fillVal) is null)
-                    (fr, fg, fb) = ParseColor(fillVal);
-
-                var opacity = ParseOpacity(runStyle.GetValueOrDefault("opacity"))
-                              * ParseOpacity(Prop(runStyle, "fill-opacity"));
-
-                sb.Append("q\n");
-                if (opacity < 0.999)
-                    sb.Append($"/{RegisterAlphaGs(ctx, opacity, opacity)} gs\n");
-                if (!noFill)
-                    sb.Append($"{F(fr)} {F(fg)} {F(fb)} rg ");
-
-                // The glyph payload: WinAnsi (escaped) string, or 2-byte Type0 hex codes.
-                string glyphOp;
-                string useFontRes;
-                if (uniTtf is not null)
-                {
-                    var (rn, hex) = Text.Type0FontEmbedder.Embed(fontDict, uniTtf, embedName, display,
-                        stripSpacesInBaseFont: true, resNameHint: NextCompositeResName(fontDict));
-                    useFontRes = rn;
-                    glyphOp = $"<{System.Convert.ToHexString(hex)}>";
-                }
-                else
-                {
-                    useFontRes = fontRes;
-                    glyphOp = $"({EscapePdfString(text)})";
-                }
-
-                if (tmMatrix is not null)
-                {
-                    // FOSS-generated SVG (round-trip): a matrix() transform on <text> is the
-                    // PDF text matrix with its y-column negated (see SvgDevice) — negate it
-                    // back to recover the text matrix and place the run with Tm.
-                    sb.Append($"BT /{useFontRes} {F(fontSize)} Tf " +
-                        $"{F(tmMatrix[0])} {F(tmMatrix[1])} {F(-tmMatrix[2])} {F(-tmMatrix[3])} {F(tmMatrix[4])} {F(tmMatrix[5])} Tm ");
-                }
-                else
-                {
-                    // Draw with a LOCAL y-flip (1 0 0 -1) so the glyphs are upright —
-                    // cancelling the page's scale(1,-1); without the flip the text
-                    // renders mirrored/upside-down.
-                    sb.Append($"BT /{useFontRes} {F(fontSize)} Tf 1 0 0 -1 {F(x)} {F(curY)} Tm ");
-                }
-                sb.Append($"{glyphOp} Tj ET\n");
-
-                // text-decoration: draw the line as a filled rect in user space.
-                var deco = Prop(runStyle, "text-decoration");
-                if (deco.Contains("line-through") || deco.Contains("underline"))
-                {
-                    var t = Math.Max(fontSize * 0.06, 0.5);
-                    if (deco.Contains("line-through"))
-                        sb.Append($"{F(x)} {F(curY - fontSize * 0.30 - t / 2)} {F(width)} {F(t)} re f\n");
-                    if (deco.Contains("underline"))
-                        sb.Append($"{F(x)} {F(curY + fontSize * 0.11 - t / 2)} {F(width)} {F(t)} re f\n");
-                }
-                sb.Append("Q\n");
-            }
-            curX += width;
-        }
-
-        void Walk(XmlNode node, Dictionary<string, string> nodeStyle)
-        {
-            foreach (XmlNode child in node.ChildNodes)
-            {
-                if (child.NodeType is XmlNodeType.Text or XmlNodeType.CDATA)
-                {
-                    var text = CollapseWs(child.Value ?? "");
-                    EmitRun(text, (XmlElement)node, nodeStyle);
-                }
-                else if (child is XmlElement tspan && child.LocalName is "tspan" or "textPath" or "a")
-                {
-                    var childStyle = ResolveStyle(tspan, nodeStyle, ctx);
-                    if (tspan.HasAttribute("x")) curX = GetFirstLen(tspan, "x", ctx.VpW);
-                    if (tspan.HasAttribute("y")) curY = GetFirstLen(tspan, "y", ctx.VpH);
-                    curX += GetFirstLen(tspan, "dx", ctx.VpW);
-                    curY += GetFirstLen(tspan, "dy", ctx.VpH);
-                    Walk(tspan, childStyle);
-                }
-            }
-        }
-
-        Walk(elem, style);
-        sb.Append("Q\n");
+        WalkSvgTspans(sx, sx.elem, sx.style);
+        sx.sb.Append("Q\n");
     }
 
     private static string CollapseWs(string s) => Regex.Replace(s, @"\s+", " ").Trim();
@@ -274,7 +157,7 @@ internal static partial class SvgToPdfConverter
     private static bool NeedsUnicodeSvg(string s)
     {
         foreach (var ch in s)
-            if (ch > 0x7F && !Text.Cp1252.TryGetByte(ch, out _)) return true;
+            if (ch > 0x7F && Text.Cp1252.TryGetByte(ch) is null) return true;
         return false;
     }
 
@@ -300,7 +183,7 @@ internal static partial class SvgToPdfConverter
             var covers = true;
             foreach (var ch in text)
             {
-                if (ch <= 0x7F || Text.Cp1252.TryGetByte(ch, out _)) continue;
+                if (ch <= 0x7F || Text.Cp1252.TryGetByte(ch) is not null) continue;
                 if (!entry.cmap.TryGetValue(ch, out var gid) || gid == 0) { covers = false; break; }
             }
             if (covers) return entry.ttf;

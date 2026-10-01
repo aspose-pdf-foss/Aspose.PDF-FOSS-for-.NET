@@ -5,8 +5,10 @@ namespace Aspose.Pdf;
 /// content streams.</summary>
 public sealed class Matrix3D
 {
+    /// <summary>Creates the identity matrix (A, E and I are 1; every other element is 0).</summary>
     public Matrix3D() { }
 
+    /// <summary>Creates a copy of the given matrix; <c>null</c> gives the identity matrix.</summary>
     public Matrix3D(Matrix3D matrix)
     {
         if (matrix is null) return;
@@ -16,6 +18,7 @@ public sealed class Matrix3D
         Tx = matrix.Tx; Ty = matrix.Ty; Tz = matrix.Tz;
     }
 
+    /// <summary>Creates a matrix from its twelve elements: the 3 x 3 linear part row by row (<c>a</c> to <c>i</c>) followed by the translation (<c>tx</c>, <c>ty</c>, <c>tz</c>).</summary>
     public Matrix3D(
         double a, double b, double c,
         double d, double e, double f,
@@ -28,6 +31,7 @@ public sealed class Matrix3D
         Tx = tx; Ty = ty; Tz = tz;
     }
 
+    /// <summary>Creates a matrix from an array of up to twelve values in the order A, B, C, D, E, F, G, H, I, Tx, Ty, Tz. Missing entries keep their identity values; <c>null</c> gives the identity matrix.</summary>
     public Matrix3D(double[] matrix3DArray)
     {
         if (matrix3DArray is null) return;
@@ -45,11 +49,17 @@ public sealed class Matrix3D
         if (matrix3DArray.Length > 11) Tz = matrix3DArray[11];
     }
 
+    /// <summary>Gets or sets element A (row 1, column 1 of the linear part). Defaults to 1.</summary>
     public double A { get; set; } = 1.0;
+    /// <summary>Gets or sets element B (row 1, column 2 of the linear part). Defaults to 0.</summary>
     public double B { get; set; }
+    /// <summary>Gets or sets element C (row 1, column 3 of the linear part). Defaults to 0.</summary>
     public double C { get; set; }
+    /// <summary>Gets or sets element D (row 2, column 1 of the linear part). Defaults to 0.</summary>
     public double D { get; set; }
+    /// <summary>Gets or sets element E (row 2, column 2 of the linear part). Defaults to 1.</summary>
     public double E { get; set; } = 1.0;
+    /// <summary>Gets or sets element F (row 2, column 3 of the linear part). Defaults to 0.</summary>
     public double F { get; set; }
     public double G { get; set; }
     public double H { get; set; }

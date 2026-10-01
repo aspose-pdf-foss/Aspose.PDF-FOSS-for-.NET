@@ -2,19 +2,20 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf.Facades;
 
 public sealed partial class PdfContentEditor
 {
+    /// <summary>Embeds the file at the given path as a document-level attachment, named after the file, with the given description.</summary>
     public void AddDocumentAttachment(string fileAttachmentPath, string description)
     {
         var bytes = File.ReadAllBytes(fileAttachmentPath);
         AddAttachmentEntry(Path.GetFileName(fileAttachmentPath), bytes, description);
     }
 
+    /// <summary>Embeds the contents of the stream as a document-level attachment with the given name and description.</summary>
     public void AddDocumentAttachment(Stream fileAttachmentStream, string fileAttachmentName, string description)
     {
         using var ms = new MemoryStream();
@@ -42,6 +43,7 @@ public sealed partial class PdfContentEditor
         arr.Add(fs);
     }
 
+    /// <summary>Removes all document-level attachments (the embedded files name tree).</summary>
     public void DeleteAttachments()
     {
         var doc = EnsureBound();
@@ -51,6 +53,7 @@ public sealed partial class PdfContentEditor
         names.Remove("EmbeddedFiles");
     }
 
+    /// <summary>Removes the first image found in the page resources, searching from the first page.</summary>
     public void DeleteImage()
     {
         // Delete the "current" image — first image on the first page that has one.
@@ -73,6 +76,7 @@ public sealed partial class PdfContentEditor
         }
     }
 
+    /// <summary>Removes images from the resources of the given page. Each index is matched both 1-based and 0-based, so index 1 removes the first and the second image.</summary>
     public void DeleteImage(int pageNumber, int[] index)
     {
         var page = GetPage1Based(pageNumber);
@@ -91,6 +95,7 @@ public sealed partial class PdfContentEditor
         }
     }
 
+    /// <summary>Replaces the image at the given 1-based index on the given page with the JPEG file at <c>imageFile</c>. Does nothing when the index is out of range.</summary>
     public void ReplaceImage(int pageNumber, int index, string imageFile)
     {
         var page = GetPage1Based(pageNumber);

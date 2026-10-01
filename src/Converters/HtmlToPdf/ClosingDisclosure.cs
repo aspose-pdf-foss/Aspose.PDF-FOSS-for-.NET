@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -119,321 +119,44 @@ internal static partial class HtmlToPdfConverter
     /// document is not one.</summary>
     private static Document? TryRenderClosingDisclosure(string html)
     {
-        if (!html.Contains("closingDisclosureFrm", StringComparison.OrdinalIgnoreCase)
-            || !html.Contains("AddendumTitle", StringComparison.OrdinalIgnoreCase)
-            || !html.Contains("tbl_LoanCostSection", StringComparison.OrdinalIgnoreCase))
+        var cd = new ClosingDisclosureState();
+        cd.html = html;
+        if (!cd.html.Contains("closingDisclosureFrm", StringComparison.OrdinalIgnoreCase)
+            || !cd.html.Contains("AddendumTitle", StringComparison.OrdinalIgnoreCase)
+            || !cd.html.Contains("tbl_LoanCostSection", StringComparison.OrdinalIgnoreCase))
             return null;
-        var calibri = Text.SystemFontResolver.Resolve("Calibri");
-        var calibriB = Text.SystemFontResolver.Resolve("Calibri-Bold")
-            ?? Text.SystemFontResolver.Resolve("Calibri Bold");
-        var arial = Text.SystemFontResolver.Resolve("Arial");
-        var arialB = Text.SystemFontResolver.Resolve("Arial-Bold")
-            ?? Text.SystemFontResolver.Resolve("Arial Bold");
-        if (calibri is null || calibriB is null || arial is null || arialB is null) return null;
+        cd.calibri = Text.SystemFontResolver.Resolve("Calibri")!;
+        cd.calibriB = Text.SystemFontResolver.Resolve("Calibri-Bold")
+            ?? Text.SystemFontResolver.Resolve("Calibri Bold")!;
+        cd.arial = Text.SystemFontResolver.Resolve("Arial")!;
+        cd.arialB = Text.SystemFontResolver.Resolve("Arial-Bold")
+            ?? Text.SystemFontResolver.Resolve("Arial Bold")!;
+        if (cd.calibri is null || cd.calibriB is null || cd.arial is null || cd.arialB is null) return null;
 
-        const double marginLeft = CdMarginXPt, marginTop = CdMarginYPt;
-        const double marginBottom = CdMarginYPt;
-        var contentW = CdMeasureSheetWidth();
-        var pageWidth = marginLeft + contentW + CdMarginXPt;
-        var pageHeight = marginTop + CdSheetHeightPt + marginBottom;
-        var flowLeft = marginLeft + contentW * CdGutterFrac;
-        var tableLeft = flowLeft + CdSheetPadPt;
-        var tableW = contentW * (1 - 2 * CdGutterFrac) - 2 * CdSheetPadPt;
+        cd.marginLeft = CdMarginXPt;
+        cd.marginTop = CdMarginYPt;
+        cd.marginBottom = CdMarginYPt;
+        cd.contentW = CdMeasureSheetWidth();
+        cd.pageWidth = cd.marginLeft + cd.contentW + CdMarginXPt;
+        cd.pageHeight = cd.marginTop + CdSheetHeightPt + cd.marginBottom;
+        cd.flowLeft = cd.marginLeft + cd.contentW * CdGutterFrac;
+        cd.tableLeft = cd.flowLeft + CdSheetPadPt;
+        cd.tableW = cd.contentW * (1 - 2 * CdGutterFrac) - 2 * CdSheetPadPt;
 
-        var doc = new Document();
-        var pages = new List<Page>();
-        var ops = new List<(int Sheet, int Layer, int Seq, string Text)>();
-        var seq = 0;
-        var invc = System.Globalization.CultureInfo.InvariantCulture;
+        RenderHeaderSections(cd);
 
-        string Rgb(Color c, string op)
-            => string.Create(invc,
-                $"{c.R / 255.0:0.###} {c.G / 255.0:0.###} {c.B / 255.0:0.###} {op} ");
+        RenderCostAndSummary(cd);
 
-        Page PageAt(int i)
-        {
-            while (pages.Count <= i)
-            {
-                var p = doc.Pages.Add(pageWidth, pageHeight);
-                EnsureFonts(p);
-                // the body plate: the @page box inside the sheet's own margins
-                ops.Add((pages.Count, CdLayerCanvas, seq++, string.Create(invc,
-                    $"q {Rgb(CdWhite, "rg")}{marginLeft:0.##} {marginBottom:0.##} "
-                    + $"{contentW:0.##} {CdSheetHeightPt:0.##} re f Q")));
-                pages.Add(p);
-            }
-            return pages[i];
-        }
+        RenderPayoffAndContacts(cd);
 
-        void Fill(int sheet, double x, double top, double w, double h, Color c)
-        {
-            if (w <= 0 || h <= 0) return;
-            PageAt(sheet);
-            ops.Add((sheet, CdLayerFill, seq++, string.Create(invc,
-                $"q {Rgb(c, "rg")}{x:0.##} {pageHeight - top - h:0.##} "
-                + $"{w:0.##} {h:0.##} re f Q")));
-        }
-
-        void HRule(int sheet, double x0, double x1, double y, Color c)
-        {
-            PageAt(sheet);
-            ops.Add((sheet, CdLayerRule, seq++, string.Create(invc,
-                $"q {Rgb(c, "RG")}{CdRulePt:0.##} w {x0:0.##} {pageHeight - y:0.##} m "
-                + $"{x1:0.##} {pageHeight - y:0.##} l S Q")));
-        }
-
-        void VRule(int sheet, double x, double y0, double y1, Color c)
-        {
-            PageAt(sheet);
-            ops.Add((sheet, CdLayerRule, seq++, string.Create(invc,
-                $"q {Rgb(c, "RG")}{CdRulePt:0.##} w {x:0.##} {pageHeight - y0:0.##} m "
-                + $"{x:0.##} {pageHeight - y1:0.##} l S Q")));
-        }
-
-        double Measure(byte[] ttf, string name, string s, double size)
-        {
-            if (PageAt(0).Dict.Get("Resources") is not Core.PdfDictionary res
-                || res.Get("Font") is not Core.PdfDictionary fd) return s.Length * size * 0.5;
-            return Text.Type0FontEmbedder.MeasureText(fd, ttf, name, s, size,
-                stripSpacesInBaseFont: true);
-        }
-
-        void Run(int sheet, double x, double baseline, double size, byte[] ttf,
-            string name, string s, Color c)
-        {
-            if (s.Length == 0) return;
-            var pg = PageAt(sheet);
-            if (pg.Dict.Get("Resources") is not Core.PdfDictionary res
-                || res.Get("Font") is not Core.PdfDictionary fd) return;
-            var (rn, hex) = Text.Type0FontEmbedder.Embed(fd, ttf, name, s,
-                stripSpacesInBaseFont: true);
-            ops.Add((sheet, CdLayerText, seq++, string.Create(invc,
-                $"BT {Rgb(c, "rg")}/{rn} {size:0.##} Tf 1 0 0 1 {x:0.##} "
-                + $"{pageHeight - baseline:0.##} Tm ")
-                + "<" + System.Convert.ToHexString(hex) + "> Tj ET"));
-        }
-
-        void Centre(int sheet, double x0, double x1, double baseline, double size,
-            byte[] ttf, string name, string s, Color c)
-            => Run(sheet, (x0 + x1 - Measure(ttf, name, s, size)) / 2, baseline, size,
-                ttf, name, s, c);
-
-        // ── the header block ────────────────────────────────────────────────
-        var body = html;
-        Run(0, flowLeft, CdTitleBasePt, CdTitlePt, calibriB, "CalibriBold",
-            CdText(body, "AddendumTitle"), CdDark);
-
-        var labelLeft = flowLeft + 2 * CdSheetPadPt;
-        var headings = CdHeadings(body);
-        Run(0, flowLeft, CdClosingBasePt, CdHeadingPt, calibriB, "CalibriBold",
-            headings.Count > 0 ? headings[0] : "", CdDark);
-        // the section's own heading opens its label list, and the File No pair
-        // is a right float rather than a row of its own
-        var floated = CdLabels(body, "rightColumn");
-        var closing = CdLabels(body, "closingInfoSection")
-            .Skip(1).Where(t => !floated.Contains(t)).ToList();
-        var y = CdClosingRow0Pt;
-        foreach (var lab in closing)
-        {
-            Run(0, labelLeft, y, CdBodyPt, calibriB, "CalibriBold", lab, CdDark);
-            y += CdWrapRowPt;
-        }
-        if (floated.Count > 0)
-        {
-            var w = Measure(calibriB, "CalibriBold", floated[0], CdBodyPt);
-            Run(0, tableLeft + tableW - CdFloatRightPadPt - w, CdClosingRow0Pt, CdBodyPt,
-                calibriB, "CalibriBold", floated[0], CdDark);
-        }
-
-        Run(0, flowLeft, CdTransBasePt, CdHeadingPt, calibriB, "CalibriBold",
-            headings.Count > 1 ? headings[1] : "", CdDark);
-        y = CdTransRow0Pt;
-        var parties = new[] { "Borrower:", "Seller:" };
-        foreach (var party in parties)
-        {
-            Run(0, labelLeft, y, CdBodyPt, calibriB, "CalibriBold", party, CdDark);
-            Run(0, labelLeft, y + CdLabelRowPt, CdBodyPt, calibri, "Calibri",
-                "Address:", CdDark);
-            Run(0, labelLeft, y + 2 * CdLabelRowPt, CdBodyPt, calibri, "Calibri",
-                "City/ST/Zip:", CdDark);
-            y += CdPartyGapPt + 2 * CdLabelRowPt - CdLabelRowPt;
-            y = CdTransRow0Pt + CdPartyGapPt + 2 * CdLabelRowPt;
-        }
-
-        // ── the two cost grids ──────────────────────────────────────────────
-        var colX = new double[7];
-        colX[0] = tableLeft;
-        colX[1] = tableLeft + tableW * CdDescFrac;
-        for (var i = 2; i <= 6; i++) colX[i] = colX[1] + (i - 1) * tableW * CdMoneyFrac;
-
-        void CostGrid(string id, double top)
-        {
-            var rows = CdRows(body, id);
-            if (rows.Count == 0) return;
-            HRule(0, colX[0], colX[6], top, CdBlack);
-            var ry = top;
-            for (var ri = 0; ri < rows.Count; ri++)
-            {
-                var (cls, cells) = rows[ri];
-                var head = cls.Contains("sec-header", StringComparison.OrdinalIgnoreCase);
-                var h = ri == 0 ? CdHeadRowPt
-                    : ri == 1 ? CdSubRowPt
-                    : head ? CdSectionRowPt : CdBlankRowPt;
-                if (head) Fill(0, colX[0], ry, colX[6] - colX[0], h, CdBand);
-
-                var ci = 0;
-                foreach (var (span, text, cellCls) in cells)
-                {
-                    var x0 = colX[ci];
-                    var x1 = colX[Math.Min(6, ci + span)];
-                    if (text.Length > 0)
-                    {
-                        var bold = head;
-                        var drop = ci == 0 ? CdHeadTextDropPt
-                            : ri == 0 ? CdHeadCentreDropPt : CdSubCentreDropPt;
-                        if (ci == 0)
-                            Run(0, x0 + CdCellPadLeftPt, ry + drop, CdGridPt,
-                                bold ? arialB : arial, bold ? "ArialBold" : "Arial",
-                                text, CdBlack);
-                        else
-                            Centre(0, x0, x1, ry + drop, CdGridPt,
-                                bold ? arialB : arial, bold ? "ArialBold" : "Arial",
-                                text, CdBlack);
-                    }
-                    if (cellCls.Contains("rightbordercol", StringComparison.OrdinalIgnoreCase))
-                        VRule(0, x1, ry - CdRulePt / 2, ry + h + CdRulePt / 2, CdBlack);
-                    else if (cellCls.Contains("border-right-light", StringComparison.OrdinalIgnoreCase))
-                        VRule(0, x1, ry - CdRulePt / 2, ry + h + CdRulePt / 2, CdLight);
-                    ci += span;
-                }
-                ry += h;
-                if (cls.Contains("border-bottom-light", StringComparison.OrdinalIgnoreCase))
-                    HRule(0, colX[0], colX[6], ry, CdLight);
-                else if (cls.Contains("border-bottom", StringComparison.OrdinalIgnoreCase))
-                    HRule(0, colX[0], colX[6], ry, CdBlack);
-            }
-        }
-
-        CostGrid("tbl_LoanCostSection", CdLoanTopPt);
-        CostGrid("tbl_OtherCostSection", CdOtherTopPt);
-
-        // ── the summaries pair ──────────────────────────────────────────────
-        var halfW = (tableW - 2 * CdSummaryPadPt - CdSummaryGapPt) / 2;
-        var leftX = tableLeft + CdSummaryPadPt;
-        var rightX = leftX + halfW + CdSummaryGapPt;
-        Run(0, leftX + CdBannerInsetPt, CdSummaryHeadBasePt, CdBannerPt, calibriB,
-            "CalibriBold", "BORROWER'S TRANSACTION", CdDark);
-        Run(0, rightX + CdBannerInsetPt, CdSummaryHeadBasePt, CdBannerPt, calibriB,
-            "CalibriBold", "SELLER'S TRANSACTION", CdDark);
-
-        // Each sub-table is one heading row over one empty value row. A heading
-        // cell marked `sub02` is a lettered section: it takes the band, opens a
-        // 4px margin above itself when it is not the stack's first, and keeps
-        // the amount column unless it declares no amount cell at all.
-        void SummaryStack(double x,
-            IReadOnlyList<(string Text, bool Lettered, bool Amount)> heads, double top)
-        {
-            var sy = top;
-            var amountX = x + halfW - CdSummaryAmountPt;
-            var deepest = sy;
-            HRule(0, x, x + halfW, sy, CdBlack);
-            for (var i = 0; i < heads.Count; i++)
-            {
-                var (text, lettered, amount) = heads[i];
-                if (lettered && i > 0) sy += CdSumSectionGapPt;
-                var headH = !lettered ? CdSumPlainHeadPt
-                    : i == 0 ? CdSumFirstHeadPt : CdSumLetterHeadPt;
-                if (lettered)
-                {
-                    if (amount)
-                    {
-                        Fill(0, x, sy, halfW - CdSummaryAmountPt, headH, CdBand);
-                        Fill(0, amountX, sy, CdSummaryAmountPt, headH, CdBand);
-                    }
-                    else Fill(0, x, sy, halfW, headH, CdBand);
-                }
-                Run(0, x + (lettered ? CdBannerInsetPt : 0), sy + CdSummaryTextDropPt,
-                    CdBodyPt, calibriB, "CalibriBold", text, CdDark);
-                sy += headH;
-                HRule(0, x, x + halfW, sy, CdLight);
-                sy += lettered && !amount ? CdSumTightBlankPt : CdSumBlankPt;
-                HRule(0, x, x + halfW, sy, CdLight);
-                deepest = sy;
-            }
-            VRule(0, amountX, top + CdRulePt / 2, deepest, CdBlack);
-        }
-
-        SummaryStack(leftX, CdSummaryHeads(body, true), CdSummaryTopPt);
-        SummaryStack(rightX, CdSummaryHeads(body, false), CdSummaryTopPt);
-
-        // ── the payoff and contact plates ───────────────────────────────────
-        void Banner(double top, string caption, string note)
-        {
-            Fill(0, tableLeft + CdBannerInsetPt, top, CdBannerWidthPt, CdBannerHeightPt,
-                CdDark);
-            Run(0, tableLeft + CdBannerTextXPt, top + CdBannerDropPt + CdBannerPt * CdAscEm,
-                CdBannerPt, calibriB, "CalibriBold", caption, CdWhite);
-            Run(0, tableLeft + CdBannerNoteXPt,
-                top + CdBannerNoteDropPt + CdBodyPt * CdAscEm, CdBodyPt, calibriB,
-                "CalibriBold", note, CdDark);
-            HRule(0, tableLeft + CdBannerInsetPt, tableLeft + CdBannerInsetPt
-                + CdBannerWidthPt, top + CdBannerRulePt, CdDark);
-        }
-
-        Banner(CdPayoffBannerPt, "Payoffs and Payments",
-            "Use this table to see a summary of your payoffs and payments to others");
-        var payoffSplit = tableLeft + CdPayoffWidthPt - CdPayoffAmountPt;
-        HRule(0, tableLeft, tableLeft + CdPayoffWidthPt, CdPayoffTopPt, CdBlack);
-        Fill(0, tableLeft, CdPayoffTopPt, payoffSplit - tableLeft, CdPayoffRowPt, CdBand);
-        Fill(0, payoffSplit, CdPayoffTopPt, CdPayoffAmountPt, CdPayoffRowPt, CdBand);
-        Run(0, tableLeft + CdCellPadLeftPt, CdPayoffTopPt + CdHeadTextDropPt, CdGridPt,
-            arialB, "ArialBold", "TO", CdBlack);
-        Run(0, payoffSplit + CdRulePt / 2, CdPayoffTopPt + CdHeadCentreDropPt, CdGridPt,
-            arialB, "ArialBold", "AMOUNT", CdBlack);
-        VRule(0, payoffSplit, CdPayoffTopPt - CdRulePt / 2,
-            CdPayoffTopPt + 2 * CdPayoffRowPt + CdRulePt / 2, CdBlack);
-        HRule(0, tableLeft, tableLeft + CdPayoffWidthPt, CdPayoffTopPt + CdPayoffRowPt,
-            CdLight);
-        HRule(0, tableLeft, tableLeft + CdPayoffWidthPt,
-            CdPayoffTopPt + 2 * CdPayoffRowPt - CdRulePt / 2 + CdRulePt / 2, CdLight);
-
-        Banner(CdContactBannerPt, "Contact Information",
-            "Contacts that could not fit are shown in full here.");
-        var contactW = CdContactLabelPt + CdContactCols * CdContactColPt;
-        var contactRight = tableLeft + contactW + CdRulePt / 2;
-        HRule(0, tableLeft, contactRight, CdContactTopPt, CdBlack);
-        for (var ci = 0; ci <= CdContactCols; ci++)
-            Fill(0, tableLeft + (ci == 0 ? 0 : CdContactLabelPt + (ci - 1) * CdContactColPt),
-                CdContactTopPt, ci == 0 ? CdContactLabelPt : CdContactColPt,
-                CdContactHeadPt, CdBand);
-        HRule(0, tableLeft, contactRight, CdContactTopPt + CdContactHeadPt, CdLight);
-        var labels = CdContactLabels(body);
-        var cy = CdContactTopPt + CdContactHeadPt;
-        var sheet = 0;
-        foreach (var lab in labels)
-        {
-            if (cy + CdContactRowPt > marginTop + CdSheetHeightPt - CdRulePt)
-            {
-                sheet++;
-                cy = marginTop;
-            }
-            Run(sheet, tableLeft, cy + CdBodyPt * CdAscEm, CdBodyPt, calibriB,
-                "CalibriBold", lab, CdDark);
-            cy += CdContactRowPt;
-            HRule(sheet, tableLeft, contactRight, cy, CdLight);
-        }
-        for (var ci = 1; ci <= CdContactCols + 1; ci++)
-            VRule(0, tableLeft + CdContactLabelPt + (ci - 1) * CdContactColPt,
-                CdContactTopPt - CdRulePt / 2, marginTop + CdSheetHeightPt - 2.24, CdBlack);
-
-        foreach (var g in ops.GroupBy(o => o.Sheet))
+        foreach (var g in cd.ops.GroupBy(o => o.Sheet))
         {
             var sb = new StringBuilder();
             foreach (var o in g.OrderBy(o => o.Layer).ThenBy(o => o.Seq))
                 sb.Append(o.Text).Append('\n');
-            pages[g.Key].AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
+            cd.pages[g.Key].AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
         }
-        return doc;
+        return cd.doc;
     }
 
     /// <summary>The sheet the print stylesheet resolves to. The contact grid is

@@ -1,9 +1,8 @@
 # Facades
 
 Facades expose task-oriented APIs that complement the `Document` model. They
-are particularly handy for byte-array workflows and for the operations that
-the legacy Aspose.PDF API surface has historically grouped together (file
-editing, signing, form filling, content patching, ...).
+are particularly handy for byte-array workflows and for whole-file operations
+such as file editing, signing, form filling and content patching.
 
 `PdfFileSanitization` repairs damaged files at the byte level so they open
 again. Bind a path, stream, or `Document`; `Recover()` runs the steps selected by
@@ -24,11 +23,21 @@ foreach (var line in sanitizer.Log)
     Console.WriteLine(line);
 ```
 
-Printing goes through `PdfViewer`. Spooler-backed printing (`PrintDocument`,
-`PrintDocumentWithSetup`, `PrintDocuments`, `PrintLargePdf`) throws
-`PlatformNotSupportedException`; `PrintDocumentWithSettings` with
-`PrinterSettings.PrintToFile` set and a `.pdf` `PrintFileName` writes the selected
-page range, once per copy, to that file. The `Aspose.Pdf.Printing` types need
+Printing goes through `PdfViewer`. `PrintDocument`, `PrintDocumentWithSettings`,
+`PrintDocumentWithSetup`, `PrintDocuments` and `PrintLargePdf` submit a job to an
+installed printer on Windows, honouring the paper, margins, orientation, page range,
+copies and scale the settings ask for, and raising the viewer's `StartPage`, `EndPage`,
+`CustomPrint`, `PdfQueryPageSettings` and `EndPrint` events as the job runs. Each page
+reaches the printer as drawing commands - glyph outlines, paths and the page's own images -
+so the printer rasterises it at its own resolution. A page is sent as a rendered image
+instead when `PrintAsImage` is set, when `PrintAsGrayscale` is set, or when it holds content
+composited from pixels (transparency groups, blend modes, soft masks); that image is rendered
+at `Resolution` DPI, with bare paper left transparent. `PrintPageDialog` raises no dialog
+because the library has no windowing dependency. One job needs no printer at all:
+`PrintDocumentWithSettings` with `PrinterSettings.PrintToFile` set and a `.pdf`
+`PrintFileName` writes the selected page range, once per copy, straight to that file.
+`PrintStatus` holds whatever ended the last job, and is null when it finished.
+The `Aspose.Pdf.Printing` types need
 `System.Drawing.Common` on modern .NET, which the application must reference
 itself; `PrintingOptionalDependencyGuard.EnsureDependenciesAvailable()` turns a
 missing package into a `MissingOptionalDependencyException` whose message names the
@@ -62,9 +71,11 @@ Concatenation merges the inputs' outlines, page labels and AcroForm fields
 (`KeepFieldsUnique` renames colliding field names). Tagged inputs stay tagged:
 their structure trees are merged into the result, which keeps `/MarkInfo
 /Marked`, so a concatenation of PDF/UA documents remains PDF/UA. Stream and
-`Document[]` overloads exist alongside the byte-array and path ones, and every
-operation has a `Try*` twin that returns `false` and records `LastException`
-instead of throwing.
+`Document[]` overloads exist alongside the byte-array and path ones, and the
+path and stream operations have `Try*` twins (`TryConcatenate`, `TryAppend`,
+`TryInsert`, `TryExtract`, `TryDelete`, `TrySplitFromFirst`, `TrySplitToEnd`,
+`TryMakeBooklet`, `TryMakeNUp`, `TryResizeContents`) that return `false` and
+record `LastException` instead of throwing.
 
 ### Extract pages
 
@@ -218,7 +229,10 @@ sig.RemoveSignature("Signature1");
 doc.Save("unsigned.pdf");         // the document itself no longer carries the signature
 ```
 
-For PKCS#7 signing flow, see
+`TryVerifySignature(SignatureName, out VerificationResult)` verifies without
+throwing (names come from `GetSignatureNames()`), and the facade is also the
+entry point of `UnsignedContentAbsorber`, which lists what was added after the
+last signature. For PKCS#7 signing, external signers and forgery checks, see
 [Security and Encryption](security-and-encryption.md).
 
 ## `FormEditor`
@@ -400,7 +414,7 @@ mend.AddImage("logo.png",
     lowerLeftX:  50f, lowerLeftY:  50f,
     upperRightX: 150f, upperRightY: 150f);
 
-mend.Save("output.pdf");
+mend.Close();   // writes output.pdf; Save(path) / Save(stream) write elsewhere
 ```
 
 ## `PdfFileStamp`
@@ -461,5 +475,8 @@ while (converter.HasNextImage())
 converter.SaveAsTIFF("pages.tiff", new TiffSettings { Compression = CompressionType.LZW });
 ```
 
-`MergeImages` / `MergeImagesAsTiff` combine already-rendered images;
-`MergeImages` is marked `[SupportedOSPlatform("windows")]`.
+`MergeImages` / `MergeImagesAsTiff` combine already-rendered images on every
+platform (GDI+ on Windows, the library's own decoders and encoders elsewhere).
+The only Windows-only output is EMF: `GetNextImage` with
+`System.Drawing.Imaging.ImageFormat.Emf` throws `PlatformNotSupportedException`
+on other systems.

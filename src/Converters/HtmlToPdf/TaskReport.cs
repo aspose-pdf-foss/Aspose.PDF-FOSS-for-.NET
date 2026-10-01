@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -81,299 +81,70 @@ internal static partial class HtmlToPdfConverter
     private static Document? TryRenderTaskReport(string html, double pageWidth, double pageHeight,
         double marginLeft, double marginRight, double marginTop, double marginBottom)
     {
-        if (!html.Contains("s-snapshow__workflow_info", StringComparison.Ordinal)
-            || !html.Contains("s-workflow__stage", StringComparison.Ordinal)
-            || !html.Contains("g-blockheader", StringComparison.Ordinal))
+        var tq = new TaskReportState();
+        tq.html = html;
+        tq.pageWidth = pageWidth;
+        tq.pageHeight = pageHeight;
+        tq.marginLeft = marginLeft;
+        tq.marginRight = marginRight;
+        tq.marginTop = marginTop;
+        tq.marginBottom = marginBottom;
+        if (!tq.html.Contains("s-snapshow__workflow_info", StringComparison.Ordinal)
+            || !tq.html.Contains("s-workflow__stage", StringComparison.Ordinal)
+            || !tq.html.Contains("g-blockheader", StringComparison.Ordinal))
             return null;
 
-        var bodyM = Regex.Match(html, "<body[^>]*>([\\s\\S]*)</body>", RegexOptions.IgnoreCase);
-        if (!bodyM.Success) return null;
-        // the display:none Report element contributes nothing
-        var body = Regex.Replace(bodyM.Groups[1].Value,
+        tq.bodyM = Regex.Match(tq.html, "<body[^>]*>([\\s\\S]*)</body>", RegexOptions.IgnoreCase);
+        if (!tq.bodyM.Success) return null;
+        tq.body = Regex.Replace(tq.bodyM.Groups[1].Value,
             "<div[^>]*style=\"display:none\"[\\s\\S]*?</div>", "", RegexOptions.IgnoreCase);
 
-        static string Flat(string s) => CollapseWs(DecodeEntities(
-            Regex.Replace(s, "<[^>]+>", " "))).Trim();
-
-        // Tokenize the export's landmarks in document order; a row's content runs
-        // to the next landmark, which spares walking the div nesting.
-        var tokens = Regex.Matches(body,
+        tq.tokens = Regex.Matches(tq.body,
             "<div class=\"s-workflow__stage\">"
             + "|<div class=\"s-workflow__task\">"
             + "|<h2 class=\"g-heading\">((?:(?!</h2>)[\\s\\S])*)</h2>"
             + "|<h3 class=\"g-heading\">((?:(?!</h3>)[\\s\\S])*)</h3>"
             + "|<div class=\"s-snapshow__workflow_info row\">",
-            RegexOptions.IgnoreCase).ToList();
-        if (tokens.Count == 0) return null;
+            RegexOptions.IgnoreCase).Cast<Match>().ToList();
+        if (tq.tokens.Count == 0) return null;
 
-        var reportHeading = "";
-        var stages = new List<TrCard>();
-        TrCard? stage = null, task = null;
-        TrCard? pendingCard = null;   // the h3 that follows names it
-        for (var i = 0; i < tokens.Count; i++)
-        {
-            var tk = tokens[i];
-            var text = tk.Value;
-            var end = i + 1 < tokens.Count ? tokens[i + 1].Index : body.Length;
-            if (text.StartsWith("<div class=\"s-workflow__stage\"", StringComparison.OrdinalIgnoreCase))
-            {
-                stage = new TrCard();
-                stages.Add(stage);
-                task = null;
-                pendingCard = stage;
-            }
-            else if (text.StartsWith("<div class=\"s-workflow__task\"", StringComparison.OrdinalIgnoreCase))
-            {
-                if (stage is null) return null;
-                task = new TrCard();
-                if (stage.Sections.Count == 0) stage.Sections.Add(("", new List<TrCard>()));
-                stage.Sections[^1].Tasks.Add(task);
-                pendingCard = task;
-            }
-            else if (text.StartsWith("<h2", StringComparison.OrdinalIgnoreCase))
-            {
-                var h = Flat(tk.Groups[1].Value);
-                if (stage is null) reportHeading = h;
-                else { stage.Sections.Add((h, new List<TrCard>())); task = null; }
-            }
-            else if (text.StartsWith("<h3", StringComparison.OrdinalIgnoreCase))
-            {
-                if (pendingCard is not null) pendingCard.Title = Flat(tk.Groups[2].Value);
-                pendingCard = null;
-            }
-            else // a label/value row, owned by the innermost open card
-            {
-                var owner = task ?? stage;
-                if (owner is null) continue;
-                var seg = body[tk.Index..end];
-                var cols = new List<TrCol>();
-                foreach (Match cm in Regex.Matches(seg,
-                    "<div class=\"col-sm-(?:3|12)\">((?:(?!<div class=\"col-sm)[\\s\\S])*)",
-                    RegexOptions.IgnoreCase))
-                {
-                    var c = cm.Groups[1].Value;
-                    var col = new TrCol();
-                    var lm = Regex.Match(c, "<label[^>]*>((?:(?!</label>)[\\s\\S])*)</label>",
-                        RegexOptions.IgnoreCase);
-                    if (!lm.Success) continue;
-                    col.Label = Flat(lm.Groups[1].Value).ToUpperInvariant();
-                    var rest = c[(lm.Index + lm.Length)..];
-                    var pm = Regex.Match(rest, "<span class=\"g-status\">((?:(?!</span>)[\\s\\S])*)</span>",
-                        RegexOptions.IgnoreCase);
-                    if (pm.Success)
-                        col.PillText = Flat(pm.Groups[1].Value).ToUpperInvariant();
-                    else
-                    {
-                        // attachment file names arrive one <div> per line
-                        var divLines = Regex.Matches(rest, "<div>((?:(?!</div>)[\\s\\S])*)</div>",
-                            RegexOptions.IgnoreCase);
-                        if (divLines.Count > 0)
-                            foreach (Match dm in divLines)
-                            {
-                                var t = Flat(dm.Groups[1].Value);
-                                if (t.Length > 0) col.Lines.Add(t);
-                            }
-                        else
-                        {
-                            var t = Flat(rest);
-                            if (t.Length > 0) col.Lines.Add(t);
-                        }
-                    }
-                    cols.Add(col);
-                }
-                if (cols.Count > 0) owner.Rows.Add(cols);
-            }
-        }
-        if (stages.Count == 0) return null;
+        tq.reportHeading = "";
+        tq.stages = new List<TrCard>();
+        tq.stage = null;
+        tq.task = null;
+        tq.pendingCard = null;
+        if (!ParseTaskTokens(tq)) return null;
+        if (tq.stages.Count == 0) return null;
 
-        // ── the flow ──
-        var top = marginTop;
-        var bottom = pageHeight - marginBottom;
-        var left = marginLeft;
-        var right = pageWidth - marginRight;
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        string N(double v) => v.ToString("0.###", inv);
-
-        var doc = new Document();
-        var pages = new List<(Page Page, StringBuilder Chrome, StringBuilder Text)>();
-        void OpenPage()
-        {
-            var p = doc.Pages.Add(pageWidth, pageHeight);
-            EnsureFonts(p);
-            var chrome = new StringBuilder();
-            chrome.AppendLine(
-                $"1 1 1 rg {N(left)} {N(pageHeight - bottom)} {N(right - left)} {N(bottom - top)} re f");
-            pages.Add((p, chrome, new StringBuilder()));
-        }
-        OpenPage();
-        double Y(double yTd) => pageHeight - yTd;
-        void Text(double fs, double x, double baseTd, string t)
-        {
-            if (t.Length == 0) return;
-            pages[^1].Text.AppendLine($"BT 0.133 0.180 0.196 rg /F1 {fs.ToString("F2", inv)} Tf "
-                + $"1 0 0 1 {N(x)} {N(Y(baseTd))} Tm ({EscapePdfString(t)}) Tj ET");
-        }
-        void HRule(double x0, double x1, double yTd) => pages[^1].Chrome.AppendLine(
-            $"0.816 0.839 0.855 RG 0.75 w {N(x0)} {N(Y(yTd))} m {N(x1)} {N(Y(yTd))} l S");
-        void VRule(double x, double y0Td, double y1Td) => pages[^1].Chrome.AppendLine(
-            $"0.816 0.839 0.855 RG 0.75 w {N(x)} {N(Y(y1Td))} m {N(x)} {N(Y(y0Td))} l S");
-        void Band(double x0, double x1, double topTd) => pages[^1].Chrome.AppendLine(
-            $"0.906 0.918 0.925 rg {N(x0)} {N(Y(topTd + TrBandHPt))} {N(x1 - x0)} {N(TrBandHPt)} re f");
-        void Pill(double x, double topTd) => pages[^1].Chrome.AppendLine(
-            $"0.816 0.839 0.855 RG 0.75 w {N(x)} {N(Y(topTd + TrPillHPt))} {N(TrPillWPt)} {N(TrPillHPt)} re S");
-
-        // the open cards' side borders, sliced per page
-        var stageL = left + TrCardInsetPt;
-        var stageR = right - TrCardInsetPt;
-        var taskL = left + TrTaskInsetPt;
-        var taskR = right - TrTaskInsetPt;
-        double? stageTopOnPage = null, taskTopOnPage = null;
-        bool stageOpen = false, taskOpen = false;
-        void CloseCardSides(bool isTask, double? botTd)
-        {
-            var (l, r) = isTask ? (taskL, taskR) : (stageL, stageR);
-            var from = (isTask ? taskTopOnPage : stageTopOnPage) ?? top;
-            var to = botTd is { } b ? b + TrHalfRulePt : bottom;
-            VRule(l + TrHalfRulePt, from, to);
-            VRule(r - TrHalfRulePt, from, to);
-            if (isTask) taskTopOnPage = null; else stageTopOnPage = null;
-        }
-
-        var y = top;               // the NEXT label/heading baseline
-        var lastValueBase = top;   // where the previous row's deepest value seated
-        void PageBreak(double carry)
-        {
-            if (taskOpen) CloseCardSides(isTask: true, botTd: null);
-            if (stageOpen) CloseCardSides(isTask: false, botTd: null);
-            OpenPage();
-            y = top + carry;
-        }
-
-        void OpenCard(bool isTask, string title)
-        {
-            var (l, r) = isTask ? (taskL, taskR) : (stageL, stageR);
-            if (y + TrBandDropPt + TrBandHPt > bottom) PageBreak(0);
-            HRule(l - TrHalfRulePt, r + TrHalfRulePt, y);
-            Band(l + TrHalfRulePt, r - TrHalfRulePt, y + TrBandDropPt);
-            if (isTask) HRule(l + TrHalfRulePt, r - TrHalfRulePt, y + TrBandRulePt);
-            Text(TrTitleFs, l + TrTitleInsetPt, y + TrTitleDropPt, title);
-            if (isTask) { taskTopOnPage = y - TrHalfRulePt; taskOpen = true; }
-            else { stageTopOnPage = y - TrHalfRulePt; stageOpen = true; }
-            y += isTask ? TrTaskFirstLabelPt : TrStageFirstLabelPt;
-        }
-
-        void EmitRow(List<TrCol> cols, double[] colX)
-        {
-            // the row carries onto the next page when its label line cannot seat
-            if (y + TrLabelFs * TrLineDescFrac > bottom)
-                PageBreak(y - bottom);
-            var labelBase = y;
-            var anyPill = false;
-            var extra = 0;
-            for (var c = 0; c < cols.Count && c < colX.Length; c++)
-            {
-                var col = cols[c];
-                var x = left + colX[c];
-                Text(TrLabelFs, x, labelBase, col.Label);
-                if (col.PillText.Length > 0)
-                {
-                    anyPill = true;
-                    Pill(x + TrPillInsetPt, labelBase + TrPillDropPt);
-                    Text(TrLabelFs, x + TrPillInsetPt + TrPillPadX,
-                        labelBase + TrPillTextDropPt, col.PillText);
-                    continue;
-                }
-                var vb = labelBase + TrLabelValueGap;
-                foreach (var line in col.Lines)
-                {
-                    // a value line that cannot seat opens the next page alone
-                    if (vb + TrValueFs * TrLineDescFrac > bottom)
-                    {
-                        PageBreak(0);
-                        vb = top + TrLoneValueSeatPt;
-                        labelBase = vb - TrLabelValueGap; // keep the pitch chain
-                    }
-                    Text(TrValueFs, x, vb, line);
-                    vb += TrValueLinePitch;
-                }
-                extra = Math.Max(extra, Math.Max(1, col.Lines.Count) - 1);
-            }
-            lastValueBase = labelBase + TrLabelValueGap + extra * TrValueLinePitch;
-            y = labelBase + (anyPill ? TrPillRowPitch : TrRowPitch) + extra * TrValueLinePitch;
-        }
-
-        // wrap the long stage guidance at the measured width
-        static List<string> Wrap(string text, double width, double fs)
-        {
-            var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            var lines = new List<string>();
-            var cur = "";
-            foreach (var w in words)
-            {
-                var probe = cur.Length == 0 ? w : cur + " " + w;
-                if (cur.Length > 0 && MeasureFaceText("Helvetica", probe, fs) > width)
-                {
-                    lines.Add(cur);
-                    cur = w;
-                }
-                else cur = probe;
-            }
-            if (cur.Length > 0) lines.Add(cur);
-            return lines;
-        }
-
+        tq.top = tq.marginTop;
+        tq.bottom = tq.pageHeight - tq.marginBottom;
+        tq.left = tq.marginLeft;
+        tq.right = tq.pageWidth - tq.marginRight;
+        tq.inv = System.Globalization.CultureInfo.InvariantCulture;
+        tq.doc = new Document();
+        tq.pages = new List<(Page Page, StringBuilder Chrome, StringBuilder Text)>();
+        OpenPage(tq);
+        tq.stageL = tq.left + TrCardInsetPt;
+        tq.stageR = tq.right - TrCardInsetPt;
+        tq.taskL = tq.left + TrTaskInsetPt;
+        tq.taskR = tq.right - TrTaskInsetPt;
+        tq.stageTopOnPage = null;
+        tq.taskTopOnPage = null;
+        tq.stageOpen = false;
+        tq.taskOpen = false;
+        tq.y = tq.top;
+        tq.lastValueBase = tq.top;
         // page 1 opens with the report heading
-        Text(TrH2Fs, left + TrH2X, top + TrWfH2Drop, reportHeading);
-        y = top + TrWfH2Drop + TrH2ToCardPt;
+        TrText(tq, TrH2Fs, tq.left + TrH2X, tq.top + TrWfH2Drop, tq.reportHeading);
+        tq.y = tq.top + TrWfH2Drop + TrH2ToCardPt;
 
-        foreach (var st in stages)
-        {
-            OpenCard(isTask: false, st.Title);
-            foreach (var row in st.Rows)
-            {
-                foreach (var col in row)
-                    if (col.PillText.Length == 0 && col.Lines.Count == 1
-                        && MeasureFaceText("Helvetica", col.Lines[0], TrValueFs) > TrGuidanceWrapPt)
-                        col.Lines = Wrap(col.Lines[0], TrGuidanceWrapPt, TrValueFs);
-                EmitRow(row, TrStageColX);
-            }
-            var lastBotRule = lastValueBase + TrDetailRulePt;   // the details rule
-            foreach (var (heading, tasks) in st.Sections)
-            {
-                if (heading.Length == 0 && tasks.Count == 0) continue;
-                if (heading.Length > 0)
-                {
-                    HRule(taskL - TrHalfRulePt, taskR + TrHalfRulePt, lastBotRule);
-                    var hb = lastBotRule + TrRuleToH2Pt;
-                    if (hb + TrH2ToTaskPt + TrBandHPt > bottom) { PageBreak(0); hb = top + TrWfH2Drop; }
-                    Text(TrH2Fs, taskL - TrHalfRulePt, hb, heading);
-                    y = hb + TrH2ToTaskPt;
-                }
-                foreach (var tk in tasks)
-                {
-                    OpenCard(isTask: true, tk.Title);
-                    foreach (var row in tk.Rows) EmitRow(row, TrTaskColX);
-                    var botTd = lastValueBase + TrCardBotPadPt;
-                    HRule(taskL - TrHalfRulePt, taskR + TrHalfRulePt, botTd);
-                    CloseCardSides(isTask: true, botTd);
-                    taskOpen = false;
-                    lastBotRule = botTd;
-                    y = botTd + TrCardGapPt;
-                }
-            }
-            // the stage closes one gap under its last task
-            var stageBotTd = lastBotRule + TrCardGapPt;
-            HRule(stageL - TrHalfRulePt, stageR + TrHalfRulePt, stageBotTd);
-            CloseCardSides(isTask: false, stageBotTd);
-            stageOpen = false;
-            y = stageBotTd + TrCardGapPt;
-        }
+        DrawTaskStages(tq);
 
-        foreach (var (page, chrome, text) in pages)
+        foreach (var (page, chrome, text) in tq.pages)
         {
             page.AddContentStream(Encoding.ASCII.GetBytes(chrome.ToString()));
             page.AddContentStream(Encoding.ASCII.GetBytes(text.ToString()));
         }
-        return doc;
+        return tq.doc;
     }
 }

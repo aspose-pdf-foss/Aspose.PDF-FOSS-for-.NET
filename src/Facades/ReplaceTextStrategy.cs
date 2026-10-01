@@ -38,6 +38,10 @@ public sealed class ReplaceTextStrategy
     private bool _isRegex;
     private NoCharacterAction _noCharacter = NoCharacterAction.UseStandardFont;
 
+    /// <summary>Creates a standalone strategy that replaces only the first match, treats the search text literally
+    /// and falls back to a standard font for missing characters.</summary>
+    public ReplaceTextStrategy() { }
+
     /// <summary>How many matches to replace per call.</summary>
     public enum Scope
     {

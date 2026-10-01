@@ -2,7 +2,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf.Facades;
@@ -195,6 +194,7 @@ public sealed partial class PdfContentEditor : System.IDisposable
     /// </summary>
     private ReplaceTextStrategy? _replaceTextStrategy;
 
+    /// <summary>Gets or sets the strategy that controls how <c>ReplaceText</c> matches text (literal or regular expression) and how many matches it replaces. It stays in sync with this editor's text search, edit and replace options.</summary>
     public ReplaceTextStrategy ReplaceTextStrategy
     {
         // Bound to this editor so its settings are live views over

@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
@@ -38,7 +38,7 @@ public sealed class MarkdownConverterOptions
 /// <summary>
 /// Converts PDF pages to Markdown text.
 /// </summary>
-public sealed class PdfToMarkdownConverter
+public sealed partial class PdfToMarkdownConverter
 {
     private readonly MarkdownConverterOptions _options;
 
@@ -83,7 +83,9 @@ public sealed class PdfToMarkdownConverter
 
     private string ConvertPage(Page page)
     {
-        var sb = new StringBuilder();
+        var cp = new ConvertPageState();
+        cp.page = page;
+        cp.sb = new StringBuilder();
 
         // Extract tables if enabled — only render tables that were detected from actual grid lines
         // (Rect != null). Text-layout-only detected tables are too error-prone (false positives
@@ -91,111 +93,54 @@ public sealed class PdfToMarkdownConverter
         if (_options.IncludeTables)
         {
             var tableAbsorber = new TableAbsorber();
-            tableAbsorber.Visit(page);
+            tableAbsorber.Visit(cp.page);
             foreach (var table in tableAbsorber.Tables.Where(t => t.Rect != null))
             {
-                RenderTable(table, sb);
-                sb.AppendLine();
+                RenderTable(table, cp.sb);
+                cp.sb.AppendLine();
             }
         }
 
-        // Collect link annotations
-        var links = CollectLinks(page);
+        cp.links = CollectLinks(cp.page);
 
-        // Detect horizontal rules from content stream
-        var horizontalRules = DetectHorizontalRules(page);
+        cp.horizontalRules = DetectHorizontalRules(cp.page);
 
-        // Resolve base font names from page resources
-        var baseFontNames = ResolveBaseFontNames(page);
+        cp.baseFontNames = ResolveBaseFontNames(cp.page);
 
         // Extract images
-        ExtractImages(page, sb);
+        ExtractImages(cp.page, cp.sb);
 
-        // Fall back to plain text extraction with font-size-based heading detection
-        var fragmentAbsorber = new TextFragmentAbsorber();
-        fragmentAbsorber.Visit(page);
+        cp.fragmentAbsorber = new TextFragmentAbsorber();
+        cp.fragmentAbsorber.Visit(cp.page);
 
-        // Track which links have been matched to text
-        var matchedLinks = new HashSet<int>();
+        cp.matchedLinks = new HashSet<int>();
 
-        // Sort horizontal rule Y positions descending (PDF Y is bottom-up, process top-to-bottom)
-        var ruleYPositions = horizontalRules.OrderByDescending(y => y).ToList();
-        var nextRuleIndex = 0;
+        cp.ruleYPositions = cp.horizontalRules.OrderByDescending(y => y).ToList();
+        cp.nextRuleIndex = 0;
 
-        foreach (var fragment in fragmentAbsorber.TextFragments)
+        foreach (var fragment in cp.fragmentAbsorber.TextFragments)
         {
-            var text = fragment.Text.Trim();
-            if (string.IsNullOrEmpty(text)) continue;
-
-            // Check if a horizontal rule should be inserted before this fragment
-            // (rules with Y position above the current text fragment)
-            if (fragment.Rectangle is not null)
-            {
-                while (nextRuleIndex < ruleYPositions.Count &&
-                       ruleYPositions[nextRuleIndex] > fragment.Rectangle.LLY)
-                {
-                    sb.AppendLine("---");
-                    sb.AppendLine();
-                    nextRuleIndex++;
-                }
-            }
-
-            // Check for link annotation overlap
-            var linkUri = FindOverlappingLink(fragment, links, matchedLinks);
-
-            // Detect bold/italic from font name.
-            // TextState.FontName is already the resolved base font name (e.g. "Helvetica-Bold"),
-            // so check it directly rather than going through the baseFontNames resource-key lookup.
-            var isBold = false;
-            var isItalic = false;
-
-            var fontName = fragment.TextState.FontName;
-            if (fontName is not null)
-            {
-                isBold = fontName.Contains("Bold", StringComparison.OrdinalIgnoreCase);
-                isItalic = fontName.Contains("Italic", StringComparison.OrdinalIgnoreCase) ||
-                           fontName.Contains("Oblique", StringComparison.OrdinalIgnoreCase);
-            }
-
-            // Font size based heading detection
-            string formattedText;
-            if (fragment.FontSize >= _options.H1Threshold)
-                formattedText = $"# {EscapeMarkdown(text)}";
-            else if (fragment.FontSize >= _options.H2Threshold)
-                formattedText = $"## {EscapeMarkdown(text)}";
-            else if (fragment.FontSize >= _options.H3Threshold)
-                formattedText = $"### {EscapeMarkdown(text)}";
-            else
-            {
-                var escaped = EscapeMarkdown(text);
-                formattedText = ApplyInlineFormatting(escaped, isBold, isItalic);
-            }
-
-            // Wrap in link if applicable
-            if (linkUri is not null)
-                formattedText = $"[{formattedText}]({linkUri})";
-
-            sb.AppendLine(formattedText);
+            ConvertFragment(cp, fragment);
         }
 
         // Emit remaining horizontal rules after all text
-        while (nextRuleIndex < ruleYPositions.Count)
+        while (cp.nextRuleIndex < cp.ruleYPositions.Count)
         {
-            sb.AppendLine("---");
-            sb.AppendLine();
-            nextRuleIndex++;
+            cp.sb.AppendLine("---");
+            cp.sb.AppendLine();
+            cp.nextRuleIndex++;
         }
 
         // Emit standalone links (links not matched to any text fragment)
-        for (var i = 0; i < links.Count; i++)
+        for (var i = 0; i < cp.links.Count; i++)
         {
-            if (!matchedLinks.Contains(i) && links[i].Uri is not null)
+            if (!cp.matchedLinks.Contains(i) && cp.links[i].Uri is not null)
             {
-                sb.AppendLine($"[Link]({links[i].Uri})");
+                cp.sb.AppendLine($"[Link]({cp.links[i].Uri})");
             }
         }
 
-        return sb.ToString();
+        return cp.sb.ToString();
     }
 
     private List<LinkInfo> CollectLinks(Page page)
@@ -303,18 +248,9 @@ public sealed class PdfToMarkdownConverter
                             hasMoveToForLine = false;
                             break;
                         case "re" when operands.Count >= 4:
-                        {
                             // Thin filled rectangle can also be a horizontal rule
-                            var rx = Num(operands[0]);
-                            var ry = Num(operands[1]);
-                            var rw = Num(operands[2]);
-                            var rh = Num(operands[3]);
-                            if (Math.Abs(rw) >= minRuleWidth && Math.Abs(rh) < 3.0)
-                            {
-                                rules.Add(ry);
-                            }
+                            AddThinRectRule(operands, minRuleWidth, rules);
                             break;
-                        }
                         case "BI":
                             SkipInlineImage(lexer);
                             operands.Clear();
@@ -333,6 +269,20 @@ public sealed class PdfToMarkdownConverter
                     operands.Clear();
                     break;
             }
+        }
+    }
+
+    /// <summary>A thin filled rectangle is a horizontal rule too: record its baseline when the
+    /// rectangle spans at least <paramref name="minRuleWidth"/> and is under 3 pt tall.</summary>
+    private static void AddThinRectRule(List<PdfObject> operands, double minRuleWidth, List<double> rules)
+    {
+        var rx = Num(operands[0]);
+        var ry = Num(operands[1]);
+        var rw = Num(operands[2]);
+        var rh = Num(operands[3]);
+        if (Math.Abs(rw) >= minRuleWidth && Math.Abs(rh) < 3.0)
+        {
+            rules.Add(ry);
         }
     }
 

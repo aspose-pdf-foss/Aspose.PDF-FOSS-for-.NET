@@ -33,6 +33,9 @@ public partial class TextFragment
     // CSS line-height (pt) carried into table-cell layout: wrapped cell lines
     // pitch at this height instead of the bare font size when set.
     internal double CssLineHeightPt;
+    // True when CssLineHeightPt is a DECLARED line-height (the cell's or row's own, an element rule's factor
+    // or the body rule's factor) rather than the face's normal box: a UA-boxed line then stands on it.
+    internal bool CssLineHeightDeclared;
 
     // True when CssLineHeightPt came from the CELL'S OWN inline `line-height`
     // declaration: the lifted table dialect then makes it each line's BOX height
@@ -87,6 +90,12 @@ public partial class TextFragment
     public new bool IsInLineParagraph { get; set; }
 
     public new bool IsInNewPage { get; set; }
+
+    /// <summary>Whether the fragment's lines stay on ONE page: when they do not all
+    /// fit in the room left on the current page but would fit an empty one, the
+    /// fragment starts on the next page instead of splitting. One taller than a
+    /// page splits anyway. Flow only.</summary>
+    public bool IsKeptTogether { get; set; }
 
     /// <summary>
     /// Optional footnote attached to this fragment. Stored only; the

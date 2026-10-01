@@ -18,7 +18,9 @@ namespace Aspose.Pdf.Devices
         /// <summary>Vertical resolution in DPI.</summary>
         public int Y { get; set; }
 
+        /// <summary>Creates a resolution with the same DPI value horizontally and vertically.</summary>
         public Resolution(int value) { X = value; Y = value; }
+        /// <summary>Creates a resolution with separate horizontal and vertical DPI values.</summary>
         public Resolution(int valueX, int valueY) { X = valueX; Y = valueY; }
 
         public override string ToString() => $"{X}x{Y} DPI";
@@ -112,13 +114,13 @@ public sealed class ImagePlacement
             try
             {
                 var content = SourceReader.DecodeStream(SourcePattern);
-                var text = System.Text.Encoding.Latin1.GetString(content);
+                var text = Compat.Latin1.GetString(content);
                 var pat = new System.Text.RegularExpressions.Regex(
                     "/" + System.Text.RegularExpressions.Regex.Escape(XObjectName) + "\\s+Do");
                 var replaced = pat.Replace(text, " ", 1);
                 if (!ReferenceEquals(replaced, text))
                 {
-                    SourcePattern.ReplaceData(System.Text.Encoding.Latin1.GetBytes(replaced));
+                    SourcePattern.ReplaceData(Compat.Latin1.GetBytes(replaced));
                     SourcePattern.Dict.Remove("Filter");
                     SourcePattern.Dict.Remove("DecodeParms");
                     SourcePattern.Dict.Set("Length", new Core.PdfInteger(replaced.Length));
@@ -199,6 +201,9 @@ public sealed class ImagePlacementCollection : IReadOnlyList<ImagePlacement>
 {
     private readonly List<ImagePlacement> _items = new();
 
+    /// <summary>Creates an empty collection of image placements.</summary>
+    public ImagePlacementCollection() { }
+
     /// <summary>Number of image placements.</summary>
     public int Count => _items.Count;
 
@@ -209,22 +214,27 @@ public sealed class ImagePlacementCollection : IReadOnlyList<ImagePlacement>
     /// <summary>Get an image placement by 1-based index.</summary>
     public ImagePlacement this[int index] => _items[index - 1];
 
+    /// <summary>Appends an image placement to the collection; <c>null</c> throws <c>ArgumentNullException</c>.</summary>
     public void Add(ImagePlacement fragment)
     {
         if (fragment is null) throw new ArgumentNullException(nameof(fragment));
         _items.Add(fragment);
     }
 
+    /// <summary>Returns <c>true</c> if the collection contains the given image placement.</summary>
     public bool Contains(ImagePlacement item) => _items.Contains(item);
 
+    /// <summary>Copies the image placements into <c>array</c>, starting at the 0-based position <c>index</c> in that array.</summary>
     public void CopyTo(ImagePlacement[] array, int index) => _items.CopyTo(array, index);
 
+    /// <summary>Removes the given image placement from the collection (it does not change the page); returns <c>true</c> if it was found.</summary>
     public bool Remove(ImagePlacement item)
     {
         if (item is null) return false;
         return _items.Remove(item);
     }
 
+    /// <summary>Removes all image placements from the collection.</summary>
     public void Clear() => _items.Clear();
 
     public IEnumerator<ImagePlacement> GetEnumerator() => _items.GetEnumerator();
@@ -239,6 +249,9 @@ public sealed class ImagePlacementCollection : IReadOnlyList<ImagePlacement>
 /// </summary>
 public sealed class ImagePlacementAbsorber
 {
+    /// <summary>Creates an absorber with an empty <c>ImagePlacements</c> collection.</summary>
+    public ImagePlacementAbsorber() { }
+
     /// <summary>The collected image placements.</summary>
     public ImagePlacementCollection ImagePlacements { get; } = new();
 

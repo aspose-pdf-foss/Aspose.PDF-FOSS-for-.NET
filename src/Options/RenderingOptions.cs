@@ -8,6 +8,9 @@ namespace Aspose.Pdf;
 /// </summary>
 public sealed class RenderingOptions
 {
+    /// <summary>Creates rendering options with every flag off and every size at zero.</summary>
+    public RenderingOptions() { }
+
     /// <summary>Analyse fonts on the page before rendering.</summary>
     public bool AnalyzeFonts { get; set; }
 

@@ -46,6 +46,47 @@ public sealed class PageAddImageTests
     }
 
     [Fact]
+    public void AddImage_WithBoundingBox_ClipsTheImageToIt()
+    {
+        var jpeg = CreateMinimalJpeg(4, 4);
+
+        using var doc = Document.Create();
+        doc.Pages.Add();
+        var page = doc.Pages.At(1);
+        using var stream = new MemoryStream(jpeg);
+        var placed = new Rectangle(100, 500, 300, 700);
+        var shown = new Rectangle(100, 500, 200, 600);
+        page.AddImage(stream, placed, shown);
+
+        using var reopened = Document.Open(doc.ToArray());
+        var reread = reopened.Pages.At(1);
+        Assert.Single(reread.Images);
+        var operators = reread.Contents.ToList();
+        var clip = Assert.Single(operators.OfType<Aspose.Pdf.Operators.Clip>());
+        var draw = Assert.Single(operators.OfType<Aspose.Pdf.Operators.Do>());
+        Assert.True(operators.IndexOf(clip) < operators.IndexOf(draw), "the clip comes before the image is drawn");
+        var box = Assert.Single(operators.OfType<Aspose.Pdf.Operators.Re>());
+        Assert.Equal((100, 500, 100, 100), (box.X, box.Y, box.Width, box.Height));
+    }
+
+    [Fact]
+    public void AddImage_WithoutABoundingBox_PlacesTheImageWhole()
+    {
+        var jpeg = CreateMinimalJpeg(4, 4);
+
+        using var doc = Document.Create();
+        doc.Pages.Add();
+        var page = doc.Pages.At(1);
+        using var stream = new MemoryStream(jpeg);
+        page.AddImage(stream, new Rectangle(100, 500, 300, 700), null!, false);
+
+        using var reopened = Document.Open(doc.ToArray());
+        var reread = reopened.Pages.At(1);
+        Assert.Single(reread.Images);
+        Assert.Empty(reread.Contents.OfType<Aspose.Pdf.Operators.Clip>());
+    }
+
+    [Fact]
     public void AddImage_ImageStamp_ApplyTo()
     {
         using var doc = Document.Create();

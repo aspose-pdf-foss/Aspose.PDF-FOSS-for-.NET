@@ -1,4 +1,4 @@
-using System.Drawing;
+﻿using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.Versioning;
@@ -16,6 +16,20 @@ namespace Aspose.Pdf.Devices;
 public sealed partial class GdiPlusPageRenderer : IPageRenderer
 {
     // ── Paths ───────────────────────────────────────────────────────
+
+    /// <summary>The smallest absurd extent, in device pixels: geometry — a path's
+    /// bounds or a pen's width — reaching this far past the page came from a damaged
+    /// stream, not from a design. A page-sized pen is legitimate: a PostScript
+    /// program floods a clipped region by stroking through it with a pen as wide as
+    /// the page, and the converter carries that width straight into the stream.</summary>
+    private static float GeometrySanity(int pageSpan) =>
+        Math.Max(AbsurdExtentFloor, pageSpan * AbsurdExtentPageSpans);
+
+    /// <summary>How many page spans of geometry stay believable.</summary>
+    private const float AbsurdExtentPageSpans = 64f;
+
+    /// <summary>The absurd-extent bar for a page too small for the span rule.</summary>
+    private const float AbsurdExtentFloor = 1e5f;
 
     private void DrawPath(string op, GraphicsState state, IReadOnlyList<PathCommand> segments)
     {
@@ -38,103 +52,16 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             // treat such ops as if they were absent.
             var pathBounds = path.GetBounds(world);
             var pageSpan = Math.Max(_bitmap.Width, _bitmap.Height);
-            var sanity = Math.Max(1e5f, pageSpan * 64f);
-            if (!float.IsFinite(pathBounds.X) || !float.IsFinite(pathBounds.Y)
-                || !float.IsFinite(pathBounds.Width) || !float.IsFinite(pathBounds.Height)
+            var sanity = GeometrySanity(pageSpan);
+            if (!Compat.IsFinite(pathBounds.X) || !Compat.IsFinite(pathBounds.Y)
+                || !Compat.IsFinite(pathBounds.Width) || !Compat.IsFinite(pathBounds.Height)
                 || pathBounds.Width > sanity || pathBounds.Height > sanity
                 || Math.Abs(pathBounds.X) > sanity || Math.Abs(pathBounds.Y) > sanity)
                 return;
 
             if (doFill && state.FillPatternName is null)
             {
-                var blend = Rasterizer.BlendModes.Parse(state.BlendMode);
-                var softMask = state.SoftMask is { } sm ? GetSoftMaskAlpha(sm) : null;
-                if (softMask is not null)
-                {
-                    // An ExtGState soft mask modulates this fill's coverage per pixel
-                    // (PDF 32000 §11.6.5.4); composite by hand through the mask's alpha.
-                    FillPathBlended(path, world, blend, state, softMask);
-                }
-                else if (blend != Rasterizer.BlendMode.Normal)
-                {
-                    // GDI+ has no per-pixel PDF blend modes, so composite the fill into
-                    // the backing bitmap by hand (PDF 32000 §11.3.5). Scoped to the rare
-                    // non-Normal case; Normal fills keep the fast native path below.
-                    FillPathBlended(path, world, blend, state);
-                }
-                else
-                {
-                    using var brush = new SolidBrush(ColorFrom(state.FillR, state.FillG, state.FillB, state.FillAlpha));
-                    // A sub-pixel fill renders at its TRUE geometric coverage — the
-                    // reference rasterizer draws a 0.24pt frame rule at 150 dpi as the
-                    // 159/223 coverage split, never as a solid 1px bar (probed with a
-                    // 0.03..1pt bar ladder at 150 and 300 dpi: coverage is exact, with
-                    // a floor of ~1/8 px so a vanishingly thin rule stays faintly
-                    // visible instead of dissolving to nothing).
-                    var db = pathBounds;
-                    var thinnest = Math.Min(db.Width, db.Height);
-                    if (db.Width > 0f && db.Height > 0f && thinnest < 1f)
-                    {
-                        // GDI+'s own AA is unreliable below one device pixel (a
-                        // 0.2px-tall rule can dissolve to nothing), so sub-pixel
-                        // fills draw as a deterministic >=1px bar whose ALPHA is the
-                        // geometric coverage (floored at ~1/8 so a vanishingly thin
-                        // rule stays faintly visible) - the probed reference law is
-                        // true coverage, never a solid bump.
-                        using var faint = new SolidBrush(ColorFrom(state.FillR, state.FillG, state.FillB,
-                            state.FillAlpha * Math.Max(thinnest, 0.125f)));
-                        var cur = _g.Transform;
-                        _g.ResetTransform();
-                        _g.FillRectangle(faint, db.X, db.Y, Math.Max(db.Width, 1f), Math.Max(db.Height, 1f));
-                        _g.Transform = cur;
-                        cur.Dispose();
-                    }
-                    else
-                    {
-                        // Blend a semi-transparent fill in straight sRGB.
-                        // The page keeps gamma-corrected compositing for text AA;
-                        // applying it to /ca fills composites them visibly lighter than the
-                        // platform convention. Scoped to the shape-fill call so glyph
-                        // rendering is unaffected.
-                        // A near-white opaque fill is composited the same way: gamma-corrected
-                        // coverage blending darkens even a white-over-white anti-aliased edge
-                        // by one level (a white redaction rect over a white scan reads 0xFEFEFE
-                        // at its border); a straight-sRGB blend of coverage α is α·255+(1−α)·255
-                        // = 255 exactly, so the halo disappears.
-                        bool nearWhiteFill = state.FillR > 0.99 && state.FillG > 0.99 && state.FillB > 0.99;
-                        var savedCq = _g.CompositingQuality;
-                        if (state.FillAlpha < 0.999 || nearWhiteFill) _g.CompositingQuality = CompositingQuality.AssumeLinear;
-                        if (AliasedVectorFills)
-                        {
-                            // Aliased fill rule: run start = ceil(edge·s) inclusive-on-
-                            // exact, run end = ceil(edge·s) exclusive, at the EXACT
-                            // dpi/72 device mapping (AliasedWorldMatrix). GDI+'s non-AA
-                            // rasterization under PixelOffsetMode.None implements that
-                            // corner-lattice rule natively (calibrated on a 220-dpi bar
-                            // page: 43/43 edges + the vertical runs land exactly); the
-                            // Q_BCSHIFT/Q_BCPOM knobs exist to recalibrate the rule
-                            // if a counter-example shows up.
-                            var savedSm2 = _g.SmoothingMode;
-                            var savedPom2 = _g.PixelOffsetMode;
-                            var savedTx2 = _g.Transform;
-                            _g.SmoothingMode = SmoothingMode.None;
-                            _g.PixelOffsetMode = BcPomNone ? PixelOffsetMode.None : PixelOffsetMode.Half;
-                            using (var exactWorld = AliasedWorldMatrix(state.Ctm))
-                            {
-                                exactWorld.Translate(BcShift.dx, BcShift.dy, MatrixOrder.Append);
-                                _g.Transform = exactWorld;
-                                _g.FillPath(brush, path);
-                            }
-                            _g.Transform = savedTx2;
-                            savedTx2.Dispose();
-                            _g.SmoothingMode = savedSm2;
-                            _g.PixelOffsetMode = savedPom2;
-                        }
-                        else
-                            _g.FillPath(brush, path);
-                        _g.CompositingQuality = savedCq;
-                    }
-                }
+                FillPathFlat(path, world, pathBounds, state);
             }
             else if (doFill && state.FillPatternName is not null)
             {
@@ -164,51 +91,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             }
             else if (doStroke)
             {
-                // Corrupt-stroke tolerance: a damaged stream can turn "0.35 w" into
-                // "735 w"; a pen wider than half the page blots out everything it
-                // touches. No real design strokes with such a pen — skip the
-                // damaged op entirely.
-                var ctmScale = Math.Sqrt(Math.Abs(
-                    state.Ctm[0] * state.Ctm[3] - state.Ctm[1] * state.Ctm[2])) * _scale;
-                var devPen = state.LineWidth * (ctmScale > 0 ? ctmScale : _scale);
-                if (devPen > 0.5 * pageSpan)
-                    return;
-
-                using var pen = BuildPen(state);
-                // On transparency pages, composite the stroke in straight sRGB
-                // — the page default (HighQuality = gamma-corrected) blends
-                // partial-coverage stroke pixels visibly lighter over a painted backdrop, the
-                // same reason the semi-transparent fill branch already forces AssumeLinear.
-                var savedScq = _g.CompositingQuality;
-                if (StrokeLinear) _g.CompositingQuality = CompositingQuality.AssumeLinear;
-                // PDF stroking widens the path in user space, so under a non-uniform CTM
-                // the pen is elliptical in device space: a vertical line under
-                // `3.4 0 0 0.29 0 0 cm` must come out 3.4× wider than its nominal width
-                // (manual-gradient bands drawn as adjacent stroked lines rely on this to
-                // tile into a solid fill). GDI+ scales a pen by a single factor only, so
-                // such strokes render several times too thin. For strongly anisotropic
-                // CTMs, widen the path in user space ourselves and fill the outline —
-                // the world transform then maps it exactly as the CTM dictates.
-                bool drawnWidened = false;
-                if (Environment.GetEnvironmentVariable("Q_ANISO") != "0"
-                    && state.LineWidth > 0 && CtmAnisotropy(state.Ctm) > 1.5)
-                {
-                    using var widened = (GraphicsPath)path.Clone();
-                    try
-                    {
-                        widened.Widen(pen);
-                        using var sb = new SolidBrush(pen.Color);
-                        _g.FillPath(sb, widened);
-                        drawnWidened = true;
-                    }
-                    catch
-                    {
-                        // Widen can reject degenerate subpaths — fall back to the pen.
-                    }
-                }
-                if (!drawnWidened)
-                    _g.DrawPath(pen, path);
-                _g.CompositingQuality = savedScq;
+                StrokePathGdi(path, state, pageSpan);
             }
         }
         finally { _g.Transform = saved; }
@@ -223,125 +106,52 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     /// </summary>
     private void FillWithTilingPattern(GraphicsPath path, GraphicsState state, GdiMatrix world, string patName)
     {
+        var tl = new TilingPatternFillState();
+        tl.path = path;
+        tl.state = state;
+        tl.world = world;
+        tl.patName = patName;
         if (_formDepth > 24 || _scope.Patterns is null) return;
-        var patObj = _reader.Resolve(_scope.Patterns.Get(patName));
+        tl.patObj = _reader.Resolve(_scope.Patterns.Get(tl.patName));
         // PatternType 2 (shading pattern, PDF 32000 §8.7.4.3) is a plain dict referencing a
         // /Shading — fill the path with that shading under the pattern matrix.
-        if (patObj is PdfDictionary spd && (int)spd.GetInt("PatternType") == 2)
+        if (tl.patObj is PdfDictionary spd && (int)spd.GetInt("PatternType") == 2)
         {
-            FillWithShadingPattern(path, state, spd);
+            FillWithShadingPattern(tl.path, tl.state, spd);
             return;
         }
-        if (patObj is not PdfStream patStream) return;
-        var pd = patStream.Dict;
-        if ((int)pd.GetInt("PatternType") != 1) return;
-        if (pd.Get("BBox") is not PdfArray bbox || bbox.Count < 4) return;
-        double bx0 = NumFrom(bbox[0]), by0 = NumFrom(bbox[1]), bx1 = NumFrom(bbox[2]), by1 = NumFrom(bbox[3]);
-        double xstep = NumFrom(pd.Get("XStep")), ystep = NumFrom(pd.Get("YStep"));
-        if (Math.Abs(xstep) < 1e-6) xstep = bx1 - bx0;
-        if (Math.Abs(ystep) < 1e-6) ystep = by1 - by0;
-        if (Math.Abs(xstep) < 1e-6 || Math.Abs(ystep) < 1e-6) return;
-        var patMatrix = ExtractFormMatrix(pd) ?? new double[] { 1, 0, 0, 1, 0, 0 };
+        if (!ComputeTilingExtent(tl)) return;
 
-        byte[] content;
-        try { content = _reader.DecodeStream(patStream); } catch { return; }
-        if (content.Length == 0) return;
+        tl.needsComposite = tl.state.FillAlpha < 0.999
+            || tl.state.SoftMask is not null
+            || (!string.IsNullOrEmpty(tl.state.BlendMode) && tl.state.BlendMode != "Normal");
 
-        using var patWorld = WorldMatrix(patMatrix);
-        using var inv = patWorld.Clone();
-        if (!inv.IsInvertible) return;
-        inv.Invert();
-
-        // Bound the tiling loop: map the fill region's device bounds into pattern space.
-        var db = path.GetBounds(world);
-        var corners = new[]
+        if (!tl.needsComposite)
         {
-            new PointF(db.Left, db.Top), new PointF(db.Right, db.Top),
-            new PointF(db.Left, db.Bottom), new PointF(db.Right, db.Bottom),
-        };
-        inv.TransformPoints(corners);
-        float pMinX = corners[0].X, pMaxX = corners[0].X, pMinY = corners[0].Y, pMaxY = corners[0].Y;
-        foreach (var c in corners)
-        {
-            pMinX = Math.Min(pMinX, c.X); pMaxX = Math.Max(pMaxX, c.X);
-            pMinY = Math.Min(pMinY, c.Y); pMaxY = Math.Max(pMaxY, c.Y);
-        }
-        int iMin = (int)Math.Floor((pMinX - bx1) / xstep), iMax = (int)Math.Ceiling((pMaxX - bx0) / xstep);
-        int jMin = (int)Math.Floor((pMinY - by1) / ystep), jMax = (int)Math.Ceiling((pMaxY - by0) / ystep);
-        if (iMax < iMin || jMax < jMin) return;
-        if ((long)(iMax - iMin + 1) * (jMax - jMin + 1) > 8000)
-        {
-            // Too many tiles to execute the cell per-tile (a fine screen/dither over a
-            // large area). Rasterise one cell to a device-sized tile and let GDI+ repeat
-            // it with a TextureBrush instead of bailing (which would leave the region
-            // blank). Scoped to the over-guard case, so the exact per-tile path for
-            // normal-sized fills is unchanged.
-            FillWithTiledBrush(path, pd, content, bx0, by0, bx1, by1, xstep, ystep, patMatrix, world);
+            RenderTilingCells(tl.path, tl.pd, tl.content, tl.patMatrix, tl.xstep, tl.ystep, tl.iMin, tl.iMax, tl.jMin, tl.jMax);
             return;
         }
 
-        // A pattern fill that carries transparency — group fill-alpha (/ca < 1), an active
-        // ExtGState soft mask, or a non-Normal blend mode — must composite as a unit
-        // (PDF 32000 §11.6.5-6): render the tiles onto a transparent layer, then blend that
-        // layer onto the page once at the fill alpha / mask / blend. Painting the cells
-        // straight onto the page (the common opaque case) ignores the alpha and over-inks
-        // the region — e.g. a faded content panel drawn as an opaque dark overlay.
-        bool needsComposite = state.FillAlpha < 0.999
-            || state.SoftMask is not null
-            || (!string.IsNullOrEmpty(state.BlendMode) && state.BlendMode != "Normal");
+        tl.pw = _bitmap.Width;
+        tl.ph = _bitmap.Height;
+        tl.rx0 = Math.Max(0, (int)Math.Floor(tl.db.Left));
+        tl.ry0 = Math.Max(0, (int)Math.Floor(tl.db.Top));
+        tl.rx1 = Math.Min(tl.pw, (int)Math.Ceiling(tl.db.Right));
+        tl.ry1 = Math.Min(tl.ph, (int)Math.Ceiling(tl.db.Bottom));
+        if (tl.rx1 <= tl.rx0 || tl.ry1 <= tl.ry0) return; // fill maps off-page
+        tl.compRect = new System.Drawing.Rectangle(tl.rx0, tl.ry0, tl.rx1 - tl.rx0, tl.ry1 - tl.ry0);
 
-        if (!needsComposite)
-        {
-            RenderTilingCells(path, pd, content, patMatrix, xstep, ystep, iMin, iMax, jMin, jMax);
-            return;
-        }
-
-        int pw = _bitmap.Width, ph = _bitmap.Height;
-        int rx0 = Math.Max(0, (int)Math.Floor(db.Left)), ry0 = Math.Max(0, (int)Math.Floor(db.Top));
-        int rx1 = Math.Min(pw, (int)Math.Ceiling(db.Right)), ry1 = Math.Min(ph, (int)Math.Ceiling(db.Bottom));
-        if (rx1 <= rx0 || ry1 <= ry0) return; // fill maps off-page
-        var compRect = new System.Drawing.Rectangle(rx0, ry0, rx1 - rx0, ry1 - ry0);
-
-        // Capture the inherited device-space clip so the pattern fill stays bounded.
-        var savedClipT = _g.Transform;
+        tl.savedClipT = _g.Transform;
         _g.ResetTransform();
-        var deviceClip = _g.Clip;
-        _g.Transform = savedClipT;
-        savedClipT.Dispose();
+        tl.deviceClip = _g.Clip;
+        _g.Transform = tl.savedClipT;
+        tl.savedClipT.Dispose();
 
-        var layer = RentLayer(pw, ph);
-        var savedLG = _g; var savedLBmp = _bitmap; var savedLScratch = _blendScratch;
-        var lg = Graphics.FromImage(layer);
-        try
-        {
-            // Isolated source: start from a transparent backdrop under the fill rect.
-            lg.CompositingMode = CompositingMode.SourceCopy;
-            using (var clear = new SolidBrush(GdiColor.Transparent))
-                lg.FillRectangle(clear, compRect);
-            lg.CompositingMode = CompositingMode.SourceOver;
-            lg.SmoothingMode = savedLG.SmoothingMode;
-            lg.PixelOffsetMode = savedLG.PixelOffsetMode;
-            lg.InterpolationMode = savedLG.InterpolationMode;
-            lg.TextRenderingHint = savedLG.TextRenderingHint;
-            lg.CompositingQuality = savedLG.CompositingQuality;
-            if (deviceClip is not null) lg.Clip = deviceClip;
-            // RenderTilingCells reads `path` in user space then drops to identity, so the
-            // layer transform must be the fill CTM (= world) when it sets the clip.
-            using (var wclone = world.Clone()) lg.Transform = wclone;
-
-            _g = lg; _bitmap = layer; _blendScratch = null;
-            RenderTilingCells(path, pd, content, patMatrix, xstep, ystep, iMin, iMax, jMin, jMax);
-            _g.Flush();
-        }
-        finally
-        {
-            _g = savedLG; _bitmap = savedLBmp;
-            _blendScratch?.Dispose(); _blendScratch = savedLScratch;
-            lg.Dispose(); deviceClip?.Dispose();
-        }
-
-        CompositeGroupLayer(layer, state, state.BlendMode, compRect);
-        _layerPool.Push(layer);
+        tl.layer = RentLayer(tl.pw, tl.ph);
+        tl.savedLG = _g; var savedLBmp = _bitmap; var savedLScratch = _blendScratch;
+        tl.lg = Graphics.FromImage(tl.layer);
+        PaintTilingPatternComposite(tl, savedLBmp, savedLScratch);
+        _layerPool.Push(tl.layer);
     }
 
     /// <summary>
@@ -500,7 +310,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         if (shading is not (AxialShading or RadialShading or FreeFormGouraudShading
             or LatticeFormGouraudShading or CoonsPatchShading or TensorPatchShading)) return;
 
-        var patMatrix = ExtractFormMatrix(pd) ?? new double[] { 1, 0, 0, 1, 0, 0 };
+        var patMatrix = PatternSpaceMatrix(pd);
 
         // A shading fill under transparency — /ca < 1, an ExtGState soft mask, or a
         // non-Normal blend — must composite as a unit (PDF 32000 §11.6.5-6), exactly
@@ -615,7 +425,12 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             : -System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(sm.Dict);
         if (_softMaskCache.TryGetValue(key, out var cached)) return cached;
         byte[]? alpha = null;
-        try { alpha = SoftwarePageRenderer.RenderSoftMaskAlpha(_reader, _bitmap.Width, _bitmap.Height, _scale, _mediaBox, sm); }
+        try
+        {
+            alpha = PrintedPageImage
+                ? RenderPrintedSoftMaskAlpha(sm)
+                : SoftwarePageRenderer.RenderSoftMaskAlpha(_reader, _bitmap.Width, _bitmap.Height, _scale, _mediaBox, sm);
+        }
         catch { alpha = null; }
         _softMaskCache[key] = alpha;
         return alpha;
@@ -690,7 +505,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                     double bbr = sr, bbg = sg, bbb = sb;
                     if (dn > 0.0)
                     {
-                        Rasterizer.BlendModes.Blend(mode, dr, dg, db, sr, sg, sb, out int ibr, out int ibg, out int ibb);
+                        var (ibr, ibg, ibb) = Rasterizer.BlendModes.Blend(mode, dr, dg, db, sr, sg, sb);
                         bbr = (1 - dn) * sr + dn * ibr;
                         bbg = (1 - dn) * sg + dn * ibg;
                         bbb = (1 - dn) * sb + dn * ibb;
@@ -798,25 +613,6 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         return path;
     }
 
-    /// <summary>
-    /// Ratio of the CTM's singular values (max/min stretch). 1 for uniform scale and
-    /// rotation; grows as the matrix squashes one axis relative to the other.
-    /// Degenerate matrices report a huge ratio (callers treat them like "very anisotropic",
-    /// where the widen-and-fill path still produces the right geometry).
-    /// </summary>
-    private static double CtmAnisotropy(double[] m)
-    {
-        double a = m[0], b = m[1], c = m[2], d = m[3];
-        double e = a * a + b * b + c * c + d * d;
-        double det = Math.Abs(a * d - b * c);
-        // σmax² = (E + √(E²−4·det²))/2, σmin = det/σmax
-        double disc = Math.Sqrt(Math.Max(0, e * e - 4 * det * det));
-        double sMax = Math.Sqrt((e + disc) / 2);
-        if (sMax <= 0) return 1;
-        double sMin = det / sMax;
-        return sMin > 1e-9 ? sMax / sMin : 1e9;
-    }
-
     private Pen BuildPen(GraphicsState state)
     {
         // Line width is in user units; the active world transform scales it into
@@ -837,36 +633,19 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             _ => LineJoin.Miter,
         };
         if (state.MiterLimit > 0) pen.MiterLimit = (float)state.MiterLimit;
-        if (state.DashArray.Length > 0)
+        // The dash law (the one-pen floor, a dot's period, the round-cap pattern) is
+        // shared with the software renderer so both draw the same dashes.
+        if (PenGeometry.DashPatternInPenWidths(state.DashArray, state.LineWidth, state.LineCap) is { } pattern)
         {
             var w = (float)state.LineWidth;
             if (w <= 0) w = 1;
-            var pattern = new float[state.DashArray.Length];
-            var allZero = true;
-            for (int i = 0; i < pattern.Length; i++)
-            {
-                // ★ Each dash element is at least the LINE WIDTH. Measured on the
-                // expected render over nine (pattern, width) combinations — the
-                // rendered period is max(on,w) + max(off,w) every time, and the duty
-                // cycle agrees: [3 2] at w3 draws as [3 3] (period 6, not 5), [3 2] at
-                // w5 as [5 5] (period 10), while [6 4] at w3 is already above the floor
-                // and renders nominally. Taking the array at face value makes every
-                // narrow-gap dashed stroke too dense.
-                // GDI+ counts the pattern in PEN WIDTHS, so the floor is 1.
-                pattern[i] = (float)Math.Max(state.DashArray[i] / w, 1.0);
-                if (pattern[i] > 0) allZero = false;
-                if (pattern[i] <= 0) pattern[i] = 0.01f; // GDI+ rejects zero dash entries
-            }
-            if (!allZero)
-            {
-                pen.DashPattern = pattern;
-                pen.DashOffset = (float)(state.DashPhase / w);
-                // PDF dash segments take the stroke's line cap (§8.4.3.6), but GDI+
-                // caps dash segments with Pen.DashCap, not Start/EndCap. Without it a
-                // zero-length dash entry — a round DOT in every dotted-border PDF —
-                // gets flat caps and paints nothing.
-                if (state.LineCap == 1) pen.DashCap = DashCap.Round;
-            }
+            pen.DashPattern = pattern;
+            pen.DashOffset = (float)(state.DashPhase / w);
+            // PDF dash segments take the stroke's line cap (§8.4.3.6), but GDI+
+            // caps dash segments with Pen.DashCap, not Start/EndCap. Without it a
+            // zero-length dash entry — a round DOT in every dotted-border PDF —
+            // gets flat caps and paints nothing.
+            if (state.LineCap == PenGeometry.RoundCap) pen.DashCap = DashCap.Round;
         }
         return pen;
     }

@@ -30,7 +30,7 @@ public sealed partial class PdfSigner
         // trailing UTC offset), so a caller-supplied local time round-trips.
         var when = options.SigningDate ?? DateTime.UtcNow;
         var dateStr = $"D:{when:yyyyMMddHHmmss}+00'00'";
-        dict.Set("M", new PdfString(Encoding.Latin1.GetBytes(dateStr)));
+        dict.Set("M", new PdfString(Compat.Latin1.GetBytes(dateStr)));
 
         // ByteRange placeholder — will be patched later
         // Use a distinctive pattern for easy replacement
@@ -98,7 +98,7 @@ public sealed partial class PdfSigner
         dict.Set("Type", new PdfName("Annot"));
         dict.Set("Subtype", new PdfName("Widget"));
         dict.Set("FT", new PdfName("Sig"));
-        dict.Set("T", new PdfString(Encoding.Latin1.GetBytes(fieldName)));
+        dict.Set("T", new PdfString(Compat.Latin1.GetBytes(fieldName)));
         dict.Set("V", new PdfIndirectRef(sigValObjNum, 0));
         // Invisible signature (zero rect)
         var rect = new PdfArray();
@@ -245,8 +245,8 @@ public sealed partial class PdfSigner
     }
 
     private static byte[] CreatePkcs7Signature(byte[] hash, PdfCertificate certificate,
-        DigestHashAlgorithm digest = DigestHashAlgorithm.Sha256)
-        => CmsBuilder.CreateDetachedSignature(hash, certificate, digest);
+        DigestHashAlgorithm digest = DigestHashAlgorithm.Sha256, Forms.SignHash? signer = null)
+        => CmsBuilder.CreateDetachedSignature(hash, certificate, digest, signer);
 
     /// <summary>The digest algorithm implied by the signature /SubFilter: adbe.pkcs7.sha1
     /// (and the raw adbe.x509.rsa_sha1 handler) use SHA-1; everything else uses SHA-256.</summary>

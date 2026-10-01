@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Text;
@@ -7,7 +7,7 @@ namespace Aspose.Pdf.Text;
 /// Type0/CIDFont byte-stream metadata: encoding width and CID→GID mapping.
 /// Built from a font dictionary once per Tf operator; cached by the renderer.
 /// </summary>
-internal sealed class CidFontInfo
+internal sealed partial class CidFontInfo
 {
     /// <summary>Encoding produces 2-byte big-endian CIDs (Identity-H/V or 2-byte predefined CMaps).</summary>
     public required bool IsTwoByteEncoding { get; init; }
@@ -123,116 +123,75 @@ internal sealed class CidFontInfo
     /// </summary>
     public static CidFontInfo? TryBuild(PdfDictionary fontDict, PdfReader reader)
     {
-        if (fontDict.GetName("Subtype") != "Type0") return null;
+        var cb = new CidFontBuildState();
+        cb.fontDict = fontDict;
+        cb.reader = reader;
+        if (cb.fontDict.GetName("Subtype") != "Type0") return null;
 
-        // /Encoding can be a direct name OR an indirect reference to a CMap stream
-        // (PDF 32000 §9.7.5.2). Resolve through the reference first; if the resolved
-        // object is a stream, peek at its dict's /CMapName for the predefined-name
-        // lookup, otherwise inspect the stream's `begincodespacerange ... endcode-
-        // spacerange` declarations to decide 2-byte vs 1-byte. Without this,
-        // sub-setted PDFs that emit `/Encoding 23 0 R` for an embedded custom CMap
-        // (CMapName = subset-prefix+family, not a predefined name) get isTwoByte =
-        // false and the renderer walks raw bytes one at a time — every 2-byte CID
-        // is drawn as two .notdef glyphs, doubling visible letter-spacing.
-        string? encoding = fontDict.GetName("Encoding");
-        PdfStream? encStream = null;
-        if (encoding is null)
+        cb.encoding = cb.fontDict.GetName("Encoding");
+        cb.encStream = null;
+        if (cb.encoding is null)
         {
-            var encObj = reader.Resolve(fontDict.Get("Encoding"));
-            if (encObj is PdfName encName) encoding = encName.Value;
+            var encObj = cb.reader.Resolve(cb.fontDict.Get("Encoding"));
+            if (encObj is PdfName encName) cb.encoding = encName.Value;
             else if (encObj is PdfStream es)
             {
-                encStream = es;
-                encoding = es.Dict.GetName("CMapName");
+                cb.encStream = es;
+                cb.encoding = es.Dict.GetName("CMapName");
             }
         }
-        var isTwoByte = encoding switch
+        cb.isTwoByte = cb.encoding switch
         {
             "Identity-H" => true,
             "Identity-V" => true,
             // UCS2/UTF16 variants and predefined CJK CMaps (UniJIS-*, UniGB-*, UniCNS-*, UniKS-*,
             // GB-EUC-H, ETen-B5-H, etc.) all use 2-byte big-endian codes.
-            not null when encoding.Contains("-UCS2-") || encoding.Contains("-UTF16-") => true,
-            not null when IsTwoByteCjkCMap(encoding) => true,
+            not null when cb.encoding.Contains("-UCS2-") || cb.encoding.Contains("-UTF16-") => true,
+            not null when IsTwoByteCjkCMap(cb.encoding) => true,
             _ => false,
         };
-        // If the CMap name didn't identify a known encoding, fall back to parsing
-        // the stream's codespace ranges. Custom subset CMaps name themselves after
-        // the font (e.g. "NQTMYA+Lucida Sans Unicode,Bold") which can't be guessed.
-        System.Collections.Generic.Dictionary<int, int>? cmapCodeToCid = null;
-        var singleByteCMap = false;
-        if (encStream is not null)
+        cb.cmapCodeToCid = null;
+        cb.singleByteCMap = false;
+        if (cb.encStream is not null)
         {
-            try
-            {
-                var cmapBytes = reader.DecodeStream(encStream);
-                if (!isTwoByte)
-                    isTwoByte = CMapHasTwoByteCodespace(cmapBytes);
-                singleByteCMap = !isTwoByte && CMapHasOnlySingleByteCodespace(cmapBytes);
-                // Custom CMaps map byte-codes → CIDs via `cidchar` / `cidrange`.
-                // Without this, codes hit `CidToGidMap[code]` directly, which
-                // produces wrong glyphs (e.g. 0x0046 looked up as CID 70 instead
-                // of CID 4 via the CMap's `<0046>4` entry).
-                cmapCodeToCid = ParseCMapCodeToCid(cmapBytes);
-            }
-            catch { }
+            ReadEmbeddedCMap(cb);
         }
-        // Uni*-UCS2-* and Uni*-UTF16-* CMaps emit Unicode codepoints (not
-        // Adobe CIDs) for each 2-byte code. Identity-H/V and the legacy
-        // bytecode CMaps (GB-EUC, ETen-B5, KSC-EUC, etc.) emit CIDs.
-        var isUnicodeEnc = encoding is not null
-            && (encoding.Contains("-UCS2-") || encoding.Contains("-UTF16-"));
+        cb.isUnicodeEnc = cb.encoding is not null
+            && (cb.encoding.Contains("-UCS2-") || cb.encoding.Contains("-UTF16-"));
 
-        // DescendantFonts[0] holds the CIDFont dictionary that owns /CIDToGIDMap
-        // and /CIDSystemInfo.
-        int[]? cidToGid = null;
-        string? ordering = null;
-        double vertOriginY = 880, vertAdvance = -1000;
-        Dictionary<int, (double, double, double)>? w2 = null;
-        var descendantsObj = reader.Resolve(fontDict.Get("DescendantFonts"));
-        if (descendantsObj is PdfArray descArr && descArr.Count > 0)
+        cb.cidToGid = null;
+        cb.ordering = null;
+        cb.vertOriginY = 880;
+        cb.vertAdvance = -1000;
+        cb.w2 = null;
+        cb.descendantsObj = cb.reader.Resolve(cb.fontDict.Get("DescendantFonts"));
+        if (cb.descendantsObj is PdfArray descArr && descArr.Count > 0)
         {
-            var cidFontDict = reader.ResolveDict(descArr[0]);
-            if (cidFontDict is not null)
-            {
-                cidToGid = ReadCidToGidMap(cidFontDict, reader);
-                // /CIDSystemInfo is a required entry on a CIDFont (§9.7.3).
-                var sysInfo = reader.ResolveDict(cidFontDict.Get("CIDSystemInfo"));
-                if (sysInfo is not null && sysInfo.Get("Ordering") is PdfString os)
-                    ordering = os.ToText();
-                // Vertical-writing defaults (/DW2 = [vy w1], default [880 -1000],
-                // PDF 32000 §9.7.4.3) and the per-CID /W2 overrides.
-                if (reader.Resolve(cidFontDict.Get("DW2")) is PdfArray dw2 && dw2.Count >= 2)
-                {
-                    vertOriginY = NumOf(dw2[0]);
-                    vertAdvance = NumOf(dw2[1]);
-                }
-                w2 = ReadW2(cidFontDict, reader);
-            }
+            ReadDescendantFont(cb, descArr);
         }
 
         // A predefined legacy national CMap (named, not a stream) encodes byte-codes
         // in the national charset rather than as Adobe CIDs. Record its codepage so
         // a non-embedded CIDFont can be rendered by decoding code → Unicode → system
         // CJK font. Stream CMaps (custom subset) and Unicode CMaps don't apply.
-        var legacyCodepage = (encStream is null && !isUnicodeEnc)
-            ? CodepageForCMap(encoding)
+        var legacyCodepage = (cb.encStream is null && !cb.isUnicodeEnc)
+            ? CodepageForCMap(cb.encoding)
             : 0;
 
         return new CidFontInfo
         {
-            IsTwoByteEncoding = isTwoByte,
-            IsUnicodeEncoding = isUnicodeEnc,
-            CidToGidMap = cidToGid,
-            Ordering = ordering,
-            CMapCodeToCid = cmapCodeToCid,
-            HasFixedSingleByteCMap = singleByteCMap,
+            IsTwoByteEncoding = cb.isTwoByte,
+            IsUnicodeEncoding = cb.isUnicodeEnc,
+            CidToGidMap = cb.cidToGid,
+            Ordering = cb.ordering,
+            CMapCodeToCid = cb.cmapCodeToCid,
+            HasFixedSingleByteCMap = cb.singleByteCMap,
             LegacyCodepage = legacyCodepage,
-            CjkBaseFont = fontDict.GetName("BaseFont"),
-            IsVertical = encoding is not null && encoding.EndsWith("-V", StringComparison.Ordinal),
-            VertOriginY = vertOriginY,
-            VertAdvance = vertAdvance,
-            W2 = w2,
+            CjkBaseFont = cb.fontDict.GetName("BaseFont"),
+            IsVertical = cb.encoding is not null && cb.encoding.EndsWith("-V", StringComparison.Ordinal),
+            VertOriginY = cb.vertOriginY,
+            VertAdvance = cb.vertAdvance,
+            W2 = cb.w2,
         };
     }
 
@@ -359,7 +318,7 @@ internal sealed class CidFontInfo
     // We only need the horizontal ones; -V variants decode the same codes.
     /// <summary>
     /// True when the CMap stream declares any `begincodespacerange` entry where the
-    /// low/high pair is two bytes wide (e.g. `<0000> <FFFF>`). PDF 32000 §9.7.5.4
+    /// low/high pair is two bytes wide (e.g. `&lt;0000> &lt;FFFF>`). PDF 32000 §9.7.5.4
     /// allows a CMap to mix codespace lengths, but in practice custom subset CMaps
     /// emitted by PDF generators for Type0 fonts use either all-1-byte or all-2-byte
     /// ranges. Spot the first 2-byte range and treat the whole CMap as 2-byte.
@@ -371,7 +330,7 @@ internal sealed class CidFontInfo
     private static bool CMapHasOnlySingleByteCodespace(byte[] cmapBytes)
     {
         if (cmapBytes is null || cmapBytes.Length == 0) return false;
-        var text = System.Text.Encoding.Latin1.GetString(cmapBytes);
+        var text = Compat.Latin1.GetString(cmapBytes);
         var start = text.IndexOf("begincodespacerange", StringComparison.Ordinal);
         if (start < 0) return false;
         var end = text.IndexOf("endcodespacerange", start, StringComparison.Ordinal);
@@ -402,7 +361,7 @@ internal sealed class CidFontInfo
         // Treat as ASCII — CMap header / operators are PostScript-style ASCII tokens.
         // Look for "begincodespacerange ... endcodespacerange" and inspect the first
         // hex-string pair inside.
-        var text = System.Text.Encoding.Latin1.GetString(cmapBytes);
+        var text = Compat.Latin1.GetString(cmapBytes);
         var start = text.IndexOf("begincodespacerange", StringComparison.Ordinal);
         if (start < 0) return false;
         var end = text.IndexOf("endcodespacerange", start, StringComparison.Ordinal);
@@ -433,7 +392,7 @@ internal sealed class CidFontInfo
     private static System.Collections.Generic.Dictionary<int, int>? ParseCMapCodeToCid(byte[] cmapBytes)
     {
         if (cmapBytes is null || cmapBytes.Length == 0) return null;
-        var text = System.Text.Encoding.Latin1.GetString(cmapBytes);
+        var text = Compat.Latin1.GetString(cmapBytes);
         System.Collections.Generic.Dictionary<int, int>? map = null;
 
         // cidchar: lines like `<0041>2` between begincidchar / endcidchar
@@ -445,7 +404,7 @@ internal sealed class CidFontInfo
             var end = text.IndexOf("endcidchar", start, StringComparison.Ordinal);
             if (end < 0) break;
             var block = text.Substring(start + "begincidchar".Length, end - (start + "begincidchar".Length));
-            ParseCidCharLines(block, ref map);
+            map = ParseCidCharLines(block, map);
             idx = end + 1;
         }
 
@@ -458,14 +417,14 @@ internal sealed class CidFontInfo
             var end = text.IndexOf("endcidrange", start, StringComparison.Ordinal);
             if (end < 0) break;
             var block = text.Substring(start + "begincidrange".Length, end - (start + "begincidrange".Length));
-            ParseCidRangeLines(block, ref map);
+            map = ParseCidRangeLines(block, map);
             idx = end + 1;
         }
 
         return map;
     }
 
-    private static void ParseCidCharLines(string block, ref System.Collections.Generic.Dictionary<int, int>? map)
+    private static System.Collections.Generic.Dictionary<int, int>? ParseCidCharLines(string block, System.Collections.Generic.Dictionary<int, int>? map)
     {
         var p = 0;
         while (p < block.Length)
@@ -476,19 +435,20 @@ internal sealed class CidFontInfo
             var endHex = block.IndexOf('>', p);
             if (endHex < 0) break;
             var hex = block.Substring(p + 1, endHex - p - 1);
-            if (!TryParseHex(hex, out var code)) { p = endHex + 1; continue; }
+            if (TryParseHex(hex) is not { } code) { p = endHex + 1; continue; }
             p = endHex + 1;
             // Skip whitespace and read a decimal number = CID.
             while (p < block.Length && (block[p] == ' ' || block[p] == '\t' || block[p] == '\n' || block[p] == '\r')) p++;
             var numStart = p;
             while (p < block.Length && block[p] >= '0' && block[p] <= '9') p++;
             if (p == numStart) continue;
-            var cid = int.Parse(block.AsSpan(numStart, p - numStart));
+            var cid = Compat.ParseInt32(block.AsSpan(numStart, p - numStart));
             (map ??= new System.Collections.Generic.Dictionary<int, int>())[code] = cid;
         }
+        return map;
     }
 
-    private static void ParseCidRangeLines(string block, ref System.Collections.Generic.Dictionary<int, int>? map)
+    private static System.Collections.Generic.Dictionary<int, int>? ParseCidRangeLines(string block, System.Collections.Generic.Dictionary<int, int>? map)
     {
         var p = 0;
         while (p < block.Length)
@@ -499,39 +459,40 @@ internal sealed class CidFontInfo
             var endHex1 = block.IndexOf('>', p);
             if (endHex1 < 0) break;
             var hex1 = block.Substring(p + 1, endHex1 - p - 1);
-            if (!TryParseHex(hex1, out var startCode)) { p = endHex1 + 1; continue; }
+            if (TryParseHex(hex1) is not { } startCode) { p = endHex1 + 1; continue; }
             p = endHex1 + 1;
             while (p < block.Length && block[p] != '<') p++;
             if (p >= block.Length) break;
             var endHex2 = block.IndexOf('>', p);
             if (endHex2 < 0) break;
             var hex2 = block.Substring(p + 1, endHex2 - p - 1);
-            if (!TryParseHex(hex2, out var endCode)) { p = endHex2 + 1; continue; }
+            if (TryParseHex(hex2) is not { } endCode) { p = endHex2 + 1; continue; }
             p = endHex2 + 1;
             while (p < block.Length && (block[p] == ' ' || block[p] == '\t' || block[p] == '\n' || block[p] == '\r')) p++;
             var numStart = p;
             while (p < block.Length && block[p] >= '0' && block[p] <= '9') p++;
             if (p == numStart) continue;
-            var startCid = int.Parse(block.AsSpan(numStart, p - numStart));
+            var startCid = Compat.ParseInt32(block.AsSpan(numStart, p - numStart));
             map ??= new System.Collections.Generic.Dictionary<int, int>();
             for (int c = startCode, cid = startCid; c <= endCode; c++, cid++)
                 map[c] = cid;
         }
+        return map;
     }
 
-    private static bool TryParseHex(string hex, out int value)
+    private static int? TryParseHex(string hex)
     {
-        value = 0;
+        int value = 0;
         foreach (var c in hex)
         {
             int d;
             if (c >= '0' && c <= '9') d = c - '0';
             else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
             else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-            else return false;
+            else return null;
             value = (value << 4) | d;
         }
-        return true;
+        return value;
     }
 
     private static bool IsTwoByteCjkCMap(string name)

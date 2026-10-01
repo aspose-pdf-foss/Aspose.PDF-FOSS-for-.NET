@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 
 namespace Aspose.Pdf.Text;
 
@@ -30,7 +30,7 @@ internal sealed class GlyphOutline
 /// Parses TrueType glyph outlines from the glyf table.
 /// Handles both simple and composite glyphs.
 /// </summary>
-internal sealed class GlyphOutlineParser : IGlyphOutlineSource
+internal sealed partial class GlyphOutlineParser : IGlyphOutlineSource
 {
     private readonly byte[] _data;
     private readonly Dictionary<string, (int offset, int length)> _tables = new();
@@ -41,6 +41,12 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
 
     /// <summary>Font units per em.</summary>
     public int UnitsPerEm { get; private set; } = 1000;
+
+    /// <summary>hhea ascender in font units (0 when the program ships no hhea).</summary>
+    public int Ascender { get; private set; }
+
+    /// <summary>hhea descender in font units, negative below the baseline.</summary>
+    public int Descender { get; private set; }
 
     /// <summary>CMap: character code → glyph ID.</summary>
     public Dictionary<int, int> CMap { get; } = new();
@@ -124,7 +130,7 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
         if (string.IsNullOrEmpty(name) || name == ".notdef") return 0;
 
         var digits = 0;
-        while (digits < name.Length - 1 && char.IsAsciiDigit(name[name.Length - 1 - digits])) digits++;
+        while (digits < name.Length - 1 && Compat.IsAsciiDigit(name[name.Length - 1 - digits])) digits++;
         if (digits > 0)
         {
             var prefix = name[..^digits];
@@ -149,6 +155,8 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
         if (!_tables.TryGetValue("hmtx", out var hmtx)) return;
         if (!_tables.TryGetValue("hhea", out var hhea)) return;
         if (hhea.offset + 36 > _data.Length) return;
+        Ascender = ReadInt16(hhea.offset + 4);
+        Descender = ReadInt16(hhea.offset + 6);
         // hhea.numberOfHMetrics is the last field, at offset +34 (u16).
         var numHMetrics = ReadUInt16(hhea.offset + 34);
         if (numHMetrics == 0) return;
@@ -240,111 +248,62 @@ internal sealed class GlyphOutlineParser : IGlyphOutlineSource
             return ParseCompositeGlyph(start + 10, depth, xMin, yMin, xMax, yMax);
     }
 
-    private GlyphOutline? ParseSimpleGlyph(int offset, int numContours,
-        double xMin, double yMin, double xMax, double yMax)
+    private GlyphOutline? ParseSimpleGlyph(int offset, int numContours, double xMin, double yMin, double xMax, double yMax)
     {
-        if (numContours == 0) return null;
+        var sg = new SimpleGlyphState();
+        sg.offset = offset;
+        sg.numContours = numContours;
+        sg.xMin = xMin;
+        sg.yMin = yMin;
+        sg.xMax = xMax;
+        sg.yMax = yMax;
+        if (sg.numContours == 0) return null;
 
-        // Read endPtsOfContours
-        var endPts = new int[numContours];
-        for (var i = 0; i < numContours; i++)
+        sg.endPts = new int[sg.numContours];
+        for (var i = 0; i < sg.numContours; i++)
         {
-            if (offset + 2 > _data.Length) return null;
-            endPts[i] = ReadUInt16(offset);
-            offset += 2;
+            if (sg.offset + 2 > _data.Length) return null;
+            sg.endPts[i] = ReadUInt16(sg.offset);
+            sg.offset += 2;
         }
 
-        var numPoints = endPts[numContours - 1] + 1;
+        sg.numPoints = sg.endPts[sg.numContours - 1] + 1;
 
         // Skip instructions
-        if (offset + 2 > _data.Length) return null;
-        var instrLen = ReadUInt16(offset);
-        offset += 2 + instrLen;
+        if (sg.offset + 2 > _data.Length) return null;
+        sg.instrLen = ReadUInt16(sg.offset);
+        sg.offset += 2 + sg.instrLen;
 
-        // Read flags
-        var flags = new byte[numPoints];
-        for (var i = 0; i < numPoints; i++)
+        sg.flags = new byte[sg.numPoints];
+        for (var i = 0; i < sg.numPoints; i++)
         {
-            if (offset >= _data.Length) return null;
-            flags[i] = _data[offset++];
-            if ((flags[i] & 0x08) != 0) // repeat flag
-            {
-                if (offset >= _data.Length) return null;
-                var repeatCount = _data[offset++];
-                for (var j = 0; j < repeatCount && i + 1 < numPoints; j++)
-                {
-                    i++;
-                    flags[i] = flags[i - 1];
-                }
-            }
+            var lastFlagged = ReadGlyphFlags(sg, i);
+            if (lastFlagged is null) return null;
+            i = lastFlagged.Value;
         }
 
-        // Read X coordinates (deltas)
-        var xCoords = new double[numPoints];
-        double x = 0;
-        for (var i = 0; i < numPoints; i++)
+        sg.xCoords = new double[sg.numPoints];
+        sg.x = 0;
+        for (var i = 0; i < sg.numPoints; i++)
         {
-            var f = flags[i];
-            if ((f & 0x02) != 0) // x is 1 byte
-            {
-                if (offset >= _data.Length) return null;
-                var dx = _data[offset++];
-                x += (f & 0x10) != 0 ? dx : -dx;
-            }
-            else if ((f & 0x10) == 0) // x is 2 bytes (signed)
-            {
-                if (offset + 2 > _data.Length) return null;
-                x += ReadInt16(offset);
-                offset += 2;
-            }
-            // else: x is same as previous (delta = 0)
-            xCoords[i] = x;
+            if (!ReadGlyphXCoords(sg, i)) return null;
         }
 
-        // Read Y coordinates (deltas)
-        var yCoords = new double[numPoints];
-        double y = 0;
-        for (var i = 0; i < numPoints; i++)
+        sg.yCoords = new double[sg.numPoints];
+        sg.y = 0;
+        for (var i = 0; i < sg.numPoints; i++)
         {
-            var f = flags[i];
-            if ((f & 0x04) != 0) // y is 1 byte
-            {
-                if (offset >= _data.Length) return null;
-                var dy = _data[offset++];
-                y += (f & 0x20) != 0 ? dy : -dy;
-            }
-            else if ((f & 0x20) == 0) // y is 2 bytes (signed)
-            {
-                if (offset + 2 > _data.Length) return null;
-                y += ReadInt16(offset);
-                offset += 2;
-            }
-            yCoords[i] = y;
+            if (!ReadGlyphYCoords(sg, i)) return null;
         }
 
-        // Build contours. numPoints comes from the LAST endPt alone, so a font whose
-        // endPtsOfContours is not non-descending - or which names a point past the end -
-        // yields a count that walks the flag and coordinate arrays off their ends. The
-        // outline is unusable at that point, so report it missing like every other
-        // malformed case here rather than drawing part of it.
-        var contours = new ContourPoint[numContours][];
-        var ptIdx = 0;
-        for (var c = 0; c < numContours; c++)
+        sg.contours = new ContourPoint[sg.numContours][];
+        sg.ptIdx = 0;
+        for (var c = 0; c < sg.numContours; c++)
         {
-            if (endPts[c] < ptIdx - 1 || endPts[c] >= numPoints) return null;
-            var count = endPts[c] - ptIdx + 1;
-            var pts = new ContourPoint[count];
-            for (var i = 0; i < count; i++)
-            {
-                var idx = ptIdx + i;
-                var onCurve = (flags[idx] & 0x01) != 0;
-                pts[i] = new ContourPoint(xCoords[idx], yCoords[idx], onCurve);
-            }
-            contours[c] = pts;
-            ptIdx = endPts[c] + 1;
+            if (!BuildGlyphContours(sg, c)) return null;
         }
 
-        return new GlyphOutline(contours, xMin, yMin, xMax, yMax);
+        return new GlyphOutline(sg.contours, sg.xMin, sg.yMin, sg.xMax, sg.yMax);
     }
 
     private GlyphOutline? ParseCompositeGlyph(int offset, int depth,

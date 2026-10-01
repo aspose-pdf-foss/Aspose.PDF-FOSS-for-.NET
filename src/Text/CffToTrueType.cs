@@ -94,6 +94,8 @@ internal static class CffToTrueType
             => glyphId >= 0 && glyphId < _srcGids.Count ? _src.GetOutline(_srcGids[glyphId]) : null;
         public int GetAdvanceWidth(int glyphId)
             => glyphId >= 0 && glyphId < _srcGids.Count ? _src.GetAdvanceWidth(_srcGids[glyphId]) : 0;
+        // Glyph names are not remapped: the subset is addressed by glyph id only.
+        public int GidForName(string name) => 0;
     }
 
     private static byte[]? Build(IGlyphOutlineSource src, int glyphCount,
@@ -129,7 +131,7 @@ internal static class CffToTrueType
             if (gxMax > xMax) xMax = gxMax;
             if (gyMax > yMax) yMax = gyMax;
 
-            WriteGlyph(glyf, outline, gxMin, gyMin, gxMax, gyMax, ref maxPoints, ref maxContours);
+            (maxPoints, maxContours) = WriteGlyph(glyf, outline, gxMin, gyMin, gxMax, gyMax, maxPoints, maxContours);
         }
         loca[glyphCount] = (uint)glyf.Length;
         if (xMin > xMax) { xMin = 0; yMin = 0; xMax = 0; yMax = 0; }
@@ -160,8 +162,9 @@ internal static class CffToTrueType
 
     /// <summary>One simple glyf record from a flattened outline: every point on-curve,
     /// coordinates as full 16-bit deltas (no repeat/short-form compression).</summary>
-    private static void WriteGlyph(MemoryStream glyf, GlyphOutline outline,
-        short xMin, short yMin, short xMax, short yMax, ref int maxPoints, ref int maxContours)
+    /// <returns>The point and contour maxima seen so far, raised by this glyph where it exceeds them.</returns>
+    private static (int maxPoints, int maxContours) WriteGlyph(MemoryStream glyf, GlyphOutline outline,
+        short xMin, short yMin, short xMax, short yMax, int maxPoints, int maxContours)
     {
         var contours = outline.Contours;
         var w = new BigEndianWriter(glyf);
@@ -193,6 +196,7 @@ internal static class CffToTrueType
         // 4-byte-align each glyph record (long loca permits any offset but alignment
         // keeps consumers that assume word-aligned records happy).
         while (glyf.Length % 4 != 0) glyf.WriteByte(0);
+        return (maxPoints, maxContours);
     }
 
     private static byte[] BuildLoca(uint[] offsets)
@@ -313,10 +317,25 @@ internal static class CffToTrueType
         catch { return null; }
     }
 
+    /// <summary>A cmap subtable that maps no character: a format 4 table of the end
+    /// segment alone, a format 6 or 12 table with no entries.</summary>
+    private static bool MapsNothing(byte[] cmap, int off)
+    {
+        static int U16(byte[] b, int o) => o + 1 < b.Length ? (b[o] << 8) | b[o + 1] : -1;
+        static long U32(byte[] b, int o) => o + 3 < b.Length ? ((long)b[o] << 24) | ((long)b[o + 1] << 16) | ((long)b[o + 2] << 8) | b[o + 3] : -1;
+        return U16(cmap, off) switch
+        {
+            4 => U16(cmap, off + 6) <= 2,
+            6 => U16(cmap, off + 8) == 0,
+            12 => U32(cmap, off + 12) == 0,
+            _ => false,
+        };
+    }
+
     /// <summary>Rebuild a cmap table keeping its existing subtables and appending a
     /// Windows-Unicode (3,1) format-4 one. Null when a Unicode-capable subtable
-    /// (platform 0, or Windows BMP/full) is already present or the table is
-    /// malformed.</summary>
+    /// (platform 0, or Windows BMP/full) mapping anything is already present or the
+    /// table is malformed.</summary>
     private static byte[]? MergeUnicodeIntoCmap(byte[] cmap, Dictionary<int, int> unicodeToGid, int glyphCount)
     {
         static ushort U16At(byte[] b, int o) => (ushort)((b[o] << 8) | b[o + 1]);
@@ -331,9 +350,15 @@ internal static class CffToTrueType
             var r = 4 + i * 8;
             int plat = U16At(cmap, r), enc = U16At(cmap, r + 2);
             var off = (int)U32At(cmap, r + 4);
-            // Unicode platform, or Windows Unicode BMP (1) / full (10): nothing to add.
-            if (plat == 0 || (plat == 3 && enc is 1 or 10)) return null;
             if (off < 4 || off >= cmap.Length) return null;
+            // Unicode platform, or Windows Unicode BMP (1) / full (10): nothing to add -
+            // unless it maps nothing (a CID-keyed program converted to an sfnt carries an
+            // empty one), which the mapping offered replaces.
+            if (plat == 0 || (plat == 3 && enc is 1 or 10))
+            {
+                if (MapsNothing(cmap, off)) continue;
+                return null;
+            }
             records.Add((plat, enc, off));
         }
         // Subtable length by its format header (U16 at +2 for formats 0-6,
@@ -351,13 +376,14 @@ internal static class CffToTrueType
         var unicodeSub = BuildFormat4Subtable(unicodeToGid, glyphCount);
         using var ms = new MemoryStream();
         var w = new BigEndianWriter(ms);
-        w.U16(0);                         // table version
-        w.U16((ushort)(n + 1));
         // Encoding records sorted by platform, then encoding; identical source
-        // offsets keep pointing at one shared copy of their subtable.
+        // offsets keep pointing at one shared copy of their subtable. The count is
+        // of the records written: an empty Unicode subtable left out is not one.
         var all = new List<(int plat, int enc, int srcOff)>(records) { (3, 1, -1) };
         all.Sort((a, b) => a.plat != b.plat ? a.plat - b.plat : a.enc - b.enc);
-        var dataStart = 4 + (n + 1) * 8;
+        w.U16(0);                         // table version
+        w.U16((ushort)all.Count);
+        var dataStart = 4 + all.Count * 8;
         var chunks = new List<byte[]>();
         var offsetOf = new Dictionary<int, int>();   // srcOff → new offset
         var newOffsets = new int[all.Count];
@@ -446,7 +472,7 @@ internal static class CffToTrueType
         sw.U16((ushort)(segCount * 2));
         var searchRange = 2; while (searchRange * 2 <= segCount * 2) searchRange *= 2;
         sw.U16((ushort)searchRange);
-        sw.U16((ushort)(Math.Log2(searchRange / 2) is var l && l > 0 ? (int)l : 0));
+        sw.U16((ushort)(Compat.Log2(searchRange / 2) is var l && l > 0 ? (int)l : 0));
         sw.U16((ushort)(segCount * 2 - searchRange));
         foreach (var s in segments) sw.U16((ushort)s.end);
         sw.U16(0);                        // reservedPad

@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -23,119 +23,32 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
 
     private string? GetXfaFieldValueCore(string path, bool strict)
     {
+        var xv = new XfaFieldValueState();
+        xv.path = path;
+        xv.strict = strict;
         var (_, xml) = GetXfaPart("datasets");
-        // Fallback: single-stream XFA
-        var reader = ResolvedReader;
-        if (xml is null && reader is not null)
+        xv.reader = ResolvedReader;
+        if (xml is null && xv.reader is not null)
         {
-            var acroForm = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
+            var acroForm = xv.reader.ResolveDict(xv.reader.Catalog.Get("AcroForm"));
             if (acroForm is not null)
             {
-                var xfaObj = reader.Resolve(acroForm.Get("XFA"));
+                var xfaObj = xv.reader.Resolve(acroForm.Get("XFA"));
                 if (xfaObj is PdfStream singleStream)
                 {
-                    var data = reader.DecodeStream(singleStream);
+                    var data = xv.reader.DecodeStream(singleStream);
                     xml = Encoding.UTF8.GetString(data);
                 }
             }
         }
         if (xml is null) return null;
-        var result = FindXfaNodeValue(xml, path, strict);
-        if (!string.IsNullOrEmpty(result)) return result;
+        xv.result = FindXfaNodeValue(xml, xv.path, xv.strict);
+        if (!string.IsNullOrEmpty(xv.result)) return xv.result;
 
         // Template-based data binding resolution:
         // Walk the template to find the field, resolve <bind match="dataRef" ref="$.xxx"/>
         // and skip presentation-only subforms (those with <bind match="none"/>).
-        try
-        {
-            var templateXml = GetXfaTemplateXml();
-            if (templateXml is null) return result;
-
-            var templateDoc = new XmlDocument();
-            templateDoc.LoadXml(templateXml);
-            if (templateDoc.DocumentElement is null) return result;
-
-            var parts = SplitSomPath(path);
-            if (parts.Length < 2) return result;
-
-            // Template name attributes are un-indexed (name="insuredFullName") while a
-            // SOM path segment carries its occurrence index (insuredFullName[0]) —
-            // strip it for the template walk.
-            static string BareSeg(string p)
-            {
-                var m = Regex.Match(p, @"^(.+)\[(\d+)\]$");
-                return m.Success ? m.Groups[1].Value : p;
-            }
-
-            // Walk the template by path segments to find the field node
-            XmlNode? templateNode = templateDoc.DocumentElement;
-            for (int i = 0; i < parts.Length && templateNode is not null; i++)
-            {
-                templateNode = FindTemplateChild(templateNode, BareSeg(parts[i]));
-            }
-
-            if (templateNode is null) return result;
-
-            // Check for <bind match="dataRef" ref="$.xxx"/>
-            var bindNode = FindBindElement(templateNode);
-            string? bindRef = null;
-            if (bindNode is not null)
-            {
-                var matchAttr = bindNode.Attributes?["match"];
-                var refAttr = bindNode.Attributes?["ref"];
-                if (matchAttr?.Value == "dataRef" && refAttr?.Value is { } r && r.StartsWith("$."))
-                    bindRef = r.Substring(2); // strip "$."
-            }
-
-            // Build the data path by walking up, skipping bind="none" subforms
-            var dataPathParts = new List<string>();
-            for (int i = 0; i < parts.Length - 1; i++) // exclude the field itself
-            {
-                // Check if this subform is presentation-only (bind match="none")
-                XmlNode? checkNode = templateDoc.DocumentElement;
-                for (int j = 0; j <= i && checkNode is not null; j++)
-                    checkNode = FindTemplateChild(checkNode, BareSeg(parts[j]));
-
-                if (checkNode is not null && HasBindNone(checkNode))
-                    continue; // skip presentation-only subform
-
-                dataPathParts.Add(parts[i]);
-            }
-
-            // Append the resolved field name (from bind ref or original field name)
-            dataPathParts.Add(bindRef ?? parts[^1]);
-
-            var resolvedPath = string.Join(".", dataPathParts);
-            if (Environment.GetEnvironmentVariable("XFA_BIND_DEBUG") == "1")
-                Console.Error.WriteLine($"[bind] path={path} bindRef={bindRef} resolvedPath={resolvedPath}");
-            if (resolvedPath != path)
-            {
-                var resolved = FindXfaNodeValue(xml, resolvedPath, strict);
-                if (!string.IsNullOrEmpty(resolved)) return resolved;
-            }
-
-            // A dataRef's "$" is the field's data CONTEXT — the nearest ANCESTOR
-            // subform that actually binds to a data node. Wrapper subforms with no
-            // matching data group (common in single-record letter templates, e.g.
-            // DocumentTemplateModel > PolicyJacketCoverLetter > field bound to
-            // $.Insured.FullName) are transparent to binding, so retry the ref
-            // against each shorter ancestor prefix, deepest first.
-            if (bindRef is not null)
-            {
-                for (int k = dataPathParts.Count - 2; k >= 0; k--)
-                {
-                    var candidate = string.Join(".",
-                        dataPathParts.Take(k).Append(bindRef));
-                    var resolved = FindXfaNodeValue(xml, candidate, strict);
-                    if (Environment.GetEnvironmentVariable("XFA_BIND_DEBUG") == "1")
-                        Console.Error.WriteLine($"[bind]   k={k} candidate={candidate} -> '{resolved}'");
-                    if (!string.IsNullOrEmpty(resolved)) return resolved;
-                }
-            }
-        }
-        catch { /* template resolution failed — return original result */ }
-
-        return result;
+        return ResolveXfaFieldValue(xv, xml);
     }
 
     /// <summary>Resolve a SOM (template) field path to the corresponding XFA *datasets* path using

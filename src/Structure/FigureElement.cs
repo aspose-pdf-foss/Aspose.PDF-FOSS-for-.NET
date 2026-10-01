@@ -29,7 +29,7 @@ public class FigureElement : Element
             // Gdip) - and the catch-all at the end of this getter swallowed whichever it
             // was into a null that every caller then dereferenced. Throwing here honours
             // the documented contract exactly and cannot be eaten by that catch.
-            if (!OperatingSystem.IsWindows())
+            if (!Compat.IsWindows())
                 throw new PlatformNotSupportedException(
                     "FigureElement.Image returns a System.Drawing.Image, which is supported "
                     + "only on Windows.");
@@ -205,14 +205,14 @@ public class FigureElement : Element
     {
         var contents = _reader!.Resolve(page.Get("Contents"));
         if (contents is PdfStream s)
-            return Encoding.Latin1.GetString(_reader.DecodeStream(s));
+            return Compat.Latin1.GetString(_reader.DecodeStream(s));
         if (contents is PdfArray arr)
         {
             var sb = new StringBuilder();
             foreach (var item in arr)
                 if (_reader.ResolveStream(item) is PdfStream cs)
                 {
-                    sb.Append(Encoding.Latin1.GetString(_reader.DecodeStream(cs)));
+                    sb.Append(Compat.Latin1.GetString(_reader.DecodeStream(cs)));
                     sb.Append('\n');
                 }
             return sb.ToString();

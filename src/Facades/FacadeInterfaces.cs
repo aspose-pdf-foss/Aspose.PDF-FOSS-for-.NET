@@ -22,16 +22,16 @@ namespace Aspose.Pdf.Facades
     /// <summary>Auto-rotation behaviour for the PDF viewer.</summary>
     public enum AutoRotateMode
     {
+        /// <summary>Print pages as they are.</summary>
         None,
-        FlipLandscape,
         /// <summary>Rotate output 90° clockwise.</summary>
         ClockWise,
         /// <summary>Rotate output 90° counter-clockwise.</summary>
         AntiClockWise,
     }
 
-    /// <summary>Custom event handler delegate for <c>PdfViewer.PdfQueryPageSettings</c>.
-    /// Lives in <see cref="Aspose.Pdf.Facades"/> in Aspose.Pdf.</summary>
+    /// <summary>Event handler for <c>PdfViewer.PdfQueryPageSettings</c>, raised before each page
+    /// is printed so the caller can change its page settings.</summary>
     public delegate void PdfQueryPageSettingsEventHandler(
         object sender,
         Aspose.Pdf.Printing.PdfQueryPageSettingsEventArgs queryPageSettingsEventArgs,

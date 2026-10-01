@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -138,416 +138,84 @@ internal static partial class HtmlToPdfConverter
             || !Regex.IsMatch(html, @"class\s*=\s*[""']details_group_frame", RegexOptions.IgnoreCase)
             || !Regex.IsMatch(html, @"class\s*=\s*[""']rule_header", RegexOptions.IgnoreCase))
             return null;
-        var faceReg = Text.SystemFontResolver.Resolve("Segoe UI");
-        var faceIt = Text.SystemFontResolver.Resolve("SegoeUI-Italic")
-            ?? Text.SystemFontResolver.Resolve("Segoe UI Italic");
-        var faceSemi = Text.SystemFontResolver.Resolve("SegoeUI-Semibold")
-            ?? Text.SystemFontResolver.Resolve("Segoe UI Semibold") ?? faceReg;
-        if (faceReg is null || faceIt is null || faceSemi is null) return null;
+        var vr = new ValidationReportState();
+        vr.pageWidth = pageWidth;
+        vr.pageHeight = pageHeight;
+        vr.marginLeft = marginLeft;
+        vr.marginRight = marginRight;
+        vr.marginTop = marginTop;
+        vr.marginBottom = marginBottom;
+        vr.faceReg = (Text.SystemFontResolver.Resolve("Segoe UI"))!;
+        vr.faceIt = (Text.SystemFontResolver.Resolve("SegoeUI-Italic")
+            ?? Text.SystemFontResolver.Resolve("Segoe UI Italic"))!;
+        vr.faceSemi = (Text.SystemFontResolver.Resolve("SegoeUI-Semibold")
+            ?? Text.SystemFontResolver.Resolve("Segoe UI Semibold") ?? vr.faceReg)!;
+        if (vr.faceReg is null || vr.faceIt is null || vr.faceSemi is null) return null;
 
-        var contentH = pageHeight - marginTop - marginBottom;
-        if (contentH <= VrBarHeightPt) return null;
-        var bodyM = Regex.Match(html, @"<body\b[^>]*>([\s\S]*)</body", RegexOptions.IgnoreCase);
-        var src = bodyM.Success ? bodyM.Groups[1].Value : html;
-        var groups = VrParseGroups(src);
-        if (groups.Count < 2) return null;
+        vr.contentH = vr.pageHeight - vr.marginTop - vr.marginBottom;
+        if (vr.contentH <= VrBarHeightPt) return null;
+        vr.bodyM = Regex.Match(html, @"<body\b[^>]*>([\s\S]*)</body", RegexOptions.IgnoreCase);
+        vr.src = vr.bodyM.Success ? vr.bodyM.Groups[1].Value : html;
+        vr.groups = VrParseGroups(vr.src);
+        if (vr.groups.Count < 2) return null;
 
-        var doc = new Document();
-        var pages = new List<Page>();
-        var invc = System.Globalization.CultureInfo.InvariantCulture;
+        vr.doc = new Document();
+        vr.pages = new List<Page>();
+        vr.invc = System.Globalization.CultureInfo.InvariantCulture;
 
-        // The report is laid out in document order but PAINTED in stacking
-        // order: a rule frame's own background is measured only once its
-        // contents have been placed, so every operator is banked against the
-        // layer it belongs to and the sheets are written out at the end.
-        var ops = new List<(int Sheet, int Layer, int Seq, string Text)>();
-        var seq = 0;
+        vr.ops = new List<(int Sheet, int Layer, int Seq, string Text)>();
+        vr.seq = 0;
 
-        string Rgb(Color c, string op)
-            => string.Create(invc,
-                $"{c.R / 255.0:0.###} {c.G / 255.0:0.###} {c.B / 255.0:0.###} {op} ");
+        vr.boxL = vr.marginLeft + VrSideLeftPt;
+        vr.boxR = vr.pageWidth - vr.marginRight - VrSideRightPt;
 
-        Page PageAt(int i)
-        {
-            while (pages.Count <= i)
-            {
-                var p = doc.Pages.Add(pageWidth, pageHeight);
-                EnsureFonts(p);
-                ops.Add((pages.Count, VrLayerCanvas, seq++, string.Create(invc,
-                    $"q {Rgb(VrPageBg, "rg")}{marginLeft:0.##} {marginBottom:0.##} "
-                    + $"{pageWidth - marginLeft - marginRight:0.##} {contentH:0.##} re f Q")));
-                pages.Add(p);
-            }
-            return pages[i];
-        }
+        vr.y = 0.0;
 
-        void Emit(int sheet, int layer, string text)
-        {
-            PageAt(sheet);
-            ops.Add((sheet, layer, seq++, text));
-        }
+        DrawBanner(vr);
 
-        // Y runs continuously through the report; the sheet it lands on and the
-        // offset inside that sheet fall straight out of the content height.
-        (int Sheet, double Top) Loc(double y)
-        {
-            var i = Math.Max(0, (int)Math.Floor(y / contentH + 1e-9));
-            return (i, marginTop + (y - i * contentH));
-        }
-
-        void Fill(double y0, double y1, double x, double w, Color c, int layer)
-        {
-            if (y1 - y0 <= 1e-6 || w <= 0) return;
-            var last = Loc(y1 - 1e-6).Sheet;
-            for (var i = Loc(y0).Sheet; i <= last; i++)
-            {
-                var top = Math.Max(y0, i * contentH);
-                var bot = Math.Min(y1, (i + 1) * contentH);
-                if (bot - top <= 1e-6) continue;
-                var yTop = marginTop + (top - i * contentH);
-                Emit(i, layer, string.Create(invc,
-                    $"q {Rgb(c, "rg")}{x:0.##} {pageHeight - yTop - (bot - top):0.##} "
-                    + $"{w:0.##} {bot - top:0.##} re f Q"));
-            }
-        }
-
-        void HRule(double y, double x0, double x1, Color c)
-        {
-            var (i, top) = Loc(y);
-            Emit(i, VrLayerStroke, string.Create(invc,
-                $"q {Rgb(c, "RG")}{VrBorderPt:0.##} w {x0:0.##} {pageHeight - top:0.##} m "
-                + $"{x1:0.##} {pageHeight - top:0.##} l S Q"));
-        }
-
-        void VRule(double y0, double y1, double x, Color c)
-        {
-            if (y1 - y0 <= 1e-6) return;
-            var last = Loc(y1 - 1e-6).Sheet;
-            for (var i = Loc(y0).Sheet; i <= last; i++)
-            {
-                var top = Math.Max(y0, i * contentH);
-                var bot = Math.Min(y1, (i + 1) * contentH);
-                if (bot - top <= 1e-6) continue;
-                var yTop = marginTop + (top - i * contentH);
-                Emit(i, VrLayerStroke, string.Create(invc,
-                    $"q {Rgb(c, "RG")}{VrBorderPt:0.##} w {x:0.##} {pageHeight - yTop:0.##} m "
-                    + $"{x:0.##} {pageHeight - yTop - (bot - top):0.##} l S Q"));
-            }
-        }
-
-        // A bordered box: the sides run the whole span, while the top and the
-        // bottom rule land only on the sheets those edges fall on.
-        void Box(double y0, double y1, double x0, double x1, Color? fill, Color border,
-            int layer = VrLayerFrame)
-        {
-            if (fill is { } f) Fill(y0, y1, x0, x1 - x0, f, layer);
-            VRule(y0, y1, x0 + VrBorderPt / 2, border);
-            VRule(y0, y1, x1 - VrBorderPt / 2, border);
-            HRule(y0 + VrBorderPt / 2, x0, x1, border);
-            HRule(y1 - VrBorderPt / 2, x0, x1, border);
-        }
-
-        double Measure(byte[] ttf, string name, string s, double size)
-        {
-            if (PageAt(0).Dict.Get("Resources") is not Core.PdfDictionary res
-                || res.Get("Font") is not Core.PdfDictionary fd) return s.Length * size * 0.5;
-            return Text.Type0FontEmbedder.MeasureText(fd, ttf, name, s, size,
-                stripSpacesInBaseFont: true);
-        }
-
-        void Run(double lineTop, double x, double size, byte[] ttf, string name,
-            string s, Color c)
-        {
-            if (s.Length == 0) return;
-            var (i, top) = Loc(lineTop);
-            var pg = PageAt(i);
-            if (pg.Dict.Get("Resources") is not Core.PdfDictionary res
-                || res.Get("Font") is not Core.PdfDictionary fd) return;
-            var (rn, hex) = Text.Type0FontEmbedder.Embed(fd, ttf, name, s,
-                stripSpacesInBaseFont: true);
-            // half-leading inside the rounded line box, then the face's ascent
-            var baseline = top + (VrLineH(size) - size * VrLineEm) / 2 + size * VrAscEm;
-            Emit(i, VrLayerText, string.Create(invc,
-                $"BT {Rgb(c, "rg")}/{rn} {size:0.##} Tf 1 0 0 1 {x:0.##} "
-                + $"{pageHeight - baseline:0.##} Tm ")
-                + "<" + System.Convert.ToHexString(hex) + "> Tj ET");
-        }
-
-        List<string> Wrap(byte[] ttf, string name, string s, double size, double width)
-        {
-            var outp = new List<string>();
-            var cur = "";
-            foreach (var w in s.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var t = cur.Length == 0 ? w : cur + " " + w;
-                if (cur.Length > 0 && Measure(ttf, name, t, size) > width)
-                { outp.Add(cur); cur = w; }
-                else cur = t;
-            }
-            if (cur.Length > 0) outp.Add(cur);
-            if (outp.Count == 0) outp.Add("");
-            return outp;
-        }
-
-        var boxL = marginLeft + VrSideLeftPt;
-        var boxR = pageWidth - marginRight - VrSideRightPt;
-
-        double Bar(string itemClass, double top)
-        {
-            var x = boxL + VrBorderPt + VrBarInsetPt;
-            var ty = top + VrBorderPt + VrBarPadPt + VrBarItemDropPt;
-            foreach (var t in VrTexts(src, itemClass))
-            {
-                Run(ty, x, VrBarTextPt, faceReg, "SegoeUI", t, VrInk);
-                x += Measure(faceReg, "SegoeUI", t, VrBarTextPt) + VrBarInsetPt;
-            }
-            Box(top, top + VrBarHeightPt, boxL, boxR, VrWhite, VrBarBorder, VrLayerContainer);
-            return top + VrBarHeightPt + VrBarGapPt;
-        }
-
-        var y = 0.0;
-
-        // == the brand banner ================================================
-        var bannerTop = y;
-        y += VrBannerPadPt;
-        var items = VrTexts(src, "header_report_item");
-        for (var i = 0; i < items.Count; i++)
-        {
-            var size = i == 0 ? VrBannerTitlePt : VrColTextPt;
-            Run(y, marginLeft + VrBannerPadPt, size, faceReg, "SegoeUI", items[i], VrBannerInk);
-            y += VrLineH(size);
-        }
-        y += VrBannerPadPt;
-        Fill(bannerTop, y, marginLeft, pageWidth - marginLeft - marginRight, VrBrand,
-            VrLayerBand);
-        y += VrBannerGapPt;
-
-        // == the four-column results panel ===================================
-        var panelL = marginLeft + VrPanelMarginPt;
-        var panelR = pageWidth - marginRight - VrGroupGapPt;
-        var panelContentW = panelR - panelL - VrPanelPadPt;
-        var infoL = panelL + VrPanelPadPt + VrInfoMarginPt;
-        var infoW = panelContentW * VrInfoWidthFrac + 2 * VrInfoPadXPt;
-        var infoTop = y + VrPanelPadPt + VrInfoMarginPt;
-        var colW = (infoW - 2 * VrInfoPadXPt) * VrColWidthFrac;
-        var colTop = infoTop + VrInfoPadYPt;
-        var colLines = 1;
-        var cols = VrColumns(src);
-        for (var i = 0; i < cols.Count; i++)
-        {
-            var cy = colTop;
-            var cx = infoL + VrInfoPadXPt + i * colW + VrColPadPt;
-            foreach (var ln in Wrap(faceReg, "SegoeUI", cols[i].Label, VrColTextPt,
-                         colW - 2 * VrColPadPt))
-            { Run(cy, cx, VrColTextPt, faceReg, "SegoeUI", ln, VrInk); cy += VrLineH(VrColTextPt); }
-            foreach (var ln in Wrap(faceSemi, "SegoeUISemibold", cols[i].Value, VrColTextPt,
-                         colW - 2 * VrColPadPt))
-            {
-                Run(cy, cx, VrColTextPt, faceSemi, "SegoeUISemibold", ln, VrDarkInk);
-                cy += VrLineH(VrColTextPt);
-            }
-            colLines = Math.Max(colLines, (int)Math.Round((cy - colTop) / VrLineH(VrColTextPt)));
-        }
-        var infoBottom = colTop + colLines * VrLineH(VrColTextPt) + VrInfoPadYPt;
-        Fill(infoTop, infoBottom, infoL, infoW, VrWhite, VrLayerContainer);
-        y = infoBottom + VrInfoMarginPt + VrPanelPadPt + VrPanelMarginPt;
+        DrawInfoPanel(vr);
 
         // == "General Information" over its label/value grid ==================
-        y = Bar("header_generals_item", y);
-        var genTop = y;
-        var gen = VrPairs(src, "generals_label", "generals_value");
-        var genContentTop = genTop + VrBorderPt + VrPanelPadPt;
-        var genLabelX = boxL + VrBorderPt + VrPanelPadPt;
-        var genValueX = genLabelX + VrGeneralsLabelEm * VrGeneralsPt;
-        var genRowH = 2 * VrGeneralsPadPt + VrLineH(VrGeneralsPt);
-        for (var i = 0; i < gen.Count; i++)
-        {
-            var top = genContentTop + i * (genRowH + VrBorderPt);
-            Run(top + VrGeneralsPadPt, genLabelX, VrGeneralsPt, faceReg, "SegoeUI",
-                gen[i].Label, VrInk);
-            Run(top + VrGeneralsPadPt, genValueX, VrGeneralsPt, faceReg, "SegoeUI",
-                gen[i].Value, VrInk);
-            // .last_row drops its rule
-            if (i == gen.Count - 1) continue;
-            HRule(top + genRowH + VrBorderPt / 2, genLabelX, genValueX, VrRuleBorder);
-            HRule(top + genRowH + VrBorderPt / 2, genValueX, boxR - VrGroupGapPt - VrBorderPt,
-                VrRuleBorder);
-        }
-        var genBottom = genContentTop + gen.Count * (genRowH + VrBorderPt) - VrBorderPt
-            + VrPanelPadPt + VrBorderPt;
-        Box(genTop, genBottom, boxL, boxR, VrWhite, VrFrameBorder, VrLayerContainer);
-        y = genBottom + VrBarGapPt;
+        DrawGeneralsPanel(vr);
 
         // == "Envelope Information" over its two tables =======================
-        y = Bar("header_admin_item", y);
-        var envL = marginLeft + VrEnvMarginXPt + VrEnvTableMarginPt;
-        var envW = (pageWidth - marginLeft - marginRight - 2 * VrEnvMarginXPt
-            - 2 * VrEnvTableMarginPt) * VrEnvWidthFrac;
-        var envTop = y;
-        var envRows = VrEnvelopeRows(src);
-        var envSplit = envL + VrEnvPadPt + envW * VrEnvLabelFrac;
-        for (var i = 0; i < envRows.Count; i++)
+        DrawEnvelopePanel(vr);
+
+        DrawFilesPanel(vr);
+        vr.y = Bar(vr, "header_details_item", vr.y);
+
+        vr.listTop = vr.y;
+        vr.outerR = vr.boxR - VrGroupGapPt;
+        vr.outerContentL = vr.boxL + VrBorderPt + VrFramePadPt;
+        vr.outerContentR = vr.outerR - VrBorderPt - VrFramePadPt;
+        vr.y += VrBorderPt + VrFramePadPt;
+
+        Fill(vr, vr.y + VrBubbleDropPt, vr.y + VrBubbleDropPt + VrBubblePt, vr.outerContentL, VrBubblePt,
+            vr.groups[0].Bubble, VrLayerBubble);
+        Run(vr, vr.y, vr.outerContentL + VrBubblePt + VrBubbleGapPt, VrGroupNamePt, vr.faceReg, "SegoeUI",
+            vr.groups[0].Name, VrInk);
+        vr.y += VrLineH(VrGroupNamePt) + VrNamePadPt;
+
+        vr.listBottom = vr.y;
+        for (var gi = 1; gi < vr.groups.Count; gi++)
         {
-            var top = envTop + VrEnvPadPt + i * VrEnvRowPt + VrEnvCellPadPt;
-            Run(top, envL + VrEnvPadPt + VrEnvCellPadPt, VrEnvTextPt, faceReg, "SegoeUI",
-                envRows[i].Label, VrDarkInk);
-            Run(top, envSplit + VrEnvCellPadPt, VrEnvTextPt, faceReg, "SegoeUI",
-                envRows[i].Value, VrDarkInk);
-            if (i == envRows.Count - 1) continue;
-            HRule(top + VrEnvRowPt - VrEnvCellPadPt - VrBorderPt / 2, envL + VrEnvPadPt,
-                envL + envW - VrEnvPadPt, VrRuleBorder);
-        }
-        var envBottom = envTop + 2 * VrEnvPadPt + envRows.Count * VrEnvRowPt;
-        Box(envTop, envBottom, envL, envL + envW, VrWhite, VrBand, VrLayerContainer);
-        y = envBottom + VrEnvTableBottomPt;
-
-        // == the File / Path table ============================================
-        var fileTop = y;
-        var fileHeadTop = fileTop + VrBorderPt + VrPanelPadPt;
-        var fileX = boxL + VrBorderPt + VrPanelPadPt + VrFileCellInsetPt;
-        var fileSplit = fileX + VrFileSplitPt;
-        Fill(fileHeadTop, fileHeadTop + VrFileHeadPt, boxL + VrBorderPt + VrPanelPadPt,
-            boxR - boxL - VrBorderPt - VrPanelPadPt, VrBrand, VrLayerBand);
-        Run(fileHeadTop + VrFileCellPadPt, fileX, VrFileTablePt, faceReg, "SegoeUI",
-            "File", VrBannerInk);
-        Run(fileHeadTop + VrFileCellPadPt, fileSplit, VrFileTablePt, faceReg, "SegoeUI",
-            "Path", VrBannerInk);
-        var fy = fileHeadTop + VrFileHeadPt + VrFileCellPadPt;
-        foreach (var (label, path) in VrFileRows(src))
-        {
-            var rowTop = fy;
-            Run(fy, fileX, VrFileTablePt, faceReg, "SegoeUI", label, VrInk);
-            var pathY = fy;
-            foreach (var ln in Wrap(faceReg, "SegoeUI", path, VrFileTablePt,
-                         boxR - VrPanelPadPt - fileSplit))
-            {
-                Run(pathY, fileSplit, VrFileTablePt, faceReg, "SegoeUI", ln, VrLinkInk);
-                pathY += VrLineH(VrFileTablePt);
-            }
-            fy = Math.Max(pathY, rowTop + VrLineH(VrFileTablePt)) + VrFileCellPadPt;
-            VRule(rowTop - VrFileCellPadPt, fy - VrFileCellPadPt,
-                fileSplit - VrFileCellInsetPt, VrRuleBorder);
-        }
-        Box(fileTop, fy + VrPanelPadPt, boxL, boxR, VrWhite, VrFrameBorder, VrLayerContainer);
-
-        // == the Details half, which the print sheet opens on its own page ====
-        y = Math.Ceiling((fy + VrPanelPadPt + 1e-6) / contentH) * contentH;
-        y = Bar("header_details_item", y);
-
-        var listTop = y;
-        var outerR = boxR - VrGroupGapPt;
-        var outerContentL = boxL + VrBorderPt + VrFramePadPt;
-        var outerContentR = outerR - VrBorderPt - VrFramePadPt;
-        y += VrBorderPt + VrFramePadPt;
-
-        Fill(y + VrBubbleDropPt, y + VrBubbleDropPt + VrBubblePt, outerContentL, VrBubblePt,
-            groups[0].Bubble, VrLayerBubble);
-        Run(y, outerContentL + VrBubblePt + VrBubbleGapPt, VrGroupNamePt, faceReg, "SegoeUI",
-            groups[0].Name, VrInk);
-        y += VrLineH(VrGroupNamePt) + VrNamePadPt;
-
-        var listBottom = y;
-        for (var gi = 1; gi < groups.Count; gi++)
-        {
-            var g = groups[gi];
-            var innerR = outerContentR - VrGroupGapPt;
-            var innerTop = y + VrGroupGapPt;
-            var innerContentL = outerContentL + VrBorderPt + VrFramePadPt;
-            var innerContentR = innerR - VrBorderPt - VrFramePadPt;
-            var iy = innerTop + VrBorderPt + VrFramePadPt;
-            Fill(iy + VrBubbleDropPt, iy + VrBubbleDropPt + VrBubblePt, innerContentL,
-                VrBubblePt, g.Bubble, VrLayerBubble);
-            Run(iy, innerContentL + VrBubblePt + VrBubbleGapPt, VrGroupNamePt, faceReg,
-                "SegoeUI", g.Name, VrInk);
-            iy += VrLineH(VrGroupNamePt) + VrNamePadPt;
-
-            foreach (var r in g.Rules)
-            {
-                var frameTop = iy + VrRuleGapPt;
-                var frameL = innerContentL;
-                var frameR = innerContentR - VrGroupGapPt;
-                var cl = frameL + VrBorderPt + VrFramePadPt;
-                var cr = frameR - VrBorderPt - VrFramePadPt;
-                var ry = frameTop + VrBorderPt + VrFramePadPt;
-
-                // .rule_header's -14px margin pulls its band back out over the
-                // frame's padding, so the band spans the frame edge to edge
-                var bandTop = ry - VrFramePadPt;
-                var bandBottom = bandTop + 2 * VrHeaderPadPt + VrLineH(VrTitlePt);
-                Fill(bandTop, bandBottom, frameL + VrBorderPt,
-                    frameR - frameL - 2 * VrBorderPt, VrBand, VrLayerBand);
-                Fill(ry + VrBubbleDropPt, ry + VrBubbleDropPt + VrBubblePt, cl, VrBubblePt,
-                    r.Bubble, VrLayerBubble);
-                Run(bandTop + VrHeaderPadPt, cl + VrBubblePt + VrBubbleGapPt, VrTitlePt,
-                    faceReg, "SegoeUI", r.Title, VrInk);
-                ry = bandBottom + VrHeaderGapPt + VrHelpPadPt;
-
-                foreach (var ln in Wrap(faceIt, "SegoeUIItalic", r.Comment, VrCommentPt, cr - cl))
-                {
-                    Run(ry, cl, VrCommentPt, faceIt, "SegoeUIItalic", ln, VrInk);
-                    ry += VrLineH(VrCommentPt);
-                }
-                ry += VrHelpPadPt;
-
-                if (r.Path.Length > 0)
-                {
-                    foreach (var ln in Wrap(faceReg, "SegoeUI", r.Path, VrFindingPt, cr - cl))
-                    {
-                        Run(ry, cl, VrFindingPt, faceReg, "SegoeUI", ln, VrLinkInk);
-                        ry += VrLineH(VrFindingPt);
-                    }
-                    ry += VrBr2Pt;
-                }
-                foreach (var f in r.Findings)
-                {
-                    var slTop = ry;
-                    var tl = cl + VrBorderPt + VrLinePadXPt;
-                    var tr = cr - VrBorderPt - VrLinePadXPt;
-                    var ty = slTop + VrBorderPt + VrLinePadYPt;
-                    foreach (var ln in Wrap(faceReg, "SegoeUI", f.Text, VrFindingPt, tr - tl))
-                    {
-                        Run(ty, tl, VrFindingPt, faceReg, "SegoeUI", ln, VrInk);
-                        ty += VrLineH(VrFindingPt);
-                    }
-                    ty += VrBr2Pt + VrXmlTopPt;
-                    foreach (var ln in Wrap(faceReg, "SegoeUI", f.Xml, VrFindingPt, tr - tl))
-                    {
-                        // .error-xml sets its own 22px line box
-                        Run(ty + (VrXmlLinePt - VrLineH(VrFindingPt)) / 2, tl, VrFindingPt,
-                            faceReg, "SegoeUI", ln, VrErrorInk);
-                        ty += VrXmlLinePt;
-                    }
-                    ty += VrXmlBottomPt + VrLinePadYPt + VrBorderPt;
-                    Box(slTop, ty, cl, cr, null, VrRuleBorder);
-                    ry = ty;
-                }
-
-                var frameBottom = ry + VrFramePadPt + VrBorderPt;
-                Box(frameTop, frameBottom, frameL, frameR, VrWhite, VrRuleBorder);
-                iy = frameBottom;
-            }
-
-            var innerBottom = iy + VrFramePadPt + VrBorderPt;
-            Box(innerTop, innerBottom, outerContentL, innerR, null, VrFrameBorder);
-            listBottom = innerBottom + VrFramePadPt + VrBorderPt;
-            // .details_group_frame { page-break-after: always }
-            y = Math.Ceiling((innerBottom + 1e-6) / contentH) * contentH;
+            if (!DrawRuleGroup(vr, gi)) break;
         }
 
-        Fill(listTop, listBottom, boxL, boxR - boxL, VrWhite, VrLayerContainer);
-        VRule(listTop, listBottom, boxL + VrBorderPt / 2, VrFrameBorder);
-        VRule(listTop, listBottom, outerR - VrBorderPt / 2, VrFrameBorder);
-        HRule(listBottom - VrBorderPt / 2, boxL, outerR, VrFrameBorder);
+        Fill(vr, vr.listTop, vr.listBottom, vr.boxL, vr.boxR - vr.boxL, VrWhite, VrLayerContainer);
+        VRule(vr, vr.listTop, vr.listBottom, vr.boxL + VrBorderPt / 2, VrFrameBorder);
+        VRule(vr, vr.listTop, vr.listBottom, vr.outerR - VrBorderPt / 2, VrFrameBorder);
+        HRule(vr, vr.listBottom - VrBorderPt / 2, vr.boxL, vr.outerR, VrFrameBorder);
 
         // the banked operators, written out sheet by sheet in stacking order
-        foreach (var g in ops.GroupBy(o => o.Sheet))
+        foreach (var g in vr.ops.GroupBy(o => o.Sheet))
         {
             var sb = new StringBuilder();
             foreach (var o in g.OrderBy(o => o.Layer).ThenBy(o => o.Seq))
                 sb.Append(o.Text).Append('\n');
-            pages[g.Key].AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
+            vr.pages[g.Key].AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
         }
-        return doc;
+        return vr.doc;
     }
 
     /// <summary>The inner html of the div whose opening tag starts at

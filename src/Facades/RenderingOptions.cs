@@ -7,6 +7,9 @@ namespace Aspose.Pdf.Facades;
 /// </summary>
 public sealed class RenderingOptions
 {
+    /// <summary>Creates rendering options with default values (anti-aliasing on, every other option off).</summary>
+    public RenderingOptions() { }
+
     /// <summary>Use the new imaging engine. Stored only; not currently honoured.</summary>
     public bool UseNewImagingEngine { get; set; }
 

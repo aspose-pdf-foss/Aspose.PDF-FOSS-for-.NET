@@ -293,8 +293,16 @@ public sealed partial class PdfToHtmlConverter
                 if (ttf is null && GetEmbeddedBareCff(font, reader) is { } cff)
                 {
                     // Bare CFF (Type1C): synthesize a TrueType sfnt so the glyphs
-                    // survive into a WOFF like any other embedded program.
+                    // survive into a WOFF like any other embedded program. A CID-keyed one
+                    // has no Unicode cmap of its own: it comes from the PDF's mapping, each
+                    // CID reaching its glyph through the program's charset.
                     try { ttf = Text.CffToTrueType.Convert(cff); } catch { }
+                    if (ttf is not null && font.GetName("Subtype") == "Type0")
+                    {
+                        var program = Text.CffGlyphSource.TryLoad(cff);
+                        ttf = EnsureUnicodeCmap(ttf, font, reader,
+                            program is { IsCidKeyed: true } ? program.CidToGid : null) ?? ttf;
+                    }
                 }
                 if (ttf is null && GetEmbeddedType1(font, reader) is { } t1)
                 {
@@ -334,7 +342,7 @@ public sealed partial class PdfToHtmlConverter
                     // programs for these).
                     if (ttf is null)
                     {
-                        try { ttf = BuildCjkSubstituteSubset(font, reader, out substituteFamily); }
+                        try { (ttf, substituteFamily) = BuildCjkSubstituteSubset(font, reader); }
                         catch { }
                     }
                     if (ttf is null) continue;
@@ -363,9 +371,11 @@ public sealed partial class PdfToHtmlConverter
     /// code→GID mapping — the descendant's /CIDToGIDMap (Identity when
     /// absent/named) for a Type0 font, the program's own byte cmap for a simple
     /// TrueType subset — and patch a (3,1) format-4 cmap into
-    /// <paramref name="ttf"/>. Null when the program already maps Unicode or no
-    /// mapping can be derived.</summary>
-    private static byte[]? EnsureUnicodeCmap(byte[] ttf, PdfDictionary font, PdfReader reader)
+    /// <paramref name="ttf"/>. <paramref name="cidToGlyph"/>, when given, places a
+    /// CID in a program ordered by its own charset in place of the /CIDToGIDMap.
+    /// Null when the program already maps Unicode or no mapping can be derived.</summary>
+    private static byte[]? EnsureUnicodeCmap(byte[] ttf, PdfDictionary font, PdfReader reader,
+        Func<int, int>? cidToGlyph = null)
     {
         try
         {
@@ -402,7 +412,9 @@ public sealed partial class PdfToHtmlConverter
                 if (isType0)
                 {
                     gid = code;
-                    if (cid2gid is not null)
+                    if (cidToGlyph is not null)
+                        gid = cidToGlyph(code);
+                    else if (cid2gid is not null)
                     {
                         var off = code * 2;
                         gid = off + 1 < cid2gid.Length ? (cid2gid[off] << 8) | cid2gid[off + 1] : 0;
@@ -430,7 +442,13 @@ public sealed partial class PdfToHtmlConverter
                 descriptor = descFont is not null ? reader.ResolveDict(descFont.Get("FontDescriptor")) : null;
             }
             var fontFile = descriptor is not null ? reader.ResolveStream(descriptor.Get("FontFile3")) : null;
-            if (fontFile is null) return null;
+            if (fontFile is null)
+            {
+                // A bare CFF program filed under FontFile2 (TrueType) by its producer.
+                var misfiled = descriptor is not null ? reader.ResolveStream(descriptor.Get("FontFile2")) : null;
+                var program = misfiled is not null ? reader.DecodeStream(misfiled) : null;
+                return program is not null && LooksLikeBareCff(program) ? program : null;
+            }
             var bytes = reader.DecodeStream(fontFile);
             if (bytes.Length < 4) return null;
             var tag = (uint)((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]);
@@ -596,13 +614,7 @@ public sealed partial class PdfToHtmlConverter
         return ms.ToArray();
     }
 
-    private static byte[] ZlibCompress(byte[] data)
-    {
-        using var ms = new System.IO.MemoryStream();
-        using (var z = new System.IO.Compression.ZLibStream(ms, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
-            z.Write(data, 0, data.Length);
-        return ms.ToArray();
-    }
+    private static byte[] ZlibCompress(byte[] data) => IO.Filters.ManagedDeflater.DeflateZlib(data);
 
     private static void WriteU32(byte[] b, int o, uint v)
     {

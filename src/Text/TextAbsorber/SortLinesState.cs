@@ -98,5 +98,10 @@ private sealed class SortLinesState
     // The sort inputs, captured from the method parameters.
     public int textStartOffset;
     public int yStartIndex;
+    // The RTL row rebuild's trailing pad, gathered across the row's member
+    // lines: the leftmost non-blank member's leading spaces move to the
+    // LOGICAL end, so the leftmost X seen so far picks the winner.
+    public int rtlTailPad;
+    public double rtlTailPadX;
 }
 }

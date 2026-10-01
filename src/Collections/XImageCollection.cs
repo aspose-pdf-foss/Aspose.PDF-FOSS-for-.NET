@@ -114,7 +114,7 @@ public class XImageCollection : ImageCollection
         if (filterType == ImageFilterType.CCITTFax)
         {
             var bytes = DrainStream(image);
-            if (TryBuildCcittImageFromTiff(bytes, out var imageStream))
+            if (TryBuildCcittImageFromTiff(bytes) is { } imageStream)
                 return AppendImageXObject(imageStream);
         }
         return Add(image);
@@ -131,15 +131,15 @@ public class XImageCollection : ImageCollection
     // Parse a CCITT-compressed (Group 3 / Group 4) TIFF and re-wrap its raw fax
     // strips as a PDF /CCITTFaxDecode image XObject — no re-encoding, the bytes
     // pass through. Returns false for any TIFF that isn't single-component CCITT.
-    private static bool TryBuildCcittImageFromTiff(byte[] t, out PdfStream imageStream)
+    private static PdfStream? TryBuildCcittImageFromTiff(byte[] t)
     {
-        imageStream = null!;
-        if (t.Length < 8) return false;
+        PdfStream imageStream = null!;
+        if (t.Length < 8) return null;
         bool le = t[0] == 0x49 && t[1] == 0x49;
-        if (!le && !(t[0] == 0x4D && t[1] == 0x4D)) return false;
+        if (!le && !(t[0] == 0x4D && t[1] == 0x4D)) return null;
 
         int ifd = (int)U32(t, le, 4);
-        if (ifd <= 0 || ifd + 2 > t.Length) return false;
+        if (ifd <= 0 || ifd + 2 > t.Length) return null;
         int n = (int)U16(t, le, ifd);
 
         long compression = 0, width = 0, height = 0, t4 = 0, photometric = 1, fillorder = 1;
@@ -164,12 +164,12 @@ public class XImageCollection : ImageCollection
                 case 292: t4 = val; break;
             }
         }
-        if (compression != 3 && compression != 4) return false;
-        if (width <= 0 || height <= 0) return false;
+        if (compression != 3 && compression != 4) return null;
+        if (width <= 0 || height <= 0) return null;
 
         var offsets = ReadIntArray(t, le, offPtr, offCnt, offType);
         var counts = ReadIntArray(t, le, cntPtr, cntCnt, cntType);
-        if (offsets.Count == 0) return false;
+        if (offsets.Count == 0) return null;
         // Some CCITT TIFFs omit StripByteCounts for a single strip; the strip then
         // runs from its offset up to the IFD (or end of file).
         if (counts.Count == 0 && offsets.Count == 1)
@@ -177,13 +177,13 @@ public class XImageCollection : ImageCollection
             int end = ifd > offsets[0] ? ifd : t.Length;
             counts.Add(end - offsets[0]);
         }
-        if (offsets.Count != counts.Count) return false;
+        if (offsets.Count != counts.Count) return null;
 
         var data = new List<byte>();
         for (int i = 0; i < offsets.Count; i++)
         {
             int off = offsets[i], len = counts[i];
-            if (off < 0 || (long)off + len > t.Length) return false;
+            if (off < 0 || (long)off + len > t.Length) return null;
             for (int j = 0; j < len; j++) data.Add(t[off + j]);
         }
         var ccitt = data.ToArray();
@@ -207,7 +207,7 @@ public class XImageCollection : ImageCollection
         dict.Set("DecodeParms", dp);
         dict.Set("Length", new PdfInteger(ccitt.Length));
         imageStream = new PdfStream(dict, ccitt);
-        return true;
+        return imageStream;
     }
 
     private static uint U16(byte[] b, bool le, int o)
@@ -333,10 +333,10 @@ public class XImageCollection : ImageCollection
         {
             const int jpegQuality = 90; // the library's standard re-encode quality
             data = IO.JpegEncoderImpl.Encode(
-                (int x, int y, out byte r, out byte g, out byte b) =>
+                (int x, int y) =>
                 {
                     var o = ((long)y * w + x) * 3;
-                    r = rgb[o]; g = rgb[o + 1]; b = rgb[o + 2];
+                    return (rgb[o], rgb[o + 1], rgb[o + 2]);
                 }, w, h, jpegQuality);
             dict.Set("Filter", new PdfName("DCTDecode"));
         }
@@ -365,13 +365,7 @@ public class XImageCollection : ImageCollection
         return AppendImageXObject(new PdfStream(dict, data));
     }
 
-    private static byte[] FlateCompress(byte[] data, int length)
-    {
-        using var ms = new MemoryStream();
-        using (var z = new System.IO.Compression.ZLibStream(ms, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
-            z.Write(data, 0, length);
-        return ms.ToArray();
-    }
+    private static byte[] FlateCompress(byte[] data, int length) => IO.Filters.ManagedDeflater.DeflateZlib(data, 0, length);
 
     /// <summary>Remove every image from the collection.</summary>
     public void Clear()

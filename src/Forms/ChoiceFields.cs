@@ -41,8 +41,8 @@ public class ChoiceField : Field
     internal override void GenerateAppearance()
     {
         if (Reader.ResolveDict(Dict.Get("AP")) is not null) return;
-        if (!TryWidgetSize(out var w, out var h)) return;
-        ParseDefaultAppearance(out var fontName, out var fontSize);
+        if (TryWidgetSize() is not (var w, var h)) return;
+        var (fontName, fontSize) = ParseDefaultAppearanceFont();
         // Colour operator from the field /DA (falls back to black fill).
         var daText = Reader.Resolve(Dict.Get("DA")) is PdfString daStr ? daStr.ToText() : "/Helv 12 Tf 0 g";
         var colorOp = ExtractDaColor(daText);
@@ -258,16 +258,29 @@ public class ChoiceField : Field
                     arr.Add(new PdfString(System.Text.Encoding.UTF8.GetBytes(val)));
                 Dict.Set("V", arr);
             }
+            SyncSelectedIndices(value);
             // Mark the field dirty so an incremental save persists the selection change.
             if (OwnerDocument is not null && ObjectNumber >= 0)
                 OwnerDocument.MarkDirty(ObjectNumber, Dict);
         }
     }
 
+    /// <summary>Keep the /I selected-index array in step with a selection change: a field
+    /// that carries one gets the 0-based /Opt positions of the new values (a viewer trusts
+    /// /I over /V for list boxes), and a cleared selection leaves it EMPTY, not absent.</summary>
+    private void SyncSelectedIndices(IReadOnlyList<string>? values)
+    {
+        if (Dict.Get("I") is null) return;
+        if (values is null || values.Count == 0) { Dict.Set("I", new PdfArray()); return; }
+        var indices = new PdfArray();
+        foreach (var i in SelectedIndices) indices.Add(new PdfInteger(i));
+        Dict.Set("I", indices);
+    }
+
     /// <summary>
     /// The 0-based indices of selected values within the Options list.
     /// </summary>
-    public IReadOnlyList<int> SelectedIndices
+    public virtual IReadOnlyList<int> SelectedIndices
     {
         get
         {
@@ -328,7 +341,8 @@ public class ChoiceField : Field
     /// </summary>
     public override string? Value
     {
-        get => base.Value;
+        // A choice with no selection reads as the empty string, never null.
+        get => base.Value ?? string.Empty;
         set => base.Value = value;
     }
 
@@ -341,7 +355,7 @@ public class ChoiceField : Field
             opt = new PdfArray();
             Dict.Set("Opt", opt);
         }
-        opt.Add(new PdfString(System.Text.Encoding.Latin1.GetBytes(optionName)));
+        opt.Add(new PdfString(Compat.Latin1.GetBytes(optionName)));
     }
 
     /// <summary>Add an option with separate export and display values.</summary>
@@ -354,8 +368,8 @@ public class ChoiceField : Field
             Dict.Set("Opt", opt);
         }
         var pair = new PdfArray();
-        pair.Add(new PdfString(System.Text.Encoding.Latin1.GetBytes(export)));
-        pair.Add(new PdfString(System.Text.Encoding.Latin1.GetBytes(name)));
+        pair.Add(new PdfString(Compat.Latin1.GetBytes(export)));
+        pair.Add(new PdfString(Compat.Latin1.GetBytes(name)));
         opt.Add(pair);
     }
 
@@ -457,11 +471,16 @@ public class ChoiceField : Field
             {
                 option.Index = result.Count + 1;
                 option.Selected = selectedValues.Contains(option.Value);
+                option.Owner = this;
                 result.Add(option);
             }
         }
         return result;
     }
+
+    /// <summary>Select one of this field's options, as the option's own
+    /// <see cref="Option.Selected"/> flag asks.</summary>
+    internal void SelectOption(Option option) => Selected = option.Index;
 }
 
 /// <summary>
@@ -469,6 +488,7 @@ public class ChoiceField : Field
 /// </summary>
 public sealed class Option
 {
+    /// <summary>Creates an option with the given export value and display name.</summary>
     public Option(string value, string name)
     {
         ExportValue = value;
@@ -481,8 +501,22 @@ public sealed class Option
     /// <summary>Display name shown in the choice UI.</summary>
     public string Name { get => DisplayValue; set => DisplayValue = value; }
 
-    /// <summary>Whether this option is currently selected on the owning field.</summary>
-    public bool Selected { get; set; }
+    private bool _selected;
+
+    /// <summary>Whether this option is currently selected on the owning field. Setting the
+    /// flag selects the option on the field it was read from.</summary>
+    public bool Selected
+    {
+        get => _selected;
+        set
+        {
+            _selected = value;
+            if (value) Owner?.SelectOption(this);
+        }
+    }
+
+    /// <summary>The field this option was read from; null for an option built by hand.</summary>
+    internal ChoiceField? Owner { get; set; }
 
     /// <summary>Export value written to the PDF when this option is selected.</summary>
     public string Value { get => ExportValue; set => ExportValue = value; }
@@ -562,13 +596,13 @@ public sealed class OptionCollection : ICollection<Option>
         }
         if (item.Value == item.Name)
         {
-            arr.Add(new PdfString(System.Text.Encoding.Latin1.GetBytes(item.Value)));
+            arr.Add(new PdfString(Compat.Latin1.GetBytes(item.Value)));
         }
         else
         {
             var pair = new PdfArray();
-            pair.Add(new PdfString(System.Text.Encoding.Latin1.GetBytes(item.Value)));
-            pair.Add(new PdfString(System.Text.Encoding.Latin1.GetBytes(item.Name)));
+            pair.Add(new PdfString(Compat.Latin1.GetBytes(item.Value)));
+            pair.Add(new PdfString(Compat.Latin1.GetBytes(item.Name)));
             arr.Add(pair);
         }
     }
@@ -682,7 +716,7 @@ public class ComboBoxField : ChoiceField
         dict.Set("FT", new PdfName("Ch"));
         dict.Set("Ff", new PdfInteger(1 << 17)); // Combo flag
         dict.Set("Rect", MakeRectArray(rect));
-        dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes("/Helv 12 Tf 0 g")));
+        dict.Set("DA", new PdfString(Compat.Latin1.GetBytes("/Helv 12 Tf 0 g")));
         return dict;
     }
 }
@@ -741,7 +775,7 @@ public class ListBoxField : ChoiceField
         dict.Set("FT", new PdfName("Ch"));
         // No Combo flag — list box
         dict.Set("Rect", MakeRectArray(rect));
-        dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes("/Helv 12 Tf 0 g")));
+        dict.Set("DA", new PdfString(Compat.Latin1.GetBytes("/Helv 12 Tf 0 g")));
         return dict;
     }
 }

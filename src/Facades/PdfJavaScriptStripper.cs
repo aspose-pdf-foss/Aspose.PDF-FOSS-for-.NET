@@ -21,8 +21,8 @@ public sealed class PdfJavaScriptStripper
     }
 
     /// <summary>
-    /// Strip all JavaScript from <paramref name="inputPath"/> and write the
-    /// result to <paramref name="outputPath"/>. Mirrors the
+    /// Strip all JavaScript from <c>inputPath</c> and write the
+    /// result to <c>outputPath</c>. Mirrors the
     /// <c>Aspose.Pdf.Facades.PdfJavaScriptStripper.Strip(string, string)</c> overload.
     /// </summary>
     public bool Strip(string inputFile, string outputFile)

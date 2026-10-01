@@ -39,7 +39,7 @@ public sealed partial class PdfFileEditor
     {
         try
         {
-            TryGetXfaPackets(PdfReader.FromBytes(pdf), out var tplXml, out _);
+            (var tplXml, _) = TryGetXfaPackets(PdfReader.FromBytes(pdf));
             return tplXml is not null;
         }
         catch { return false; }
@@ -57,7 +57,7 @@ public sealed partial class PdfFileEditor
         int withTemplate = 0;
         foreach (var r in readers)
         {
-            TryGetXfaPackets(r, out var tplXml, out _);
+            (var tplXml, _) = TryGetXfaPackets(r);
             var doc = LoadXmlOrNull(tplXml);
             tplRoots.Add(doc?.DocumentElement);
             if (doc?.DocumentElement is not null) withTemplate++;
@@ -175,134 +175,77 @@ public sealed partial class PdfFileEditor
     /// an XFA template (nothing to merge).</summary>
     private PdfArray? BuildMergedXfaArray(List<PdfReader> readers)
     {
-        var parts = new List<(XmlDocument? tpl, XmlDocument? ds)>();
-        int withTemplate = 0;
-        foreach (var r in readers)
+        var xm = new MergedXfaState();
+        xm.readers = readers;
+        xm.parts = new List<(XmlDocument? tpl, XmlDocument? ds)>();
+        xm.withTemplate = 0;
+        foreach (var r in xm.readers)
         {
-            TryGetXfaPackets(r, out var tplXml, out var dsXml);
+            var (tplXml, dsXml) = TryGetXfaPackets(r);
             var tplDoc = LoadXmlOrNull(tplXml);
             var dsDoc = LoadXmlOrNull(dsXml);
-            parts.Add((tplDoc, dsDoc));
-            if (tplDoc is not null) withTemplate++;
+            xm.parts.Add((tplDoc, dsDoc));
+            if (tplDoc is not null) xm.withTemplate++;
         }
-        if (withTemplate < 2) return null;
+        if (xm.withTemplate < 2) return null;
 
-        // ── Merged template ──
-        XmlDocument? mergedTpl = null;
-        XmlElement? tplRootSub = null;                       // synthetic <subform name="root">
-        var renameByInput = new Dictionary<int, Dictionary<string, string>>();
-        var firstXmlByName = new Dictionary<string, string>();   // origName → first occurrence's subtree
-        var dupCount = new Dictionary<string, int>();
+        xm.mergedTpl = null;
+        xm.tplRootSub = null;                       // synthetic <subform name="root">
+        xm.renameByInput = new Dictionary<int, Dictionary<string, string>>();
+        xm.firstXmlByName = new Dictionary<string, string>();   // origName → first occurrence's subtree
+        xm.dupCount = new Dictionary<string, int>();
 
-        for (int i = 0; i < parts.Count; i++)
+        for (int i = 0; i < xm.parts.Count; i++)
         {
-            var tRoot = parts[i].tpl?.DocumentElement;
-            if (tRoot is null) continue;
-            var subforms = TopContainerChildren(tRoot);
-            if (subforms.Count == 0) continue;
-
-            if (mergedTpl is null)
-            {
-                mergedTpl = parts[i].tpl;
-                tplRootSub = mergedTpl!.CreateElement(tRoot.Prefix, "subform", tRoot.NamespaceURI);
-                tplRootSub.SetAttribute("name", "root");
-            }
-
-            var map = new Dictionary<string, string>();
-            renameByInput[i] = map;
-            foreach (var sf in subforms)
-            {
-                var orig = sf.GetAttribute("name");
-                string newName;
-                if (!firstXmlByName.ContainsKey(orig))
-                {
-                    newName = orig;
-                    firstXmlByName[orig] = sf.OuterXml;
-                }
-                else
-                {
-                    dupCount.TryGetValue(orig, out var n); n++; dupCount[orig] = n;
-                    if (_uniqueSuffixSet)
-                        newName = orig + ApplyUniqueSuffix(_uniqueSuffix, n);
-                    else if (_keepFieldsUnique == false)
-                        newName = orig;
-                    else
-                        newName = sf.OuterXml == firstXmlByName[orig]
-                            ? orig
-                            : orig + n.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                }
-                if (!map.ContainsKey(orig)) map[orig] = newName;
-
-                var imported = (XmlElement)mergedTpl!.ImportNode(sf, deep: true);
-                imported.SetAttribute("name", newName);
-                tplRootSub!.AppendChild(imported);
-            }
+            CollectMergedXfaPart(xm, i);
         }
-        if (mergedTpl?.DocumentElement is null || tplRootSub is null) return null;
-        RemoveTopContainerChildren(mergedTpl.DocumentElement);
-        mergedTpl.DocumentElement.AppendChild(tplRootSub);
-        var mergedTemplateXml = mergedTpl.DocumentElement.OuterXml;
+        if (xm.mergedTpl?.DocumentElement is null || xm.tplRootSub is null) return null;
+        RemoveTopContainerChildren(xm.mergedTpl.DocumentElement);
+        xm.mergedTpl.DocumentElement.AppendChild(xm.tplRootSub);
+        xm.mergedTemplateXml = xm.mergedTpl.DocumentElement.OuterXml;
 
-        // ── Merged datasets ──
-        XmlDocument? mergedDs = null;
-        XmlElement? dsRootEl = null;                         // synthetic <root>
-        XmlElement? dataEl = null;
-        for (int i = 0; i < parts.Count; i++)
+        xm.mergedDs = null;
+        xm.dsRootEl = null;                         // synthetic <root>
+        xm.dataEl = null;
+        for (int i = 0; i < xm.parts.Count; i++)
         {
-            var dRoot = parts[i].ds?.DocumentElement;
-            if (dRoot is null) continue;
-            var thisData = FindDataElement(dRoot);
-            if (thisData is null) continue;
-            var map = renameByInput.TryGetValue(i, out var m) ? m : new Dictionary<string, string>();
-
-            if (mergedDs is null)
-            {
-                mergedDs = parts[i].ds;
-                dataEl = thisData;
-                dsRootEl = mergedDs!.CreateElement("root");
-            }
-            foreach (var dc in ElementChildren(thisData))
-            {
-                var imported = (XmlElement)mergedDs!.ImportNode(dc, deep: true);
-                if (map.TryGetValue(dc.LocalName, out var nn) && nn != dc.LocalName)
-                    imported = RenameElement(mergedDs, imported, nn);
-                dsRootEl!.AppendChild(imported);
-            }
+            EmitMergedXfaPart(xm, i);
         }
-        string? mergedDatasetsXml = null;
-        if (mergedDs?.DocumentElement is not null && dsRootEl is not null && dataEl is not null)
+        xm.mergedDatasetsXml = null;
+        if (xm.mergedDs?.DocumentElement is not null && xm.dsRootEl is not null && xm.dataEl is not null)
         {
-            RemoveElementChildren(dataEl);
-            dataEl.AppendChild(dsRootEl);
-            mergedDatasetsXml = mergedDs.DocumentElement.OuterXml;
+            RemoveElementChildren(xm.dataEl);
+            xm.dataEl.AppendChild(xm.dsRootEl);
+            xm.mergedDatasetsXml = xm.mergedDs.DocumentElement.OuterXml;
         }
 
-        // ── Emit /XFA array ──
-        var arr = new PdfArray();
-        arr.Add(new PdfString(Encoding.Latin1.GetBytes("template")));
-        arr.Add(new PdfStream(new PdfDictionary(), Encoding.UTF8.GetBytes(mergedTemplateXml)));
-        if (mergedDatasetsXml is not null)
+        xm.arr = new PdfArray();
+        xm.arr.Add(new PdfString(Compat.Latin1.GetBytes("template")));
+        xm.arr.Add(new PdfStream(new PdfDictionary(), Encoding.UTF8.GetBytes(xm.mergedTemplateXml)));
+        if (xm.mergedDatasetsXml is not null)
         {
-            arr.Add(new PdfString(Encoding.Latin1.GetBytes("datasets")));
-            arr.Add(new PdfStream(new PdfDictionary(), Encoding.UTF8.GetBytes(mergedDatasetsXml)));
+            xm.arr.Add(new PdfString(Compat.Latin1.GetBytes("datasets")));
+            xm.arr.Add(new PdfStream(new PdfDictionary(), Encoding.UTF8.GetBytes(xm.mergedDatasetsXml)));
         }
-        return arr;
+        return xm.arr;
     }
 
     /// <summary>Read the template / datasets XML from an input's /XFA (array of
     /// named parts, or a single-stream XDP).</summary>
-    private static void TryGetXfaPackets(PdfReader reader, out string? templateXml, out string? datasetsXml)
+    private static (string? templateXml, string? datasetsXml) TryGetXfaPackets(PdfReader reader)
     {
+        string? templateXml = default;
+        string? datasetsXml = default;
         templateXml = null; datasetsXml = null;
         var acro = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
-        if (acro is null) return;
+        if (acro is null) return (templateXml, datasetsXml);
         var xfa = reader.Resolve(acro.Get("XFA"));
         if (xfa is PdfArray arr)
         {
             for (int i = 0; i + 1 < arr.Count; i += 2)
             {
                 if (arr[i] is not PdfString s) continue;
-                var part = Encoding.Latin1.GetString(s.Value);
+                var part = Compat.Latin1.GetString(s.Value);
                 if (reader.Resolve(arr[i + 1]) is not PdfStream stream) continue;
                 var txt = StripXfaBom(Encoding.UTF8.GetString(reader.DecodeStream(stream)));
                 if (part == "template") templateXml = txt;
@@ -321,6 +264,7 @@ public sealed partial class PdfFileEditor
                 datasetsXml = ds?.OuterXml;
             }
         }
+        return (templateXml, datasetsXml);
     }
 
     private static XmlDocument? LoadXmlOrNull(string? xml)

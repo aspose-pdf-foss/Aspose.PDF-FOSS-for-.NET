@@ -1,13 +1,12 @@
-using System.IO.Compression;
 using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.IO.Filters;
 
 /// <summary>
 /// Decodes Flate (zlib/deflate) compressed data (PDF 32000 §7.4.4).
-/// Uses a self-contained managed inflater so behavior is independent of
-/// the host's native zlib; falls back to the BCL's ZLibStream/DeflateStream
-/// only if the managed path throws.
+/// Uses the library's own inflater so behavior is independent of the host's
+/// native zlib; a stream it refuses whole is salvaged as zlib, as raw deflate
+/// and as raw deflate past a two-byte header, keeping what each still yields.
 /// PNG / TIFF prediction filters are applied after decompression per the
 /// stream's DecodeParms dictionary.
 /// </summary>
@@ -46,12 +45,14 @@ internal static class FlateDecodeFilter
             return full.Length <= maxBytes ? full : full[..maxBytes];
         }
 
-        // Stream-inflate and stop once maxBytes are produced. Try the same wrapper
-        // variants Inflate's BCL fallback uses (zlib, raw, raw+2-byte skip).
-        foreach (var (useZlib, offset) in new[] { (true, 0), (false, 0), (false, 2) })
+        // Inflate no further than maxBytes, trying the readings Inflate's salvage uses
+        // (zlib, raw, raw past a two-byte header).
+        if (HasZlibHeader(data) && ManagedInflater.InflatePrefix(data, ZlibHeaderLength, maxBytes) is { Length: > 0 } zlibPrefix)
+            return zlibPrefix;
+        foreach (var offset in new[] { 0, ZlibHeaderLength })
         {
             if (offset >= data.Length) continue;
-            if (TryInflatePrefix(data, useZlib, offset, maxBytes, out var prefix) && prefix.Length > 0)
+            if (ManagedInflater.InflatePrefix(data, offset, maxBytes) is { Length: > 0 } prefix)
                 return prefix;
         }
 
@@ -60,49 +61,38 @@ internal static class FlateDecodeFilter
         return all.Length <= maxBytes ? all : all[..maxBytes];
     }
 
-    private static bool TryInflatePrefix(byte[] data, bool useZlib, int offset, int maxBytes, out byte[] result)
-    {
-        var output = new MemoryStream();
-        try
-        {
-            using var input = new MemoryStream(data, offset, data.Length - offset);
-            using var decompressor = useZlib
-                ? (Stream)new ZLibStream(input, CompressionMode.Decompress)
-                : new DeflateStream(input, CompressionMode.Decompress);
-            var buf = new byte[Math.Min(4096, maxBytes)];
-            while (output.Length < maxBytes)
-            {
-                int n;
-                try { n = decompressor.Read(buf, 0, buf.Length); }
-                catch { break; }
-                if (n == 0) break;
-                output.Write(buf, 0, (int)Math.Min(n, maxBytes - output.Length));
-            }
-        }
-        catch { /* partial output already captured */ }
+    private const int ZlibHeaderLength = 2;
+    private const int CompressionMethodDeflate = 8;
+    private const int MaxWindowInfo = 7;
+    private const int HeaderCheckDivisor = 31;
+    private const int PresetDictionaryFlag = 0x20;
 
-        result = output.ToArray();
-        return result.Length > 0;
-    }
+    /// <summary>A zlib header a reader would accept: deflate, a window of at most 32K, the check
+    /// bits right and no preset dictionary.</summary>
+    private static bool HasZlibHeader(byte[] data)
+        => data.Length >= ZlibHeaderLength
+            && (data[0] & 0x0F) == CompressionMethodDeflate
+            && data[0] >> 4 <= MaxWindowInfo
+            && (data[0] * 256 + data[1]) % HeaderCheckDivisor == 0
+            && (data[1] & PresetDictionaryFlag) == 0;
 
     private static byte[] Inflate(byte[] data)
     {
         if (data.Length == 0) return data;
 
-        // Primary path: pure-managed inflater. Always produces the same output
+        // Primary path: the whole stream as zlib. Always produces the same output
         // for the same input, on any host.
         try { return ManagedInflater.InflateZlib(data); }
-        catch { /* fall through to BCL fallbacks for edge cases the managed path doesn't handle */ }
+        catch { /* refused whole: salvage what the other readings yield */ }
 
-        // BCL fallback: System.IO.Compression. Native zlib is fast and well-tested,
-        // but its behavior varies across hosts (some Win Server 2022 .NET 8 builds
-        // mis-decode certain streams) — that's why we try the managed path first.
-        if (TryBclDecompress(data, useZlib: true, offset: 0, out var result) && result.Length > 0)
-            return result;
-        if (TryBclDecompress(data, useZlib: false, offset: 0, out result) && result.Length > 0)
-            return result;
-        if (data.Length > 2 && TryBclDecompress(data, useZlib: false, offset: 2, out result) && result.Length > 0)
-            return result;
+        // A stream refused whole (a broken header, a fault before any output) may still
+        // hold data: read it as zlib, as raw deflate, and as raw deflate past its header.
+        if (ManagedInflater.Salvage(data, 0, zlibWrapper: true) is { } zlibResult)
+            return zlibResult;
+        if (ManagedInflater.Salvage(data, 0, zlibWrapper: false) is { } rawResult)
+            return rawResult;
+        if (data.Length > ZlibHeaderLength && ManagedInflater.Salvage(data, ZlibHeaderLength, zlibWrapper: false) is { } skippedResult)
+            return skippedResult;
 
         // Some PDFs ship raw deflate without the zlib wrapper.
         try { return ManagedInflater.InflateRaw(data); }
@@ -110,34 +100,6 @@ internal static class FlateDecodeFilter
 
         // Give up: return the input untouched rather than crashing.
         return data;
-    }
-
-    private static bool TryBclDecompress(byte[] data, bool useZlib, int offset, out byte[] result)
-    {
-        var output = new MemoryStream();
-        try
-        {
-            using var input = new MemoryStream(data, offset, data.Length - offset);
-            using var decompressor = useZlib
-                ? (Stream)new ZLibStream(input, CompressionMode.Decompress)
-                : new DeflateStream(input, CompressionMode.Decompress);
-            // Chunked reads with per-Read try/catch so any bytes produced before
-            // a corruption error are still captured in `output` (CopyTo with a
-            // large buffer would discard partial output on a mid-buffer fault).
-            var buf = new byte[4096];
-            while (true)
-            {
-                int n;
-                try { n = decompressor.Read(buf, 0, buf.Length); }
-                catch { break; }
-                if (n == 0) break;
-                output.Write(buf, 0, n);
-            }
-        }
-        catch { /* partial output already captured */ }
-
-        result = output.ToArray();
-        return result.Length > 0;
     }
 
     // Shared with LzwDecodeFilter: both filters carry the same /Predictor DecodeParms.
@@ -161,17 +123,24 @@ internal static class FlateDecodeFilter
 
         if (data.Length == 0) return data;
 
+        // Samples filtered through a stride other than the image's own row (a soft mask
+        // whose producer kept its parent's /Colors) end in a partial row: one filter byte
+        // and a short run of samples. Those samples are real image data, so the partial
+        // row decodes like the others instead of being dropped.
         var rows = data.Length / srcRowBytes;
-        var output = new byte[rows * rowBytes];
+        var tailBytes = data.Length - rows * srcRowBytes - 1;
+        var totalRows = tailBytes > 0 ? rows + 1 : rows;
+        var output = new byte[rows * rowBytes + Math.Max(0, tailBytes)];
         var prevRow = new byte[rowBytes];
 
-        for (var row = 0; row < rows; row++)
+        for (var row = 0; row < totalRows; row++)
         {
             var srcOffset = row * srcRowBytes;
             var dstOffset = row * rowBytes;
             var filterType = data[srcOffset];
+            var rowLength = row < rows ? rowBytes : tailBytes;
 
-            for (var col = 0; col < rowBytes; col++)
+            for (var col = 0; col < rowLength; col++)
             {
                 var raw = data[srcOffset + 1 + col];
                 byte a = col >= bytesPerPixel ? output[dstOffset + col - bytesPerPixel] : (byte)0;
@@ -189,7 +158,7 @@ internal static class FlateDecodeFilter
                 };
             }
 
-            Array.Copy(output, dstOffset, prevRow, 0, rowBytes);
+            Array.Copy(output, dstOffset, prevRow, 0, rowLength);
         }
 
         return output;

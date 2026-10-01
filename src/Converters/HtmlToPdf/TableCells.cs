@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -25,7 +25,13 @@ internal static partial class HtmlToPdfConverter
         ps.probeFonts ??= new();
         if (ps.probeFonts.TryGetValue((fam, bold), out var cached)) return cached;
         Text.Font? r = null;
-        try { r = Text.FontRepository.TryFindFont(fam, bold ? Text.FontStyles.Bold : Text.FontStyles.Regular, ignoreCase: true); }
+        // The UA checkbox grid measures its headers in the REAL bold program (the styled lookup
+        // falls back to the regular face for a system family), as the render draws them.
+        try
+        {
+            r = ps.uaControlGrid && bold ? Text.FontRepository.FindEmbeddableStyledFont(fam, Text.FontStyles.Bold) : null;
+            r ??= Text.FontRepository.TryFindFont(fam, bold ? Text.FontStyles.Bold : Text.FontStyles.Regular, ignoreCase: true);
+        }
         catch { }
         ps.probeFonts[(fam, bold)] = r;
         return r;
@@ -79,7 +85,7 @@ internal static partial class HtmlToPdfConverter
         try
         {
             var mf = ps.measureFont;
-            if (widenProbe && (bold || fam is not null))
+            if ((widenProbe || ps.uaControlGrid) && (bold || fam is not null))
                 mf = ResolveProbeFont(ps, options, widenProbe, fam, bold) ?? ps.measureFont;
             // A system font resolved via FindFont has an empty PDF font dict (no /Widths),
             // so Font.MeasureString would default every glyph to 1 em. Read the real glyph
@@ -139,6 +145,26 @@ internal static partial class HtmlToPdfConverter
         return total / 1000.0 * size;
     }
 
+    /// <summary>The characters a line never breaks BEFORE (UAX #14's infix separators, closers and
+    /// terminators): a label written <c>Direction :</c> is one unbreakable token, not two.</summary>
+    internal const string NoBreakBeforeChars = ":;,.!?%)]}";
+
+    /// <summary>The tokens a min-content measure takes the widest of: the space-separated words, with a
+    /// word made only of <see cref="NoBreakBeforeChars"/> joined back onto the one before it (and its
+    /// space), because no break opportunity stands there.</summary>
+    private static List<string> MinContentWords(string s, bool joinNoBreakBefore)
+    {
+        var words = new List<string>(s.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        if (!joinNoBreakBefore) return words;
+        for (var i = words.Count - 1; i > 0; i--)
+            if (words[i].TrimEnd(NoBreakBeforeChars.ToCharArray()).Length == 0)
+            {
+                words[i - 1] = words[i - 1] + " " + words[i];
+                words.RemoveAt(i);
+            }
+        return words;
+    }
+
     private static double MeasureMinContent(TableParseState ps, HtmlLoadOptions? options, double cellFontSize, bool dwFormCells, bool fullWidthCjkMin, bool widenProbe, string s, bool bold = false, double pt = 0, string? fam = null,
         bool breakDashes = false)
     {
@@ -151,7 +177,7 @@ internal static partial class HtmlToPdfConverter
                 .Replace(Table.InlineCheckboxGapChar.ToString(), "");
         if (string.IsNullOrEmpty(s)) return 0;
         double w = 0;
-        foreach (var word in s.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var word in MinContentWords(s, ps.sheetTdBoxRule))
         {
             // The widen probe honours soft break opportunities after hyphens and
             // en-dashes, matching the min-content measure — an
@@ -186,6 +212,56 @@ internal static partial class HtmlToPdfConverter
         return w;
     }
 
+    private const double UaHrMarginEm = 0.5;          // ...and the hr's
+    private const double UaH1MarginEm = 0.67;         // the browser's h1 margins, in the heading's size
+    private const double UaH2MarginEm = 0.83;         // ...and h2's
+    private const double UaH1FontEm = 2.0;            // the browser's h1 size when no sheet rule sizes it
+    private const double UaH2FontEm = 1.5;
+    private const double UaH3FontEm = 1.17;           // ...h3's, h4's, h5's and h6's
+    private const double UaH4FontEm = 1.0;
+    private const double UaH5FontEm = 0.83;
+    private const double UaH6FontEm = 0.67;            // ...and h2's
+    private const double UaHrRuleFontPt = 1.0;        // a 1pt "line" whose UA box is the 1.5 pt rule
+    private const double UaHrRulePt = 1.5;            // the rule's box: two strokes
+    private const double UaMarginOnlyFontPt = 0.01;   // a line of no height that carries a trailing block margin
+    private const double UaHrStrokePt = 0.75;         // ...each one px
+    private static readonly Color UaHrShadeColor = Color.FromRgbBytes(0x55, 0x55, 0x55);   // the lower, shaded stroke
+
+    /// <summary>A block boundary in a UA-boxed cell leaves its margin pending; adjoining
+    /// margins collapse to the larger.</summary>
+    /// <summary>A UA heading's margin: its own style's, else the sheet's h1/h2 rule's, else the UA 0.67 / 0.83 em
+    /// (in the heading's size), left pending like any block margin.</summary>
+    private static void UaLeaveHeadingMargin(TableParseState ps, string tag, Token? tok, bool top)
+    {
+        var fs = ps.curFontPt > 0 ? ps.curFontPt : ps.uaBaseFontPt > 0 ? ps.uaBaseFontPt : DefaultBodyFontPt;
+        var side = top ? "margin-top" : "margin-bottom";
+        double? declared = null;
+        if (tok?.Attributes is not null && tok.Attributes.TryGetValue("style", out var hSt) && hSt is not null)
+            declared = CssBoxSidePt(hSt, "margin", side, top ? 0 : 2, fs);
+        if (declared is null)
+            foreach (var sheet in new IReadOnlyDictionary<string, Dictionary<string, string>>?[] { ps.uaSheet, ps.uaDocSheet })
+                if (sheet is not null && sheet.TryGetValue(tag, out var rule) && CssBoxSidePt(rule, "margin", side, top ? 0 : 2, fs) is { } sheetPt)
+                { declared = sheetPt; break; }
+        ps.uaPendingMarginPt = Math.Max(ps.uaPendingMarginPt, declared ?? UaHeadingMarginEm(tag) * fs);
+    }
+
+    /// <summary>The browser's heading sizes, in em of the running size (h1 2, h2 1.5, h3 1.17, h4 1, h5 .83, h6 .67).</summary>
+    private static double UaHeadingFontEm(string tag) => tag switch
+    {
+        "h1" => UaH1FontEm, "h2" => UaH2FontEm, "h3" => UaH3FontEm, "h4" => UaH4FontEm, "h5" => UaH5FontEm, _ => UaH6FontEm,
+    };
+
+    /// <summary>The browser's heading margins, in em of the heading's own size.</summary>
+    private static double UaHeadingMarginEm(string tag) => tag switch
+    {
+        "h1" => UaH1MarginEm, "h2" => UaH2MarginEm, _ => UaBlockMarginEmOf(tag),
+    };
+
+    private static void UaLeaveBlockMargin(TableParseState ps, double em)
+    {
+        ps.uaPendingMarginPt = Math.Max(ps.uaPendingMarginPt, em * (ps.curFontPt > 0 ? ps.curFontPt : ps.uaBaseFontPt > 0 ? ps.uaBaseFontPt : DefaultBodyFontPt));
+    }
+
     private static void PushLine(TableParseState ps, bool redlineCells, bool dwFormCells, bool widenProbe, bool keepIfBlank = false, bool joinNext = false)
     {
         // A box run still open at a line break closes its segment on this line
@@ -217,31 +293,31 @@ internal static partial class HtmlToPdfConverter
         // the wrap and is dropped when the line is drawn — see Table.StripZeroWidth.)
         var zwsOnly = text.Length > 0 && text.Trim(ZeroWidthSpace).Length == 0;
         if (zwsOnly) text = "";
+        // A UA-boxed cell's pending block margin seats above the next line that SHOWS (a whitespace
+        // run that collapses to nothing is no line, and must not swallow the margin).
+        if (ps.uaCellBoxes && ps.uaPendingMarginPt > 0 && (text.Length > 0 || keepIfBlank || zwsOnly))
+        {
+            ps.lineMarginTop = Math.Max(ps.lineMarginTop, ps.uaPendingMarginPt);
+            ps.uaPendingMarginPt = 0;
+        }
         // Mixed bold runs on one line (form-grid): rebuild the run segments
         // against the raw buffer, keeping a single space at a run boundary the
         // source had whitespace at; discard unless they reconcile with the
         // collapsed line exactly.
-        if (ps.lineRunMarks is { Count: > 1 } && text.Length > 0)
-        {
-            var raw = ps.line.ToString();
-            var runSegs = new List<(string Text, bool Bold)>();
-            for (var mi = 0; mi < ps.lineRunMarks.Count; mi++)
-            {
-                var segEnd = mi + 1 < ps.lineRunMarks.Count ? ps.lineRunMarks[mi + 1].Pos : raw.Length;
-                var rawSeg = raw[ps.lineRunMarks[mi].Pos..segEnd];
-                var segText = CollapseWs(rawSeg);
-                if (segText.Length == 0) continue;
-                if (segEnd < raw.Length && char.IsWhiteSpace(raw[segEnd - 1])) segText += " ";
-                if (runSegs.Count > 0 && runSegs[^1].Bold == ps.lineRunMarks[mi].Bold)
-                    runSegs[^1] = (runSegs[^1].Text + segText, runSegs[^1].Bold);
-                else
-                    runSegs.Add((segText, ps.lineRunMarks[mi].Bold));
-            }
-            var joined = string.Concat(runSegs.ConvertAll(r => r.Text));
-            if (runSegs.Count > 1 && joined == text)
-                (ps.lineRunsByIdx ??= new())[ps.lines.Count] = runSegs;
-        }
+        ApplyLineRunMarks(ps, text);
         ps.lineRunMarks = null;
+        if ((ps.wordMailCells || ps.uaCellBoxes) && ps.curLineHeightPct > 0)
+            (ps.lineHeightPctByIdx ??= new())[ps.lines.Count] = ps.curLineHeightPct;
+        if (ps.uaLineAlign is { } uaAlign) (ps.lineAlignByIdx ??= new())[ps.lines.Count] = uaAlign;
+        if (ps.uaHrRulePending) { (ps.hrRuleLines ??= new()).Add(ps.lines.Count); ps.uaHrRulePending = false; }
+        if (ps.lineMarker is { } lineMarker && (text.Length > 0 || keepIfBlank))
+        {
+            (ps.lineMarkerByIdx ??= new())[ps.lines.Count] = lineMarker;
+            ps.lineMarker = null;
+        }
+        // (a UA-boxed line whose runs change size stands on its largest run's box - measured on the
+        //  royalty statement's 9 pt labels beside 10 pt values: the row pitches on the 10)
+        if (ps.uaCellBoxes && text.Length > 0 && ps.lineMaxRunPt > ps.lineFontPt) ps.lineFontPt = ps.lineMaxRunPt;
         ps.lines.Add((text, text.Length > 0 || keepIfBlank || zwsOnly ? ps.lineFontPt : 0,
             ps.lineFamily, (keepIfBlank || zwsOnly) && text.Length == 0, joinNext, ps.lineAnchors,
             ps.lineHadText && ps.lineAllBold, ps.lineMarginTop,
@@ -262,7 +338,7 @@ internal static partial class HtmlToPdfConverter
         ps.lineAnchors = null;
         ps.line.Clear();
         ps.lineFontPt = 0; ps.lineFamily = null; ps.lineStyleSet = false; ps.lineMarginTop = 0; ps.lineMarginLeft = 0;
-        ps.lineColor = null;
+        ps.lineColor = null; ps.lineMaxRunPt = 0;
         ps.lineHadText = false; ps.lineAllBold = true; ps.lineAllItalic = true;
     }
 
@@ -314,5 +390,6 @@ internal static partial class HtmlToPdfConverter
         }
         ps.rowHasTd = false; ps.rowHasCell = false;
         ps.row = null;
+        ps.rowMinSum = 0;
     }
 }

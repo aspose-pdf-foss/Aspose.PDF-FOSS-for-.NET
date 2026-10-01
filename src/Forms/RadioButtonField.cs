@@ -5,6 +5,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Forms;
 
+/// <summary>A radio-button group field: a set of option widgets of which at most one is selected.</summary>
 public class RadioButtonField : ChoiceField
 {
     internal RadioButtonField(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -31,6 +32,8 @@ public class RadioButtonField : ChoiceField
         Dict.Set("Rect", arr);
     }
 
+    /// <summary>Creates an empty radio-button group for the given document. Add options, then add the field
+    /// through <c>Form.Add</c>.</summary>
     public RadioButtonField(Document doc) : base(BuildRadioFieldDict(), doc?.Reader ?? PdfReader.Empty) { }
 
     private static PdfDictionary BuildRadioFieldDict()
@@ -65,7 +68,20 @@ public class RadioButtonField : ChoiceField
         var rect = Reader.Resolve(Dict.Get("Rect")) is PdfArray ra && ra.Count >= 4
             ? Rectangle.FromPdfArray(ra)
             : new Rectangle(0, 0, 16, 16);
-        AddOptionKid(optionName, rect);
+        AddOptionKid(optionName, StackedOptionRect(rect, ExistingKidCount()));
+    }
+
+    private int ExistingKidCount()
+        => Reader.Resolve(Dict.Get("Kids")) is PdfArray kids ? kids.Count : 0;
+
+    /// <summary>The widget box of an option added without a rectangle of its own: the
+    /// field's box moved down by one box height per option already present, so the
+    /// options stack under each other (measured: a 16 pt field at y 100..116 holds its
+    /// three options at 100..116, 84..100 and 68..84).</summary>
+    internal static Rectangle StackedOptionRect(Rectangle fieldRect, int optionsBefore)
+    {
+        var drop = optionsBefore * fieldRect.Height;
+        return new Rectangle(fieldRect.LLX, fieldRect.LLY - drop, fieldRect.URX, fieldRect.URY - drop);
     }
 
     /// <summary>Build and register a radio kid widget annotation carrying
@@ -416,9 +432,6 @@ public class RadioButtonField : ChoiceField
             var raw = base.Value;
             if (string.IsNullOrEmpty(raw) || raw == "Off") return -1;
             var states = CollectKidStates();
-            if (IsOptIndexed(states, MaterializeOptions().Count)
-                && int.TryParse(raw, out var idx))
-                return idx + 1;
             for (int i = 0; i < states.Count; i++)
             {
                 if (states[i] == raw) return i + 1;
@@ -428,14 +441,7 @@ public class RadioButtonField : ChoiceField
         set
         {
             var states = CollectKidStates();
-            string optValue;
-            if (IsOptIndexed(states, MaterializeOptions().Count))
-                optValue = value >= 1 && value <= states.Count
-                    ? (value - 1).ToString(System.Globalization.CultureInfo.InvariantCulture)
-                    : "Off";
-            else
-                optValue = value >= 1 && value <= states.Count ? states[value - 1] : "Off";
-            ApplyRadioState(optValue);
+            ApplyRadioState(value >= 1 && value <= states.Count ? states[value - 1] : "Off");
         }
     }
 
@@ -497,59 +503,37 @@ public class RadioButtonField : ChoiceField
         return null;
     }
 
-    /// <summary>True when this is the /Opt-indexed radio model (PDF 32000
-    /// §12.7.4.2.3): the group carries an /Opt array of export values and every
-    /// kid widget's on-state is the decimal index of its /Opt entry. In that
-    /// model the public <see cref="Value"/> is the /Opt EXPORT value, while /V
-    /// and the kid appearance states hold the index string.</summary>
-    private bool IsOptIndexed(List<string> states, int optCount)
-    {
-        if (optCount == 0 || states.Count == 0) return false;
-        foreach (var s in states)
-            if (!int.TryParse(s, out var i) || i < 0 || i >= optCount) return false;
-        return true;
-    }
-
     /// <summary>
-    /// Override of <see cref="Field.Value"/>. For an /Opt-indexed group the
-    /// value is the selected option's export value; otherwise it is the /AP/N
-    /// appearance-state name. Setting a value that resolves to no option lands
-    /// on "Off" — the canonical unselected sentinel for radio buttons.
+    /// Override of <see cref="Field.Value"/>: the appearance-state name of the selected
+    /// button, as /V carries it. A group that lists its buttons in an /Opt array (PDF 32000
+    /// section 12.7.4.2.3) names its states by /Opt index, and the value is still that index
+    /// name - the /Opt entry supplies the button's export value, it does not rename the
+    /// state. Setting a value selects the button whose export value it is, or else the
+    /// button whose state it names; a value that is neither lands on "Off", the canonical
+    /// unselected sentinel for radio buttons.
     /// </summary>
     public override string? Value
     {
-        get
-        {
-            var raw = base.Value;
-            if (string.IsNullOrEmpty(raw) || raw == "Off") return raw;
-            var opts = MaterializeOptions();
-            if (IsOptIndexed(CollectKidStates(), opts.Count)
-                && int.TryParse(raw, out var idx) && idx >= 0 && idx < opts.Count)
-                return opts[idx].Value;
-            return raw;
-        }
+        get => base.Value;
         set
         {
             var states = CollectKidStates();
-            string? state = value;
-            var opts = MaterializeOptions();
-            if (value is not null && IsOptIndexed(states, opts.Count))
-            {
-                state = null;
-                for (int i = 0; i < opts.Count; i++)
+            string? state = null;
+            foreach (var option in MaterializeOptions())
+                if (option.Value == value && option.Index <= states.Count)
                 {
-                    if (opts[i].Value == value)
-                    {
-                        state = i.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                        break;
-                    }
+                    state = states[option.Index - 1];
+                    break;
                 }
-                // Compatibility: accept a raw index-state name as well.
-                if (state is null && states.Contains(value)) state = value;
-            }
-            ApplyRadioState(state is not null && states.Contains(state) ? state : "Off");
+            if (state is null && value is not null && states.Contains(value)) state = value;
+            ApplyRadioState(state ?? "Off");
         }
     }
+
+    /// <summary>The selected button's position, as the option list counts them; the
+    /// base lookup by export value would miss a state that /Opt names differently.</summary>
+    public override IReadOnlyList<int> SelectedIndices
+        => Selected is var selected && selected >= 1 ? [selected - 1] : [];
 
     private List<string> CollectKidStates()
     {
@@ -621,25 +605,20 @@ public class RadioButtonField : ChoiceField
     }
 
     /// <summary>
-    /// A radio group's option list is carried by the kid widgets' /AP/N on-states,
-    /// not (usually) by an /Opt array, so the base /Opt reading yields nothing.
-    /// Fall back to one option per distinct kid appearance state so
-    /// <see cref="Options"/> reflects the selectable buttons. Reads /V straight from
-    /// the dict to mark the selected option (calling <see cref="Value"/> would recurse
-    /// back into this method).
+    /// A radio group's options are its buttons: one per distinct kid widget /AP/N on-state,
+    /// named by that state, whether or not the group also carries an /Opt array. An /Opt
+    /// entry is not an option of its own: it supplies the export value of the button at the
+    /// same position, which is what the option's Value carries (and what an XFA form or an
+    /// index fill writes out); a button without an entry exports its state name. Only a
+    /// genuine radio GROUP, whose buttons are separate kid widgets, surfaces these; a single
+    /// merged-widget button that carries its own /AP/N on-state (no /Kids of its own, no
+    /// shared parent group) reports whatever /Opt says, since CollectKidStates would
+    /// otherwise fall back to the field's own /AP/N and invent a phantom option. Reads /V
+    /// straight from the dict to mark the selected option.
     /// </summary>
     protected internal override List<Option> MaterializeOptions()
     {
-        var baseOpts = base.MaterializeOptions();
-        if (baseOpts.Count > 0) return baseOpts;
-
-        // Only a genuine radio GROUP — whose buttons are separate kid widgets — surfaces
-        // synthesized options. A single merged-widget button that carries its own /AP/N
-        // on-state (no /Kids of its own, no shared parent group) reports no
-        // options. CollectKidStates would otherwise fall back to the
-        // field's own /AP/N (correct for resolving Value/Selected) and invent a phantom
-        // option here.
-        if (!HasRadioKidWidgets()) return baseOpts;
+        if (!HasRadioKidWidgets()) return base.MaterializeOptions();
 
         var raw = Reader.Resolve(Dict.Get("V")) switch
         {
@@ -647,14 +626,17 @@ public class RadioButtonField : ChoiceField
             PdfString s => s.ToText(),
             _ => null,
         };
+        var exports = base.MaterializeOptions();
         var result = new List<Option>();
         foreach (var state in CollectKidStates())
         {
-            var option = new Option(state, state)
+            var export = result.Count < exports.Count ? exports[result.Count].Value : state;
+            var option = new Option(export, state)
             {
                 Index = result.Count + 1,
                 Selected = raw is not null && raw == state,
             };
+            option.Owner = this;
             result.Add(option);
         }
         return result;

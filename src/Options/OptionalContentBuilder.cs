@@ -45,7 +45,7 @@ public sealed class OptionalContentBuilder
             // Create OCG dictionary
             var ocgDict = new PdfDictionary();
             ocgDict.Set("Type", new PdfName("OCG"));
-            ocgDict.Set("Name", new PdfString(Encoding.Latin1.GetBytes(layer.Name)));
+            ocgDict.Set("Name", new PdfString(Compat.Latin1.GetBytes(layer.Name)));
 
             var objNum = _document.AllocateObjectNumber();
             layer.ObjectNumber = objNum;

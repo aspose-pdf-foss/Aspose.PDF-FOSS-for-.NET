@@ -57,7 +57,7 @@ public sealed class AutoFiller : ISaveableFacade, IDisposable
     /// <summary>Create an unbound AutoFiller.</summary>
     public AutoFiller() { }
 
-    /// <inheritdoc />
+    /// <summary>Uses an already opened document as the template. The document is not disposed by this filler.</summary>
     public void BindPdf(Document srcDoc)
     {
         DisposeInput();
@@ -66,7 +66,7 @@ public sealed class AutoFiller : ISaveableFacade, IDisposable
     }
 
 
-    /// <inheritdoc />
+    /// <summary>Opens the PDF file at the given path and uses it as the template.</summary>
     public void BindPdf(string srcFile)
     {
         DisposeInput();
@@ -74,7 +74,7 @@ public sealed class AutoFiller : ISaveableFacade, IDisposable
         _ownsInput = true;
     }
 
-    /// <inheritdoc />
+    /// <summary>Reads the whole stream (from the start when it is seekable) and uses that PDF as the template.</summary>
     public void BindPdf(Stream srcStream)
     {
         DisposeInput();
@@ -86,7 +86,7 @@ public sealed class AutoFiller : ISaveableFacade, IDisposable
     }
 
     /// <summary>
-    /// For each row in <paramref name="table"/>, clone the template, set form-field
+    /// For each row in <c>table</c>, clone the template, set form-field
     /// values from row[columnName], flatten (except <see cref="UnFlattenFields"/>),
     /// and append the cloned pages to the output document.
     /// </summary>
@@ -204,21 +204,21 @@ public sealed class AutoFiller : ISaveableFacade, IDisposable
         Save(OutputFileName);
     }
 
-    /// <inheritdoc />
+    /// <summary>Saves the merged output document to the given file path.</summary>
     public void Save(string destFile)
     {
         EnsureOutput();
         _output!.Save(destFile);
     }
 
-    /// <inheritdoc />
+    /// <summary>Saves the merged output document to the given stream.</summary>
     public void Save(Stream destStream)
     {
         EnsureOutput();
         _output!.Save(destStream);
     }
 
-    /// <inheritdoc />
+    /// <summary>Releases the template and the output document; same as <c>Dispose</c>.</summary>
     public void Close() => Dispose();
 
     /// <inheritdoc />

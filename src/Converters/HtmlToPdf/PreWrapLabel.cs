@@ -108,9 +108,9 @@ internal static partial class HtmlToPdfConverter
             var yTd = PwFirstLineTopTd + i * PwLinePitchPt;
             sb.Append("BT ");
             if (color is { } col)
-                sb.Append(string.Create(inv,
+                sb.Append(Compat.Format(inv,
                     $"{col.R / 255.0:0.###} {col.G / 255.0:0.###} {col.B / 255.0:0.###} rg "));
-            sb.Append(string.Create(inv,
+            sb.Append(Compat.Format(inv,
                 $"/F8 {fs:0.##} Tf 1 0 0 1 {x:F4} {pageHeight - yTd:F4} Tm ({EscapePdfString(line)}) Tj "));
             if (color is not null) sb.Append("0 g ");
             sb.AppendLine("ET");

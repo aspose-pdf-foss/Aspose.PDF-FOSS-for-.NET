@@ -70,6 +70,7 @@ public class PageActionCollection
 /// <summary>Group / blending colour space dictionary (PDF 32000 §11.6.5).</summary>
 public class Group
 {
+    /// <summary>Creates a transparency group description for the given page, with a DeviceRGB colour space.</summary>
     public Group(Page page) { _page = page; }
     private readonly Page _page;
 

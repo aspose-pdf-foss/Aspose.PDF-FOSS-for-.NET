@@ -19,7 +19,7 @@ internal static class SaslPrepProfile
     }
 
     /// <summary>Apply the full SASLprep profile, returning the prepared string
-    /// or throwing <see cref="StringprepException"/>.</summary>
+    /// or throwing <c>StringprepException</c>.</summary>
     internal static string SaslPrep(string input)
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;

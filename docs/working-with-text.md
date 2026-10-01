@@ -40,6 +40,12 @@ var raw = new TextAbsorber(new TextExtractionOptions(
     TextExtractionOptions.TextFormattingMode.Raw));
 ```
 
+`MemorySaving` reads like `Raw` but writes a single space wherever the pen
+jumps between runs, so table cells stay separate words. In Pure mode,
+`TextExtractionOptions.ScaleFactor` (default 1) scales the character grid used
+for column padding; `0` derives the grid from the page's own glyph advances,
+which suits dense multi-column pages.
+
 ### Using TextDevice
 
 `TextDevice` is an alternative that returns per-page text into a stream:
@@ -155,6 +161,10 @@ foreach (var fragment in absorber.TextFragments)
 }
 ```
 
+Setting `TextState.FontSize` on a found fragment rewrites its text in place:
+a fragment that is only part of a larger text-showing operation splits it, and
+the text after it on the same line moves by the change in width.
+
 ## Adding text
 
 ### `TextBuilder`
@@ -207,6 +217,17 @@ s.CharacterSpacing = 1.5f;
 s.WordSpacing      = 3f;
 ```
 
+`IsStrikeOut`, `IsSuperscript` and `IsSubscript` are on `TextState` too; a
+superscript or subscript run is drawn at a reduced size on a raised or lowered
+baseline. `new TextState(foreground, background, FontStyles.Bold, font, 12)`
+sets colours (`System.Drawing.Color`), style, face and size in one call — the
+style picks the matching sibling of the face's family.
+
+For text laid out through `Page.Paragraphs`, `TextState.FormattingOptions.UnderlineStyle`
+and `StrikeoutStyle` take a `TextDecorationStyle` that sets the rule's
+geometry: `Thickness` / `ThicknessEm`, `Offset` / `OffsetEm` from the
+baseline, `Color` (the text colour when null) and `Opacity`.
+
 `TextFragment.TextState` is a `TextFragmentState` (a `TextState` subclass with extras like `TabStops`, `DrawTextRectangleBorder`, and `Font` typed as `Aspose.Pdf.Text.Font`). For most authoring you can treat it like a `TextState`.
 
 ## Paragraph extraction
@@ -240,6 +261,10 @@ fragment.Segments.Add(new TextSegment("$100.00"));
 
 new TextBuilder(doc.Pages[1]).AppendText(fragment);
 ```
+
+`TabAlignmentType` offers `Left`, `Center`, `Right` and `Decimal` (aligned on
+`TabStop.AnchorCharacter`, a full stop by default); `TabLeaderType` offers
+`None`, `Solid`, `Dash` and `Dot`.
 
 ## Notes on the absorbers
 

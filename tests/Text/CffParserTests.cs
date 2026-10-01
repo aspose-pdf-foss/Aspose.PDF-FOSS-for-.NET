@@ -485,7 +485,7 @@ public class CffParserTests
         // byte 1: 0x1A, byte 2: 0x5F
         var data = new byte[] { 0x1A, 0x5F };
         var pos = 0;
-        var result = CffParser.ParseBcdReal(data, ref pos);
+        (var result, pos) = CffParser.ParseBcdReal(data, pos);
 
         Assert.Equal(1.5, result, precision: 10);
     }
@@ -497,7 +497,7 @@ public class CffParserTests
         // byte 1: 0xE2, byte 2: 0xA5, byte 3: 0xFF (end nibble in first position of byte)
         var data = new byte[] { 0xE2, 0xA5, 0xFF };
         var pos = 0;
-        var result = CffParser.ParseBcdReal(data, ref pos);
+        (var result, pos) = CffParser.ParseBcdReal(data, pos);
 
         Assert.Equal(-2.5, result, precision: 10);
     }
@@ -509,7 +509,7 @@ public class CffParserTests
         // byte 1: 0x1B, byte 2: 0x3F
         var data = new byte[] { 0x1B, 0x3F };
         var pos = 0;
-        var result = CffParser.ParseBcdReal(data, ref pos);
+        (var result, pos) = CffParser.ParseBcdReal(data, pos);
 
         Assert.Equal(1000.0, result, precision: 10);
     }

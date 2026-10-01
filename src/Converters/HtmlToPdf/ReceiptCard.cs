@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -67,185 +67,97 @@ internal static partial class HtmlToPdfConverter
     private static Document? TryRenderReceiptCard(string html, IReadOnlyDictionary<string,
         Dictionary<string, string>> css, double pageWidth, double pageHeight)
     {
-        if (!css.TryGetValue(".receiptDetails", out var cardRule)
+        var rk = new ReceiptCardState();
+        rk.html = html;
+        rk.css = css;
+        rk.pageWidth = pageWidth;
+        rk.pageHeight = pageHeight;
+        if (!rk.css.TryGetValue(".receiptDetails", out var cardRule)
             || !cardRule.ContainsKey("border-radius")
-            || !css.TryGetValue(".receiptHeader", out var hdrRule)
+            || !rk.css.TryGetValue(".receiptHeader", out var hdrRule)
             || !(hdrRule.TryGetValue("float", out var hf)
                  && hf.Contains("right", StringComparison.OrdinalIgnoreCase))
-            || !html.Contains("receiptDetail-head", StringComparison.Ordinal))
+            || !rk.html.Contains("receiptDetail-head", StringComparison.Ordinal))
             return null;
 
-        static string Flat(string s) => CollapseWs(DecodeEntities(
-            Regex.Replace(s, @"<[^>]+>", " "))).Trim();
-
-        // the agency heading and inline address items
-        var agentM = Regex.Match(html, @"class=[""']agencyHeading[""'][^>]*>([\s\S]*?)</span>",
+        rk.agentM = Regex.Match(rk.html, @"class=[""']agencyHeading[""'][^>]*>([\s\S]*?)</span>",
             RegexOptions.IgnoreCase);
-        var addrItems = new List<string>();
-        var addrM = Regex.Match(html, @"class=[""']addressList[""'][\s\S]*?<ul>([\s\S]*?)</ul>",
+        rk.addrItems = new List<string>();
+        rk.addrM = Regex.Match(rk.html, @"class=[""']addressList[""'][\s\S]*?<ul>([\s\S]*?)</ul>",
             RegexOptions.IgnoreCase);
-        if (addrM.Success)
-            foreach (Match li in Regex.Matches(addrM.Groups[1].Value, @"<li[^>]*>([\s\S]*?)</li>",
-                RegexOptions.IgnoreCase))
-            {
-                var t = Flat(li.Groups[1].Value);
-                if (t.Length > 0) addrItems.Add(t);
-            }
+        ParseReceiptAddress(rk);
 
-        // the two summary sections' label/value rows
-        var sections = new List<List<(string Label, string Value)>>();
-        foreach (Match sm in Regex.Matches(html,
-            @"class=[""']summarySection[""'][\s\S]*?<table>([\s\S]*?)</table>", RegexOptions.IgnoreCase))
+        rk.sections = new List<List<(string Label, string Value)>>();
+        CollectReceiptSections(rk);
+
+        rk.headM = Regex.Match(rk.html, @"receiptDetail-head[""'][\s\S]*?<table>([\s\S]*?)</table>",
+            RegexOptions.IgnoreCase);
+        rk.authVal = "";
+        rk.rcptVal = "";
+        if (rk.headM.Success)
         {
-            var rows = new List<(string, string)>();
-            foreach (Match tr in Regex.Matches(sm.Groups[1].Value, @"<tr>([\s\S]*?)</tr>",
-                RegexOptions.IgnoreCase))
-            {
-                var tds = Regex.Matches(tr.Groups[1].Value, @"<td[^>]*>([\s\S]*?)</td>",
-                    RegexOptions.IgnoreCase);
-                if (tds.Count >= 2)
-                    rows.Add((Flat(tds[0].Groups[1].Value), Flat(tds[1].Groups[1].Value)));
-            }
-            sections.Add(rows);
-        }
-
-        // the auth band's two label/value pairs
-        var headM = Regex.Match(html, @"receiptDetail-head[""'][\s\S]*?<table>([\s\S]*?)</table>",
-            RegexOptions.IgnoreCase);
-        string authVal = "", rcptVal = "";
-        if (headM.Success)
-        {
-            var tds = Regex.Matches(headM.Groups[1].Value, @"<td[^>]*>([\s\S]*?)</td>",
+            var tds = Regex.Matches(rk.headM.Groups[1].Value, @"<td[^>]*>([\s\S]*?)</td>",
                 RegexOptions.IgnoreCase);
             // [img][Auth Code][value][Receipt Number][value]
             if (tds.Count >= 5)
             {
-                authVal = Flat(tds[2].Groups[1].Value);
-                rcptVal = Flat(tds[4].Groups[1].Value);
+                rk.authVal = Flat(rk, tds[2].Groups[1].Value);
+                rk.rcptVal = Flat(rk, tds[4].Groups[1].Value);
             }
         }
 
-        // the details body: label + (value | nested fees grid | right amount)
-        var bodyM = Regex.Match(html, @"receiptDetail-body[""'][\s\S]*?<table>([\s\S]*)</table>\s*</div>",
+        rk.bodyM = Regex.Match(rk.html, @"receiptDetail-body[""'][\s\S]*?<table>([\s\S]*)</table>\s*</div>",
             RegexOptions.IgnoreCase);
-        if (!bodyM.Success) return null;
-        var bodyRows = new List<(string Label, string Value, bool Amount, bool Total, bool Fees)>();
-        foreach (Match tr in Regex.Matches(bodyM.Groups[1].Value,
-            @"<tr>((?:(?!</tr>)[\s\S])*)</tr>", RegexOptions.IgnoreCase))
-        {
-            var row = tr.Groups[1].Value;
-            var tds = Regex.Matches(row, @"<td\b([^>]*)>((?:(?!</td>|<td\b)[\s\S])*)</td>",
-                RegexOptions.IgnoreCase);
-            if (tds.Count < 2) continue;
-            var label = Flat(tds[0].Groups[2].Value);
-            if (label.Length == 0) continue;
-            var attrs0 = tds[0].Groups[1].Value;
-            var isTotal = attrs0.Contains("totalLabel", StringComparison.OrdinalIgnoreCase);
-            var isFees = row.Contains("<table", StringComparison.OrdinalIgnoreCase);
-            var isAmount = tds[1].Groups[1].Value.Contains("detailValueAmt", StringComparison.OrdinalIgnoreCase)
-                || isTotal;
-            var value = Flat(isFees
-                ? Regex.Replace(tds[1].Groups[2].Value, @"</?t[a-z]+\b[^>]*>", " ")
-                : tds[1].Groups[2].Value);
-            bodyRows.Add((label, value, isAmount, isTotal, isFees));
-        }
-        if (bodyRows.Count == 0) return null;
+        if (!rk.bodyM.Success) return null;
+        rk.bodyRows = new List<(string Label, string Value, bool Amount, bool Total, bool Fees)>();
+        CollectReceiptRows(rk);
+        if (rk.bodyRows.Count == 0) return null;
 
-        var doc = new Document();
-        var page = doc.Pages.Add(pageWidth, pageHeight);
-        EnsureFonts(page);
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        var sb = new StringBuilder();
-        string N(double v) => v.ToString("0.###", inv);
-        // page-down y → PDF y
-        double Y(double yTd) => pageHeight - yTd;
-
+        rk.doc = new Document();
+        rk.page = rk.doc.Pages.Add(rk.pageWidth, rk.pageHeight);
+        EnsureFonts(rk.page);
+        rk.inv = System.Globalization.CultureInfo.InvariantCulture;
+        rk.sb = new StringBuilder();
         // ── boxes ──
         // the card outline
-        sb.AppendLine("0.925 0.937 0.941 RG 0.75 w");
-        sb.AppendLine($"{N(RcCardSidePt)} {N(Y(RcCardTopPt + RcCardHPt))} {N(pageWidth - 2 * RcCardSidePt)} {N(RcCardHPt)} re S");
-        // the auth band fill + dotted border
-        var bandRight = pageWidth - RcBandRightInsetPt;
-        sb.AppendLine("0.925 0.937 0.941 rg");
-        sb.AppendLine($"{N(RcBandLeftPt)} {N(Y(RcBandTopPt + RcBandHPt))} {N(bandRight - RcBandLeftPt)} {N(RcBandHPt)} re f");
-        sb.AppendLine("[0.75 0.75] 0 d 0.502 0.502 0.502 RG 0.75 w");
-        sb.AppendLine($"{N(RcBandLeftPt + 0.38)} {N(Y(RcBandTopPt + RcBandHPt))} {N(bandRight - RcBandLeftPt - 0.76)} {N(RcBandHPt)} re S");
-        sb.AppendLine("[] 0 d");
+        rk.sb.AppendLine("0.925 0.937 0.941 RG 0.75 w");
+        rk.sb.AppendLine($"{N(rk, RcCardSidePt)} {N(rk, Y(rk, RcCardTopPt + RcCardHPt))} {N(rk, rk.pageWidth - 2 * RcCardSidePt)} {N(rk, RcCardHPt)} re S");
+        rk.bandRight = rk.pageWidth - RcBandRightInsetPt;
+        rk.sb.AppendLine("0.925 0.937 0.941 rg");
+        rk.sb.AppendLine($"{N(rk, RcBandLeftPt)} {N(rk, Y(rk, RcBandTopPt + RcBandHPt))} {N(rk, rk.bandRight - RcBandLeftPt)} {N(rk, RcBandHPt)} re f");
+        rk.sb.AppendLine("[0.75 0.75] 0 d 0.502 0.502 0.502 RG 0.75 w");
+        rk.sb.AppendLine($"{N(rk, RcBandLeftPt + 0.38)} {N(rk, Y(rk, RcBandTopPt + RcBandHPt))} {N(rk, rk.bandRight - RcBandLeftPt - 0.76)} {N(rk, RcBandHPt)} re S");
+        rk.sb.AppendLine("[] 0 d");
         // the broken-image placeholder (two-tone 14pt box)
-        sb.AppendLine("1 w 0.333 0.333 0.333 RG");
-        sb.AppendLine($"{N(RcImgBoxX)} {N(Y(RcImgBoxTop + 0.5))} m {N(RcImgBoxX + RcImgBoxSz)} {N(Y(RcImgBoxTop + 0.5))} l S");
-        sb.AppendLine($"{N(RcImgBoxX + 0.5)} {N(Y(RcImgBoxTop + RcImgBoxSz))} m {N(RcImgBoxX + 0.5)} {N(Y(RcImgBoxTop))} l S");
-        sb.AppendLine("0.667 0.667 0.667 RG");
-        sb.AppendLine($"{N(RcImgBoxX)} {N(Y(RcImgBoxTop + RcImgBoxSz - 0.5))} m {N(RcImgBoxX + RcImgBoxSz)} {N(Y(RcImgBoxTop + RcImgBoxSz - 0.5))} l S");
-        sb.AppendLine($"{N(RcImgBoxX + RcImgBoxSz - 0.5)} {N(Y(RcImgBoxTop + RcImgBoxSz))} m {N(RcImgBoxX + RcImgBoxSz - 0.5)} {N(Y(RcImgBoxTop))} l S");
-        page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
+        rk.sb.AppendLine("1 w 0.333 0.333 0.333 RG");
+        rk.sb.AppendLine($"{N(rk, RcImgBoxX)} {N(rk, Y(rk, RcImgBoxTop + 0.5))} m {N(rk, RcImgBoxX + RcImgBoxSz)} {N(rk, Y(rk, RcImgBoxTop + 0.5))} l S");
+        rk.sb.AppendLine($"{N(rk, RcImgBoxX + 0.5)} {N(rk, Y(rk, RcImgBoxTop + RcImgBoxSz))} m {N(rk, RcImgBoxX + 0.5)} {N(rk, Y(rk, RcImgBoxTop))} l S");
+        rk.sb.AppendLine("0.667 0.667 0.667 RG");
+        rk.sb.AppendLine($"{N(rk, RcImgBoxX)} {N(rk, Y(rk, RcImgBoxTop + RcImgBoxSz - 0.5))} m {N(rk, RcImgBoxX + RcImgBoxSz)} {N(rk, Y(rk, RcImgBoxTop + RcImgBoxSz - 0.5))} l S");
+        rk.sb.AppendLine($"{N(rk, RcImgBoxX + RcImgBoxSz - 0.5)} {N(rk, Y(rk, RcImgBoxTop + RcImgBoxSz))} m {N(rk, RcImgBoxX + RcImgBoxSz - 0.5)} {N(rk, Y(rk, RcImgBoxTop))} l S");
+        rk.page.AddContentStream(Encoding.ASCII.GetBytes(rk.sb.ToString()));
 
-        // ── text ── (everything #666)
-        var runs = new StringBuilder();
-        void Emit(string res, double fs, double x, double yTd, string text)
+        rk.runs = new StringBuilder();
+        rk.hdrLeft = rk.pageWidth - RcCardSidePt - 3.75 - RcHeaderWPt;
+        if (rk.agentM.Success)
+            Emit(rk, "F2", RcAgentFs, rk.hdrLeft + RcAgentOffPt, RcAgentBase, Flat(rk, rk.agentM.Groups[1].Value));
+        rk.ax = rk.hdrLeft + RcAddrOffPt;
+        foreach (var item in rk.addrItems)
         {
-            runs.AppendLine("BT 0.4 0.4 0.4 rg");
-            runs.Append($"/{res} {fs.ToString("F2", inv)} Tf ");
-            runs.Append($"1 0 0 1 {N(x)} {N(Y(yTd))} Tm ");
-            runs.AppendLine($"({EscapePdfString(text)}) Tj ET");
+            Emit(rk, "F1", RcAddrFs, rk.ax, RcAddrBase, item);
+            rk.ax += W(rk, item + " ", RcAddrFs, bold: false) + RcAddrGapPt;
         }
-        double W(string t, double fs, bool bold) =>
-            MeasureFaceText(bold ? "Helvetica-Bold" : "Helvetica", t, fs);
+        EmitReceiptSections(rk);
+        Emit(rk, "F1", RcBodyFs, RcAuthLabelRight - W(rk, "Auth Code", RcBodyFs, false), RcAuthBase, "Auth Code");
+        if (rk.authVal.Length > 0) Emit(rk, "F2", RcBodyFs, RcAuthValueX, RcAuthBase, rk.authVal);
+        Emit(rk, "F1", RcBodyFs, RcRcptLabelRight - W(rk, "Receipt Number", RcBodyFs, false), RcAuthBase, "Receipt Number");
+        if (rk.rcptVal.Length > 0) Emit(rk, "F2", RcBodyFs, RcRcptValueX, RcAuthBase, rk.rcptVal);
 
-        var hdrLeft = pageWidth - RcCardSidePt - 3.75 - RcHeaderWPt;
-        if (agentM.Success)
-            Emit("F2", RcAgentFs, hdrLeft + RcAgentOffPt, RcAgentBase, Flat(agentM.Groups[1].Value));
-        var ax = hdrLeft + RcAddrOffPt;
-        foreach (var item in addrItems)
-        {
-            Emit("F1", RcAddrFs, ax, RcAddrBase, item);
-            ax += W(item + " ", RcAddrFs, bold: false) + RcAddrGapPt;
-        }
-        for (var s = 0; s < sections.Count && s < 2; s++)
-        {
-            var labelX = hdrLeft + (s == 0 ? RcS1LabelOff : RcS2LabelOff);
-            var valueX = hdrLeft + (s == 0 ? RcS1ValueOff : RcS2ValueOff);
-            var y = RcSumBase - (s == 1 ? RcSumLift : 0);
-            foreach (var (label, value) in sections[s])
-            {
-                Emit("F1", RcSumFs, labelX, y, label);
-                if (value.Length > 0) Emit("F2", RcSumFs, valueX, y, value);
-                y += RcSumPitch;
-            }
-        }
-        Emit("F1", RcBodyFs, RcAuthLabelRight - W("Auth Code", RcBodyFs, false), RcAuthBase, "Auth Code");
-        if (authVal.Length > 0) Emit("F2", RcBodyFs, RcAuthValueX, RcAuthBase, authVal);
-        Emit("F1", RcBodyFs, RcRcptLabelRight - W("Receipt Number", RcBodyFs, false), RcAuthBase, "Receipt Number");
-        if (rcptVal.Length > 0) Emit("F2", RcBodyFs, RcRcptValueX, RcAuthBase, rcptVal);
+        rk.by = RcBodyBase;
+        rk.afterFees = false;
+        EmitReceiptRows(rk);
 
-        var by = RcBodyBase;
-        var afterFees = false;
-        for (var i = 0; i < bodyRows.Count; i++)
-        {
-            var (label, value, isAmount, isTotal, isFees) = bodyRows[i];
-            if (i > 0) by += isTotal ? RcTotalPitch : afterFees ? RcPostFeesPitch : RcBodyPitch;
-            afterFees = false;
-            var lfs = isTotal ? RcTotalFs : RcBodyFs;
-            Emit(isTotal ? "F2" : "F1", lfs, RcBodyLabelX, by, label);
-            if (isFees)
-            {
-                // the nested fees grid: name left, amount right, a touch lower
-                var parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                var amt = parts.Length > 1 ? parts[^1] : "";
-                var name = amt.Length > 0 ? value[..value.LastIndexOf(amt, StringComparison.Ordinal)].Trim() : value;
-                Emit("F2", RcBodyFs, RcFeesValueX, by + RcFeesDrop, name);
-                if (amt.Length > 0)
-                    Emit("F2", RcBodyFs, RcFeesAmtRight - W(amt, RcBodyFs, true), by + RcFeesDrop, amt);
-                afterFees = true;
-            }
-            else if (isAmount && value.Length > 0)
-                Emit("F2", lfs,
-                    (isTotal ? RcTotalAmtRight : RcAmountRight) - W(value, lfs, true), by, value);
-            else if (value.Length > 0)
-                Emit("F2", RcBodyFs, RcBodyValueX, by, value);
-        }
-
-        page.AddContentStream(Encoding.ASCII.GetBytes(runs.ToString()));
-        return doc;
+        rk.page.AddContentStream(Encoding.ASCII.GetBytes(rk.runs.ToString()));
+        return rk.doc;
     }
 }

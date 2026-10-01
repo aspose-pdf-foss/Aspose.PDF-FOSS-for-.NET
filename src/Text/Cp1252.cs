@@ -37,7 +37,7 @@ internal static class Cp1252
     }
 
     /// <summary>Try to encode a single character to its Windows-1252 byte.</summary>
-    public static bool TryGetByte(char ch, out byte b) => ToByteTable.TryGetValue(ch, out b);
+    public static byte? TryGetByte(char ch) => ToByteTable.TryGetValue(ch, out var b) ? b : null;
 
     /// <summary>Encode a string; characters outside Windows-1252 become '?'.</summary>
     public static byte[] GetBytes(string s)

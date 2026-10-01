@@ -32,6 +32,9 @@ namespace Aspose.Pdf.Vector
         /// <summary>The form's own painted elements, in form-space coordinates.</summary>
         public GraphicElementCollection Elements { get; }
 
+        internal override List<Aspose.Pdf.Operator> DrawingOperators() =>
+            Elements.SelectMany(element => element.Operators).ToList();
+
         /// <summary>The CTM in force at the <c>Do</c> invocation (placement into page space).</summary>
         internal Aspose.Pdf.Matrix PlacementCtm { get; }
 

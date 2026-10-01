@@ -5,7 +5,7 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.Facades;
 using Aspose.Pdf.Text;
 
-namespace Aspose.Pdf.Stamps;
+namespace Aspose.Pdf;
 
 public partial class TextStamp
 {
@@ -78,10 +78,11 @@ public partial class TextStamp
     // assigned a custom byte code in the 0x80-0x9F (and as needed 0x7F/0xA0)
     // range and an AGL glyph name returned via `diffMap` so the caller can
     // emit /Encoding /Differences. Truly unrepresentable chars fall back to '?'.
-    private static byte[] EncodeForWinAnsi(string text, out List<(byte code, string glyph)> diffMap)
+    private static (byte[] result, List<(byte code, string glyph)> diffMap) EncodeForWinAnsi(string text)
     {
+        List<(byte code, string glyph)>? diffMap = default;
         diffMap = new List<(byte, string)>();
-        if (string.IsNullOrEmpty(text)) return Array.Empty<byte>();
+        if (string.IsNullOrEmpty(text)) return (Array.Empty<byte>(), diffMap);
         // Managed Windows-1252 (Cp1252): chars not in WinAnsi report as
         // unmappable so we route them through the AGL /Differences path instead
         // of silently transliterating them — the renderer never draws the wrong
@@ -108,7 +109,7 @@ public partial class TextStamp
                 bytes[i] = (byte)ch;
                 continue;
             }
-            if (Aspose.Pdf.Text.Cp1252.TryGetByte(ch, out var wb))
+            if (Aspose.Pdf.Text.Cp1252.TryGetByte(ch) is { } wb)
             {
                 bytes[i] = wb;
                 continue;
@@ -130,7 +131,7 @@ public partial class TextStamp
             diffMap.Add((code, glyph));
             bytes[i] = code;
         }
-        return bytes;
+        return (bytes, diffMap);
     }
 
     // Inverse of AglGlyphName for the chars we actually map via /Differences,

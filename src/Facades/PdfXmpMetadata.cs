@@ -252,7 +252,7 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
                && string.Equals(raw, item.Value?.ToStringValue(), StringComparison.Ordinal);
     }
 
-    /// <inheritdoc />
+    /// <summary>Returns true when the bound XMP metadata contains the given raw property key; false when nothing is bound.</summary>
     public bool ContainsKey(string key) => _metadata is not null && _metadata.ContainsKey(key);
 
     /// <summary>Copy all key/value pairs into <paramref name="array"/> starting at <paramref name="index"/>.</summary>

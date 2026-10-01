@@ -1,3 +1,4 @@
+﻿using System.IO;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -69,10 +70,56 @@ public sealed partial class GdiPlusPageRenderer
             }
         }
 
-        using var bmp = ImageDecoder.TryDecode(xobj, state, _reader, _pdfxOverprintSim);
+        if (_vectorTarget && TryBlitJpegAsItself(xobj, state)) return;
+
+        using var bmp = ImageDecoder.TryDecode(xobj, state, _reader, _pdfxOverprintSim, replicateChroma: PrintedPageImage);
         if (bmp is null) return;
         var softMask = state.SoftMask is { } sm ? GetSoftMaskAlpha(sm) : null;
         BlitImage(bmp, state.Ctm, state.OverprintFill && IsSubtractiveImage(xobj.Dict), state.FillAlpha, softMask);
+    }
+
+    /// <summary>
+    /// Hands a plain JPEG image to a printer as the JPEG it is: the platform decodes the stream's
+    /// own bytes and the printer driver, given that image unmodified, keeps them. False, with
+    /// nothing drawn, for any image whose samples need more than a decode to reach the page.
+    /// </summary>
+    /// <remarks>
+    /// The reference's XPS print of a DCTDecode DeviceRGB logo carries pixels identical to a
+    /// plain decode of the PDF's JPEG. Decoded here and handed over as a new bitmap, the driver
+    /// re-encodes it, and 152 of a half-scale page's 167 pixels outside the corpus template's
+    /// match window sat inside that logo. An image in an ICC or other colour space is left to
+    /// the decoder: the reference re-encodes those itself.
+    /// </remarks>
+    private bool TryBlitJpegAsItself(PdfStream xobj, GraphicsState state)
+    {
+        var dict = xobj.Dict;
+        if (state.SoftMask is not null || state.FillAlpha < FullyOpaqueImage || state.OverprintFill) return false;
+        if (dict.Get("SMask") is not null || dict.Get("Mask") is not null || dict.Get("Decode") is not null
+            || dict.Get("ImageMask") is PdfBoolean { Value: true })
+            return false;
+        var filter = _reader.Resolve(dict.Get("Filter"));
+        var isJpeg = filter is PdfName { Value: "DCTDecode" }
+            || filter is PdfArray { Count: 1 } one && _reader.Resolve(one[0]) is PdfName { Value: "DCTDecode" };
+        if (!isJpeg || _reader.Resolve(dict.Get("ColorSpace")) is not PdfName { Value: "DeviceRGB" or "DeviceGray" })
+            return false;
+
+        // The reader decrypts; a DCTDecode stream decodes to its JPEG bytes as they are.
+        byte[] bytes;
+        try { bytes = _reader.DecodeStream(xobj); }
+        catch { return false; }
+        using var stream = new MemoryStream(bytes, writable: false);
+        Bitmap jpeg;
+        try { jpeg = new Bitmap(stream); }
+        catch (ArgumentException) { return false; }
+        using (jpeg)
+        {
+            if (jpeg.Width != (int)dict.GetInt("Width") || jpeg.Height != (int)dict.GetInt("Height")) return false;
+            var saved = _g.Transform;
+            using var world = WorldMatrix(state.Ctm);
+            try { BlitImageAsDrawingCommand(jpeg, world); }
+            finally { _g.Transform = saved; }
+        }
+        return true;
     }
 
     /// <summary>Paint an ImageMask whose current fill is a pattern: build a clip from
@@ -188,142 +235,74 @@ public sealed partial class GdiPlusPageRenderer
 
     private void BlitImageCore(Bitmap bmp, double[] ctm, bool overprint, double alpha, byte[]? softMask)
     {
-        var saved = _g.Transform;
-        using var world = WorldMatrix(ctm);
-        _g.Transform = world;
-        // Composite a semi-transparent image in straight sRGB (no gamma) so its alpha
-        // blend matches the platform renderer — the same reason the shape-fill path
-        // forces AssumeLinear (PDF §11.3.6 composites in the device colour space, not
-        // linear light). Without this a soft-masked overlay (e.g. a slide's translucent
-        // blue/photo panels) composites a few levels too light. Opaque images are
-        // unaffected (src fully replaces dst).
-        var savedCq = _g.CompositingQuality;
-        _g.CompositingQuality = CompositingQuality.AssumeLinear;
-        var savedIm = _g.InterpolationMode;
+        BlitImageWithMasks(bmp, ctm, softMask, overprint, alpha);
+    }
+
+    /// <summary>A /ca at or above this draws an image as opaque.</summary>
+    private const double FullyOpaqueImage = 0.999;
+
+    /// <summary>
+    /// Hand a translucent image to a printer: the plain bilinear kernel and the opacity as a
+    /// whole number of alpha levels, drawn into the unit square under the page transform.
+    /// </summary>
+    /// <remarks>
+    /// Probed against the reference's print of a watermark drawn at /ca 0.1 (a 509x460 picture
+    /// on a Letter page, 2026-09-17, twelve GDI+ variants through the XPS Document Writer): the
+    /// writer rasterises the translucent picture itself, and its pixels equal the reference's
+    /// only under plain bilinear resampling - the high-quality kernels leave 1,198 pixels 20 or
+    /// more levels off. Its alpha plane equals the reference's only when the opacity is the
+    /// WHOLE alpha level below /ca times 255 (25 of 255 for 0.1): the exact 25.5 dithers to a
+    /// 23/27 checkerboard where the reference's plane carries 23 on three pixels in four. The
+    /// seat and border clip of the raster blit do not apply - the printer resamples.
+    /// </remarks>
+    private void BlitTranslucentImageAsDrawingCommand(Bitmap bmp, double alpha)
+    {
+        using var attributes = new ImageAttributes();
+        attributes.SetWrapMode(WrapMode.TileFlipXY);
+        var levels = Math.Floor(Math.Max(0.0, Math.Min(1.0, alpha)) * AlphaLevels) / AlphaLevels;
+        attributes.SetColorMatrix(new ColorMatrix { Matrix33 = (float)levels });
+        var savedInterpolation = _g.InterpolationMode;
+        _g.InterpolationMode = InterpolationMode.Bilinear;
         try
         {
-            // Device-space extent of the unit square under the world transform.
-            // Elements = [m11, m12, m21, m22, dx, dy]; the u-edge (1,0) and v-edge
-            // (0,1) map to (m11,m12) and (m21,m22).
-            var e = world.Elements;
-            var devW = Math.Sqrt(e[0] * e[0] + e[1] * e[1]);
-            var devH = Math.Sqrt(e[2] * e[2] + e[3] * e[3]);
-            // LAW: a MAGNIFIED image is seated half a pixel earlier than
-            // a naive blit does — see ShiftBlitByHalfDevicePixel for the correction and
-            // the evidence. Judged at the OUTPUT scale: a supersampling caller renders
-            // large and averages down, and the law is about what the viewer sees, so an
-            // image at 1:1 on a 2x intermediate is not "magnified". The 1% margin keeps a
-            // 1:1 blit — where the correction is nothing and rounding can put the device
-            // extent a hair over the source — off the magnified path entirely.
-            var outScale = Math.Max(1, OutputSupersample);
-            var magnified = devW > bmp.Width * 1.01 * outScale || devH > bmp.Height * 1.01 * outScale;
-            // Sub-pixel-thin blits (e.g. a gradient or raster logo sliced into
-            // 1-row scanline strips, each mapped to a fraction of a pixel) average
-            // away to nothing under high-quality resampling. Grow such a strip to
-            // cover at least one device pixel, centred on its band, so stacked
-            // strips accumulate into the intended image instead of vanishing.
-            float x0 = 0f, x1 = 1f, y0 = 0f, y1 = 1f;
-            if (devW > 1e-6 && devW < 1f) { var f = (float)(1.0 / devW); x0 = 0.5f - f / 2f; x1 = 0.5f + f / 2f; }
-            if (devH > 1e-6 && devH < 1f) { var f = (float)(1.0 / devH); y0 = 0.5f - f / 2f; y1 = 0.5f + f / 2f; }
-
-            if (magnified)
-                ShiftBlitByHalfDevicePixel(world, outScale, ref x0, ref x1, ref y0, ref y1);
-
-            // LAW (minification): a MINIFIED image resamples through the SOFT
-            // kernel. Decimating a scanned text page ~0.95× through bicubic keeps full
-            // contrast and rings — 255|9 across a glyph edge where the expected render
-            // lands 225|70 — because bicubic's negative lobes sharpen what is already
-            // aliasing. The expected minified output matches the prefiltered
-            // bilinear, and switching to it removed every mismatch in the minified band
-            // of a 300 dpi scan (330 pixels past tolerance → 0).
-            if (devW < bmp.Width * 0.99 && devH < bmp.Height * 0.99)
-                _g.InterpolationMode = InterpolationMode.HighQualityBilinear;
-
-            // LAW (the 1:1 rule): a blit within 1% of source scale is drawn
-            // EXACTLY 1:1, one texel per device pixel from the rounded origin. A
-            // full-bleed 96 dpi scan (a 962-px source on a 721.601 pt page = 962.135
-            // device px) is expected pixel-crisp; resampling 962 texels
-            // onto 962.135 px instead smears every pixel by a phase that grows to a
-            // seventh of a pixel across the page. The true-DPI page scale (see
-            // RenderPageAtPixelSize) is proven at 300 dpi, so the crisp 96 dpi scan can
-            // only mean a near-identity blit collapses to identity. Same
-            // 1% margin as the magnified test, so every blit lands in exactly one regime.
-            if (softMask is null && !overprint
-                && Math.Abs(devW - bmp.Width) <= 0.01 * bmp.Width
-                && Math.Abs(devH - bmp.Height) <= 0.01 * bmp.Height)
-                SnapBlitToIdentity(world, bmp, ref x0, ref x1, ref y0, ref y1);
-
-            var dest = new[]
-            {
-                new PointF(x0, y1), // upper-left  → image top-left
-                new PointF(x1, y1), // upper-right → image top-right
-                new PointF(x0, y0), // lower-left  → image bottom-left
-            };
-            if (softMask is not null) BlitImageMasked(bmp, world, dest, alpha, softMask);
-            else if (overprint) BlitImageMultiply(bmp, world, dest);
-            else
-            {
-                // WrapMode.TileFlipXY: at the image boundary a high-quality (bicubic)
-                // resample otherwise samples the pixels *outside* the source — which are
-                // transparent since the page backdrop is bare paper — bleeding partial
-                // alpha and a darkened colour into the edge row/column. Over the former
-                // opaque-white backdrop this went unnoticed; on the coverage-alpha page it
-                // flattens to off-white (e.g. an opaque white scan edge lands at 254
-                // not 255). Clamping the sampler to the edge texel keeps the border
-                // exact. The alpha branch also carries the /ca image opacity via a matrix.
-                using var ia = new ImageAttributes();
-                ia.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);
-                if (alpha < 0.999)
-                {
-                    var cm = new ColorMatrix { Matrix33 = (float)Math.Max(0.0, Math.Min(1.0, alpha)) };
-                    ia.SetColorMatrix(cm);
-                }
-                // LAW (the border, magnified only): an axis-aligned magnified
-                // image covers device pixels [ceil(x0), ceil(x1)) × [ceil(y0), ceil(y1))
-                // of its UNSEATED extent, painted hard — probed on a 300 dpi ladder of
-                // sub-pixel left edges (50.0/50.17/…/50.83 start at columns 50/51/51/51/
-                // 51/51), witnessed on a scan whose banner at 87.5 px starts hard at 88.
-                // Enforced as a CLIP around the seated blit: the seat owns the interior
-                // phase (it measured exact), the clip owns the border, and neither
-                // disturbs the other — the source-rewindow and destination-translation
-                // forms of this rule were both tried and measured worse. The seated
-                // content edge sits half a pixel inside the clip on each side, and the
-                // sampler's mirrored edge texel carries full strength to the clip line.
-                // A MINIFIED border stays soft (its half-covered edge pixels match the
-                // reference as-is — clipping them was measured and lost the match).
-                Region? savedClip = null;
-                if (magnified && Math.Abs(e[1]) < 1e-4f && Math.Abs(e[2]) < 1e-4f
-                    && e[0] > 0f && e[3] < 0f)
-                {
-                    var hardL = (float)Math.Ceiling(e[4]);
-                    var hardT = (float)Math.Ceiling(e[5] + e[3]);
-                    var hardR = (float)Math.Ceiling(e[4] + e[0]);
-                    var hardB = (float)Math.Ceiling(e[5]);
-                    if (hardR - hardL >= 1 && hardB - hardT >= 1)
-                    {
-                        savedClip = _g.Clip;
-                        // The hard rect is in device pixels; intersect it under an
-                        // identity transform, then restore the blit's world matrix.
-                        using (var id = new GdiMatrix())
-                        {
-                            _g.Transform = id;
-                            _g.IntersectClip(new RectangleF(hardL, hardT, hardR - hardL, hardB - hardT));
-                        }
-                        _g.Transform = world;
-                    }
-                }
-                try
-                {
-                    _g.DrawImage(bmp, dest, new RectangleF(0, 0, bmp.Width, bmp.Height),
-                        GraphicsUnit.Pixel, ia);
-                }
-                finally
-                {
-                    if (savedClip is not null) { _g.Clip = savedClip; savedClip.Dispose(); }
-                }
-            }
+            var dest = new[] { new PointF(0, 1), new PointF(1, 1), new PointF(0, 0) };
+            _g.DrawImage(bmp, dest, new RectangleF(0, 0, bmp.Width, bmp.Height), GraphicsUnit.Pixel, attributes);
         }
-        finally { _g.Transform = saved; _g.CompositingQuality = savedCq; _g.InterpolationMode = savedIm; }
+        finally { _g.InterpolationMode = savedInterpolation; }
+    }
+
+    /// <summary>The alpha levels of an 8-bit plane: an opacity is printed as a whole number of them.</summary>
+    private const double AlphaLevels = 255.0;
+
+    /// <summary>
+    /// Hand an image to a printer as itself: its own pixels into the parallelogram the page puts
+    /// it in. None of the pixel-grid laws of the raster blit apply - the printer resamples.
+    /// </summary>
+    /// <remarks>
+    /// <para>The corners are taken all the way to the printer surface's own units FIRST, and the
+    /// image drawn with nothing left to transform. Drawn through the page's Y-flipping world
+    /// transform instead, GDI+ resamples the image itself before the driver sees it (a 125x83
+    /// picture reached the XPS writer as 126x84, and a 250x232 one as two 253x117 bands); drawn this
+    /// way the driver receives the native pixels, byte for byte what the reference printer job sends
+    /// for the same page.</para>
+    /// <para>Not only to layout pixels: under a page scaled to fit the sheet, an image drawn in layout
+    /// pixels reached the XPS writer offset as if the scale did not apply to where it sits. Of 80
+    /// small images at fractional positions on a fitted A4 page, 45 landed a printer pixel right of
+    /// the reference's and 59 below; drawn in the sheet's units, all 80 land on the reference's
+    /// edges - each the exact device coordinate, rounded up.</para>
+    /// </remarks>
+    private void BlitImageAsDrawingCommand(Bitmap bmp, GdiMatrix world)
+    {
+        var corners = new[] { new PointF(0, 1), new PointF(1, 1), new PointF(0, 0) };
+        world.TransformPoints(corners);
+        _layoutToSheet!.TransformPoints(corners);
+        using var sheetToLayout = _layoutToSheet.Clone();
+        sheetToLayout.Invert();
+        _g.Transform = sheetToLayout;
+        var savedInterpolation = _g.InterpolationMode;
+        _g.InterpolationMode = InterpolationMode.Bilinear;
+        try { _g.DrawImage(bmp, corners, new RectangleF(0, 0, bmp.Width, bmp.Height), GraphicsUnit.Pixel); }
+        finally { _g.InterpolationMode = savedInterpolation; }
     }
 
     /// <summary>Seat a magnified image half a DEVICE pixel back, up and to the left.</summary>
@@ -343,26 +322,24 @@ public sealed partial class GdiPlusPageRenderer
     /// has no axis-aligned pixel grid to seat against.
     /// </para>
     /// </remarks>
-    private static void ShiftBlitByHalfDevicePixel(GdiMatrix world, int outScale,
-        ref float x0, ref float x1, ref float y0, ref float y1)
+    /// <returns>The unit rectangle, seated back half a device pixel on each magnified axis when the mapping is upright.</returns>
+    private static (float x0, float x1, float y0, float y1) ShiftBlitByHalfDevicePixel(GdiMatrix world,
+        float x0, float x1, float y0, float y1, bool seatX, bool seatY)
     {
         var e = world.Elements;
         // Elements = [m11, m12, m21, m22, dx, dy]; (u,v) → (u·m11 + v·m21 + dx, u·m12 + v·m22 + dy).
         const float AxisAlignedTol = 1e-4f;
-        if (Math.Abs(e[1]) > AxisAlignedTol || Math.Abs(e[2]) > AxisAlignedTol) return;
+        if (Math.Abs(e[1]) > AxisAlignedTol || Math.Abs(e[2]) > AxisAlignedTol) return (x0, x1, y0, y1);
         // Upright page mapping: x grows with u, and device y grows DOWN while v grows up.
-        if (e[0] <= 0f || e[3] >= 0f) return;
+        if (e[0] <= 0f || e[3] >= 0f) return (x0, x1, y0, y1);
 
         // Half a device pixel expressed in the unit square the caller draws into: the
         // u-edge spans e[0] device pixels across, the v-edge e[3] down (negative, so the
-        // same subtraction moves the image UP the page). On a supersampled intermediate
-        // half an OUTPUT pixel is outScale of its own, since that is the grid the rule
-        // is stated against.
-        var shift = (float)(HalfDevicePixel * outScale);
-        var du = shift / e[0];
-        var dv = shift / e[3];
-        x0 -= du; x1 -= du;
-        y0 -= dv; y1 -= dv;
+        // same subtraction moves the image UP the page).
+        var shift = (float)(HalfDevicePixel);
+        var du = seatX ? shift / e[0] : 0f;
+        var dv = seatY ? shift / e[3] : 0f;
+        return (x0 - du, x1 - du, y0 - dv, y1 - dv);
     }
 
     /// <summary>Half a device pixel — the distance a magnified image is seated back.</summary>
@@ -374,31 +351,45 @@ public sealed partial class GdiPlusPageRenderer
     /// extent is what the resampler does. Do not re-add a snap.</remarks>
     private const double HalfDevicePixel = 0.5;
 
+    /// <summary>How close to source scale a blit must be to collapse to an exact texel copy: a
+    /// tenth of a percent. The full-bleed 96-dpi scan that proved the 1:1 rule sits at 0.014 %;
+    /// a full-page scan at 0.66 % is resampled by the reference (its bilinear kernel turns the
+    /// scan's halftone into flat grey), which the exact copy kept at full contrast.</summary>
+    private const double IdentityBlitTolerance = 0.001;
+
+    /// <summary>Where the magnified regime (bicubic with the half-pixel seat) begins: one percent
+    /// over source scale, as measured on the magnified fixtures. A blit between the identity
+    /// tolerance and this margin resamples plainly, without the seat.</summary>
+    private const double MagnifiedBlitMargin = 0.01;
+    /// <summary>A device extent under this share of the source is a minified axis.</summary>
+    private const double MinifiedBlitMargin = 0.99;
+
     /// <summary>Collapse a near-identity blit to an exact 1:1 copy: one texel per device
     /// pixel, from the rounded device origin. See the call site for the law. The
     /// caller has already established the extent is within 1% of the source size; this
     /// adds the geometric guards (axis-aligned, upright, the un-expanded unit square)
     /// and rewrites the unit rect so the world transform lands each texel on a whole
     /// pixel — where the bicubic sampler degenerates to a copy.</summary>
-    private static void SnapBlitToIdentity(GdiMatrix world, Bitmap bmp,
-        ref float x0, ref float x1, ref float y0, ref float y1)
+    /// <returns>The unit rectangle, rewritten onto whole device pixels when the blit is near-identity.</returns>
+    private static (float x0, float x1, float y0, float y1) SnapBlitToIdentity(GdiMatrix world, Bitmap bmp,
+        float x0, float x1, float y0, float y1)
     {
-        if (x0 != 0f || x1 != 1f || y0 != 0f || y1 != 1f) return;
+        if (x0 != 0f || x1 != 1f || y0 != 0f || y1 != 1f) return (x0, x1, y0, y1);
 
         var e = world.Elements;
         const float AxisAlignedTol = 1e-4f;
-        if (Math.Abs(e[1]) > AxisAlignedTol || Math.Abs(e[2]) > AxisAlignedTol) return;
+        if (Math.Abs(e[1]) > AxisAlignedTol || Math.Abs(e[2]) > AxisAlignedTol) return (x0, x1, y0, y1);
         // Upright page mapping: x grows with u, and device y grows DOWN while v grows up.
-        if (e[0] <= 0f || e[3] >= 0f) return;
+        if (e[0] <= 0f || e[3] >= 0f) return (x0, x1, y0, y1);
 
         double mx = e[0], my = e[3], dx = e[4], dy = e[5];
         var rx = Math.Round(dx);            // left edge  (u = 0)
         var ry = Math.Round(dy + my);       // top edge   (v = 1)
         // Unit-space u/v that place [rx, rx+W) × [ry, ry+H) under the SAME transform.
-        x0 = (float)((rx - dx) / mx);
-        x1 = (float)((rx + bmp.Width - dx) / mx);
-        y1 = (float)((ry - dy) / my);
-        y0 = (float)((ry + bmp.Height - dy) / my);
+        return ((float)((rx - dx) / mx),
+                (float)((rx + bmp.Width - dx) / mx),
+                (float)((ry + bmp.Height - dy) / my),
+                (float)((ry - dy) / my));
     }
 
     /// <summary>Decode a very large packed DeviceGray image (1 or 8 bpc) directly into a

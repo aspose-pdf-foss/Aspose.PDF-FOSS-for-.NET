@@ -247,7 +247,7 @@ public sealed class PdfBookmarkEditor : IDisposable
         {
             Indent = true,
             CloseOutput = false,
-            Encoding = System.Text.Encoding.Latin1,
+            Encoding = Compat.Latin1,
         });
         writer.WriteStartDocument();
         writer.WriteStartElement("Bookmark");
@@ -266,7 +266,7 @@ public sealed class PdfBookmarkEditor : IDisposable
         NamedDestinationCollection namedDests)
     {
         writer.WriteStartElement("Title");
-        var page = ResolveExportPage(item, namedDests, out var dest);
+        (var page, var dest) = ResolveExportPage(item, namedDests);
         if (page > 0)
             writer.WriteAttributeString("Page", FormatLegacyDestination(page, dest));
         writer.WriteAttributeString("Action", ActionTypeName(item.Action));
@@ -280,17 +280,17 @@ public sealed class PdfBookmarkEditor : IDisposable
     }
 
     /// <summary>The destination page for export — the item's own resolved page, or the
-    /// named destination's when /Dest (or the action /D) is a name; <paramref name="dest"/>
+    /// named destination's when /Dest (or the action /D) is a name; <c>dest</c>
     /// carries the explicit destination when one is directly reachable.</summary>
-    private static int ResolveExportPage(OutlineItem item, NamedDestinationCollection namedDests,
-        out Annotations.ExplicitDestination? dest)
+    private static (int result, Annotations.ExplicitDestination? dest) ResolveExportPage(OutlineItem item, NamedDestinationCollection namedDests)
     {
+        Annotations.ExplicitDestination? dest = default;
         dest = null;
         var reader = item.Reader;
         if (reader is null)
         {
             dest = item.Destination as Annotations.ExplicitDestination;
-            return dest?.PageNumber ?? 0;
+            return (dest?.PageNumber ?? 0, dest);
         }
         var destObj = reader.Resolve(item.Dict.Get("Dest"));
         if (destObj is null)
@@ -312,7 +312,7 @@ public sealed class PdfBookmarkEditor : IDisposable
             if (name.Length > 0 && namedDests.FindByName(name) is { PageNumber: > 0 } resolved)
                 page = resolved.PageNumber;
         }
-        return page;
+        return (page, dest);
     }
 
     /// <summary>The legacy Page attribute — "&lt;page&gt; &lt;fit-type&gt; [args…]",

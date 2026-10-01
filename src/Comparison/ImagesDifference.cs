@@ -10,150 +10,163 @@ using GdiRectangle = System.Drawing.Rectangle;
 namespace Aspose.Pdf.Comparison
 {
     /// <summary>
-    /// Result of a graphical comparison of two rendered PDF pages: the first (source) page
-    /// rasterised to a 24bpp bitmap, plus a per-pixel record of where the second (destination)
-    /// page differs from it. Produced by <see cref="GraphicalPdfComparer.GetDifference"/>.
+    /// The per-pixel difference between two rendered pages, as <see cref="GraphicalPdfComparer.GetDifference"/>
+    /// computes it. The rasters are managed 24-bit RGB rows; the <see cref="Bitmap"/> views are built on demand
+    /// and need the platform's GDI+, which the file and PDF outputs of the comparer do not.
     /// </summary>
-    [SupportedOSPlatform("windows")]
     public sealed class ImagesDifference : IDisposable
     {
-        /// <summary>Sentinel stored in <see cref="Difference"/> for pixels identical in both pages.</summary>
+        /// <summary>The difference entry of a pixel the two pages agree on.</summary>
         internal const int Same = -1;
+
+        /// <summary>Bytes per pixel of the rasters this class holds (24bpp RGB).</summary>
+        internal const int BytesPerPixel = 3;
+
+        /// <summary>Every raster row is padded to a multiple of this many bytes, as a 24bpp platform bitmap's is.</summary>
+        internal const int RowAlignment = 4;
 
         // Compose modes for <see cref="Compose"/>.
         internal const int ModeDestination = 0; // reconstruct the destination page
         internal const int ModeMask = 1;        // fg where different, bg where identical
         internal const int ModeOverlay = 2;     // source page with differing pixels painted fg
 
-        private Bitmap _source;
+        private const int ChannelMask = 0xFF;
+        private const int RedShift = 16;
+        private const int GreenShift = 8;
+
+        private readonly byte[] _source;
         private bool _disposed;
 
-        internal ImagesDifference(Bitmap sourceImage, int[] difference, int stride, int height)
+        /// <summary>Wraps the source raster (RGB rows of <paramref name="width"/> pixels) and the
+        /// per-pixel difference against the destination.</summary>
+        internal ImagesDifference(byte[] sourceRgb, int width, int[] difference, int height)
         {
-            _source = sourceImage;
+            _source = sourceRgb;
+            Width = width;
             Difference = difference;
-            Stride = stride;
             Height = height;
         }
 
-        /// <summary>The first (source) page rendered to a 24bpp RGB bitmap.</summary>
-        public Bitmap SourceImage => _source;
+        /// <summary>The first page as rendered (GDI+ view; see <see cref="SourceRgb"/> for the raster).</summary>
+        [SupportedOSPlatform("windows")]
+        public Bitmap SourceImage => ToBitmap(_source, Width, Height);
 
         /// <summary>
-        /// Per-pixel difference record, row-major (index = y * <c>Width</c> + x). A value of
-        /// <c>-1</c> means the pixel is identical in both pages; any other value is the packed
-        /// <c>0xRRGGBB</c> colour of the destination page at that pixel.
+        /// One entry per pixel, row by row: <c>-1</c> where the two pages agree, otherwise the
+        /// destination page's colour as <c>0xRRGGBB</c>.
         /// </summary>
         public int[] Difference { get; }
 
-        /// <summary>Row stride (in bytes) of <see cref="SourceImage"/> at 24bpp.</summary>
-        public int Stride { get; }
+        /// <summary>Bytes per row of the source raster: the pixels, padded to <see cref="RowAlignment"/>.</summary>
+        public int Stride => StrideFor(Width);
 
-        /// <summary>Pixel height of the compared images.</summary>
+        /// <summary>The padded row length of a raster <paramref name="width"/> pixels wide.</summary>
+        internal static int StrideFor(int width) =>
+            (width * BytesPerPixel + RowAlignment - 1) / RowAlignment * RowAlignment;
+
+        /// <summary>Height of the rasters in pixels.</summary>
         public int Height { get; }
 
-        private int Width => _source.Width;
+        /// <summary>Width of the rasters in pixels.</summary>
+        internal int Width { get; }
 
-        /// <summary>
-        /// Reconstruct the second (destination) page image: identical pixels are copied from the
-        /// source, differing pixels take their recorded destination colour.
-        /// </summary>
+        /// <summary>The first page's raster: RGB rows, <see cref="Stride"/> bytes each.</summary>
+        internal byte[] SourceRgb => _source;
+
+        /// <summary>The second page, rebuilt from the source and the difference.</summary>
+        [SupportedOSPlatform("windows")]
         public Bitmap GetDestinationImage()
         {
-            return Compose(ModeDestination, Color.Black, Color.Black);
+            return ToBitmap(Compose(ModeDestination, Color.Black, Color.Black), Width, Height);
         }
 
-        /// <summary>
-        /// Produce a difference mask: <paramref name="color"/> where the two pages differ and
-        /// <paramref name="backgroundColor"/> where they are identical.
-        /// </summary>
+        /// <summary>A mask: <paramref name="color"/> where the pages differ, <paramref name="backgroundColor"/> elsewhere.</summary>
+        [SupportedOSPlatform("windows")]
         public Bitmap DifferenceToImage(Color color, Color backgroundColor)
         {
-            return Compose(ModeMask, color, backgroundColor);
+            return ToBitmap(Compose(ModeMask, color, backgroundColor), Width, Height);
         }
 
-        /// <summary>
-        /// Build a 24bpp bitmap from the source raster and the difference record.
-        /// </summary>
-        internal Bitmap Compose(int mode, Color fg, Color bg)
+        /// <summary>The raster a compose mode describes: RGB rows of <see cref="Stride"/> bytes.</summary>
+        internal byte[] Compose(int mode, Color fg, Color bg)
         {
             int w = Width, h = Height;
-
-            var srcRect = new GdiRectangle(0, 0, w, h);
-            var srcData = _source.LockBits(srcRect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-            byte[] src;
-            int srcStride = srcData.Stride;
-            try
+            var dst = new byte[Stride * h];
+            for (int y = 0; y < h; y++)
             {
-                src = new byte[srcStride * h];
-                Marshal.Copy(srcData.Scan0, src, 0, src.Length);
-            }
-            finally
-            {
-                _source.UnlockBits(srcData);
-            }
-
-            var outBmp = new Bitmap(w, h, PixelFormat.Format24bppRgb);
-            var outData = outBmp.LockBits(srcRect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
-            try
-            {
-                int outStride = outData.Stride;
-                var dst = new byte[outStride * h];
-                for (int y = 0; y < h; y++)
+                int row = y * Stride;
+                int drow = y * w;
+                for (int x = 0; x < w; x++)
                 {
-                    int srow = y * srcStride;
-                    int orow = y * outStride;
-                    int drow = y * w;
-                    for (int x = 0; x < w; x++)
+                    int di = Difference[drow + x];
+                    int oi = row + x * BytesPerPixel;
+                    byte r, g, b;
+                    if (di == Same)
                     {
-                        int di = Difference[drow + x];
-                        byte r, g, b;
-                        if (di == Same)
+                        if (mode == ModeMask)
                         {
-                            if (mode == ModeMask)
-                            {
-                                r = bg.R; g = bg.G; b = bg.B;
-                            }
-                            else
-                            {
-                                // Destination and overlay keep the source colour for identical pixels.
-                                int si = srow + x * 3;
-                                b = src[si]; g = src[si + 1]; r = src[si + 2];
-                            }
-                        }
-                        else if (mode == ModeDestination)
-                        {
-                            r = (byte)((di >> 16) & 0xFF);
-                            g = (byte)((di >> 8) & 0xFF);
-                            b = (byte)(di & 0xFF);
+                            r = bg.R; g = bg.G; b = bg.B;
                         }
                         else
                         {
-                            // Mask foreground / overlay highlight colour.
-                            r = fg.R; g = fg.G; b = fg.B;
+                            // Destination and overlay keep the source colour for identical pixels.
+                            r = _source[oi]; g = _source[oi + 1]; b = _source[oi + 2];
                         }
+                    }
+                    else if (mode == ModeDestination)
+                    {
+                        r = (byte)((di >> RedShift) & ChannelMask);
+                        g = (byte)((di >> GreenShift) & ChannelMask);
+                        b = (byte)(di & ChannelMask);
+                    }
+                    else
+                    {
+                        // Mask foreground / overlay highlight colour.
+                        r = fg.R; g = fg.G; b = fg.B;
+                    }
+                    dst[oi] = r; dst[oi + 1] = g; dst[oi + 2] = b;
+                }
+            }
+            return dst;
+        }
 
-                        int oi = orow + x * 3;
-                        dst[oi] = b; dst[oi + 1] = g; dst[oi + 2] = r;
+        /// <summary>A GDI+ bitmap over an RGB raster (Windows only; the managed outputs never need it).</summary>
+        [SupportedOSPlatform("windows")]
+        internal static Bitmap ToBitmap(byte[] rgb, int width, int height)
+        {
+            var bitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            var data = bitmap.LockBits(new GdiRectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            try
+            {
+                var rows = new byte[data.Stride * height];
+                for (int y = 0; y < height; y++)
+                {
+                    int src = y * StrideFor(width);
+                    int dst = y * data.Stride;
+                    for (int x = 0; x < width; x++)
+                    {
+                        // GDI+ rows are BGR.
+                        rows[dst + x * BytesPerPixel] = rgb[src + x * BytesPerPixel + 2];
+                        rows[dst + x * BytesPerPixel + 1] = rgb[src + x * BytesPerPixel + 1];
+                        rows[dst + x * BytesPerPixel + 2] = rgb[src + x * BytesPerPixel];
                     }
                 }
-                Marshal.Copy(dst, 0, outData.Scan0, dst.Length);
+                Marshal.Copy(rows, 0, data.Scan0, rows.Length);
             }
             finally
             {
-                outBmp.UnlockBits(outData);
+                bitmap.UnlockBits(data);
             }
-
-            return outBmp;
+            return bitmap;
         }
 
-        /// <inheritdoc />
+        /// <summary>Nothing unmanaged is held; kept for the callers that dispose the result.</summary>
         public void Dispose()
         {
-            if (_disposed) return;
             _disposed = true;
-            _source?.Dispose();
-            _source = null!;
         }
+
+        /// <summary>Whether <see cref="Dispose"/> was called.</summary>
+        internal bool IsDisposed => _disposed;
     }
 }

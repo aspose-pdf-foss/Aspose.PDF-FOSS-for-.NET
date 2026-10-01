@@ -38,15 +38,35 @@ namespace Aspose.Pdf.Security
         private readonly byte[] _block;
         private readonly int _rate;        // sponge rate in bytes
         private readonly int _digestBytes;
+        private readonly byte _domain;
         private int _pos;
 
-        public Sha3Core(int digestBytes)
+        // Domain-separation and first padding bits: SHA-3 appends 01, SHAKE 1111 (FIPS 202 B.2).
+        private const byte Sha3Domain = 0x06;
+        private const byte ShakeDomain = 0x1F;
+
+        public Sha3Core(int digestBytes) : this(200 - 2 * digestBytes, digestBytes, Sha3Domain)
+        {
+            // rate = 1600/8 - capacity; capacity = 2 * digest size
+        }
+
+        private Sha3Core(int rateBytes, int digestBytes, byte domain)
         {
             _digestBytes = digestBytes;
-            _rate = 200 - 2 * digestBytes; // rate = 1600/8 - capacity; capacity = 2 * digest size
+            _rate = rateBytes;
+            _domain = domain;
             _block = new byte[_rate];
             Reset();
         }
+
+        /// <summary>SHA3 with a digest of that many octets.</summary>
+        public static Sha3Core Sha3(int digestBytes) => new Sha3Core(digestBytes);
+
+        /// <summary>SHAKE128 or SHAKE256 (by security level in bits) squeezed to that many octets.</summary>
+        public static Sha3Core Shake(int securityBits, int outputBytes) => new Sha3Core(200 - securityBits / 4, outputBytes, ShakeDomain);
+
+        /// <summary>The octets produced.</summary>
+        public int DigestLength => _digestBytes;
 
         public void Reset()
         {
@@ -69,10 +89,10 @@ namespace Aspose.Pdf.Security
 
         public byte[] Digest()
         {
-            // SHA-3 padding: domain-separation bits 01 then pad10*1 => first pad
-            // byte 0x06, last rate byte high bit 0x80 (both XORed into the block).
+            // Padding: the domain-separation bits then pad10*1 => first pad byte 0x06
+            // (SHA-3) or 0x1F (SHAKE), last rate byte high bit 0x80 (both XORed in).
             for (int i = _pos; i < _rate; i++) _block[i] = 0;
-            _block[_pos] ^= 0x06;
+            _block[_pos] ^= _domain;
             _block[_rate - 1] ^= 0x80;
             AbsorbBlock();
 
@@ -190,9 +210,16 @@ namespace Aspose.Pdf.Security
                 case DigestHashAlgorithm.Sha256: return SHA256.Create();
                 case DigestHashAlgorithm.Sha384: return SHA384.Create();
                 case DigestHashAlgorithm.Sha512: return SHA512.Create();
+#if NET8_0_OR_GREATER
                 case DigestHashAlgorithm.Sha3_256: return SHA3_256.IsSupported ? (HashAlgorithm)SHA3_256.Create() : new Sha3_256();
                 case DigestHashAlgorithm.Sha3_384: return SHA3_384.IsSupported ? (HashAlgorithm)SHA3_384.Create() : new Sha3_384();
                 case DigestHashAlgorithm.Sha3_512: return SHA3_512.IsSupported ? (HashAlgorithm)SHA3_512.Create() : new Sha3_512();
+#else
+                // The platform SHA-3 classes arrived in .NET 8; the older targets use the Keccak here.
+                case DigestHashAlgorithm.Sha3_256: return new Sha3_256();
+                case DigestHashAlgorithm.Sha3_384: return new Sha3_384();
+                case DigestHashAlgorithm.Sha3_512: return new Sha3_512();
+#endif
                 default:
                     throw new ArgumentOutOfRangeException(nameof(algorithm), algorithm, null);
             }
@@ -218,6 +245,31 @@ namespace Aspose.Pdf.Security
                 case DigestHashAlgorithm.Sha3_512: return "2.16.840.1.101.3.4.2.10";
                 default:
                     throw new ArgumentOutOfRangeException(nameof(hashAlgorithm), hashAlgorithm, null);
+            }
+        }
+        // HashAlgorithmName.SHA3_* are .NET 8 additions; the names built here are the same values on every target.
+        private static readonly HashAlgorithmName Sha3_256Name = new("SHA3-256");
+        private static readonly HashAlgorithmName Sha3_384Name = new("SHA3-384");
+        private static readonly HashAlgorithmName Sha3_512Name = new("SHA3-512");
+
+
+        /// <summary>The platform hash name for a digest OID - what <c>RSA.SignHash</c>
+        /// and its kin take. SHA-1 and MD5 by their legacy OIDs, the SHA-2 and SHA-3
+        /// families by the NIST arc; an unknown OID is an argument error.</summary>
+        public static HashAlgorithmName NameFromOid(string oidValue)
+        {
+            switch (oidValue)
+            {
+                case "1.2.840.113549.2.5": return HashAlgorithmName.MD5;
+                case "1.3.14.3.2.26": return HashAlgorithmName.SHA1;
+                case "2.16.840.1.101.3.4.2.1": return HashAlgorithmName.SHA256;
+                case "2.16.840.1.101.3.4.2.2": return HashAlgorithmName.SHA384;
+                case "2.16.840.1.101.3.4.2.3": return HashAlgorithmName.SHA512;
+                case "2.16.840.1.101.3.4.2.8": return Sha3_256Name;
+                case "2.16.840.1.101.3.4.2.9": return Sha3_384Name;
+                case "2.16.840.1.101.3.4.2.10": return Sha3_512Name;
+                default:
+                    throw new ArgumentException($"Unknown digest algorithm OID '{oidValue}'.", nameof(oidValue));
             }
         }
 

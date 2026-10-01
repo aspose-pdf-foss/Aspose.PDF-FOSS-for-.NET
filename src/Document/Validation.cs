@@ -57,64 +57,6 @@ public sealed partial class Document
         return result.IsValid;
     }
 
-    /// <summary>Serialise a validation result in the established log schema:
-    /// <c>&lt;Compliance&gt;&lt;File&gt;…&lt;Fonts&gt;&lt;Problem Severity Clause&gt;</c> —
-    /// font problems nest under &lt;Fonts&gt;, everything else sits directly under
-    /// &lt;File&gt; alongside the empty section markers.</summary>
-    private void WriteValidationLogXml(TextWriter writer, PdfFormat format,
-        Optimization.PdfAValidationResult result, string operation = "Validation")
-    {
-        static string ClauseFor(string rule) => rule switch
-        {
-            "FontCmap" => "7.21.4.2",
-            "FontEmbedding" or "FontNotEmbedded" => "6.2.11.4",
-            "MetadataPdfAId" or "MetadataPdfAConformance" or "Metadata" => "6.6.4",
-            "TaggedPdf" or "StructureTree" => "6.7.3.3",
-            "DocumentTitle" => "7.1",
-            _ => "",
-        };
-        static string Problem(Optimization.PdfAViolation v)
-        {
-            var clause = v.Clause ?? ClauseFor(v.Rule);
-            var page = v.PageNumber is int p ? $" Page=\"{p}\"" : "";
-            var objId = v.ObjectId is not null ? $" ObjectID=\"{EscapeXml(v.ObjectId)}\"" : "";
-            // Convertable defaults to true — every regular violation class this
-            // validator reports is either repaired structurally (fonts, metadata,
-            // OutputIntent, version, file ID, xref form) or stripped under
-            // ConvertErrorAction.Delete. Implementation-limit violations baked into
-            // the content mark themselves unconvertable instead.
-            var convertable = v.Convertable ? "True" : "False";
-            return $"<Problem Severity=\"Error\" Clause=\"{clause}\" Code=\"{clause}\"{objId} Convertable=\"{convertable}\"{page}>{EscapeXml(v.Description)}</Problem>";
-        }
-
-        var fontProblems = new System.Text.StringBuilder();
-        var catalogProblems = new System.Text.StringBuilder();
-        var otherProblems = new System.Text.StringBuilder();
-        foreach (var v in result.Violations)
-        {
-            if (v.Rule.StartsWith("Font", StringComparison.Ordinal)) fontProblems.Append(Problem(v));
-            // Whole-document refusals live in the log's Catalog section (the shape
-            // used for a signed-file refusal).
-            else if (v.Rule == "SignedFile") catalogProblems.Append(Problem(v));
-            else otherProblems.Append(Problem(v));
-        }
-
-        int pages;
-        try { pages = Pages.Count; } catch { pages = 0; }
-        writer.Write(
-            $"<Compliance Name=\"Log\" Operation=\"{operation}\" Target=\"{EscapeXml(GetVersionString(format))}\">" +
-            "<Version>1.0</Version>" +
-            $"<Date>{DateTime.Now}</Date>" +
-            $"<File Version=\"{EscapeXml(PdfVersion ?? string.Empty)}\" Name=\"{EscapeXml(Path.GetFileName(FileName ?? string.Empty))}\" Pages=\"{pages}\">" +
-            "<Security />" +
-            (catalogProblems.Length > 0 ? $"<Catalog>{catalogProblems}</Catalog>" : "<Catalog />") +
-            "<Header /><Annotations />" +
-            (fontProblems.Length > 0 ? $"<Fonts>{fontProblems}</Fonts>" : "<Fonts />") +
-            "<trailer />" + otherProblems +
-            "<Metadata /><objects /><xObjects /><actions /><xmpmeta /><EmbeddedFiles />" +
-            "</File></Compliance>");
-    }
-
     /// <summary>
     /// Validate the document against a specific PDF format using conversion options.
     /// </summary>

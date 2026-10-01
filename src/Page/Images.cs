@@ -4,7 +4,6 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Operators;
 using Aspose.Pdf.Shading;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -31,106 +30,80 @@ public sealed partial class Page
     // image keeps its own aspect ratio, centred); every other caller — the generator
     // flow, the HTML converter, direct byte[]/stream users — fills the rectangle
     // exactly as given.
-    private void AddImage(byte[] imageData, Rectangle rect, bool blackWhite, bool aspectFit)
+    private void AddImage(byte[] imageData, Rectangle rect, bool blackWhite, bool aspectFit, Rectangle? clip = null)
     {
-        if (blackWhite && ImageStamp.FromBlackWhite(imageData) is { } bwStamp)
+        var ia = new ImageAddState();
+        ia.imageData = imageData;
+        ia.rect = rect;
+        ia.blackWhite = blackWhite;
+        if (ia.blackWhite && ImageStamp.FromBlackWhite(ia.imageData) is { } bwStamp)
         {
-            bwStamp.X = rect.LLX;
-            bwStamp.Y = rect.LLY;
-            bwStamp.DisplayWidth = rect.Width;
-            bwStamp.DisplayHeight = rect.Height;
+            bwStamp.X = ia.rect.LLX;
+            bwStamp.Y = ia.rect.LLY;
+            bwStamp.DisplayWidth = ia.rect.Width;
+            bwStamp.DisplayHeight = ia.rect.Height;
             bwStamp.CompensatePageRotation = true;
+            bwStamp.ClipBox = clip;
             bwStamp.ApplyTo(this);
             return;
         }
 
-        // Detect JPEG by FFD8 header
-        var isJpeg = imageData.Length >= 2 && imageData[0] == 0xFF && imageData[1] == 0xD8;
-        // Detect PNG by 89504E47 header
-        var isPng = imageData.Length >= 4 && imageData[0] == 0x89 && imageData[1] == 0x50
-                    && imageData[2] == 0x4E && imageData[3] == 0x47;
-        // Detect BMP by 'BM' header
-        var isBmp = imageData.Length >= 2 && imageData[0] == 0x42 && imageData[1] == 0x4D;
-        // Detect JPEG 2000: a JP2/JPX box wrapper (signature box 00000000 0C 6A502020)
-        // or a raw codestream (SOC marker FF4F immediately followed by SIZ FF51).
-        var isJpx = (imageData.Length >= 12 && imageData[0] == 0x00 && imageData[1] == 0x00
-                     && imageData[2] == 0x00 && imageData[3] == 0x0C && imageData[4] == 0x6A
-                     && imageData[5] == 0x50 && imageData[6] == 0x20 && imageData[7] == 0x20)
-                    || (imageData.Length >= 4 && imageData[0] == 0xFF && imageData[1] == 0x4F
-                        && imageData[2] == 0xFF && imageData[3] == 0x51);
+        ia.isJpeg = ia.imageData.Length >= 2 && ia.imageData[0] == 0xFF && ia.imageData[1] == 0xD8;
+        ia.isPng = ia.imageData.Length >= 4 && ia.imageData[0] == 0x89 && ia.imageData[1] == 0x50
+                    && ia.imageData[2] == 0x4E && ia.imageData[3] == 0x47;
+        ia.isBmp = ia.imageData.Length >= 2 && ia.imageData[0] == 0x42 && ia.imageData[1] == 0x4D;
+        ia.isJpx = (ia.imageData.Length >= 12 && ia.imageData[0] == 0x00 && ia.imageData[1] == 0x00
+                     && ia.imageData[2] == 0x00 && ia.imageData[3] == 0x0C && ia.imageData[4] == 0x6A
+                     && ia.imageData[5] == 0x50 && ia.imageData[6] == 0x20 && ia.imageData[7] == 0x20)
+                    || (ia.imageData.Length >= 4 && ia.imageData[0] == 0xFF && ia.imageData[1] == 0x4F
+                        && ia.imageData[2] == 0xFF && ia.imageData[3] == 0x51);
 
-        ImageStamp stamp;
-        if (isJpeg)
+        if (ia.isJpeg)
         {
-            stamp = ImageStamp.FromJpegStream(new MemoryStream(imageData));
+            ia.stamp = ImageStamp.FromJpegStream(new MemoryStream(ia.imageData));
         }
-        else if (isPng)
+        else if (ia.isPng)
         {
             // Embed PNG as a FlateDecode image with SMask for alpha
-            stamp = ImageStamp.FromPngData(imageData);
+            ia.stamp = ImageStamp.FromPngData(ia.imageData);
         }
-        else if (isBmp)
+        else if (ia.isBmp)
         {
-            stamp = ImageStamp.FromBmp(imageData);
+            ia.stamp = ImageStamp.FromBmp(ia.imageData);
         }
-        else if (isJpx
-                 && Aspose.Pdf.IO.Filters.JpxDecoder.TryDecode(imageData, out var jxPx, out var jxW, out var jxH, out var jxC)
+        else if (ia.isJpx
+                 && Aspose.Pdf.IO.Filters.JpxDecoder.TryDecode(ia.imageData) is (var jxPx, var jxW, var jxH, var jxC)
                  && (jxC == 1 || jxC == 3))
         {
             // JPEG 2000 (.jp2/.jpx): GDI+/System.Drawing can't decode it, so decode to raw
             // samples with the built-in JPXDecode decoder and embed as a Flate RGB/Gray image.
-            stamp = jxC == 3 ? ImageStamp.FromRgb(jxPx, jxW, jxH) : ImageStamp.FromGrayscale(jxPx, jxW, jxH);
+            ia.stamp = jxC == 3 ? ImageStamp.FromRgb(jxPx, jxW, jxH) : ImageStamp.FromGrayscale(jxPx, jxW, jxH);
         }
         else
         {
-            // Assume raw RGB pixel data — caller must ensure width/height are correct
-            var w = (int)rect.Width;
-            var h = (int)rect.Height;
-            if (imageData.Length == w * h * 3)
-            {
-                stamp = ImageStamp.FromRgb(imageData, w, h);
-            }
-            else if (((OperatingSystem.IsWindows() ? ImageStamp.TryFromGdiPlusDecoder(imageData) : null)
-                     ?? ImageStamp.TryFromManagedDecoder(imageData)) is { } gdiStamp)
-            {
-                // GIF / TIFF / EMF / WMF / ICO and other GDI+-supported formats:
-                // decode to raw RGB via System.Drawing where it exists, otherwise
-                // through the library's own BMP/GIF/TIFF decoders. The dimensions are taken
-                // from the image header, not the rect — the caller-supplied
-                // rect controls the on-page display size below.
-                stamp = gdiStamp;
-            }
-            else
-            {
-                // EMF/WMF are out of scope off Windows; say that rather than letting the
-                // PNG reader report the bytes as corrupt.
-                ImageStamp.ThrowIfWindowsOnlyMetafile(imageData);
-                // Last resort: try treating as PNG anyway (some files lack proper header)
-                try { stamp = ImageStamp.FromPngData(imageData); }
-                catch { throw new ArgumentException(
-                    "Unsupported image format. Supported: JPEG, PNG, BMP, GIF, TIFF, or raw RGB data."); }
-            }
+            DecodeImageStamp(ia);
         }
 
-        // With aspectFit the rectangle is a bounding box, not a target frame: the image
-        // fits INSIDE it at its own aspect ratio, centred on both axes — a square image
-        // in a wide rect keeps its shape instead of stretching to fill.
-        double dx = rect.LLX, dy = rect.LLY, dw = rect.Width, dh = rect.Height;
-        if (aspectFit && stamp.PixelWidth > 0 && stamp.PixelHeight > 0 && dw > 0 && dh > 0)
+        ia.dx = ia.rect.LLX;
+        ia.dy = ia.rect.LLY;
+        ia.dw = ia.rect.Width;
+        ia.dh = ia.rect.Height;
+        if (aspectFit && ia.stamp.PixelWidth > 0 && ia.stamp.PixelHeight > 0 && ia.dw > 0 && ia.dh > 0)
         {
-            var scale = System.Math.Min(dw / stamp.PixelWidth, dh / stamp.PixelHeight);
-            var fitW = stamp.PixelWidth * scale;
-            var fitH = stamp.PixelHeight * scale;
-            dx += (dw - fitW) / 2;
-            dy += (dh - fitH) / 2;
-            dw = fitW; dh = fitH;
+            var scale = System.Math.Min(ia.dw / ia.stamp.PixelWidth, ia.dh / ia.stamp.PixelHeight);
+            var fitW = ia.stamp.PixelWidth * scale;
+            var fitH = ia.stamp.PixelHeight * scale;
+            ia.dx += (ia.dw - fitW) / 2;
+            ia.dy += (ia.dh - fitH) / 2;
+            ia.dw = fitW; ia.dh = fitH;
         }
-        stamp.X = dx;
-        stamp.Y = dy;
-        stamp.DisplayWidth = dw;
-        stamp.DisplayHeight = dh;
-        stamp.CompensatePageRotation = true;
-        stamp.ApplyTo(this);
+        ia.stamp.X = ia.dx;
+        ia.stamp.Y = ia.dy;
+        ia.stamp.DisplayWidth = ia.dw;
+        ia.stamp.DisplayHeight = ia.dh;
+        ia.stamp.CompensatePageRotation = true;
+        ia.stamp.ClipBox = clip;
+        ia.stamp.ApplyTo(this);
     }
 
     /// <summary>Place a pre-encoded CCITT Group 4 (1-bit) image at the given rectangle —
@@ -171,11 +144,22 @@ public sealed partial class Page
         AddImage(File.ReadAllBytes(imagePath), rectangle, blackWhite: false, aspectFit: true);
     }
 
-    /// <summary>Add an image at <paramref name="imageRect"/> with an explicit bounding-box. Stored only — falls back to <see cref="AddImage(Stream, Rectangle)"/>.</summary>
+    /// <summary>Add an image placed at <paramref name="imageRect"/> and cropped to <paramref name="bbox"/>: the
+    /// image fills its rectangle as usual and only the part inside the bounding box shows.</summary>
+    public void AddImage(Stream imageStream, Rectangle imageRect, Rectangle bbox)
+        => AddImage(imageStream, imageRect, bbox, autoAdjustRectangle: false);
+
+    /// <summary>Add an image placed at <paramref name="imageRect"/> and cropped to <paramref name="bbox"/>;
+    /// <paramref name="autoAdjustRectangle"/> is recorded only.</summary>
     public void AddImage(Stream imageStream, Rectangle imageRect, Rectangle bbox, bool autoAdjustRectangle)
     {
-        _ = bbox; _ = autoAdjustRectangle;
-        AddImage(imageStream, imageRect);
+        if (imageStream is null) throw new ArgumentNullException(nameof(imageStream));
+        _ = autoAdjustRectangle;
+        // No box, no crop: `AddImage(stream, rect, null, false)` places the image whole, as it always did.
+        if (imageStream.CanSeek) imageStream.Position = 0;
+        using var ms = new MemoryStream();
+        imageStream.CopyTo(ms);
+        AddImage(ms.ToArray(), imageRect, blackWhite: false, aspectFit: false, clip: bbox);
     }
 
     /// <summary>Add an image with explicit pixel size + proportion flag (bbox defaults to
@@ -251,7 +235,7 @@ public sealed partial class Page
             }
             case "JPXDecode":
             {
-                if (!IO.Filters.JpxDecoder.TryDecode(data, out var px, out var jw, out var jh, out var comps))
+                if (IO.Filters.JpxDecoder.TryDecode(data) is not (var px, var jw, var jh, var comps))
                     return 0;
                 total = (long)jw * jh;
                 var n = comps >= 3 ? 3 : 1;

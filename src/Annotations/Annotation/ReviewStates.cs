@@ -83,8 +83,8 @@ public partial class Annotation
             Contents = state + " set by " + author,
         };
         if (!string.IsNullOrEmpty(author)) reply.Title = author;
-        reply.Dict.Set("State", new PdfString(System.Text.Encoding.Latin1.GetBytes(state)));
-        reply.Dict.Set("StateModel", new PdfString(System.Text.Encoding.Latin1.GetBytes(model)));
+        reply.Dict.Set("State", new PdfString(Compat.Latin1.GetBytes(state)));
+        reply.Dict.Set("StateModel", new PdfString(Compat.Latin1.GetBytes(model)));
         reply.Dict.Set("IRT", _dict);
         page.Annotations.Add(reply);
     }

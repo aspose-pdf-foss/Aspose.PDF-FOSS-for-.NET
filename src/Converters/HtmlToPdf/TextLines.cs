@@ -55,19 +55,25 @@ internal static partial class HtmlToPdfConverter
     {
         bt.lineIdx++;
         bt.lineNeedBelow = bt.profile.escapedAttrDoc && bt.block.InlineIconAfter ? SerifDescentRoomPt : bt.metrics.lineHeight;
-        if (bt.flow.y - bt.lineNeedBelow < bt.marginBottom)
-        {
-            // Inside a float column the overflow is clipped, not paginated.
-            if (bt.profile.floatBandDoc && bt.bandStack.Count > 0) { bt.flow.bandColClipped = true; return false; }
-            bt.flow.page = bt.doc.Pages.Add(bt.pageWidth, bt.pageHeight);
-            EnsureFonts(bt.flow.page, bt.docFontDict);
-            bt.flow.y = FreshPageTopY(bt.profile.escapedAttrDoc, bt.pageHeight, bt.marginTop); bt.flow.pendingTopDrop = bt.profile.hasZeroTopMargin;
-            // UA flow: a block pushed to a fresh page re-applies its margin-top at
-            // the new page top (a continuation page's first paragraph baseline
-            // = topMargin + p-gap + ascent, not topMargin + ascent).
-            if (bt.uaFlow && bt.metrics.firstLineOfBlock) bt.flow.y -= bt.block.MarginTop;
-        }
+        // The Word export keeps a paragraph's lines together at the page edge (mso-pagination:
+        // widow-orphan on every style): the first line needs room for a second, and the line before
+        // the last needs room for the last - else the page breaks before the pair (probed: a two-line
+        // 14 pt paragraph with 33 pt left opens the next page whole).
+        var needRoom = bt.lineNeedBelow;
+        if (bt.profile.wordExportDoc && bt.metrics.lines.Length >= 2
+            && (bt.lineIdx == 0 || bt.lineIdx == bt.metrics.lines.Length - 2))
+            needRoom += bt.metrics.lineHeight;
+        if (!SeatLineOnPage(bt, needRoom)) return false;
         bt.fontRes = ResolveFontRes(bt.flow.page, bt.block, bt.flow, bt.profile, bt.doc, bt.embeddedFonts, bt.fontFileCache);
+        // A size-run block's first line seats its own box: its baseline drops by however much
+        // its largest run's ascent side exceeds a plain line's.
+        if (bt.lineIdx == 0 && bt.profile.sheetTypographyDoc && bt.block.SizeRuns is { Count: > 0 }
+            && bt.block.FontFamily is { Length: > 0 } sizeFace)
+        {
+            bt.lineExtents = LineExtents(bt.block, sizeFace, bt.metrics.lines, bt.metrics.blockFontSize, bt.metrics.lineHeight);
+            bt.plainAbove = RunLineExtent(bt.block, sizeFace, bt.metrics.blockFontSize, bt.metrics.blockFontSize, bt.metrics.lineHeight).above;
+            if (bt.lineExtents.Length > 0) bt.flow.y -= bt.lineExtents[0].above - bt.plainAbove;
+        }
 
         if (bt.metrics.firstLineOfBlock && !string.IsNullOrEmpty(bt.block.Marker) && !bt.block.MarkerAfter)
             EmitMarkerHere(bt);
@@ -79,7 +85,11 @@ internal static partial class HtmlToPdfConverter
         if (bt.profile.uaStdSerif && (bt.block.TextInsetPt > 0 || bt.block.BorderWidth > 0))
             bt.lineXPos += bt.block.TextInsetPt + bt.block.BorderWidth;
         // Lines still level with a left-floated image start past its right edge.
-        if (bt.flow.floatIndentPt > 0 && bt.flow.y > bt.flow.floatBottomY + 1e-9)
+        // (a size-run line is level with the float when its BOX top is, as its wrap decided)
+        var lineTopAboveFloat = bt.lineExtents is { } fxt && bt.lineIdx < fxt.Length
+            && bt.flow.y + fxt[bt.lineIdx].above > bt.flow.floatBottomY + 1e-9;
+        if (bt.flow.floatIndentPt > 0 && (bt.flow.y > bt.flow.floatBottomY + 1e-9 || lineTopAboveFloat)
+            && (!bt.profile.sheetBoxFlow || ReferenceEquals(bt.flow.page, bt.flow.floatPage)))
             bt.lineXPos += bt.flow.floatIndentPt;
         // A CENTRED line in a declared float box centres between whichever float
         // it is level with and the box's own right edge - this seats the
@@ -98,6 +108,14 @@ internal static partial class HtmlToPdfConverter
             // the line draws in the flow face with only the
             // replacement glyph re-faced, never the whole line.
             && !OnlySpecialsNonAnsi(line) ? ResolveUnicodeFont(bt.uniSource) : null;
+        // The UA serif flow's non-WinAnsi text (Cyrillic, Greek) draws in the UA serif face
+        // itself where that face covers it, not in the sans fallback (measured on a saved
+        // wiki page: every run TimesNewRoman / TimesNewRomanBold, none Arial).
+        // (…and a block that names its own face - the body's Arial - draws it in that face, bold where
+        //  the block is bold: the change-control page's `Kezdeményező szervezet:` label stays ArialBold)
+        if (bt.profile.uaStdSerif && bt.cjkFont is not null
+            && UaSerifFaceCovering(bt.uniSource, bt.block.FontRes == "F2", string.IsNullOrEmpty(bt.block.FontFamily) ? "Times New Roman" : bt.block.FontFamily) is { } uaSerif)
+            bt.cjkFont = uaSerif;
         bt.cjkTtf = bt.cjkFont?.SourceFontData?.TtfData;
         bt.cjkName = bt.cjkFont?.FontName ?? "Unicode";
         // RTL documents draw with the same face the right-align measurement
@@ -119,10 +137,31 @@ internal static partial class HtmlToPdfConverter
         // their run; resolved to a GoTo/URI action after layout.
         RegisterLineAnchors(bt, line);
         bt.metrics.cumChar += line.Length + 1;   // +1 for the space consumed at the wrap point
-        bt.flow.y -= bt.metrics.lineHeight;
+        // A size-run block steps by the CSS line boxes: this line's descent side and the
+        // next line's ascent side (a plain line's after the last).
+        if (bt.lineExtents is { } stepExt && bt.lineIdx < stepExt.Length)
+            bt.flow.y -= stepExt[bt.lineIdx].below
+                + (bt.lineIdx + 1 < stepExt.Length ? stepExt[bt.lineIdx + 1].above : bt.plainAbove);
+        else
+            bt.flow.y -= bt.metrics.lineHeight;
         if (bt.metrics.ptLeadExtraPt > 0) { bt.flow.y -= bt.metrics.ptLeadExtraPt; bt.metrics.ptLeadExtraPt = 0; }
         if (line.Length > 0) bt.flow.contentPage = bt.flow.page;
         return true;
+    }
+
+    /// <summary>The face a line's text is measured in: the metric flow's measure face, else the
+    /// block's family (Times by default), bold where the block is (<paramref name="plain"/>: the
+    /// regular variant whatever the block, for measuring its emphasis runs one by one).</summary>
+    private static string LineMeasureFace(BlockTextState bt, bool plain = false)
+    {
+        var bold = !plain && (bt.block.FontRes == "F2" || bt.block.EmBold);
+        if (bt.metrics.metricMeasureFace.Length > 0)
+        {
+            var measure = bt.metrics.metricMeasureFace;
+            if (plain && measure.EndsWith("-Bold", StringComparison.Ordinal)) return measure[..^"-Bold".Length];
+            return bold && !measure.EndsWith("-Bold", StringComparison.Ordinal) ? measure + "-Bold" : measure;
+        }
+        return (bt.block.FontFamily ?? "Times New Roman") + (bold ? " Bold" : "");
     }
 
     /// <summary>Link rectangles for the line's anchors and the diff/form decoration runs drawn over it.</summary>
@@ -131,18 +170,32 @@ internal static partial class HtmlToPdfConverter
         if (bt.block.Anchors is { Count: > 0 })
         {
             int lineStart = bt.metrics.cumChar, lineEnd = bt.metrics.cumChar + line.Length;
+            // The rect spans the anchor's text as drawn: measured in the line's face from where
+            // the line starts (the decoration runs measure the same way).
+            var face = LineMeasureFace(bt);
+            // The rect stands on the line's baseline (the metric flow seats it a drop under
+            // the cursor, the legacy flow at the cursor), one line box tall.
+            var baseline = bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y;
+            // ... from where the line starts to the anchor, measured as drawn: a block whose
+            // emphasis runs put parts of the line in bold or italic measures each run in its own variant.
+            double XAt(int p) => bt.lineXPos + (p <= 0 ? 0
+                : bt.block.SmallCaps
+                ? MeasureSmallCapsText(face, line[..Math.Min(p, line.Length)], bt.metrics.blockFontSize)
+                : bt.block.BoldRuns is { Count: > 0 } || bt.block.ItalicRuns is { Count: > 0 }
+                ? RunsMeasuredWidth(bt.block, lineStart, line[..Math.Min(p, line.Length)], LineMeasureFace(bt, plain: true), bt.metrics.blockFontSize)
+                : MeasureFaceText(face, line[..Math.Min(p, line.Length)], bt.metrics.blockFontSize));
             foreach (var (aStart, aLen, url) in bt.block.Anchors)
             {
                 int ov0 = Math.Max(aStart, lineStart), ov1 = Math.Min(aStart + aLen, lineEnd);
                 if (ov1 > ov0 && !string.IsNullOrEmpty(url))
                 {
-                    double x0 = bt.metrics.lineX + (ov0 - lineStart) * bt.metrics.charW;
-                    double x1 = bt.metrics.lineX + (ov1 - lineStart) * bt.metrics.charW;
+                    double x0 = XAt(ov0 - lineStart);
+                    double x1 = XAt(ov1 - lineStart);
                     // The link's description (annotation /Contents, surfaced as its
                     // tooltip) is the anchor's visible text.
                     string? aText = aStart >= 0 && aLen > 0 && aStart + aLen <= bt.block.Text.Length
                         ? bt.block.Text.Substring(aStart, aLen) : null;
-                    bt.pendingLinks.Add((bt.flow.page, new Aspose.Pdf.Rectangle(x0, bt.flow.y, x1, bt.flow.y + bt.metrics.lineHeight), url, aText));
+                    bt.pendingLinks.Add((bt.flow.page, new Aspose.Pdf.Rectangle(x0, baseline, x1, baseline + bt.metrics.lineHeight), url, aText));
                 }
             }
         }
@@ -188,10 +241,10 @@ internal static partial class HtmlToPdfConverter
                 var dw = dKind == 1 && bt.profile.dwFormDoc ? DwUnderWidthPt
                     : dKind <= 2 ? RedlineDecorWidthEm * bt.metrics.blockFontSize : 0.75;
                 var dcol = dKind <= 2 ? DecColorAt(a0) : dC ?? Color.FromArgb(0, 0, 0);
-                dsb.Append(string.Create(bt.invc,
+                dsb.Append(Compat.Format(bt.invc,
                     $"q {dcol.R / 255.0:0.###} {dcol.G / 255.0:0.###} {dcol.B / 255.0:0.###} RG {dw:0.##} w "));
                 if (dKind == 4) dsb.Append("[1.5 0.75] 0 d ");
-                dsb.Append(string.Create(bt.invc,
+                dsb.Append(Compat.Format(bt.invc,
                     $"{XAt(a0):0.##} {dy:0.##} m {XAt(b0):0.##} {dy:0.##} l S "));
                 dsb.Append("Q\n");
             }
@@ -203,31 +256,12 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The line's underline runs, its CSS marker and its named anchor targets.</summary>
     private static void DrawLineDecorations(BlockTextState bt, string line)
     {
+        // A strike run draws the same stroke through the run, 0.26 em over the baseline (the
+        // probed strike seat), in the run's ink.
+        if (bt.profile.uaStdSerif && bt.block.StrikeRuns is { Count: > 0 } uaSRuns && line.Length > 0)
+            DrawUaDecorationRuns(bt, line, uaSRuns, RedlineStrikeRiseEm * bt.metrics.blockFontSize);
         if (bt.profile.uaStdSerif && bt.block.UnderlineRuns is { Count: > 0 } uaURuns && line.Length > 0)
-        {
-            int uLineStart = bt.metrics.cumChar, uLineEnd = bt.metrics.cumChar + line.Length;
-            foreach (var (us0, ul0) in uaURuns)
-            {
-                var us1 = Math.Max(us0, uLineStart);
-                var ue1 = Math.Min(us0 + ul0, uLineEnd);
-                if (ue1 <= us1) continue;
-                var uPre = MeasureFaceText(bt.metrics.metricMeasureFace,
-                    line[..(us1 - uLineStart)], bt.metrics.blockFontSize);
-                var uSeg = MeasureFaceText(bt.metrics.metricMeasureFace,
-                    line[(us1 - uLineStart)..(ue1 - uLineStart)], bt.metrics.blockFontSize);
-                var uy = (bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y)
-                    - bt.metrics.blockFontSize / 10.0;
-                // The stroke takes the block's own ink (a linked line's
-                // underline draws in the link colour).
-                var uInk = bt.block.ForeColor is { } uCol
-                    ? string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                        $"{uCol.R / 255.0:0.###} {uCol.G / 255.0:0.###} {uCol.B / 255.0:0.###}")
-                    : "0 0 0";
-                bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(string.Create(
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    $"q {uInk} RG {bt.metrics.blockFontSize / 10.0:0.##} w {bt.lineXPos + uPre:F2} {uy:F2} m {bt.lineXPos + uPre + uSeg:F2} {uy:F2} l S Q\n")));
-            }
-        }
+            DrawUaDecorationRuns(bt, line, uaURuns, -bt.metrics.blockFontSize / 10.0);
         if (bt.metrics.firstLineOfBlock && !string.IsNullOrEmpty(bt.block.Marker) && bt.block.MarkerAfter)
             EmitMarkerHere(bt);
 
@@ -244,6 +278,47 @@ internal static partial class HtmlToPdfConverter
         bt.metrics.firstLineOfBlock = false;
     }
 
+    /// <summary>The UA flow's decoration runs (underline, strike) over this line: a stroke fs/10 thick at
+    /// <paramref name="riseFromBaseline"/> over the baseline, spanning each run's measured extent.</summary>
+    private static void DrawUaDecorationRuns(BlockTextState bt, string line, List<(int Start, int Length)> uaURuns, double riseFromBaseline)
+    {
+        {
+            int uLineStart = bt.metrics.cumChar, uLineEnd = bt.metrics.cumChar + line.Length;
+            // The run's extent is measured on the face the line is DRAWN in: a block with its
+            // own family (a `h2 { font-family: 'Courier new' }` heading) underlines its whole
+            // text, not the shorter width the flow face would give it.
+            var uFace = !string.IsNullOrEmpty(bt.block.FontFamily) && WinMetricsFor(bt.block.FontFamily) is not null
+                ? bt.block.FontFamily + (bt.block.FontRes == "F2" ? " Bold" : "")
+                : bt.metrics.metricMeasureFace;
+            foreach (var (us0, ul0) in uaURuns)
+            {
+                var us1 = Math.Max(us0, uLineStart);
+                var ue1 = Math.Min(us0 + ul0, uLineEnd);
+                if (ue1 <= us1) continue;
+                var uPre = MeasureFaceText(uFace,
+                    line[..(us1 - uLineStart)], bt.metrics.blockFontSize);
+                var uSeg = MeasureFaceText(uFace,
+                    line[(us1 - uLineStart)..(ue1 - uLineStart)], bt.metrics.blockFontSize);
+                var uy = (bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y)
+                    + riseFromBaseline;
+                // The stroke takes the block's own ink (a linked line's
+                // underline draws in the link colour).
+                // ...in the run's own ink when the line colours per run (a link's underline is blue).
+                var uRunCol = bt.block.ForeColor;
+                if (bt.block.ColorRuns is { } uCols)
+                    foreach (var (ucs, ucl, ucc) in uCols)
+                        if (us1 >= ucs && us1 < ucs + ucl) { uRunCol = ucc; break; }
+                var uInk = uRunCol is { } uCol
+                    ? Compat.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        $"{uCol.R / 255.0:0.###} {uCol.G / 255.0:0.###} {uCol.B / 255.0:0.###}")
+                    : "0 0 0";
+                bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    $"q {uInk} RG {bt.metrics.blockFontSize / 10.0:0.##} w {bt.lineXPos + uPre:F2} {uy:F2} m {bt.lineXPos + uPre + uSeg:F2} {uy:F2} l S Q\n")));
+            }
+        }
+    }
+
     /// <summary>Writes the line as font-segmented runs on the serif/print-grid/diff document classes; false when the block must stop.</summary>
     private static bool WriteSerifGridRuns(BlockTextState bt, string line)
     {
@@ -255,20 +330,24 @@ internal static partial class HtmlToPdfConverter
         // family-FREE text can take the UA serif as a real face; text that
         // names a family we cannot resolve keeps the sans fallback its own
         // font stack asks for, rather than dropping to the Standard-14 serif.
-        var regRes = bt.profile.printGrid || bt.profile.floatBothSidesDoc ? "F1" : "F5";
-        var boldRes = bt.profile.printGrid || bt.profile.floatBothSidesDoc ? "F2" : "F6";
-        var stdRes = bt.block.FontRes == "F2" ? boldRes : bt.block.FontRes == "F3" ? (bt.profile.printGrid || bt.profile.floatBothSidesDoc ? "F3" : "F7") : regRes;
+        var sansStd = bt.profile.printGrid || bt.profile.floatBothSidesDoc || bt.profile.sheetTypographyDoc;
+        var regRes = sansStd ? "F1" : "F5";
+        var boldRes = sansStd ? "F2" : "F6";
+        var stdRes = bt.block.FontRes == "F2" ? boldRes : bt.block.FontRes == "F3" ? (sansStd ? "F3" : "F7") : regRes;
         // A <font face> block carries a RESOLVED family: its runs draw
         // in that face (embedded Type0), bold variant for bold blocks —
         // the std-serif override serves only family-free text.
         // The certificate dialect draws its family-free text in the UA
         // serif too, and unlike the Standard-14 resource table (which has no
         // bold-italic slot at all) a real face carries both emphases.
-        if ((bt.profile.uaStdSerif || bt.profile.redlineDiffDoc || bt.profile.dwFormDoc || bt.profile.floatBothSidesDoc)
-            && bt.block.FontFamily is { } uafFam
+        // The UA serif flow's family-free text draws the real Times New Roman too (probed: the
+        // engine embeds times.ttf and kerns its pairs; the Standard-14 Times-Roman cannot).
+        if ((bt.profile.uaStdSerif || bt.profile.redlineDiffDoc || bt.profile.dwFormDoc || bt.profile.floatBothSidesDoc
+                || bt.profile.sheetTypographyDoc || bt.profile.wordMailDoc)
+            && (bt.block.FontFamily ?? (bt.profile.uaStdSerif && !bt.profile.printGrid && bt.profile.embedFonts ? "Times New Roman" : null)) is { } uafFam
             && PosFace(uafFam
                     + (bt.block.FontRes == "F2" || bt.block.EmBold ? " Bold" : "")
-                    + (bt.profile.floatBothSidesDoc && (bt.block.FontRes == "F3" || bt.block.EmItalic)
+                    + ((bt.profile.floatBothSidesDoc || bt.profile.sheetTypographyDoc) && (bt.block.FontRes == "F3" || bt.block.EmItalic)
                         ? " Italic" : "")).ttf
                 is { } uafTtf
             && bt.flow.page.Dict.Get("Resources") is Core.PdfDictionary uafRes
@@ -294,80 +373,35 @@ internal static partial class HtmlToPdfConverter
         // text lands on top). The rect covers the baseline origin of every fragment on
         // the line so text extraction recovers it as TextState.BackgroundColor. Fill
         // components are emitted at F5 so Color.FromRgb's Round(c*255) round-trips exactly.
-        if (bt.block.BackgroundColor is { } bgc)
+        // A UA-grid heading box with rules but no fill (`h4 { border-top: 2px solid #000; padding-top: 10px;
+        // height: 30px; border-bottom: 1px solid #333; width: 650px }`): its top rule stands the padding
+        // above the line box, its bottom rule the declared height below the line top, both the declared
+        // width wide (measured on the quotation: 242.38 / 273.51, 96..583.5).
+        if (bt.block.BackgroundColor is null && bt.profile.uaGridSheet && bt.block.SheetBox
+            && bt.metrics.firstLineOfBlock && bt.metrics.lineHeight > 0
+            && (bt.block.UaRuleTopPt > 0 || bt.block.BorderBottomWidth > 0))
         {
-            var bgSb = new StringBuilder();
-            bgSb.Append("q ");
-            bgSb.Append($"{(bgc.R / 255.0).ToString("F5", bt.invc)} {(bgc.G / 255.0).ToString("F5", bt.invc)} {(bgc.B / 255.0).ToString("F5", bt.invc)} rg ");
-            // A painted box (tiny background tile × declared CSS size) fills its
-            // whole declared rect once, on the block's first line. The element is
-            // a body-level container, so its box origin sits one UA body margin
-            // inside the content origin on both axes; the fill spans the declared
-            // width × height no matter how the text inside wraps. (The Min clamps
-            // the first-line-box top back to the content top at a page start,
-            // where the flow's entry drop has already been spent.)
-            if (bt.block.BgBoxHeightPt > 0)
-            {
-                if (bt.metrics.firstLineOfBlock)
-                {
-                    // A bordered painted box (background + width/height + border
-                    // rule) fills its BORDER box — declared content + border on
-                    // each side — and strokes the border centred on the box edge;
-                    // it hangs from the flow's content origin. The borderless
-                    // tile box keeps its calibrated one-body-margin inset.
-                    var pbBw = bt.block.BorderWidth > 0 && bt.block.BorderColor is not null
-                        ? bt.block.BorderWidth : 0;
-                    var bbX = bt.marginLeft + bt.block.LeftIndent + (pbBw > 0 ? 0 : UaBodyMarginPt);
-                    var bbTop = Math.Min(bt.pageHeight - bt.marginTop, bt.metrics.yBeforeBlockLines + bt.metrics.lineHeight)
-                        - UaBodyMarginPt;
-                    var pbW = bt.block.BgBoxWidthPt + 2 * pbBw;
-                    var pbH = bt.block.BgBoxHeightPt + 2 * pbBw;
-                    bgSb.Append($"{bbX.ToString("F2", bt.invc)} {(bbTop - pbH).ToString("F2", bt.invc)} {pbW.ToString("F2", bt.invc)} {pbH.ToString("F2", bt.invc)} re f ");
-                    if (pbBw > 0 && bt.block.BorderColor is { } pbc)
-                    {
-                        bgSb.Append($"{(pbc.R / 255.0).ToString("F5", bt.invc)} {(pbc.G / 255.0).ToString("F5", bt.invc)} {(pbc.B / 255.0).ToString("F5", bt.invc)} RG {pbBw.ToString("F2", bt.invc)} w ");
-                        bgSb.Append($"{(bbX + pbBw / 2).ToString("F2", bt.invc)} {(bbTop - pbH + pbBw / 2).ToString("F2", bt.invc)} {(pbW - pbBw).ToString("F2", bt.invc)} {(pbH - pbBw).ToString("F2", bt.invc)} re S ");
-                    }
-                    bgSb.Append('Q');
-                    bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bgSb.ToString()));
-                }
-            }
-            // A floated box's background fills its shrink-to-fit box: exactly
-            // the measured text advance wide, one line box tall, hanging from
-            // the line-box top (metric y).
-            else if (bt.uaFloatW > 0)
-            {
-                bgSb.Append($"{bt.lineXPos.ToString("F2", bt.invc)} {(bt.flow.y - bt.metrics.lineHeight).ToString("F2", bt.invc)} {bt.uaFloatW.ToString("F2", bt.invc)} {bt.metrics.lineHeight.ToString("F2", bt.invc)} re f Q");
-                bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bgSb.ToString()));
-            }
-            // Metric flow: y is the LINE BOX TOP (the text draws a drop
-            // below it), so the band is the CSS line box exactly — from y
-            // down one line height, one UA body margin short of the content
-            // right edge (measured: the saved-page title strip fills
-            // 96..646.5 x 97.2..110.8 around its 108.0 baseline).
-            else if (bt.profile.metricFlow && bt.metrics.metricDrop > 0)
-            {
-                var bgX = bt.marginLeft + bt.block.LeftIndent;
-                var bgW = bt.flow.contentWidth - bt.block.LeftIndent - UaBodyMarginPt;
-                var bandUp = bt.metrics.firstLineOfBlock ? bt.block.BandPadPt : 0;
-                var bandDn = bt.block.BandPadPt;
-                bgSb.Append($"{bgX.ToString("F2", bt.invc)} {(bt.flow.y - bt.metrics.lineHeight - bandDn).ToString("F2", bt.invc)} {bgW.ToString("F2", bt.invc)} {(bt.metrics.lineHeight + bandUp + bandDn).ToString("F2", bt.invc)} re f Q");
-                bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bgSb.ToString()));
-            }
-            else
-            {
-                var bgX = bt.marginLeft + bt.block.LeftIndent;
-                var bgW = bt.flow.contentWidth - bt.block.LeftIndent;
-                // A band block's fill extends by the div paddings the flow
-                // reserved around the line: up only on the first line (the
-                // interior lines' fills already touch), down on every line
-                // (interior overlaps merge invisibly, the last line closes
-                // the band's bottom pad).
-                var bandUp = bt.metrics.firstLineOfBlock ? bt.block.BandPadPt : 0;
-                var bandDn = bt.block.BandPadPt;
-                bgSb.Append($"{bgX.ToString("F2", bt.invc)} {(bt.flow.y - bt.metrics.blockFontSize * 0.25 - bandDn).ToString("F2", bt.invc)} {bgW.ToString("F2", bt.invc)} {(bt.metrics.blockFontSize * 1.15 + bandUp + bandDn).ToString("F2", bt.invc)} re f Q");
-                bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bgSb.ToString()));
-            }
+            var rlX = bt.marginLeft + bt.block.LeftIndent;
+            var rlW = bt.block.WidthPx > 0 ? bt.block.WidthPx * 0.75 : bt.flow.contentWidth - bt.block.LeftIndent;
+            var rlFace = bt.block.FontFamily is { Length: > 0 } rlFaceName ? rlFaceName : "Times New Roman";
+            var rlTop = bt.flow.y + LineBoxAbove(rlFace, bt.metrics.blockFontSize, bt.metrics.lineHeight) + bt.block.UaPadTopPt;
+            var rlBot = rlTop - bt.block.UaPadTopPt - Math.Max(bt.metrics.lineHeight, bt.block.ExplicitHeight);
+            var rlSb = new StringBuilder("q ");
+            if (bt.block.UaRuleTopPt > 0 && bt.block.UaRuleTopColor is { } rtc)
+                rlSb.Append($"{(rtc.R / 255.0).ToString("F3", bt.invc)} {(rtc.G / 255.0).ToString("F3", bt.invc)} {(rtc.B / 255.0).ToString("F3", bt.invc)} RG {bt.block.UaRuleTopPt.ToString("F2", bt.invc)} w {rlX.ToString("F2", bt.invc)} {(rlTop + bt.block.UaRuleTopPt / 2).ToString("F2", bt.invc)} m {(rlX + rlW).ToString("F2", bt.invc)} {(rlTop + bt.block.UaRuleTopPt / 2).ToString("F2", bt.invc)} l S ");
+            if (bt.block.BorderBottomWidth > 0 && bt.block.BorderBottomColor is { } rbc)
+                rlSb.Append($"{(rbc.R / 255.0).ToString("F3", bt.invc)} {(rbc.G / 255.0).ToString("F3", bt.invc)} {(rbc.B / 255.0).ToString("F3", bt.invc)} RG {bt.block.BorderBottomWidth.ToString("F2", bt.invc)} w {rlX.ToString("F2", bt.invc)} {(rlBot - bt.block.BorderBottomWidth / 2).ToString("F2", bt.invc)} m {(rlX + rlW).ToString("F2", bt.invc)} {(rlBot - bt.block.BorderBottomWidth / 2).ToString("F2", bt.invc)} l S ");
+            rlSb.Append('Q');
+            bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(rlSb.ToString()));
+        }
+        PaintLineBackgroundBox(bt);
+        // The declared box's background IMAGE, over the fill (when both are declared) and on
+        // the block's first line only, like the fill.
+        if (bt.block.BgImageSrc is not null && bt.metrics.firstLineOfBlock
+            && (bt.block.BgBoxHeightPt > 0 || bt.block.BgBoxHeightVh > 0))
+        {
+            var (ibX, ibTop, ibW, ibH, _) = PaintedBoxRect(bt);
+            PaintBackgroundImageBox(bt, ibX, ibTop, ibW, ibH);
         }
         bt.lineForeColor = bt.block.ForeColor is { } fc0 && (fc0.R != 0 || fc0.G != 0 || fc0.B != 0)
             ? bt.block.ForeColor : null;
@@ -376,7 +410,48 @@ internal static partial class HtmlToPdfConverter
                 $"{(fc.R / 255.0).ToString("F5", bt.invc)} {(fc.G / 255.0).ToString("F5", bt.invc)} {(fc.B / 255.0).ToString("F5", bt.invc)} rg"));
         bt.isRtlLine = IsPureRtl(line);
         bt.uniSource = bt.isRtlLine ? ToVisualRtl(line)
-            : Text.BidiReorderer.ContainsRtl(line) ? VisualizeMixedRtl(line) : line;
+            : Text.BidiReorderer.ContainsRtl(line)
+                ? (bt.profile.rtlDoc ? VisualizeRtlParagraph(line) : VisualizeMixedRtl(line))
+                : line;
+    }
+
+    /// <summary>The family an RTL document's lines are measured and drawn in: the UA serif in the
+    /// UA serif flow, the calibrated sans elsewhere.</summary>
+    private static string RtlLineFamily(BlockTextState bt)
+        => bt.profile.uaStdSerif ? "Times New Roman" : "Arial";
+
+    /// <summary>The advance of an RTL document's line as it draws: its emphasis segments each in their
+    /// own face, without the trailing whitespace the paragraph direction moves off the seat edge.</summary>
+    private static double MeasureRtlLine(BlockTextState bt, string line)
+    {
+        var fs = bt.metrics.blockFontSize;
+        if (RtlEmphasisSegments(bt, line) is not { } segs)
+            return MeasureFaceText(bt.rtlFace, line.TrimEnd(), fs);
+        var fam = RtlLineFamily(bt);
+        double w = 0;
+        foreach (var (text, bold) in segs)
+            w += MeasureFaceText(fam + (bold ? " Bold" : ""), text, fs);
+        return w;
+    }
+
+    /// <summary>A regular RTL-document line's visual segments by bold run, or null when the line has no
+    /// emphasis runs to split on (it draws as one run).</summary>
+    private static List<(string text, bool bold)>? RtlEmphasisSegments(BlockTextState bt, string line)
+    {
+        if (!bt.profile.rtlDoc || bt.block.FontRes != "F1" || bt.block.BoldRuns is not { Count: > 0 } runs
+            || !Text.BidiReorderer.ContainsRtl(line))
+            return null;
+        var lineStart = bt.metrics.cumChar;
+        bool BoldAt(int p)
+        {
+            foreach (var (rs, rl) in runs)
+                if (lineStart + p >= rs && lineStart + p < rs + rl) return true;
+            return false;
+        }
+        var segs = VisualizeRtlParagraphSegments(line.TrimEnd(), BoldAt);
+        var any = false;
+        foreach (var (_, bold) in segs) if (bold) { any = true; break; }
+        return any ? segs : null;
     }
 
     /// <summary>Centred, right-aligned and indented lines take their x from the document class's rule.</summary>
@@ -395,8 +470,11 @@ internal static partial class HtmlToPdfConverter
         // centres in its element's content box — from the block's indent to a
         // right edge one full left-margin (90 + 6 body) inside the page, the
         // frame symmetric to the flow's left content origin (measured: "test"
-        // centred at (126+499)/2 inside <ul><li><div text-align:center>).
-        else if (bt.profile.uaStdSerif && bt.metrics.metricDrop > 0 && bt.block.AlignCenterCss && line.Length > 0)
+        // centred at (126+499)/2 inside <ul><li><div text-align:center>) - and the
+        // legacy align=center attribute the same way (probed: the h1 and h2 inside
+        // `<div align=center>` centre at 197.16 / 214.74).
+        else if (bt.profile.uaStdSerif && bt.metrics.metricDrop > 0
+                 && (bt.block.AlignCenterCss || (bt.profile.uaBareDoc && bt.block.AlignCenterAttr)) && line.Length > 0)
         {
             var mw = MeasureFaceText(bt.metrics.metricMeasureFace, line, bt.metrics.blockFontSize);
             var boxLeft = bt.marginLeft + bt.block.LeftIndent;
@@ -406,6 +484,12 @@ internal static partial class HtmlToPdfConverter
         // UA-default serif flow honours an inline text-align:right the
         // same way: the line pins to the body box's right edge (the
         // rating-date div ends at 96 + content = 517, measured).
+        // A right-floated inline run's lines pin to the content box's right edge.
+        else if (bt.profile.uaStdSerif && bt.block.FloatRight && !bt.block.FloatLeft && line.Length > 0)
+        {
+            var fw = MeasureFaceText(bt.block.FontRes == "F2" ? "Times New Roman Bold" : "Times New Roman", line, bt.metrics.blockFontSize);
+            bt.lineXPos = Math.Max(bt.marginLeft, bt.marginLeft + bt.flow.contentWidth - UaBodyMarginPt - fw);   // the flow's text box ends one body inset short
+        }
         else if (bt.profile.uaStdSerif && bt.metrics.metricDrop > 0 && bt.block.AlignRight && line.Length > 0)
         {
             var mw = MeasureFaceText(bt.metrics.metricMeasureFace, line, bt.metrics.blockFontSize);
@@ -454,14 +538,21 @@ internal static partial class HtmlToPdfConverter
         // content box (the box is the current float column inside a band).
         else if (!bt.profile.metricFlow && bt.block.AlignCenterAttr && line.Length > 0)
         {
-            var mw = MeasureFaceText(
-                bt.metrics.bandFace ?? (string.IsNullOrEmpty(bt.block.FontFamily) ? "Arial" : bt.block.FontFamily!),
-                line, bt.metrics.blockFontSize);
+            // (the sheet-typography flow centres a BOLD heading by its bold advance - the face
+            // it draws in; measured: the 22 px Verdana title centres at 303 on the 606 sheet)
+            var centreFace = bt.metrics.bandFace ?? (string.IsNullOrEmpty(bt.block.FontFamily) ? "Arial" : bt.block.FontFamily!);
+            if (_quirksChainSheet && bt.metrics.bandFace is null
+                && (bt.block.FontRes == "F2" || bt.block.EmBold) && !centreFace.EndsWith(" Bold", StringComparison.OrdinalIgnoreCase))
+                centreFace += " Bold";
+            var mw = MeasureFaceText(centreFace, line, bt.metrics.blockFontSize);
             bt.lineXPos = Math.Max(bt.marginLeft + bt.block.LeftIndent,
                 bt.marginLeft + bt.block.LeftIndent + (bt.flow.contentWidth - bt.block.LeftIndent - mw) / 2);
         }
         if (bt.profile.redlineDiffDoc && bt.block.TextIndentPt > 0 && bt.lineIdx == 0)
             bt.lineXPos += bt.block.TextIndentPt;
+        // Word mail: the hanging label's first line starts the indent to the left, never past the margin
+        if (bt.profile.wordMailDoc && bt.block.TextIndentPt != 0 && bt.lineIdx == 0)
+            bt.lineXPos = Math.Max(bt.marginLeft, bt.lineXPos + bt.block.TextIndentPt);
     }
 
     /// <summary>A float box, a right-aligned box, a centre band or an RTL page seats the line inside its box.</summary>
@@ -497,18 +588,28 @@ internal static partial class HtmlToPdfConverter
             bt.lineXPos = bt.marginLeft + bt.block.LeftIndent
                 + Math.Max(0, (bt.block.CenterBandW - cbw) / 2);
         }
-        bt.rtlFace = bt.block.FontRes == "F2" ? "Arial Bold" : "Arial";
+        // The UA serif flow draws an RTL document's lines in the UA serif itself (the
+        // reference embeds Times New Roman for the Arabic runs of a dir="rtl" letter);
+        // the calibrated flows keep the sans they were measured on.
+        bt.rtlFace = RtlLineFamily(bt) + (bt.block.FontRes == "F2" ? " Bold" : "");
         // An RTL document's lines seat on the BODY box's right edge, which is the
         // UA body margin inside the page's right content edge - not the content
         // edge itself. Probed on one fixture at five page-margin settings: the
         // reference lands its lines at pageWidth - marginRight - 6.0 for margins
         // 0, 20, 40, the default 90, and the asymmetric 60/15, so the inset is
-        // constant and reads the RIGHT margin only.
+        // constant and reads the RIGHT margin only. A block's left inset (an
+        // unwrapped cell's chrome) mirrors onto that edge, and the line's trailing
+        // whitespace, which the paragraph direction moves to the visual left, is
+        // not part of the seat.
         if (bt.profile.rtlDoc && line.Length > 0)
         {
-            var lw = MeasureFaceText(bt.rtlFace, line, bt.metrics.blockFontSize);
-            var rtlEdge = bt.pageWidth - bt.marginRight - UaBodyMarginPt;
-            bt.lineXPos = Math.Max(bt.marginLeft, rtlEdge - lw);
+            var lw = MeasureRtlLine(bt, line);
+            var rtlEdge = bt.pageWidth - bt.marginRight - UaBodyMarginPt - bt.block.LeftIndent;
+            // a centred cell of a right-anchored shrink-to-fit wrapper table centres its
+            // line over the table's box
+            bt.lineXPos = bt.block.CenterBandW > 0
+                ? Math.Max(bt.marginLeft, rtlEdge - bt.block.CenterBandW + (bt.block.CenterBandW - lw) / 2)
+                : Math.Max(bt.marginLeft, rtlEdge - lw);
         }
         bt.uaFloatW = 0.0;
         if (bt.profile.uaStdSerif && bt.metrics.metricDrop > 0 && (bt.block.FloatLeft || bt.block.FloatRight)
@@ -532,8 +633,8 @@ internal static partial class HtmlToPdfConverter
             // emitted as consecutive Tf/Tj segments (the text position
             // advances naturally between them). Bold wins on overlap.
             var italRes = bt.profile.printGrid ? "F3" : "F7";
-            bool InRuns(System.Collections.Generic.List<(int Start, int Length)>? runs,
-                int p, ref int upTo)
+            (bool inside, int upTo) InRuns(System.Collections.Generic.List<(int Start, int Length)>? runs,
+                int p, int upTo)
             {
                 var inside = false;
                 if (runs is not null)
@@ -543,7 +644,7 @@ internal static partial class HtmlToPdfConverter
                         if (p >= rs && p < re) { inside = true; upTo = Math.Min(upTo, re); }
                         else if (rs > p) upTo = Math.Min(upTo, rs);
                     }
-                return inside;
+                return (inside, upTo);
             }
             bt.sb.Append($"1 0 0 1 {bt.lnX} {bt.lnY} Tm ");
             int lineStart = bt.metrics.cumChar, lineEnd = bt.metrics.cumChar + line.Length;
@@ -551,8 +652,8 @@ internal static partial class HtmlToPdfConverter
             while (pos < lineEnd)
             {
                 int segEnd = lineEnd;
-                var boldSeg = InRuns(bt.block.BoldRuns, pos, ref segEnd);
-                var italSeg = InRuns(bt.block.ItalicRuns, pos, ref segEnd);
+                (var boldSeg, segEnd) = InRuns(bt.block.BoldRuns, pos, segEnd);
+                (var italSeg, segEnd) = InRuns(bt.block.ItalicRuns, pos, segEnd);
                 var segText = line.Substring(pos - lineStart, segEnd - pos);
                 bt.sb.Append($"/{(boldSeg ? boldRes : italSeg ? italRes : regRes)} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
                 bt.sb.Append($"({EscapePdfString(segText)}) Tj ");
@@ -570,379 +671,4 @@ internal static partial class HtmlToPdfConverter
         return true;
     }
 
-    /// <summary>The serif document classes write the line with per-run faces, sizes and colours; false when the block must stop.</summary>
-    private static bool WriteSerifClassRuns(BlockTextState bt, string line, string uafFam, byte[] uafTtf, Core.PdfDictionary uafDict)
-    {
-        bt.sb.Clear();
-        bt.sb.AppendLine("BT");
-        if (bt.block.BoldRuns is { Count: > 0 } || bt.block.ItalicRuns is { Count: > 0 }
-            || bt.block.ColorRuns is { Count: > 0 }
-            // small-caps and symbol-PUA lines need the per-segment
-            // emitter even without emphasis runs
-            || (bt.profile.redlineDiffDoc && (bt.block.SmallCaps || HasSymbolPua(line))))
-        {
-            if (!WriteEmphasisRuns(bt, line, uafFam, uafTtf, uafDict)) return false;
-        }
-        else
-        {
-            var (uafRn, uafHex) = Text.Type0FontEmbedder.Embed(uafDict, uafTtf,
-                uafFam.Replace(" ", "")
-                + (bt.block.FontRes == "F2" || bt.block.EmBold ? "Bold" : "")
-                // The face the certificate dialect resolved may be an
-                // ITALIC one; its label has to say so or two different
-                // programs share a name in the resource dictionary.
-                + (bt.profile.floatBothSidesDoc && (bt.block.FontRes == "F3" || bt.block.EmItalic)
-                    ? "Italic" : ""),
-                line, stripSpacesInBaseFont: true);
-            bt.sb.Append($"/{uafRn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-            if (bt.profile.redlineDiffDoc && bt.block.LetterSpacingPt != 0)
-                bt.sb.Append(string.Create(bt.invc, $"{bt.block.LetterSpacingPt:0.##} Tc "));
-            bt.sb.Append($"1 0 0 1 {bt.lnX} {bt.lnY} Tm ");
-            bt.sb.Append('<').Append(System.Convert.ToHexString(uafHex)).Append("> Tj ");
-            if (bt.profile.redlineDiffDoc && bt.block.LetterSpacingPt != 0)
-                bt.sb.Append("0 Tc ");
-        }
-        bt.sb.AppendLine("ET");
-        bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bt.sb.ToString()));
-        return true;
-    }
-
-    /// <summary>A max-width block's line is written scaled into its width.</summary>
-    private static void WriteMaxWidthRuns(BlockTextState bt, string line)
-    {
-        // Report label/span dialect: drawn in the dialect's own face —
-        // the real Segoe UI embedded when the system provides it (exact
-        // shapes and advances); otherwise each word anchors at its
-        // position in the baked Segoe metrics so the Standard-14 ink
-        // never drifts more than one word's difference.
-        bt.sb.Clear();
-        bt.sb.AppendLine("BT");
-        if (HeaderFooter.TryAppendReportLineOps(bt.sb, bt.docFontDict, line,
-                bt.lineXPos, bt.lnY, bt.metrics.blockFontSize, bt.block.FontRes == "F2"))
-        {
-            // drawn kerned and word-anchored in the dialect's own face
-        }
-        else
-        {
-            bt.sb.Append($"/{bt.fontRes} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-            var rwx = bt.lineXPos;
-            foreach (var rword in line.Split(' '))
-            {
-                if (rword.Length > 0)
-                {
-                    bt.sb.Append($"1 0 0 1 {rwx.ToString("F2", bt.invc)} {bt.lnY} Tm ");
-                    bt.sb.Append($"({EscapePdfString(rword)}) Tj ");
-                }
-                rwx += HeaderFooter.MeasureReportText(rword + " ", bt.metrics.blockFontSize,
-                    bt.block.FontRes == "F2");
-            }
-        }
-        bt.sb.AppendLine("ET");
-        bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bt.sb.ToString()));
-    }
-
-    /// <summary>A UA-flow line is written run by run with its inline faces.</summary>
-    private static void WriteUaFlowRuns(BlockTextState bt, string line, byte[] uaTtf, Core.PdfDictionary uaFontDict)
-    {
-        // UA flow draws with the real serif face (embedded Type0) —
-        // TimesNewRoman/-Bold output rather than Standard-14 Helvetica.
-        // The escaped-attr dialect is serif UA output too (the real
-        // TimesNewRoman faces are embedded — bold-italic included:
-        // <b><i> notes render TimesNewRomanBoldItalic). The pt-report
-        // flow embeds its own body face under that face's name.
-        var (uaRn, uaHex) = Text.Type0FontEmbedder.Embed(uaFontDict, uaTtf,
-            (bt.profile.ptReportDoc ? bt.profile.metricFace.Replace(" ", "") : "TimesNewRoman")
-            + (bt.block.FontRes == "F2" || (bt.profile.escapedAttrDoc && bt.block.EmBold) ? "Bold" : "")
-            + (bt.profile.escapedAttrDoc && (bt.block.EmItalic || bt.block.FontRes == "F3") ? "Italic" : ""),
-            line, stripSpacesInBaseFont: true);
-        bt.sb.Clear();
-        bt.sb.AppendLine("BT");
-        bt.sb.Append($"/{uaRn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-        bt.sb.Append($"1 0 0 1 {bt.lnX} {bt.lnY} Tm ");
-        bt.sb.Append('<').Append(System.Convert.ToHexString(uaHex)).Append("> Tj ");
-        bt.sb.AppendLine("ET");
-        bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bt.sb.ToString()));
-    }
-
-    /// <summary>A line needing a CJK or RTL face is written through its embedded TrueType.</summary>
-    private static void WriteCjkRuns(BlockTextState bt, string line, Core.PdfDictionary cjkFontDict)
-    {
-        bt.sb.Clear();
-        bt.sb.AppendLine("BT");
-        // Thai mark stacking: a tone mark over an ABOVE vowel seats
-        // higher than the run's baseline — the vowel keeps the
-        // baseline slot, the tone stacks above it (measured:
-        // +2.42 pt at 11 pt, drawn a small nudge right of
-        // the pen). Such marks are zero-advance, so each becomes its
-        // own raised run at the pen position while the remainder
-        // continues where the prefix ended. Lines without the pair
-        // keep the single-run emit byte-for-byte.
-        var thaiChunks = SplitThaiStackedTones(bt.uniSource);
-        if (thaiChunks is not null)
-        {
-            var penX = bt.lineXPos;
-            foreach (var (chunkText, raised) in thaiChunks)
-            {
-                var (crn, chex) = Text.Type0FontEmbedder.Embed(
-                    cjkFontDict, bt.cjkTtf!, bt.cjkName, chunkText, stripSpacesInBaseFont: true);
-                var cx = raised ? penX + ThaiToneNudgeEm * bt.metrics.blockFontSize : penX;
-                var cy = raised
-                    ? (bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y) + ThaiToneRaiseEm * bt.metrics.blockFontSize
-                    : (bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y);
-                bt.sb.Append($"/{crn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-                bt.sb.Append($"1 0 0 1 {cx.ToString("F2", bt.invc)} {cy.ToString("F2", bt.invc)} Tm ");
-                bt.sb.Append('<').Append(System.Convert.ToHexString(chex)).Append("> Tj ");
-                if (!raised)
-                    penX += MeasureFaceText(bt.cjkName, chunkText, bt.metrics.blockFontSize);
-            }
-        }
-        else
-        {
-            var (rn, hex) = Text.Type0FontEmbedder.Embed(
-                cjkFontDict, bt.cjkTtf!, bt.cjkName, bt.uniSource, stripSpacesInBaseFont: true);
-            bt.sb.Append($"/{rn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-            bt.sb.Append($"1 0 0 1 {bt.lnX} {bt.lnY} Tm ");
-            bt.sb.Append('<').Append(System.Convert.ToHexString(hex)).Append("> Tj ");
-        }
-        bt.sb.AppendLine("ET");
-        bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bt.sb.ToString()));
-    }
-
-    /// <summary>Dispatches the line to the run writer its font needs and its document class prescribes; false when the block must stop.</summary>
-    private static bool WriteLineRuns(BlockTextState bt, string line)
-    {
-        if (bt.cjkTtf is not null
-            && bt.flow.page.Dict.Get("Resources") as Core.PdfDictionary is { } cjkRes
-            && cjkRes.Get("Font") as Core.PdfDictionary is { } cjkFontDict)
-        {
-            WriteCjkRuns(bt, line, cjkFontDict);
-        }
-        else if (NeedsUnicode(bt.uniSource)
-            // redline symbol-PUA lines stay with the face writer below,
-            // which draws those sub-runs in the symbol face itself
-            && !(bt.profile.redlineDiffDoc && HasSymbolPua(line))
-            && bt.flow.page.Dict.Get("Resources") as Core.PdfDictionary is { } segRes
-            && segRes.Get("Font") as Core.PdfDictionary is { } segFontDict)
-        {
-            // Per-segment fallback: consecutive Tj runs advance the text position
-            // naturally, so no per-segment measurement is needed.
-            bt.sb.Clear();
-            bt.sb.AppendLine("BT");
-            bt.sb.Append($"1 0 0 1 {bt.lnX} {bt.lnY} Tm ");
-            foreach (var (segText, segFont) in SegmentByFont(bt.uniSource))
-            {
-                var segTtf = segFont?.SourceFontData?.TtfData;
-                if (segTtf is not null)
-                {
-                    var (rn, hex) = Text.Type0FontEmbedder.Embed(
-                        segFontDict, segTtf, segFont!.FontName ?? "Unicode", segText, stripSpacesInBaseFont: true);
-                    bt.sb.Append($"/{rn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-                    bt.sb.Append('<').Append(System.Convert.ToHexString(hex)).Append("> Tj ");
-                }
-                else
-                {
-                    bt.sb.Append($"/{bt.fontRes} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-                    bt.sb.Append($"({EscapePdfString(segText)}) Tj ");
-                }
-            }
-            bt.sb.AppendLine("ET");
-            bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bt.sb.ToString()));
-        }
-        else if (bt.profile.uaStdSerif || bt.profile.printGrid || bt.profile.redlineDiffDoc || bt.profile.floatBothSidesDoc)
-        {
-            if (!WriteSerifGridRuns(bt, line)) return false;
-        }
-        else if ((bt.uaFlow || bt.profile.escapedAttrDoc || bt.profile.ptReportDoc)
-            && PosFace(
-                (bt.profile.escapedAttrDoc ? "Times New Roman" : bt.profile.metricFace)
-                + (bt.block.FontRes == "F2" || (bt.profile.escapedAttrDoc && bt.block.EmBold) ? " Bold" : "")
-                + (bt.profile.escapedAttrDoc && (bt.block.EmItalic || bt.block.FontRes == "F3") ? " Italic" : "")
-                ).ttf is { } uaTtf
-            && bt.flow.page.Dict.Get("Resources") is Core.PdfDictionary uaRes
-            && uaRes.Get("Font") is Core.PdfDictionary uaFontDict)
-        {
-            WriteUaFlowRuns(bt, line, uaTtf, uaFontDict);
-        }
-        else if (bt.block.MaxWidthPt > 0)
-        {
-            WriteMaxWidthRuns(bt, line);
-        }
-        else
-        {
-            // Justified block: stretch word gaps so every line but the
-            // paragraph's last fills the content box. Word-spacing only —
-            // wrap points and pagination stay identical to the unjustified
-            // layout. Skipped when the crude wrap left implausible slack.
-            var justTw = 0.0;
-            if (bt.block.AlignJustify && bt.lineIdx < bt.metrics.lines.Length - 1)
-            {
-                var spaces = 0;
-                foreach (var ch in line) if (ch == ' ') spaces++;
-                if (spaces > 0)
-                {
-                    var natural = MeasureFaceText(
-                        string.IsNullOrEmpty(bt.block.FontFamily) ? "Arial" : bt.block.FontFamily!,
-                        line, bt.metrics.blockFontSize);
-                    var slack = bt.flow.contentWidth - bt.block.LeftIndent - natural;
-                    if (slack > 0 && slack < (bt.flow.contentWidth - bt.block.LeftIndent) * 0.35)
-                        justTw = slack / spaces;
-                }
-            }
-            bt.sb.Clear();
-            bt.sb.AppendLine("BT");
-            bt.sb.Append($"/{bt.fontRes} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-            if (justTw > 0) bt.sb.Append($"{justTw.ToString("F3", bt.invc)} Tw ");
-            bt.sb.Append($"1 0 0 1 {bt.lnX} {bt.lnY} Tm ");
-            bt.sb.Append($"({EscapePdfString(line)}) Tj ");
-            if (justTw > 0) bt.sb.Append("0 Tw ");
-            bt.sb.AppendLine("ET");
-            bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bt.sb.ToString()));
-        }
-        return true;
-    }
-
-    /// <summary>A line carrying bold, italic or colour runs is written run by run in the matching faces; false when the block must stop.</summary>
-    private static bool WriteEmphasisRuns(BlockTextState bt, string line, string uafFam, byte[] uafTtf, Core.PdfDictionary uafDict)
-    {
-        Color? fCurCol = null;
-        if (bt.profile.redlineDiffDoc && bt.block.LetterSpacingPt != 0)
-            bt.sb.Append(string.Create(bt.invc, $"{bt.block.LetterSpacingPt:0.##} Tc "));
-        bt.sb.Append($"1 0 0 1 {bt.lnX} {bt.lnY} Tm ");
-        int fLineStart = bt.metrics.cumChar, fLineEnd = bt.metrics.cumChar + line.Length;
-        var fPos = fLineStart;
-        while (fPos < fLineEnd)
-        {
-            if (!WriteEmphasisRun(bt, line, uafFam, uafTtf, uafDict, fLineStart, fLineEnd, ref fPos, ref fCurCol)) break;
-        }
-        if (bt.profile.redlineDiffDoc && bt.block.LetterSpacingPt != 0)
-            bt.sb.Append("0 Tc ");
-        // a line ending inside a colour run must not leak
-        // its ink into the following content
-        if (fCurCol is not null)
-        {
-            var fBase = bt.block.ForeColor ?? Color.FromArgb(0, 0, 0);
-            bt.sb.Append(string.Create(bt.invc,
-                $"{fBase.R / 255.0:0.###} {fBase.G / 255.0:0.###} {fBase.B / 255.0:0.###} rg "));
-        }
-        return true;
-    }
-
-    /// <summary>Writes the next run of the line - one face, one colour - and advances past it; false at the line's end.</summary>
-    private static bool WriteEmphasisRun(BlockTextState bt, string line, string uafFam, byte[] uafTtf, Core.PdfDictionary uafDict, int fLineStart, int fLineEnd, ref int fPos, ref Color? fCurCol)
-    {
-        var fSegEnd = fLineEnd;
-        var fBold = InFaceRuns(bt.block.BoldRuns, fPos, ref fSegEnd);
-        var fItal = InFaceRuns(bt.block.ItalicRuns, fPos, ref fSegEnd);
-        var fRunCol = ColorInRuns(bt, fPos, ref fSegEnd);
-        if (fRunCol?.Equals(fCurCol) != true && (fRunCol is not null || fCurCol is not null))
-        {
-            var fEff = fRunCol ?? bt.block.ForeColor ?? Color.FromArgb(0, 0, 0);
-            bt.sb.Append(string.Create(bt.invc,
-                $"{fEff.R / 255.0:0.###} {fEff.G / 255.0:0.###} {fEff.B / 255.0:0.###} rg "));
-            fCurCol = fRunCol;
-        }
-        var fSegText = line.Substring(fPos - fLineStart, fSegEnd - fPos);
-        // A run can be BOTH bold and italic - the certificate
-        // heading is <i><b>…</b></i> - and a real face has that
-        // variant where the Standard-14 table has no slot for it.
-        var fVariant = (fBold ? " Bold" : "") + (fItal ? " Italic" : "");
-        // "<family> Bold" may not be an indexed NAME —
-        // fall back to the styled repository lookup
-        // (tahomabd.ttf answers to family+style, not to
-        // the "Tahoma Bold" full name).
-        var fSegTtf = uafTtf;
-        if (fVariant.Length > 0)
-        {
-            fSegTtf = PosFace(uafFam + fVariant).ttf;
-            if (fSegTtf is null)
-                try
-                {
-                    fSegTtf = Text.FontRepository.FindFont(uafFam,
-                            fBold ? Text.FontStyles.Bold : Text.FontStyles.Italic,
-                            ignoreCase: true)
-                        ?.SourceFontData?.TtfData;
-                }
-                catch { fSegTtf = null; }
-            fSegTtf ??= uafTtf;
-        }
-        // Symbol PUA runs (U+F0xx — the Wingdings box
-        // glyphs) draw with the symbol face at full size.
-        WriteEmphasisSegment(bt, fSegText, fSegTtf, fVariant, uafFam, uafDict);
-        fPos = fSegEnd;
-        return true;
-    }
-
-    /// <summary>Writes one run's text in its face: symbol PUA glyphs, small caps, or the plain embedded face.</summary>
-    private static void WriteEmphasisSegment(BlockTextState bt, string fSegText, byte[] fSegTtf, string fVariant, string uafFam, Core.PdfDictionary uafDict)
-    {
-        if (bt.profile.redlineDiffDoc && HasSymbolPua(fSegText))
-        {
-            var puaPos = 0;
-            while (puaPos < fSegText.Length)
-            {
-                var isPua = IsSymbolPua(fSegText[puaPos]);
-                var puaEnd = puaPos + 1;
-                while (puaEnd < fSegText.Length
-                       && IsSymbolPua(fSegText[puaEnd]) == isPua) puaEnd++;
-                var puaText = fSegText[puaPos..puaEnd];
-                var puaTtf = isPua ? PosFace("Wingdings").ttf : null;
-                if (isPua && puaTtf is not null)
-                {
-                    var (pRn, pHex) = Text.Type0FontEmbedder.Embed(uafDict, puaTtf,
-                        "Wingdings", puaText, stripSpacesInBaseFont: true);
-                    bt.sb.Append($"/{pRn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-                    bt.sb.Append('<').Append(System.Convert.ToHexString(pHex)).Append("> Tj ");
-                }
-                else
-                {
-                    var nPos = 0;
-                    while (nPos < puaText.Length)
-                    {
-                        var nLower = bt.block.SmallCaps && char.IsLower(puaText[nPos]);
-                        var nEnd = nPos + 1;
-                        while (nEnd < puaText.Length
-                               && (bt.block.SmallCaps && char.IsLower(puaText[nEnd])) == nLower) nEnd++;
-                        var nText = puaText[nPos..nEnd];
-                        var (nRn, nHex) = Text.Type0FontEmbedder.Embed(uafDict, fSegTtf,
-                            uafFam.Replace(" ", "") + fVariant.Replace(" ", ""),
-                            nLower ? nText.ToUpperInvariant() : nText,
-                            stripSpacesInBaseFont: true);
-                        bt.sb.Append($"/{nRn} {(nLower ? bt.metrics.blockFontSize * RedlineSmallCapsEm : bt.metrics.blockFontSize).ToString("F2", bt.invc)} Tf ");
-                        bt.sb.Append('<').Append(System.Convert.ToHexString(nHex)).Append("> Tj ");
-                        nPos = nEnd;
-                    }
-                }
-                puaPos = puaEnd;
-            }
-        }
-        else if (bt.profile.redlineDiffDoc && bt.block.SmallCaps)
-        {
-            // small-caps: lowercase sub-runs draw UPPERCASE
-            // at the small ratio on the shared baseline
-            var scPos = 0;
-            while (scPos < fSegText.Length)
-            {
-                var scLower = char.IsLower(fSegText[scPos]);
-                var scEnd = scPos + 1;
-                while (scEnd < fSegText.Length
-                       && char.IsLower(fSegText[scEnd]) == scLower) scEnd++;
-                var scText = fSegText[scPos..scEnd];
-                var (scRn, scHex) = Text.Type0FontEmbedder.Embed(uafDict, fSegTtf,
-                    uafFam.Replace(" ", "") + fVariant.Replace(" ", ""),
-                    scLower ? scText.ToUpperInvariant() : scText,
-                    stripSpacesInBaseFont: true);
-                bt.sb.Append($"/{scRn} {(scLower ? bt.metrics.blockFontSize * RedlineSmallCapsEm : bt.metrics.blockFontSize).ToString("F2", bt.invc)} Tf ");
-                bt.sb.Append('<').Append(System.Convert.ToHexString(scHex)).Append("> Tj ");
-                scPos = scEnd;
-            }
-        }
-        else
-        {
-            var (fRn, fHex) = Text.Type0FontEmbedder.Embed(uafDict, fSegTtf,
-                uafFam.Replace(" ", "") + fVariant.Replace(" ", ""),
-                fSegText, stripSpacesInBaseFont: true);
-            bt.sb.Append($"/{fRn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-            bt.sb.Append('<').Append(System.Convert.ToHexString(fHex)).Append("> Tj ");
-        }
-    }
 }

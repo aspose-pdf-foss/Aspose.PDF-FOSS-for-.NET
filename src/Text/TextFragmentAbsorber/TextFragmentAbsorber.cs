@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -330,105 +330,74 @@ public sealed partial class TextFragmentAbsorber
         VisitInternal(page);
     }
 
-    internal void VisitInternal(Page page, bool tolerantFonts = false,
-        HashSet<object>? seenForms = null)
+    internal void VisitInternal(Page page, bool tolerantFonts = false, HashSet<object>? seenForms = null)
     {
-        var reader = page.Reader;
-        var contentStreams = GetContentStreams(page.Dict, reader);
+        var fv = new FragmentVisitState();
+        fv.page = page;
+        fv.tolerantFonts = tolerantFonts;
+        fv.seenForms = seenForms;
+        fv.reader = fv.page.Reader;
+        fv.contentStreams = GetContentStreams(fv.page.Dict, fv.reader);
         // A repeated Form XObject reference is deduped per absorber run (a document walk
         // passes one set for all pages; a lone page visit is its own run). This holds for
         // a phrase search too: the matches inside a shared form all address the SAME
         // bytes, so reporting one per referencing page would hand the caller N handles
         // onto one piece of text.
-        seenForms ??= new HashSet<object>(ReferenceEqualityComparer.Instance);
-        // Font keys named by Tf but absent from Resources, reported to the page
-        // notification log when the document enables it.
-        var missingFontKeys = page.Reader?.OwnerDocument?.EnableNotificationLogging == true
+        fv.seenForms ??= new HashSet<object>(ReferenceEqualityComparer.Instance);
+        fv.missingFontKeys = fv.page.Reader?.OwnerDocument?.EnableNotificationLogging == true
             ? new List<string>() : null;
 
-        var rawFragments = new List<RawTextRun>();
-        // Collect filled rects when the caller asked for graphics-related results, or when
-        // ToAttemptGetUnderlineFromSource is set (so source underlines can be captured and,
-        // if the fragment's underline is later toggled off, removed at save time).
-        // Always collect fill rects: strikeout detection runs by default (no option).
-        // In default mode only thin decoration-candidate rects are kept (see ExtractRuns)
-        // so the extra bookkeeping stays cheap; the background/underline consumers below
-        // remain gated behind their options.
-        var fillRects = new List<RawFillRect>();
-        // Occlusion candidates for hidden-text detection (always on; rect-only paths).
-        var coverRects = new List<RawCoverRect>();
+        fv.rawFragments = new List<RawTextRun>();
+        fv.fillRects = new List<RawFillRect>();
+        fv.coverRects = new List<RawCoverRect>();
 
-        // Apply page rotation CTM so fragment coordinates are in the viewer's
-        // natural coordinate system (same as the public API behaviour).
-        var rotCtm = PageRotationCtm(page);
+        fv.rotCtm = PageRotationCtm(fv.page);
 
         // Per PDF spec, a page's content streams are logically a single concatenated stream —
         // text state and graphics state must persist across them. Concatenate with a space
         // separator to prevent token adjacency.
-        if (contentStreams.Count == 1)
+        if (fv.contentStreams.Count == 1)
         {
-            ExtractRuns(contentStreams[0], page.Dict, reader, rawFragments, inheritedCtm: rotCtm, fillRects: fillRects, useFontEngineEncoding: _textSearchOptions?.UseFontEngineEncoding ?? false, keepAllFillRects: (_textSearchOptions?.SearchForTextRelatedGraphics ?? true) || (_textEditOptions?.ToAttemptGetUnderlineFromSource ?? false), coverRects: coverRects, strictFonts: !tolerantFonts && !(_textSearchOptions?.IgnoreResourceFontErrors ?? false), seenForms: seenForms, missingFontKeys: missingFontKeys);
+            ExtractRuns(fv.contentStreams[0], fv.page.Dict, fv.reader, fv.rawFragments, inheritedCtm: fv.rotCtm, fillRects: fv.fillRects, useFontEngineEncoding: _textSearchOptions?.UseFontEngineEncoding ?? false, keepAllFillRects: (_textSearchOptions?.SearchForTextRelatedGraphics ?? true) || (_textEditOptions?.ToAttemptGetUnderlineFromSource ?? false), coverRects: fv.coverRects, strictFonts: !fv.tolerantFonts && !(_textSearchOptions?.IgnoreResourceFontErrors ?? false), seenForms: fv.seenForms, missingFontKeys: fv.missingFontKeys);
         }
-        else if (contentStreams.Count > 1)
+        else if (fv.contentStreams.Count > 1)
         {
             var totalLen = 0;
-            foreach (var s in contentStreams) totalLen += s.Length + 1;
+            foreach (var s in fv.contentStreams) totalLen += s.Length + 1;
             var combined = new byte[totalLen];
             int off = 0;
-            foreach (var s in contentStreams)
+            foreach (var s in fv.contentStreams)
             {
                 Buffer.BlockCopy(s, 0, combined, off, s.Length);
                 off += s.Length;
                 combined[off++] = (byte)'\n';
             }
-            ExtractRuns(combined, page.Dict, reader, rawFragments, inheritedCtm: rotCtm, fillRects: fillRects, useFontEngineEncoding: _textSearchOptions?.UseFontEngineEncoding ?? false, keepAllFillRects: (_textSearchOptions?.SearchForTextRelatedGraphics ?? true) || (_textEditOptions?.ToAttemptGetUnderlineFromSource ?? false), coverRects: coverRects, strictFonts: !tolerantFonts && !(_textSearchOptions?.IgnoreResourceFontErrors ?? false), seenForms: seenForms, missingFontKeys: missingFontKeys);
+            ExtractRuns(combined, fv.page.Dict, fv.reader, fv.rawFragments, inheritedCtm: fv.rotCtm, fillRects: fv.fillRects, useFontEngineEncoding: _textSearchOptions?.UseFontEngineEncoding ?? false, keepAllFillRects: (_textSearchOptions?.SearchForTextRelatedGraphics ?? true) || (_textEditOptions?.ToAttemptGetUnderlineFromSource ?? false), coverRects: fv.coverRects, strictFonts: !fv.tolerantFonts && !(_textSearchOptions?.IgnoreResourceFontErrors ?? false), seenForms: fv.seenForms, missingFontKeys: fv.missingFontKeys);
         }
 
-        if (missingFontKeys is { Count: > 0 })
-            foreach (var key in missingFontKeys)
-                page.NotificationLog +=
+        if (fv.missingFontKeys is { Count: > 0 })
+            foreach (var key in fv.missingFontKeys)
+                fv.page.NotificationLog +=
                     $"Document error: Font key {key} is absent in page Resources\r\n";
 
-        var searchRect = _textSearchOptions?.Rectangle;
+        fv.searchRect = _textSearchOptions?.Rectangle;
 
         if (string.IsNullOrEmpty(_searchPhrase)) // empty phrase = absorb all
         {
-            _absorbAllPages.Add(page);
-            BuildAllFragmentsFromRuns(rawFragments, searchRect, sourcePage: page,
-                sourceForm: null, pageIndex: page.Index, fillRects: fillRects, coverRects: coverRects);
+            _absorbAllPages.Add(fv.page);
+            BuildAllFragmentsFromRuns(fv.rawFragments, fv.searchRect, sourcePage: fv.page,
+                sourceForm: null, pageIndex: fv.page.Index, fillRects: fv.fillRects, coverRects: fv.coverRects);
         }
         else
         {
-            // Search for the phrase in concatenated text, then map matches
-            // back to source runs for bounding rectangles
-            BuildSearchFragments(rawFragments, page.Index, page, fillRects: fillRects);
-
-            // Apply rectangle filter if set — a fragment is kept when its bounding box overlaps the
-            // search rect (a search box that clips only the ascender band of a
-            // run still finds it), falling back to start-position containment when no bbox is known.
-            if (searchRect is not null && !searchRect.IsEmpty)
-            {
-                for (var i = _fragments.Count - 1; i >= 0; i--)
-                {
-                    if (!FragmentInSearchRect(searchRect, _fragments.GetInternal(i)))
-                    {
-                        // Only remove fragments added during this Visit call (they have matching pageIndex)
-                        if (_fragments.GetInternal(i).PageIndex == page.Index)
-                            _fragments.RemoveAt(i);
-                    }
-                }
-            }
+            VisitSingleStream(fv);
         }
 
         // Also search the text drawn inside annotation appearance streams
         // (form fields, FreeText, stamps, …) when the caller opts in.
         if (_textSearchOptions?.SearchInAnnotations ?? false)
         {
-            foreach (var annotation in page.Annotations)
-            {
-                var appearance = annotation?.NormalAppearance;
-                if (appearance is not null) Visit(appearance);
-            }
+            VisitAnnotationText(fv);
         }
     }
 
@@ -436,7 +405,7 @@ public sealed partial class TextFragmentAbsorber
     /// Search the content stream of a Form XObject for text fragments. The
     /// form's own /Resources dict supplies fonts; fragments are produced with
     /// <see cref="TextFragment.Page"/>=null and <see cref="TextFragment.Form"/>
-    /// set to <paramref name="form"/>. When a search phrase is set the
+    /// set to <c>form</c>. When a search phrase is set the
     /// fragments are filtered by phrase match using the same logic as
     /// <see cref="Visit(Page)"/>.
     /// </summary>

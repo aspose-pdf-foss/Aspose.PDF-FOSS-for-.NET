@@ -7,6 +7,7 @@ namespace Aspose.Pdf.Drawing;
 /// </summary>
 public abstract class Shape
 {
+    /// <summary>Gets or sets the drawing settings (line width, stroke and fill colours, dash pattern, opacity) used to paint the shape.</summary>
     public Aspose.Pdf.GraphInfo GraphInfo { get; set; } = new();
 
     /// <summary>Optional text label rendered with the shape. Stored only —
@@ -56,7 +57,7 @@ public abstract class Shape
         ApplyOpacity(builder, page);
         builder.SetLineWidth(GraphInfo.LineWidth);
         if (GraphInfo.DashPattern is { Length: > 0 })
-            builder.SetDashPattern(GraphInfo.DashPattern, GraphInfo.DashPhase);
+            builder.SetDashPattern(GraphInfo.DashPattern, GraphInfo.DashStart);
         if (GraphInfo.StrokeColor is { } sc)
             builder.SetStrokeColor(sc.R, sc.G, sc.B);
         if (GraphInfo.FillColorInternal is { } fc)
@@ -81,7 +82,7 @@ public abstract class Shape
 
         if (GraphInfo.LineWidth != 1f) builder.SetLineWidth(GraphInfo.LineWidth);
         if (GraphInfo.DashPattern is { Length: > 0 })
-            builder.SetDashPattern(GraphInfo.DashPattern, GraphInfo.DashPhase);
+            builder.SetDashPattern(GraphInfo.DashPattern, GraphInfo.DashStart);
         builder.SetExtGState(page.AddExtGStateSequential(
             new Content.ExtGState { StrokeAlpha = GraphInfo.StrokeOpacity }));
         builder.SetExtGState(page.AddExtGStateSequential(
@@ -147,15 +148,59 @@ public abstract class Shape
             return arr;
         }
 
-        var fn = new Aspose.Pdf.Core.PdfDictionary();
-        fn.Set("FunctionType", new Aspose.Pdf.Core.PdfInteger(2));
-        var domain = new Aspose.Pdf.Core.PdfArray();
-        domain.Add(new Aspose.Pdf.Core.PdfInteger(0));
-        domain.Add(new Aspose.Pdf.Core.PdfInteger(1));
-        fn.Set("Domain", domain);
-        fn.Set("C0", Rgb(grad.StartColor));
-        fn.Set("C1", Rgb(grad.EndColor));
-        fn.Set("N", new Aspose.Pdf.Core.PdfInteger(1));
+        static Aspose.Pdf.Core.PdfArray UnitDomain()
+        {
+            var domain = new Aspose.Pdf.Core.PdfArray();
+            domain.Add(new Aspose.Pdf.Core.PdfInteger(0));
+            domain.Add(new Aspose.Pdf.Core.PdfInteger(1));
+            return domain;
+        }
+
+        // One straight ramp from one colour to the next.
+        Aspose.Pdf.Core.PdfDictionary Ramp(Aspose.Pdf.Color? from, Aspose.Pdf.Color? to)
+        {
+            var leg = new Aspose.Pdf.Core.PdfDictionary();
+            leg.Set("FunctionType", new Aspose.Pdf.Core.PdfInteger(2));
+            leg.Set("Domain", UnitDomain());
+            leg.Set("C0", Rgb(from));
+            leg.Set("C1", Rgb(to));
+            leg.Set("N", new Aspose.Pdf.Core.PdfInteger(1));
+            return leg;
+        }
+
+        var stops = grad.Stops.Count >= 2
+            ? new System.Collections.Generic.List<Aspose.Pdf.Color>(grad.Stops)
+            : new System.Collections.Generic.List<Aspose.Pdf.Color>
+                { grad.StartColor!, grad.EndColor! };
+
+        // Two colours are one ramp; more are ramps stitched end to end at evenly
+        // spaced bounds, which is how a reader is told where each colour sits.
+        Aspose.Pdf.Core.PdfDictionary fn;
+        if (stops.Count == 2)
+        {
+            fn = Ramp(stops[0], stops[1]);
+        }
+        else
+        {
+            var legs = new Aspose.Pdf.Core.PdfArray();
+            var bounds = new Aspose.Pdf.Core.PdfArray();
+            var encode = new Aspose.Pdf.Core.PdfArray();
+            for (var i = 0; i + 1 < stops.Count; i++)
+            {
+                legs.Add(Ramp(stops[i], stops[i + 1]));
+                encode.Add(new Aspose.Pdf.Core.PdfInteger(0));
+                encode.Add(new Aspose.Pdf.Core.PdfInteger(1));
+                if (i + 2 < stops.Count)
+                    bounds.Add(new Aspose.Pdf.Core.PdfReal((i + 1) / (double)(stops.Count - 1)));
+            }
+
+            fn = new Aspose.Pdf.Core.PdfDictionary();
+            fn.Set("FunctionType", new Aspose.Pdf.Core.PdfInteger(3));
+            fn.Set("Domain", UnitDomain());
+            fn.Set("Functions", legs);
+            fn.Set("Bounds", bounds);
+            fn.Set("Encode", encode);
+        }
 
         var sh = new Aspose.Pdf.Core.PdfDictionary();
         sh.Set("ShadingType", new Aspose.Pdf.Core.PdfInteger(2));

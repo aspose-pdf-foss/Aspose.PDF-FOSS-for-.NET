@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -7,6 +7,17 @@ namespace Aspose.Pdf.Text;
 
 internal sealed partial class TextStateModifier
 {
+    /// <summary>
+    /// Rewrite the page (or a Form XObject) content so the text run matching
+    /// <paramref name="text"/> is shown with <paramref name="newFont"/>: a subset
+    /// of the new font is embedded into the document and the run's active Tf
+    /// operator is repointed at the freshly registered resource. Mirrors the
+    /// match-by-decoded-text approach used by ModifyFontSize / ModifyForegroundColor.
+    /// When <paramref name="segmentScoped"/> is set the caller is restyling ONE SEGMENT
+    /// of a run, so only those glyphs change font and the run is split around them; a
+    /// fragment-scoped change restyles the whole matched run by repointing its Tf,
+    /// which leaves the show operators intact for a text replacement that follows.
+    /// </summary>
     public void ModifyFont(Page page, string text, Font newFont, double? targetY = null,
         bool segmentScoped = false, OverflowRelay? relay = null)
     {
@@ -208,7 +219,7 @@ internal sealed partial class TextStateModifier
         if (site.ShowStart < 0 || site.ShowEnd <= site.ShowStart) return null;
         var origRes = ExtractResName(content, site.NameStart, site.NameEnd);
         if (origRes is null) return null;
-        if (!TryEncodeWinAnsiLiteral(site.Decoded, out var literal)) return null;
+        if (TryEncodeWinAnsiLiteral(site.Decoded) is not { } literal) return null;
 
         var resName = RegisterFontResource(container, reader, doc, isCore, ttf, baseName, newFont);
 
@@ -242,20 +253,20 @@ internal sealed partial class TextStateModifier
     /// <summary>Render <paramref name="text"/> as a PDF literal string in the WinAnsi
     /// encoding a replacement simple font is written with, escaping the delimiters.
     /// False when any character has no WinAnsi code point.</summary>
-    private static bool TryEncodeWinAnsiLiteral(string text, out string literal)
+    private static string? TryEncodeWinAnsiLiteral(string text)
     {
-        literal = string.Empty;
+        string literal = string.Empty;
         var sb = new StringBuilder(text.Length + 2).Append('(');
         foreach (var ch in text)
         {
             var bytes = Cp1252.GetBytes(ch.ToString());
             // CP1252 maps an unrepresentable character to '?'; only a genuine '?' is one.
-            if (bytes.Length != 1 || (bytes[0] == (byte)'?' && ch != '?')) return false;
+            if (bytes.Length != 1 || (bytes[0] == (byte)'?' && ch != '?')) return null;
             if (ch is '(' or ')' or '\\') sb.Append('\\');
             sb.Append((char)bytes[0]);
         }
         literal = sb.Append(')').ToString();
-        return true;
+        return literal;
     }
 
     /// <summary>Register the replacement font as a resource on <paramref name="container"/>
@@ -399,6 +410,12 @@ internal sealed partial class TextStateModifier
         int LitStart, int LitEnd, double Size, string Decoded,
         int ShowStart = -1, int ShowEnd = -1, bool Composite = false);
 
+    /// <summary>Finds the governing Tf of the first show operator whose decoded text contains
+    /// <paramref name="text"/>, returning where a font swap can be applied, or null.</summary>
+    /// <param name="streamBytes">The content stream bytes to search.</param>
+    /// <param name="text">The decoded text to match.</param>
+    /// <param name="pageDict">The page or form dictionary whose resources decode the fonts.</param>
+    /// <param name="reader">The reader that resolves the resources.</param>
     /// <param name="alreadyReplacedRes">Resource name the replacement font is registered
     /// under. A run whose active Tf already names it has been converted by an earlier call
     /// and is skipped, so replacing several fragments that share the same text (a page of
@@ -411,146 +428,32 @@ internal sealed partial class TextStateModifier
         PdfDictionary pageDict, PdfReader reader, string? alreadyReplacedRes = null,
         bool exactOnly = false)
     {
-        if (streamBytes.Length == 0) return null;
-        var fonts = TextAbsorber.ResolveFonts(pageDict, reader);
-        var lexer = new PdfLexer(streamBytes);
-        var operands = new List<(TokenKind kind, PdfObject obj, int startPos, int endPos)>();
-        int lastTfNameStart = -1, lastTfNameEnd = -1;
-        double lastTfSize = 0;
-        Dictionary<int, string>? currentToUnicode = null;
-        // A simple (single-byte) font is swapped for our simple WinAnsi embedded font by
-        // repointing Tf alone: the shown bytes are reinterpreted under the new font's
-        // encoding. A Type0/CID font shows 2-byte codes that a simple font cannot
-        // represent, so its show operand has to be re-encoded as well — the caller does
-        // that when the site reports Composite. A font the resource dict doesn't resolve
-        // is left alone entirely: its codes decode to nothing reliable.
-        bool currentFontIsSimple = false;
-        bool currentFontResolved = false;
-        string? currentFontRes = null;
-        // A run whose text IS the fragment's is the fragment's own run; one that merely
-        // contains it may belong to a different fragment. Preferring the exact run keeps
-        // a short fragment ("c" out of a split word) from claiming a long run and leaving
-        // its own showing the original font.
-        FontSwapSite? containing = null;
+        var tn = new TfNameRangeState();
+        tn.streamBytes = streamBytes;
+        tn.text = text;
+        tn.pageDict = pageDict;
+        tn.reader = reader;
+        tn.alreadyReplacedRes = alreadyReplacedRes;
+        tn.exactOnly = exactOnly;
+        if (tn.streamBytes.Length == 0) return null;
+        tn.fonts = TextAbsorber.ResolveFonts(tn.pageDict, tn.reader);
+        tn.lexer = new PdfLexer(tn.streamBytes);
+        tn.operands = new List<(TokenKind kind, PdfObject obj, int startPos, int endPos)>();
+        tn.lastTfNameStart = -1;
+        tn.lastTfNameEnd = -1;
+        tn.lastTfSize = 0;
+        tn.currentToUnicode = null;
+        tn.currentFontIsSimple = false;
+        tn.currentFontResolved = false;
+        tn.currentFontRes = null;
+        tn.containing = null;
 
         while (true)
         {
-            var startPos = (int)lexer.Position;
-            var token = lexer.NextToken();
-            if (token.Kind == TokenKind.Eof) break;
-            var endPos = (int)lexer.Position;
-
-            switch (token.Kind)
-            {
-                case TokenKind.Integer:
-                    operands.Add((token.Kind, new PdfInteger(token.IntValue), startPos, endPos));
-                    break;
-                case TokenKind.Real:
-                    operands.Add((token.Kind, new PdfReal(token.RealValue), startPos, endPos));
-                    break;
-                case TokenKind.LiteralString:
-                    operands.Add((token.Kind, new PdfString(token.BytesValue!), startPos, endPos));
-                    break;
-                case TokenKind.HexString:
-                    operands.Add((token.Kind, new PdfString(token.BytesValue!, isHex: true), startPos, endPos));
-                    break;
-                case TokenKind.Name:
-                    operands.Add((token.Kind, new PdfName(token.StringValue!), startPos, endPos));
-                    break;
-                case TokenKind.ArrayStart:
-                {
-                    var arrTexts = new StringBuilder();
-                    while (true)
-                    {
-                        var t = lexer.NextToken();
-                        if (t.Kind == TokenKind.Eof) goto done;
-                        if (t.Kind == TokenKind.ArrayEnd) break;
-                        if (t.Kind == TokenKind.LiteralString || t.Kind == TokenKind.HexString)
-                        {
-                            var strBytes = t.BytesValue;
-                            if (strBytes is not null)
-                                arrTexts.Append(DecodeTextString(strBytes, currentToUnicode));
-                        }
-                    }
-                    operands.Add((TokenKind.ArrayStart, new PdfString(
-                        Cp1252.GetBytes(arrTexts.ToString())), startPos, (int)lexer.Position));
-                    break;
-                }
-                case TokenKind.DictStart:
-                {
-                    int depth = 1;
-                    while (depth > 0)
-                    {
-                        var t = lexer.NextToken();
-                        if (t.Kind == TokenKind.Eof) goto done;
-                        if (t.Kind == TokenKind.DictStart) depth++;
-                        if (t.Kind == TokenKind.DictEnd) depth--;
-                    }
-                    operands.Clear();
-                    break;
-                }
-                case TokenKind.Keyword:
-                {
-                    var op = token.StringValue!;
-                    switch (op)
-                    {
-                        case "Tf":
-                            if (operands.Count >= 2 && operands[0].obj is PdfName fn)
-                            {
-                                currentFontRes = fn.Value;
-                                if (fonts.TryGetValue(fn.Value, out var fontDict))
-                                {
-                                    currentToUnicode = TextAbsorber.ParseToUnicodeFromDict(fontDict, reader);
-                                    currentFontIsSimple = fontDict.GetName("Subtype") != "Type0";
-                                    currentFontResolved = true;
-                                }
-                                else
-                                {
-                                    currentToUnicode = null;
-                                    currentFontIsSimple = false;
-                                    currentFontResolved = false;
-                                }
-                                lastTfNameStart = operands[0].startPos;
-                                lastTfNameEnd = operands[0].endPos;
-                                lastTfSize = operands[1].obj is PdfInteger ti ? ti.Value
-                                    : operands[1].obj is PdfReal tr ? tr.Value : 0;
-                            }
-                            break;
-                        case "Tj":
-                        case "'":
-                        case "\"":
-                        case "TJ":
-                            if (operands.Count >= 1 && operands[^1].obj is PdfString showStr)
-                            {
-                                var decoded = DecodeTextString(showStr.Value, currentToUnicode);
-                                var alreadyDone = alreadyReplacedRes is not null
-                                    && string.Equals(currentFontRes, alreadyReplacedRes, StringComparison.Ordinal);
-                                if (decoded.Contains(text) && lastTfNameStart >= 0 && currentFontResolved
-                                    && !alreadyDone)
-                                {
-                                    var litOk = op == "Tj" && operands[^1].kind == TokenKind.LiteralString;
-                                    var site = new FontSwapSite(lastTfNameStart, lastTfNameEnd,
-                                        litOk ? operands[^1].startPos : -1,
-                                        litOk ? operands[^1].endPos : -1,
-                                        lastTfSize, decoded,
-                                        operands[^1].startPos, operands[^1].endPos,
-                                        Composite: !currentFontIsSimple);
-                                    if (decoded.Length == text.Length) return site;
-                                    containing ??= site;
-                                }
-                            }
-                            break;
-                    }
-                    operands.Clear();
-                    break;
-                }
-                default:
-                    operands.Clear();
-                    break;
-            }
+            if (!ScanTfNameToken(tn)) break;
         }
-        done:
-        return exactOnly ? null : containing;
+        if (tn.found is not null) return tn.found;
+        return tn.exactOnly ? null : tn.containing;
     }
 
     /// <summary>Read the resource name (without the leading '/') from a Tf name

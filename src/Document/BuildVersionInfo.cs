@@ -1,13 +1,12 @@
 namespace Aspose.Pdf;
 
 /// <summary>
-/// Build and version information for the library. The <see cref="Product"/> name
-/// is the prefix stamped into the /Info Producer string of generated documents.
+/// Build and version information for the library: its product name and version.
 /// </summary>
 public static class BuildVersionInfo
 {
-    /// <summary>Product name (e.g. "Aspose.PDF").</summary>
-    public const string Product = "Aspose.PDF";
+    /// <summary>Product name: "Aspose.PDF FOSS".</summary>
+    public const string Product = "Aspose.PDF FOSS";
 
     /// <summary>Assembly version string (e.g. "26.5.0").</summary>
     public static readonly string AssemblyVersion =
@@ -21,7 +20,10 @@ public static class BuildVersionInfo
     /// name and version, following the usual PDF convention that a producer
     /// identifies itself through its product string.
     /// </summary>
-    internal static readonly string ProducerString = "Aspose.PDF.FOSS for .NET " + AssemblyVersion;
+    internal static readonly string ProducerString = ProducerName + " " + AssemblyVersion;
+
+    /// <summary>The library's name as <see cref="ProducerString"/> begins with it, any version.</summary>
+    internal const string ProducerName = "Aspose.PDF.FOSS for .NET";
 
     /// <summary>
     /// The default /Info Creator stamped on a new document's save when the

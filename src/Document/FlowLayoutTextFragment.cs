@@ -27,6 +27,19 @@ public sealed partial class Document
             return (rowPitch - markerSize) + d * markerSize - d * parentSize;
         }
 
+        /// <summary>The block box a background fills, when the caller asked for a
+        /// block background rather than a per-line highlight: the content width,
+        /// and the line box's own split about the baseline so the box is exactly
+        /// its line boxes tall. Null leaves the highlight alone.</summary>
+        private static (double Width, double Above, double Below)? BlockBackgroundBox(
+            Text.TextState state, double fontSize, double lineHeight, double width)
+        {
+            if (state.FormattingOptions is not { BlockBackground: true }) return null;
+            var (above, below) = LinkBoxExtent(state, fontSize);
+            var aboveBaseline = (lineHeight - (above + below)) / 2 + above;
+            return (width, aboveBaseline, lineHeight - aboveBaseline);
+        }
+
         /// <summary>The first baseline for a fragment opening at the cursor: a CSS
         /// line box seats it half the surplus leading plus the ascent below the box
         /// top; otherwise the legacy drop of one line height (caller leading) or one
@@ -42,7 +55,7 @@ public sealed partial class Document
                 // the face's descent below it.
                 return _curY - ((lineHeight - (above + below)) / 2 + above) - below;
             }
-            if (state.LineBoxSeat)
+            if (state.LineBoxSeat || DeclaresLineBox(state))
             {
                 var (above, below) = LinkBoxExtent(state, fontSize);
                 return _curY - ((lineHeight - (above + below)) / 2 + above);
@@ -58,14 +71,99 @@ public sealed partial class Document
                 ? lineHeight : fontSize);
         }
 
+        /// <summary>The bullet's code in the Standard-14 metrics (WinAnsi).</summary>
+        private const int WinAnsiBullet = 0x95;
+
+        /// <summary>Draw a list marker with its right edge at <paramref name="rightX"/> on the
+        /// baseline the item's first body line opens on; the cursor does not move, the item's
+        /// own text follows on that line.</summary>
+        public void WriteListMarker(string marker, Text.TextState itemState, double fontSize, double rightX)
+        {
+            var lineHeight = fontSize + itemState.LineSpacing;
+            var baseline = _lastBodyBaseline.HasValue
+                ? _lastBodyBaseline.Value - lineHeight
+                : FirstBaselineSeat(itemState, fontSize, lineHeight);
+            var fontName = itemState.Font?.FontName ?? "Helvetica";
+            var w = 0.0;
+            foreach (var c in marker)
+            {
+                // the bullet is U+2022 in the text, the WinAnsi bullet in the metrics
+                var code = c == '\u2022' ? WinAnsiBullet : c < 256 ? c : '?';
+                var cw = Text.Standard14Fonts.GetWidth(fontName, code);
+                w += (cw < 0 ? 500 : cw) * fontSize / 1000.0;
+            }
+            var tf = new Text.TextFragment(marker) { Position = new Text.Position(rightX - w, baseline) };
+            tf.TextState.FontSize = (float)fontSize;
+            if (itemState.Font is not null) tf.TextState.Font = itemState.Font;
+            new Text.TextBuilder(_startPage).AppendTextInline(tf);
+        }
+
         public bool WriteTextFragment(Text.TextFragment tf)
+        {
+            // A block box -- margins, border, padding, width, height -- is laid around
+            // the fragment's lines (see FlowBlockBox).
+            if (tf.HasBlockBox && !tf.HasExplicitPosition) return WriteBlockBoxFragment(tf);
+            return WriteTextFragmentCore(tf);
+        }
+
+        private bool WriteTextFragmentCore(Text.TextFragment tf)
         {
             // BindXml-built fragments carry the classic XML-generator line model.
             if (tf.XmlGeneratorModel) return WriteXmlModelFragment(tf);
+            if (TryWriteSelfPlacedFragment(tf) is { } placed) return placed;
+            PromoteSegmentStylesToFragment(tf);
+            SubstituteFaceForUncoveredText(tf);
+            // Invisible and clipping text rendering modes need the legacy writer;
+            // the flow's own writer strokes (modes 1 and 2) itself.
+            if ((int)tf.TextState.RenderingMode >= 3) return false;
+            if (FragmentSegmentsRefuseFlow(tf) is { } refused) return refused;
+
+            var wtf = new FlowTextFragmentState();
+            wtf.useEmbeddedFont = HasFaceProgram(tf.TextState);
+            wtf.unclippedLines = tf.TextState.FormattingOptions?.UnclippedLines ?? false;
+            if (!InitFragmentWrap(wtf, tf)) return false;
+            InitFragmentLineHeight(wtf, tf);
+            InitFragmentLinksAndAlignment(wtf, tf);
+
+            if (!WriteFragmentLines(wtf, tf)) return false;
+            _colDeepestY = Math.Min(_colDeepestY, _curY);
+            // Record how far down the body reached on this slot. In column mode the
+            // footnote sits below the deepest column, so use _colDeepestY (the bottom
+            // of the fullest column), not _curY (which may be near the top of a later,
+            // shorter column).
+            RecordSlotBottom(_colLefts is not null ? _colDeepestY : _curY);
+
+            WriteFragmentNotesAndLinks(wtf, tf);
+            return true;
+        }
+
+        /// <summary>Writes a fragment that places itself — one the caller positioned, or one
+        /// whose tab stops lay its own line out — and reports what it returned. Null means the
+        /// fragment places nothing of its own and flows through the paginator below.</summary>
+        private bool? TryWriteSelfPlacedFragment(Text.TextFragment tf)
+        {
             // Caller-specified Position overrides flow layout. Use HasExplicitPosition,
             // not "Position != null": the getter now auto-materialises a (0,0) Position,
             // so a fragment the caller never positioned must still flow here.
-            if (tf.HasExplicitPosition) return false;
+            if (tf.HasExplicitPosition)
+            {
+                // The caller placed it; the flow only decides WHICH page. While the
+                // flow is still on its start page the dispatcher writes it there, as
+                // before. Once the flow has moved on, that page is a slot that does
+                // not exist yet -- writing to the start page would strand the
+                // fragment on page one while the text around it had moved. Queue it
+                // for the slot instead, and do NOT advance the cursor: caller-placed
+                // content takes no flow space.
+                if (_overflowBuffer is null) return false;
+                // Only when the caller said this belongs with the flow; a fragment
+                // that named its own page keeps it.
+                if (tf.TextState.FormattingOptions is not { SeatOnFlowPage: true }) return false;
+                // Resources resolve against the start page, whose fonts are merged
+                // into every overflow page this flow produces.
+                var seated = new Text.TextBuilder(_startPage) { ContentSink = WriteContent };
+                seated.AppendTextInline(tf);
+                return true;
+            }
             // A fragment with tab stops lays its own line out — the marker runs
             // aligned to their stops with a leader drawn between them. Seat it on
             // this flow's next baseline and let the writer that knows how emit it.
@@ -84,6 +182,13 @@ public sealed partial class Document
                 new Text.TextBuilder(_startPage).AppendTextInline(tf);
                 return true;
             }
+            return null;
+        }
+
+        /// <summary>Lifts a font, size or leading a caller attached to a SEGMENT up onto the
+        /// fragment when the fragment itself never set one.</summary>
+        private static void PromoteSegmentStylesToFragment(Text.TextFragment tf)
+        {
             // Promote a segment-level font/size up to the fragment when the
             // fragment itself didn't set one. Generator-style tests build the
             // fragment with `new TextFragment()` then attach a TextSegment that
@@ -123,6 +228,12 @@ public sealed partial class Document
                         && tf.TextState.FontSize > 0 && tf.TextState.LineSpacing > 0) break;
                 }
             }
+        }
+
+        /// <summary>Trades a face that cannot show part of the paragraph for one that covers
+        /// more of it — once, for the whole paragraph, so every page's chunk draws the same.</summary>
+        private static void SubstituteFaceForUncoveredText(Text.TextFragment tf)
+        {
             // Embedded/CID fonts (FontData set directly, or via FontRepository.FindFont
             // populating TextState.Font.SourceFontData) need TextBuilder for correct
             // glyph encoding -- but TextBuilder is page-bound, and overflow pages
@@ -149,10 +260,14 @@ public sealed partial class Document
                         tf.TextState.FontData = sub;
                 }
             }
-            var useEmbeddedFont = HasFaceProgram(tf.TextState);
-            // Invisible / clipping text rendering modes need the legacy writer, which
-            // emits `Tr` operators; the paginator does not.
-            if (tf.TextState.RenderingMode != 0) return false;
+        }
+
+        /// <summary>Whether the fragment's segments refuse to flow as one wrapped paragraph, and
+        /// with what answer: false when the legacy fixed-position writer must take it, the inline
+        /// styled-line writer's own result when that writer took it. Null means the paragraph
+        /// flows normally.</summary>
+        private bool? FragmentSegmentsRefuseFlow(Text.TextFragment tf)
+        {
             // Per-segment explicit Position means the caller wants precise control;
             // otherwise tf.Text (concatenated from all segments via RefreshTextFromSegments)
             // is the paragraph's logical content and flow-wraps correctly even when the
@@ -162,6 +277,11 @@ public sealed partial class Document
             {
                 foreach (var s in tf.Segments)
                     if (s.Position is not null) return false;
+                // A paragraph whose segments were asked to flow as runs wraps them
+                // together, each drawn in its own style (see FlowSegmentedRuns).
+                if (tf.TextState.FormattingOptions is { SegmentsFlowAsRuns: true }
+                    && TryWriteSegmentedRuns(tf) is { } wroteRuns)
+                    return wroteRuns;
                 // Segments carrying DIFFERING font/size/style (a bold 50pt word inside
                 // a 30pt sentence): render them inline AT THE CURSOR as one chained
                 // line when they fit — falling back to the legacy fixed-position
@@ -172,135 +292,84 @@ public sealed partial class Document
                 if (Text.TextBuilder.SegmentStylesDiffer(tf, tf.TextState.FontSize))
                     return TryWriteStyledSegmentsLine(tf);
             }
+            return null;
+        }
 
-            var baseFont = Text.TextBuilder.MapToStandard14Public(tf.TextState);
-            var fontSize = tf.TextState.FontSize > 0 ? tf.TextState.FontSize : 12;
-            // In column mode this is the current column's width; otherwise the
-            // full page content width. Wrapping uses the entry column's width;
-            // the test columns are equal-width so a fragment that flows into the
-            // next column keeps the same break points.
-            var contentWidth = CurWidth;
-            if (contentWidth <= 0) return false;
+        /// <summary>Resolves the paragraph's face, size and write width, and wraps its text to
+        /// that width. False means the region has no width to write in.</summary>
+        private bool InitFragmentWrap(FlowTextFragmentState wtf, Text.TextFragment tf)
+        {
+            wtf.baseFont = Text.TextBuilder.MapToStandard14Public(tf.TextState);
+            wtf.fontSize = tf.TextState.FontSize > 0 ? tf.TextState.FontSize : 12;
+            wtf.contentWidth = CurWidth;
+            if (wtf.contentWidth <= 0) return false;
 
-            // WordWrapMode.NoWrap → each \n-delimited input line becomes one
-            // output line, regardless of width: a
-            // long line stays on one rendered line that overflows the page
-            // horizontally; only vertical pagination still applies. Default
-            // (ByWords / Undefined / null) flows through the width-aware wrap.
-            var noWrap = tf.TextState.FormattingOptions?.WrapMode
+            wtf.noWrap = tf.TextState.FormattingOptions?.WrapMode
                          == Text.TextFormattingOptions.WordWrapMode.NoWrap;
-            // First-line indent (paragraph indentation set via FormattingOptions):
-            // the first wrapped line starts indented and is correspondingly narrower.
-            var firstLineIndent = (double)(tf.TextState.FormattingOptions?.FirstLineIndent ?? 0f);
-            // Subsequent-lines indent: every wrapped line after the paragraph's first
-            // starts indented by this amount. Applies across page
-            // breaks too — a chunk that does not start the paragraph indents all its
-            // lines.
-            var subsequentLinesIndent = (double)(tf.TextState.FormattingOptions?.SubsequentLinesIndent ?? 0f);
-            var rawText = tf.Text ?? string.Empty;
-            var charSpacing = tf.TextState.CharacterSpacing;
-            var allLines = noWrap
-                ? new List<string>(rawText.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
-                : Text.TextPaginator.WrapToWidth(rawText, baseFont, fontSize, contentWidth,
-                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData, firstLineIndent, charSpacing);
+            wtf.firstLineIndent = (double)(tf.TextState.FormattingOptions?.FirstLineIndent ?? 0f);
+            wtf.subsequentLinesIndent = (double)(tf.TextState.FormattingOptions?.SubsequentLinesIndent ?? 0f);
+            wtf.rawText = tf.Text ?? string.Empty;
+            wtf.charSpacing = tf.TextState.CharacterSpacing;
+            wtf.allLines = wtf.noWrap
+                ? new List<string>(wtf.rawText.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+                : Text.TextPaginator.WrapToWidth(wtf.rawText, wtf.baseFont, wtf.fontSize,
+                    (wtf.contentWidth - OccupiedExtra(tf.TextState.FormattingOptions, wtf.fontSize)) / ScaleOf(tf.TextState),
+                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData, wtf.firstLineIndent, wtf.charSpacing,
+                    tf.TextState.FormattingOptions?.HangingBreakSpace ?? false, tf.TextState.WordSpacing);
             // WrapLinesCount caps the wrapped paragraph at its first N lines; the
             // rest of the text is dropped (a one-line cell shows only its first line).
-            if (tf.WrapLinesCount > 0 && allLines.Count > tf.WrapLinesCount)
-                allLines.RemoveRange(tf.WrapLinesCount, allLines.Count - tf.WrapLinesCount);
-            // When notification logging is on, trace each wrapped line's width and
-            // break reason (aligned 1:1 with allLines) so the loop below can record
-            // where every line finished.
-            var lineTrace = _logNotifications && !noWrap
-                ? Text.TextPaginator.TraceLines(rawText, baseFont, fontSize, contentWidth,
-                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData, firstLineIndent)
+            if (tf.WrapLinesCount > 0 && wtf.allLines.Count > tf.WrapLinesCount)
+                wtf.allLines.RemoveRange(tf.WrapLinesCount, wtf.allLines.Count - tf.WrapLinesCount);
+            wtf.lineTrace = _logNotifications && !wtf.noWrap
+                ? Text.TextPaginator.TraceLines(wtf.rawText, wtf.baseFont, wtf.fontSize, wtf.contentWidth,
+                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData, wtf.firstLineIndent)
                 : null;
-            // lineHeight resolution order:
-            //   1. fragment.TextState.LineSpacing -- explicit float override
-            //      in points, set by callers like
-            //      `seg.TextState.LineSpacing = fontSize + 3f`.
-            //   2. FormattingOptions.LineSpacing == FullSize -- use the font's
-            //      full vertical extent from the TTF (ascent - descent).
-            //   3. fontSize * 1.2 -- default for FontSize / Undefined modes.
-            var fontTtf = tf.TextState.FontData?.TtfData
+            return true;
+        }
+
+        /// <summary>Resolves the line pitch, seeds the per-line fallback maps, and reserves the
+        /// paragraph's opening room.</summary>
+        private void InitFragmentLineHeight(FlowTextFragmentState wtf, Text.TextFragment tf)
+        {
+            wtf.fontTtf = tf.TextState.FontData?.TtfData
                           ?? tf.TextState.Font?.SourceFontData?.TtfData;
-            var fullSize = tf.TextState.FormattingOptions?.LineSpacing
+            wtf.fullSize = tf.TextState.FormattingOptions?.LineSpacing
                            == Text.TextFormattingOptions.LineSpacingMode.FullSize;
-            double lineHeight;
             if (tf.TextState.LineSpacing > 0)
                 // An explicit LineSpacing is extra leading added on
                 // top of the glyph height: the line pitch is fontSize + LineSpacing
                 // (a 10pt font with LineSpacing 13
                 // lays out on a 23pt pitch, not 13). LineSpacing == 0 degenerates to the
                 // default fontSize pitch below, so the rule is uniform.
-                lineHeight = fontSize + tf.TextState.LineSpacing;
-            else if (fullSize && fontTtf is { Length: > 12 })
-                lineHeight = ComputeFullSizeLineHeight(fontTtf, fontSize);
+                wtf.lineHeight = wtf.fontSize + tf.TextState.LineSpacing;
+            else if (wtf.fullSize && wtf.fontTtf is { Length: > 12 })
+                wtf.lineHeight = ComputeFullSizeLineHeight(wtf.fontTtf, wtf.fontSize);
+            else if (wtf.fullSize && Standard14ExtentEm(wtf.baseFont) > 0)
+                // A Standard-14 face has no TTF to measure; FullSize takes its AFM
+                // extent (Helvetica 0.925 em: a 10 pt line pitches 9.25 and seats on
+                // 762.82 under a 770 band top, measured on the reference).
+                wtf.lineHeight = Standard14ExtentEm(wtf.baseFont) * wtf.fontSize;
             else
                 // Default LineSpacingMode is FontSize: the line
                 // advance equals the font size, not an inflated 1.2x leading.
-                lineHeight = fontSize;
-            // FullSize takes a line's height from the FONT — so a line with no glyphs
-            // has no font to measure and falls back to the DEFAULT face's own full
-            // extent (Helvetica, 0.925 em), which is shorter than a text line in a
-            // tall face. Measured on a multi-script text dump: the
-            // blank-line gaps are exactly lineHeight + 0.925 em per empty line.
-            // ⚠ and that default is only in effect on the START page: once the flow has
-            // spilled, an empty line measures as one em (its bare font
-            // size) instead — probed on a two-page blank-line ladder, where the same
-            // double blank is 2 x 9.245 on page 1 and 2 x 10.0 on the overflow page.
-            bool variableLineHeights = fullSize && fontTtf is { Length: > 12 };
-            double EmptyHeight() => _overflowBuffer is null
-                ? Text.Standard14Fonts.FullSizeEmptyLineEm * fontSize : fontSize;
-            // A line the requested face cannot COVER is not drawn in it at all: the
-            // reference hands that line to a face that has the glyphs, and the line then
-            // takes THAT face's full extent. (Arial Unicode MS has no Romanian
-            // comma-below letters, so its lines drop to Times New Roman's 1.1074 em.)
-            var fallbackFace = new Dictionary<int, Text.Font?>();
-            // The covering-face hand-off applies to EVERY embedded-face fragment, not
-            // only FullSize ones - a default-spacing Arial Unicode MS line with
-            // Romanian comma-below letters is still handed to Times New Roman by the
-            // fallback (the line is drawn, not blanked). Only the LINE-HEIGHT
-            // treatment stays FullSize-gated (HeightOfLine below).
-            bool lineFallbackActive = fontTtf is { Length: > 12 };
-            Text.Font? LineFallback(int i)
-            {
-                if (!lineFallbackActive || i < 0 || i >= allLines.Count) return null;
-                if (fallbackFace.TryGetValue(i, out var cached)) return cached;
-                var f = Text.FontRepository.ResolveCoveringFont(fontTtf!, allLines[i]);
-                fallbackFace[i] = f;
-                return f;
-            }
-            double HeightOfLine(int i)
-            {
-                if (!variableLineHeights || i < 0 || i >= allLines.Count) return lineHeight;
-                // (fullSize-only from here: fallback faces change the LINE EXTENT.)
-                if (string.IsNullOrWhiteSpace(allLines[i])) return EmptyHeight();
-                if (LineFallback(i)?.SourceFontData?.TtfData is { Length: > 12 } fb)
-                    return Math.Max(Text.Standard14Fonts.FullSizeEmptyLineEm * fontSize,
-                                    ComputeFullSizeLineHeight(fb, fontSize));
-                return lineHeight;
-            }
-            // The content rectangle an unwrapped line is clipped to. Full page height:
-            // only the horizontal overrun is cut, vertical pagination is unchanged.
-            Rectangle? NoWrapClip() =>
-                CurWidth > 0 ? new Rectangle(CurLeft, 0, CurLeft + CurWidth, _startPageHeight) : null;
-            EnsureRoom(OrphanRoom(lineHeight, allLines.Count));
-            _lastTextLinePitch = lineHeight;
+                wtf.lineHeight = wtf.fontSize;
+            wtf.variableLineHeights = wtf.fullSize && wtf.fontTtf is { Length: > 12 };
+            wtf.fallbackFace = new Dictionary<int, Text.Font?>();
+            wtf.shapingLines = new HashSet<int>();
+            wtf.coveringFace = new Dictionary<int, Text.Font?>();
+            wtf.lineFallbackActive = wtf.fontTtf is { Length: > 12 };
+            EnsureRoom(OrphanRoom(wtf.lineHeight, wtf.allLines.Count));
+            _lastTextLinePitch = wtf.lineHeight;
+        }
 
-            // A fragment-level hyperlink applies to the fragment's first line.
-            // Capture the slot + top-of-line before the write loop advances _curY.
-            var fragHyperlink = tf.HyperlinkValue;
-            var fragSlot = _currentSlot;
-            var fragTop = _curY;
-            // The baseline the first line actually landed on - a segment link is
-            // boxed on the baselines, not on the line box (see LinkBoxExtent).
-            double? fragFirstBaseline = null;
+        /// <summary>Captures the link anchors the write loop will need once the cursor has
+        /// moved, and resolves how each line is justified and aligned.</summary>
+        private void InitFragmentLinksAndAlignment(FlowTextFragmentState wtf, Text.TextFragment tf)
+        {
+            wtf.fragHyperlink = tf.HyperlinkValue;
+            wtf.fragSlot = _currentSlot;
+            wtf.fragTop = _curY;
 
-            // Per-segment hyperlinks: each TextSegment with a Hyperlink emits a
-            // LinkAnnotation sized to the segment's run. Char offsets are into the
-            // fragment's full text; the emission below maps them onto each wrapped
-            // line (a hyperlink that wraps gets one rect per line it covers).
-            var segHyperlinks = (List<(int charStart, int charEnd, Hyperlink hyperlink)>?)null;
             if (tf.Segments is { Count: > 0 } segs)
             {
                 List<(int, int, Hyperlink)>? collected = null;
@@ -312,353 +381,66 @@ public sealed partial class Document
                         (collected ??= new()).Add((cursor, cursor + len, h));
                     cursor += len;
                 }
-                segHyperlinks = collected;
+                wtf.segHyperlinks = collected;
             }
 
-            // FullJustify: each wrapped line — including the paragraph's last —
-            // is stretched so its final word ends exactly at the region's right
-            // edge. Every word AND every interior space goes out as
-            // its own absolutely-positioned show (the line-break trailing space
-            // is dropped), distributing the slack equally across the interior
-            // spaces as gaps between a space glyph and the next word; space
-            // glyphs keep their natural width. That show structure
-            // matters beyond geometry: the absorber yields one fragment per
-            // show, and justified-output tests index into that fragment list.
-            var fullJustify = !noWrap
+            wtf.fullJustify = !wtf.noWrap
                 && (tf.HorizontalAlignment == HorizontalAlignment.FullJustify
                     || tf.TextState.HorizontalAlignment == HorizontalAlignment.FullJustify);
-            Func<string, double>? justifyMeasurer = null;
+            wtf.spacingJustify = !wtf.noWrap && tf.TextState.FormattingOptions?.JustifySpacingRatio is not null
+                && (tf.HorizontalAlignment == HorizontalAlignment.Justify
+                    || tf.TextState.HorizontalAlignment == HorizontalAlignment.Justify);
+            wtf.justify = !wtf.noWrap && !wtf.spacingJustify
+                && (tf.HorizontalAlignment == HorizontalAlignment.Justify
+                    || tf.TextState.HorizontalAlignment == HorizontalAlignment.Justify);
 
-            // Center / Right alignment: every wrapped line is offset by its own
-            // slack against the write region (half of it for Center), measured
-            // on the line without its break space -- a right-aligned line ends
-            // on the region's right edge and its trailing space hangs past it
-            // (reference column output, probed 2026-08-23).
-            var alignMode = tf.HorizontalAlignment is HorizontalAlignment.Center or HorizontalAlignment.Right
+            wtf.alignMode = tf.HorizontalAlignment is HorizontalAlignment.Center or HorizontalAlignment.Right
                 ? tf.HorizontalAlignment
                 : tf.TextState.HorizontalAlignment is HorizontalAlignment.Center or HorizontalAlignment.Right
                     ? tf.TextState.HorizontalAlignment : HorizontalAlignment.Left;
-            Func<string, double>? alignMeasurer = null;
-            double LineAlignOffset(string line)
-            {
-                if (noWrap || alignMode == HorizontalAlignment.Left) return 0;
-                alignMeasurer ??= Text.TextPaginator.CreateMeasurer(baseFont, fontSize,
-                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData);
-                var slack = CurWidth - alignMeasurer(line.TrimEnd(' '));
-                if (slack <= 0) return 0;
-                return alignMode == HorizontalAlignment.Center ? slack / 2 : slack;
-            }
-            var alignsLines = !noWrap && alignMode != HorizontalAlignment.Left;
+            wtf.alignsLines = !wtf.noWrap && wtf.alignMode != HorizontalAlignment.Left;
+        }
 
-            var idx = 0;
-            double? nonEmbeddedLastBaseline = null;
-            while (idx < allLines.Count)
-            {
-                int chunkSize;
-                if (variableLineHeights)
-                {
-                    // Fill the band line by line — the lines are not all the same height.
-                    var room = _curY - EffectiveBottom;
-                    chunkSize = 0;
-                    double used = 0;
-                    while (idx + chunkSize < allLines.Count
-                           && used + HeightOfLine(idx + chunkSize) <= room)
-                    {
-                        used += HeightOfLine(idx + chunkSize);
-                        chunkSize++;
-                    }
-                    if (chunkSize == 0) chunkSize = 1;
-                }
-                else
-                {
-                    var availableLines = Math.Max(1, (int)((_curY - EffectiveBottom) / lineHeight));
-                    chunkSize = Math.Min(availableLines, allLines.Count - idx);
-                }
-                chunkSize = Math.Min(chunkSize, allLines.Count - idx);
-                var chunk = allLines.GetRange(idx, chunkSize);
-                // Cumulative drop from the chunk's first baseline to line j.
-                double BaselineDrop(int j)
-                {
-                    double d = 0;
-                    for (var k = 0; k < j; k++) d += HeightOfLine(idx + k);
-                    return d;
-                }
-                double ChunkHeight()
-                {
-                    double d = 0;
-                    for (var k = 0; k < chunkSize; k++) d += HeightOfLine(idx + k);
-                    return d;
-                }
+        /// <summary>The paragraph clip reaches this many line boxes above the bottom of the
+        /// last one (the same 1.16 the table cell clip and the TextParagraph clip use).</summary>
+        private const double ParagraphClipLineBoxEm = 1.16;
 
-                if (fullJustify)
-                {
-                    justifyMeasurer ??= Text.TextPaginator.CreateMeasurer(baseFont, fontSize,
-                        tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData);
-                    // Baselines follow the deferred-render chain: first line at the
-                    // top of a region drops by the font size, later lines sit one
-                    // line height below the previous baseline (same rule as the
-                    // embedded branch below).
-                    // A CALLER-set LineSpacing adds its leading above the first
-                    // line too (23 pt drop for 10 pt + 13);
-                    // synthetic (layout-assigned) leading keeps the plain drop.
-                    var firstLineBaseline = _lastBodyBaseline.HasValue
-                        ? _lastBodyBaseline.Value - lineHeight
-                        : _curY - (tf.TextState.LineSpacing > 0 && !tf.TextState.LineSpacingSynthetic
-                            ? lineHeight : fontSize);
-                    for (var j = 0; j < chunkSize; j++)
-                    {
-                        var lineBaseline = firstLineBaseline - j * lineHeight;
-                        foreach (var (token, xOffset) in JustifyLineTokens(chunk[j], justifyMeasurer, CurWidth))
-                            _pendingEmbeddedRenders.Add((_currentSlot, CurLeft + xOffset, _curY,
-                                token, tf.TextState, fontSize, lineBaseline));
-                    }
-                    _lastBodyBaseline = firstLineBaseline - (chunkSize - 1) * lineHeight;
-                    // All later content in this flow must defer to keep the page's
-                    // content-stream order equal to paragraph order (see field doc).
-                    _forceDeferredWrites = true;
-                    if (_overflowBuffer is not null)
-                        _overflowBuffer.Add(Array.Empty<byte>());
-                }
-                else if (useEmbeddedFont || _forceDeferredWrites)
-                {
-                    // Queue the per-page chunk for deferred rendering. TextBuilder
-                    // splits on \n internally and applies the leading set by
-                    // SetLeading(lineHeight), so joining chunk lines with \n gets
-                    // us multi-line rendering on the target page.
-                    // The first line at the top of a region drops by the font size
-                    // (the standard first-line placement); every following body line
-                    // sits one of its own line heights below the previous baseline,
-                    // so a size change between adjacent paragraphs is spaced by the
-                    // lower line's metrics. Same-size runs are unaffected.
-                    // Caller-set LineSpacing: leading above the first line too
-                    // (see the fullJustify branch above).
-                    var firstBaseline = _lastBodyBaseline.HasValue
-                        ? _lastBodyBaseline.Value - lineHeight
-                        : FullSizeFirstBaseline(fullSize ? fontTtf : null, lineHeight)
-                          ?? FirstBaselineSeat(tf.TextState, fontSize, lineHeight);
-                    fragFirstBaseline ??= firstBaseline;
-                    _lastBodyBaseline = firstBaseline - BaselineDrop(chunkSize - 1);
-                    if (alignsLines || variableLineHeights)
-                    {
-                        // Each aligned line is its own deferred render at its own x —
-                        // and so is each line of a variable-height block, whose lines no
-                        // longer share one pitch.
-                        for (var j = 0; j < chunk.Count; j++)
-                        {
-                            // A line the requested face cannot cover is drawn in the
-                            // covering face — otherwise its missing glyphs come out as
-                            // look-alikes or blanks.
-                            Text.TextState lineState = tf.TextState;
-                            if (LineFallback(idx + j) is { } fbFont)
-                            {
-                                lineState = new Text.TextState();
-                                lineState.ApplyChangesFrom(tf.TextState);
-                                lineState.FontData = fbFont.SourceFontData;
-                                lineState.Font = fbFont;
-                            }
-                            _pendingEmbeddedRenders.Add((_currentSlot, CurLeft + LineAlignOffset(chunk[j]),
-                                _curY - BaselineDrop(j), chunk[j], lineState, fontSize,
-                                firstBaseline - BaselineDrop(j)));
-                            _pendingRenderPitch[_pendingEmbeddedRenders.Count - 1] = HeightOfLine(idx + j);
-                            // LAW: an unwrapped line does not run off the page —
-                            // it clips at the content rectangle's right
-                            // edge (its ink stops exactly on the right margin).
-                            if (noWrap && NoWrapClip() is { } nwClip)
-                                _pendingRenderClip[_pendingEmbeddedRenders.Count - 1] = nwClip;
-                        }
-                    }
-                    else
-                    {
-                        _pendingEmbeddedRenders.Add((_currentSlot, CurLeft, _curY,
-                            string.Join("\n", chunk), tf.TextState, fontSize, firstBaseline));
-                        // The chunk's lines advance by the pitch the paginator reserved.
-                        _pendingRenderPitch[_pendingEmbeddedRenders.Count - 1] = lineHeight;
-                    }
-                    // Mark the overflow buffer non-empty so StartNewPage / Commit
-                    // flushes it -- otherwise an overflow-only embedded-render
-                    // slot would never produce a Page, the deferred render would
-                    // have no target, and the test would see Pages.Count
-                    // unchanged from the start-page count. The placeholder is an
-                    // empty byte array (concatenates to nothing in the final
-                    // content stream).
-                    if (_overflowBuffer is not null)
-                        _overflowBuffer.Add(Array.Empty<byte>());
-                }
-                else
-                {
-                    // Register the fragment's MAPPED base font (Times/Courier/… — not
-                    // unconditionally Helvetica) so a FontName the caller or the HTML
-                    // UA-default flow set actually draws in that face. Overflow pages
-                    // register their own F1 at commit and stay Helvetica.
-                    var fontResName = _overflowBuffer is null
-                        ? Table.RegisterFont(_startPage, baseFont)
-                        : "F1";
-                    var alphaGsName = tf.TextState.ForegroundColor is { } fg
-                        ? Text.TextParagraph.EnsureFillAlphaExtGState(_startPage, fg.AByte)
-                        : null;
-                    // TextState.BackgroundColor draws a filled highlight behind each
-                    // wrapped line (its own /ca alpha, independent of the foreground's),
-                    // emitted before the glyphs so the text sits on top.
-                    var bgColor = tf.TextState.BackgroundColor;
-                    var bgAlphaGsName = bgColor is { } bgc
-                        ? Text.TextParagraph.EnsureFillAlphaExtGState(_startPage, bgc.AByte)
-                        : null;
-                    var plainSeat = PlainFirstBaseline(tf.TextState, baseFont, fontSize, lineHeight);
-                    double[]? lineOffsets = null;
-                    if (alignsLines)
-                    {
-                        lineOffsets = new double[chunk.Count];
-                        for (var j = 0; j < chunk.Count; j++) lineOffsets[j] = LineAlignOffset(chunk[j]);
-                    }
-                    var content = BuildWrappedTextStream(chunk, fontResName, fontSize,
-                        CurLeft, _curY, lineHeight, tf.TextState.ForegroundColor,
-                        tf.TextState.IsStrikeOut, tf.TextState.IsUnderline, baseFont, alphaGsName,
-                        idx == 0 ? firstLineIndent : 0, subsequentLinesIndent, idx == 0,
-                        bgColor, bgAlphaGsName, tf.TextState.Rotation, plainSeat, lineOffsets);
-                    WriteContent(content, tf.TextState);
-                    // The chunk's last baseline, so a note marker can attach to
-                    // the end of its last line.
-                    nonEmbeddedLastBaseline = plainSeat - (chunkSize - 1) * lineHeight;
-                    // The non-embedded path positions baselines independently;
-                    // don't let a following embedded paragraph chain onto a
-                    // stale baseline from before it.
-                    _lastBodyBaseline = null;
-                }
+        /// <summary>The AFM extent (ascender + descender) of a Standard-14 face in em, 0 for
+        /// any other name.</summary>
+        private static double Standard14ExtentEm(string baseFont)
+        {
+            var ascent = Text.Standard14Fonts.GetAscent(baseFont);
+            if (ascent <= 0) return 0;
+            return (ascent + Math.Abs(Text.Standard14Fonts.GetDescent(baseFont))) / 1000.0;
+        }
 
-                // Record where each line in this chunk finished. The line "slot"
-                // baseline reported is one line-height below the
-                // band top per line (curY is the band top for this chunk); the X is
-                // the left margin plus the line's width including its trailing space.
-                if (lineTrace is not null)
-                {
-                    for (var j = 0; j < chunkSize && idx + j < lineTrace.Count; j++)
-                    {
-                        var t = lineTrace[idx + j];
-                        LogLine(_currentSlot, t.content, CurLeft + t.width,
-                            _curY - lineHeight * (j + 1), t.reason);
-                    }
-                }
+        /// <summary>The descriptor extent (Ascent + |Descent|, in em) of the face a state
+        /// draws in: the hhea values a TrueType program's descriptor is written from,
+        /// truncated to thousandths as the descriptor is, else the Standard-14 AFM.</summary>
+        private static double DescriptorExtentEm(Text.TextState state, string baseFont)
+        {
+            var ttf = state.FontData?.TtfData ?? state.Font?.SourceFontData?.TtfData;
+            if (ttf is { Length: > 12 } && Text.FontRepository.ReadTtfHheaExtent(ttf) is { } extent)
+                return (extent.ascent + extent.descent) / 1000.0;
+            return Standard14ExtentEm(baseFont);
+        }
 
-                _curY -= variableLineHeights ? ChunkHeight() : lineHeight * chunkSize;
-                idx += chunkSize;
-                if (idx < allLines.Count)
-                {
-                    FlowToNextRegion();
-                    // The paragraph's remainder wraps to the width of the region it
-                    // continues in (a narrower second column re-breaks its lines).
-                    if (!noWrap && Math.Abs(CurWidth - contentWidth) > 0.01
-                        && rawText.IndexOf((char)10) < 0
-                        && RemainderFrom(rawText, allLines, idx) is { } rest)
-                    {
-                        var reLines = Text.TextPaginator.WrapToWidth(rest, baseFont, fontSize, CurWidth,
-                            tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData, 0, charSpacing);
-                        allLines = allLines.GetRange(0, idx);
-                        allLines.AddRange(reLines);
-                        contentWidth = CurWidth;
-                    }
-                }
-            }
-            _colDeepestY = Math.Min(_colDeepestY, _curY);
-            // Record how far down the body reached on this slot. In column mode the
-            // footnote sits below the deepest column, so use _colDeepestY (the bottom
-            // of the fullest column), not _curY (which may be near the top of a later,
-            // shorter column).
-            RecordSlotBottom(_colLefts is not null ? _colDeepestY : _curY);
-
-            // A FootNote / EndNote on the fragment: emit its superscript reference
-            // marker right after the last laid-out glyph and queue the note body
-            // for the band on this slot (foot) or the flow's last page (end).
-            foreach (var (note, isEndNote) in new[] { (tf.FootNote, false), (tf.EndNote, true) })
-            {
-                if (note is null) continue;
-                var marker = NextFootnoteMarker(note);
-                var lastLine = allLines.Count > 0 ? allLines[^1] : string.Empty;
-                var markerMeasurer = Text.TextPaginator.CreateMeasurer(baseFont, fontSize,
-                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData);
-                var markerBaseline = _lastBodyBaseline ?? nonEmbeddedLastBaseline;
-                if (markerBaseline.HasValue && marker.Length > 0)
-                {
-                    var markerSize = fontSize * MarkerSizeRatio;
-                    var markerState = new Text.TextState
-                    {
-                        Font = tf.TextState.Font,
-                        FontData = tf.TextState.FontData,
-                        ForegroundColor = note.TextState?.ForegroundColor,
-                    };
-                    var markerX = CurLeft + markerMeasurer(lastLine);
-                    _pendingEmbeddedRenders.Add((_currentSlot,
-                        markerX, 0, marker, markerState, markerSize,
-                        markerBaseline.Value
-                        + MarkerBaselineRise(baseFont, fontSize, lineHeight, markerSize)));
-                    // The line's text top is its box bottom plus the font size; the
-                    // marker hangs from it.
-                    var markerLineTop = _curY + fontSize;
-                    var markerW = Text.TextPaginator.CreateMeasurer(baseFont, markerSize,
-                        tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData)(marker);
-                    _noteMarkLine[note] = (_currentSlot, markerLineTop);
-                    QueueNoteLink(note, markerX, markerLineTop, markerW, markerSize);
-                }
-                if (isEndNote) QueueEndNote(note, marker, fontSize);
-                else QueueMarkedFootnote(note, marker, fontSize);
-            }
-
-            if (fragHyperlink is not null && allLines.Count > 0)
-            {
-                // A paragraph-level Hyperlink's box hugs the TEXT it was set on, not the
-                // content band: "some text" at Helvetica 10 sits under a
-                // link 43.35 pt wide (its exact advance), where the band is 415 (probed
-                // 2026-08-26 on a TextFragment and on an HtmlFragment alike).
-                var linkMeasure = Text.TextPaginator.CreateMeasurer(baseFont, fontSize,
-                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData);
-                var linkW = 0.0;
-                foreach (var line in allLines)
-                {
-                    var lw = linkMeasure(line);
-                    if (lw > linkW) linkW = lw;
-                }
-                if (linkW <= 0 || linkW > contentWidth) linkW = contentWidth;
-                _pendingLinks.Add((fragSlot,
-                    new Rectangle(CurLeft, fragTop - lineHeight, CurLeft + linkW, fragTop),
-                    fragHyperlink));
-            }
-
-            if (segHyperlinks is { Count: > 0 })
-            {
-                // Locate each wrapped line's character span within the fragment text so a
-                // segment range [a,b) can be split across the lines it covers (wrapping
-                // drops the break space, so lines are matched sequentially by content).
-                var lineStart = new int[allLines.Count];
-                var lineEnd = new int[allLines.Count];
-                int scan = 0;
-                for (int li = 0; li < allLines.Count; li++)
-                {
-                    var ln = allLines[li];
-                    int at = ln.Length == 0 ? scan : rawText.IndexOf(ln, Math.Min(scan, rawText.Length), StringComparison.Ordinal);
-                    if (at < 0) at = scan;
-                    lineStart[li] = at;
-                    lineEnd[li] = at + ln.Length;
-                    scan = lineEnd[li];
-                }
-                foreach (var (a, b, h) in segHyperlinks)
-                {
-                    for (int li = 0; li < allLines.Count; li++)
-                    {
-                        var ln = allLines[li];
-                        int ov0 = Math.Max(a, lineStart[li]);
-                        int ov1 = Math.Min(b, lineEnd[li]);
-                        if (ov1 <= ov0) continue;
-                        var prefix = ln.Substring(0, ov0 - lineStart[li]);
-                        var run = ln.Substring(ov0 - lineStart[li], ov1 - ov0);
-                        var x0 = CurLeft + MeasureText(prefix, baseFont, fontSize);
-                        var w = MeasureText(run, baseFont, fontSize);
-                        var (sgAbove, sgBelow) = LinkBoxExtent(tf.TextState, fontSize);
-                        var sgBase = (fragFirstBaseline ?? fragTop - fontSize) - lineHeight * li;
-                        _pendingLinks.Add((fragSlot,
-                            new Rectangle(x0, sgBase - sgBelow, x0 + w, sgBase + sgAbove), h));
-                    }
-                }
-            }
-            return true;
+        /// <summary>The content bytes wrapped in a saved state that clips to
+        /// <paramref name="clip"/>.</summary>
+        private static byte[] WrapInClip(byte[] content, Rectangle clip)
+        {
+            var head = new Content.ContentStreamBuilder();
+            head.SaveState();
+            head.Rectangle(clip.LLX, clip.LLY, clip.Width, clip.Height).Clip();
+            var tail = new Content.ContentStreamBuilder();
+            tail.RestoreState();
+            var h = head.Build();
+            var t = tail.Build();
+            var all = new byte[h.Length + content.Length + t.Length];
+            Buffer.BlockCopy(h, 0, all, 0, h.Length);
+            Buffer.BlockCopy(content, 0, all, h.Length, content.Length);
+            Buffer.BlockCopy(t, 0, all, h.Length + content.Length, t.Length);
+            return all;
         }
 
         /// <summary>Compute the per-line vertical advance for

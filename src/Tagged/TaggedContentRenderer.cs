@@ -1,4 +1,4 @@
-using Aspose.Pdf.Content;
+﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.Text;
 using LS = Aspose.Pdf.LogicalStructure;
@@ -39,7 +39,7 @@ namespace Aspose.Pdf.Tagged;
 /// pages get /StructParents, links get a Link annotation + OBJR, and the
 /// StructTreeRoot receives the /ParentTree + /ParentTreeNextKey.
 /// </summary>
-internal static class TaggedContentRenderer
+internal static partial class TaggedContentRenderer
 {
     /// <summary>Try to lay out and render the authored structure tree onto
     /// pages. Never throws — on any failure the document is left as-is (an
@@ -50,13 +50,14 @@ internal static class TaggedContentRenderer
         {
             new Engine(document).Render(root);
         }
-        catch
+        catch (Exception) when (Environment.GetEnvironmentVariable("ASPOSE_PDF_TAGGED_RENDER_STRICT") is null)
         {
-            // Rendering is best-effort; the structure tree is already linked.
+            // Rendering is best-effort; the structure tree is already linked. Set the variable to
+            // see what stopped it instead.
         }
     }
 
-    private sealed class Engine
+    private sealed partial class Engine
     {
         private const double PageW = 595.0;
         private const double PageH = 842.0;
@@ -101,6 +102,14 @@ internal static class TaggedContentRenderer
         // Pre-existing content-less pages, consumed by NewPage before any page
         // is appended (see Render).
         private readonly Queue<Page> _reusablePages = new();
+        // Headers bound to a table-of-contents page's title: they render as that title, nowhere else.
+        private readonly HashSet<LS.StructureElement> _titleHeaders = new(ReferenceEqualityComparer.Instance);
+
+        private void CollectTitleHeaders(LS.StructureElement el)
+        {
+            if (el is LS.TOCElement toc && toc.LinkedTitleHeader is { } title) _titleHeaders.Add(title);
+            foreach (var child in el.ChildElements) CollectTitleHeaders(child);
+        }
 
         /// <summary>True when the page carries no content stream bytes at all.</summary>
         private static bool PageHasNoContent(Page page)
@@ -142,10 +151,13 @@ internal static class TaggedContentRenderer
             // first canvases, in order (probed: an authored tagged-TOC document
             // with one blank Pages.Add() saves with the TOC flow starting ON
             // that page — 4 pages total, not a leading blank plus 4).
+            // A table-of-contents page keeps itself: its entries are laid out from the
+            // headers that asked for them, after this render has placed those headers.
             foreach (var page in _doc.Pages)
-                if (PageHasNoContent(page))
+                if (page.TocInfo is null && PageHasNoContent(page))
                     _reusablePages.Enqueue(page);
 
+            CollectTitleHeaders(root);
             WalkChildren(root);
             CloseLine();
             FlushPage();
@@ -354,8 +366,25 @@ internal static class TaggedContentRenderer
             return 0; // unleveled "H"
         }
 
+        /// <summary>The entry a header asked for on its table-of-contents page: a heading the
+        /// page's TOC layout draws on save, naming the page the header has just landed on.</summary>
+        private void AddTocEntry(Page tocPage, LS.StructureElement header, LS.StructureElement item, int level,
+            string text, double baseline)
+        {
+            tocPage.Paragraphs.Add(new Heading(level > 0 ? level : 1)
+            {
+                TaggedEntry = (header, item),
+                TocPage = tocPage,
+                IsInList = true,
+                DestinationPage = _page,
+                Top = baseline,
+                Text = text,
+            });
+        }
+
         private void RenderHeader(LS.HeaderElement header)
         {
+            if (_titleHeaders.Contains(header)) return;
             var text = BlockText(header);
             if (string.IsNullOrEmpty(text)) return;
 
@@ -398,6 +427,8 @@ internal static class TaggedContentRenderer
             RecordMcid(mcid, header);
             _pageHasContent = true;
             _flowTop -= size + mBottom;
+            if (header.TocEntry is { } entry)
+                AddTocEntry(entry.TocPage, header, entry.Item, level, text, baseline);
         }
 
         // ── paragraphs (with inline runs + wrapping) ──────────────────
@@ -405,29 +436,17 @@ internal static class TaggedContentRenderer
         private readonly record struct Run(LS.StructureElement El, string Text, FontData Font, float Size);
         private readonly record struct Chunk(int RunIdx, double X, double Baseline, string Text);
 
+        /// <summary>A wrapped paragraph: the chunks to show, how many lines they fell on, and
+        /// the baseline the last line sits on.</summary>
+        private readonly record struct WrappedParagraph(List<Chunk> Chunks, int LineCount, double LastBaseline);
+
         private void RenderParagraph(LS.StructureElement para)
         {
             var baseFont = para.StructureTextState.Font?.SourceFontData ?? _bodyFont;
             if (baseFont.TtfData is null) baseFont = _bodyFont;
             float baseSize = para.StructureTextState.FontSize > 0 ? para.StructureTextState.FontSize : 12f;
 
-            // Inline runs: the paragraph's children (spans/quotes), or the
-            // paragraph's own text.
-            var runs = new List<Run>();
-            if (para.ChildElements.Count > 0)
-            {
-                foreach (var child in para.ChildElements)
-                {
-                    var t = child.ActualText;
-                    if (string.IsNullOrEmpty(t)) continue;
-                    var (font, size) = ResolveRunFont(child, baseFont, baseSize);
-                    runs.Add(new Run(child, t, font, size));
-                }
-            }
-            else if (!string.IsNullOrEmpty(para.ActualText))
-            {
-                runs.Add(new Run(para, para.ActualText, baseFont, baseSize));
-            }
+            var runs = CollectParagraphRuns(para, baseFont, baseSize);
             if (runs.Count == 0) return;
 
             // Default paragraph margins are 2 pt above and below; an explicit
@@ -448,12 +467,44 @@ internal static class TaggedContentRenderer
 
             double d = DescentRatio(baseFont);
             double pitch = baseSize; // 1 em leading
-            double baseline = _flowTop - (1 - d) * baseSize;
+            var wrapped = WrapParagraphRuns(runs, left, right, _flowTop - (1 - d) * baseSize, pitch);
 
-            // Greedy wrap with eager spaces: a space is emitted while it fits,
-            // a word that doesn't fit opens the next line (the separator space
-            // is consumed by the break).
+            EmitParagraphChunks(runs, wrapped, left,
+                wrapped.LastBaseline - d * baseSize, wrapped.LineCount * LineBox * baseSize);
+
+            _pageHasContent = true;
+            _flowTop -= wrapped.LineCount * pitch + mBottom;
+        }
+
+        /// <summary>Inline runs: the paragraph's children (spans/quotes), or the paragraph's own
+        /// text.</summary>
+        private List<Run> CollectParagraphRuns(LS.StructureElement para, FontData baseFont, float baseSize)
+        {
+            var runs = new List<Run>();
+            if (para.ChildElements.Count > 0)
+            {
+                foreach (var child in para.ChildElements)
+                {
+                    var t = child.ActualText;
+                    if (string.IsNullOrEmpty(t)) continue;
+                    var (font, size) = ResolveRunFont(child, baseFont, baseSize);
+                    runs.Add(new Run(child, t, font, size));
+                }
+            }
+            else if (!string.IsNullOrEmpty(para.ActualText))
+            {
+                runs.Add(new Run(para, para.ActualText, baseFont, baseSize));
+            }
+            return runs;
+        }
+
+        /// <summary>Greedy wrap with eager spaces: a space is emitted while it fits, a word that
+        /// doesn't fit opens the next line (the separator space is consumed by the break).</summary>
+        private WrappedParagraph WrapParagraphRuns(List<Run> runs, double left, double right,
+            double firstBaseline, double pitch)
+        {
             var chunks = new List<Chunk>();
+            var baseline = firstBaseline;
             int lineCount = 1;
             double pen = left;
             var sb = new System.Text.StringBuilder();
@@ -514,18 +565,19 @@ internal static class TaggedContentRenderer
                 }
             }
             FlushChunk();
+            return new WrappedParagraph(chunks, lineCount, baseline);
+        }
 
-            // Emit: outer q; first run's BDC; one whole-block clip; each run's
-            // chunks inside its own BDC; the clip closes before the last EMC.
-            double lastBaseline = baseline;
-            double clipBottom = lastBaseline - d * baseSize;
-            double clipHeight = lineCount * LineBox * baseSize;
-
+        /// <summary>Emit: outer q; first run's BDC; one whole-block clip; each run's chunks inside
+        /// its own BDC; the clip closes before the last EMC.</summary>
+        private void EmitParagraphChunks(List<Run> runs, WrappedParagraph wrapped, double left,
+            double clipBottom, double clipHeight)
+        {
             var cs = _cs!;
             cs.SaveState();
             int currentRun = -1;
             bool clipEmitted = false;
-            foreach (var chunk in chunks)
+            foreach (var chunk in wrapped.Chunks)
             {
                 if (chunk.RunIdx != currentRun)
                 {
@@ -549,10 +601,8 @@ internal static class TaggedContentRenderer
             if (clipEmitted) cs.RestoreState();
             if (currentRun >= 0) cs.EndMarkedContent();
             cs.RestoreState();
-
-            _pageHasContent = true;
-            _flowTop -= lineCount * pitch + mBottom;
         }
+
 
         // ── flowing spans (list content, standalone spans) ────────────
 
@@ -813,54 +863,8 @@ internal static class TaggedContentRenderer
             if (structRootDict is null) return;
 
             // Number every element in the tree (the /K arrays and the parent
-            // tree reference them indirectly).
-            var refs = new Dictionary<PdfDictionary, PdfIndirectRef>(ReferenceEqualityComparer.Instance);
-            void NumberTree(LS.StructureElement el)
-            {
-                if (!refs.ContainsKey(el._dict))
-                {
-                    var objNum = _doc.AllocateObjectNumber();
-                    _doc.AddNewObject(objNum, el._dict);
-                    refs[el._dict] = new PdfIndirectRef(objNum, 0);
-                }
-                foreach (var child in el.ChildElements) NumberTree(child);
-            }
-            NumberTree(root);
-
-            // /P links + /K child references.
-            void LinkTree(LS.StructureElement el)
-            {
-                foreach (var child in el.ChildElements)
-                {
-                    child._dict.Set("P", refs[el._dict]);
-                    LinkTree(child);
-                }
-                if (el._dict.Get("K") is PdfArray k)
-                {
-                    for (var i = 0; i < k.Count; i++)
-                        if (k[i] is PdfDictionary kd && refs.TryGetValue(kd, out var r))
-                            k.ReplaceAt(i, r);
-                }
-                // /Ref associations recorded through AddRef (PDF 32000 §14.7.4.3):
-                // written as an array of the referenced elements' indirect refs.
-                if (el._referencedElements is { Count: > 0 } targets)
-                {
-                    var refArr = new PdfArray();
-                    foreach (var target in targets)
-                        if (refs.TryGetValue(target._dict, out var tr))
-                            refArr.Add(tr);
-                    if (refArr.Count > 0) el._dict.Set("Ref", refArr);
-                }
-            }
-            if (_doc.Catalog.Get("StructTreeRoot") is PdfIndirectRef structRootRef)
-                root._dict.Set("P", structRootRef);
-            LinkTree(root);
-            if (structRootDict.Get("K") is PdfArray rootK)
-            {
-                for (var i = 0; i < rootK.Count; i++)
-                    if (rootK[i] is PdfDictionary kd && refs.TryGetValue(kd, out var r))
-                        rootK.ReplaceAt(i, r);
-            }
+            // tree reference them indirectly) and link /P + /K.
+            var refs = StructureWiring.NumberAndLink(_doc, root, structRootDict);
 
             // Leaf /K MCIDs + /Pg + the per-page parent-tree arrays.
             var nums = new PdfArray();
@@ -885,58 +889,7 @@ internal static class TaggedContentRenderer
                 nums.Add(new PdfInteger(key));
                 nums.Add(pageArr);
             }
-
-            // Link annotations + OBJR children.
-            foreach (var (link, page, llx, lly, urx, ury) in _links)
-            {
-                var annot = new PdfDictionary();
-                annot.Set("Type", new PdfName("Annot"));
-                annot.Set("Subtype", new PdfName("Link"));
-                var rect = new PdfArray();
-                rect.Add(new PdfReal(llx));
-                rect.Add(new PdfReal(lly));
-                rect.Add(new PdfReal(urx));
-                rect.Add(new PdfReal(ury));
-                annot.Set("Rect", rect);
-                annot.Set("F", new PdfInteger(4));
-                var bs = new PdfDictionary();
-                bs.Set("W", new PdfInteger(0));
-                annot.Set("BS", bs);
-                annot.Set("BE", new PdfDictionary());
-                if (link.Hyperlink?.Url is { } url)
-                {
-                    var action = new PdfDictionary();
-                    action.Set("S", new PdfName("URI"));
-                    action.Set("URI", new PdfString(System.Text.Encoding.ASCII.GetBytes(url)));
-                    annot.Set("A", action);
-                }
-                if (!string.IsNullOrEmpty(link.AlternateDescriptions))
-                    annot.Set("Contents", new PdfString(System.Text.Encoding.UTF8.GetBytes(link.AlternateDescriptions!)));
-
-                var annotNum = _doc.AllocateObjectNumber();
-                _doc.AddNewObject(annotNum, annot);
-                var annotRef = new PdfIndirectRef(annotNum, 0);
-
-                if (_doc.Reader.Resolve(page.Dict.Get("Annots")) is not PdfArray annots)
-                {
-                    annots = new PdfArray();
-                    page.Dict.Set("Annots", annots);
-                }
-                annots.Add(annotRef);
-
-                var key = nextKey++;
-                annot.Set("StructParent", new PdfInteger(key));
-                if (refs.TryGetValue(link._dict, out var linkRef))
-                {
-                    nums.Add(new PdfInteger(key));
-                    nums.Add(linkRef);
-                }
-
-                var objr = new PdfDictionary();
-                objr.Set("Type", new PdfName("OBJR"));
-                objr.Set("Obj", annotRef);
-                if (link._dict.Get("K") is PdfArray linkK) linkK.Add(objr);
-            }
+            nextKey = WireLinkStructure(nums, nextKey, refs);
 
             var parentTree = new PdfDictionary();
             parentTree.Set("Nums", nums);

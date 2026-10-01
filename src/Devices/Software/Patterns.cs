@@ -10,136 +10,32 @@ namespace Aspose.Pdf.Devices;
 
 public sealed partial class SoftwarePageRenderer
 {
-    private static void FillWithPattern(RenderContext ctx, EdgeTable edgeTable, bool evenOdd,
-        string patternName, GraphicsState state)
+    private static void FillWithPattern(RenderContext ctx, EdgeTable edgeTable, bool evenOdd, string patternName, GraphicsState state)
     {
-        if (ctx.Patterns?.Get(patternName) is not { } patternObj) return;
+        var pf = new PatternFillState();
+        pf.ctx = ctx;
+        pf.edgeTable = edgeTable;
+        pf.evenOdd = evenOdd;
+        pf.patternName = patternName;
+        pf.state = state;
+        if (pf.ctx.Patterns?.Get(pf.patternName) is not { } patternObj) return;
 
-        // Tiling patterns (PatternType 1) are streams (the tile content); shading
-        // patterns (PatternType 2) are plain dicts that reference a /Shading. Resolve
-        // both shapes so the patternType branch below picks the right path.
-        PdfStream? patternStream = patternObj switch
-        {
-            PdfStream s => s,
-            _ => ctx.Reader.ResolveStream(patternObj),
-        };
-        var pdict = patternStream?.Dict ?? ctx.Reader.ResolveDict(patternObj);
-        if (pdict is null) return;
-        var patternType = (int)pdict.GetInt("PatternType");
-        if (patternType is not 1 and not 2) return;
+        if (!ResolvePatternProgram(pf, patternObj)) return;
+        pf.xStep = NumFrom(pf.pdict!.Get("XStep"));
+        pf.yStep = NumFrom(pf.pdict.Get("YStep"));
+        if (pf.xStep == 0) pf.xStep = 1;
+        if (pf.yStep == 0) pf.yStep = 1;
 
-        // Build the clipping stencil from the filled path. Cheap — one pass over the
-        // same edge table the solid-fill path uses, writing 0/255 instead of RGBA.
-        // When an outer clip is active (e.g. an enclosing W/W*), AND it in so the
-        // pattern fill stays within both the path and the outer clip.
-        var mask = new byte[ctx.PixelW * ctx.PixelH];
-        ScanlineFiller.BuildMask(edgeTable, mask, ctx.PixelW, ctx.PixelH, evenOdd);
-        if (ctx.ClipMask is { } outer)
-        {
-            for (var i = 0; i < mask.Length; i++)
-                if (outer[i] == 0) mask[i] = 0;
-        }
+        pf.patResources = pf.ctx.Reader.ResolveDict(pf.pdict.Get("Resources"));
+        pf.patFonts = ResolveFontDicts(pf.patResources, pf.ctx.Reader);
+        pf.patExtG = ResolveExtGStates(pf.patResources, pf.ctx.Reader);
+        pf.patXObj = ResolveAllXObjects(pf.patResources, pf.ctx.Reader);
+        if (pf.ctx.FontDicts is not null)
+            foreach (var kv in pf.ctx.FontDicts) pf.patFonts.TryAdd(kv.Key, kv.Value);
+        if (pf.ctx.AllXObjects is not null)
+            foreach (var kv in pf.ctx.AllXObjects) pf.patXObj.TryAdd(kv.Key, kv.Value);
 
-        if (patternType == 2)
-        {
-            FillWithShadingPattern(ctx, pdict, state, mask);
-            return;
-        }
-
-        if (patternStream is null) return;
-        byte[] patternContent;
-        try { patternContent = ctx.Reader.DecodeStream(patternStream); }
-        catch { return; }
-
-        // Pattern's Matrix maps pattern space → user space (PDF 32000 §8.7.3.3).
-        var patMatrix = pdict.Get("Matrix") as PdfArray;
-        var m = new double[] { 1, 0, 0, 1, 0, 0 };
-        if (patMatrix is { Count: >= 6 })
-        {
-            for (var i = 0; i < 6; i++) m[i] = NumFrom(patMatrix[i]);
-        }
-        // XStep/YStep drive the tile repetition grid in pattern space.
-        var xStep = NumFrom(pdict.Get("XStep"));
-        var yStep = NumFrom(pdict.Get("YStep"));
-        if (xStep == 0) xStep = 1;
-        if (yStep == 0) yStep = 1;
-
-        // Resolve the pattern's own /Resources so Image Do, font lookups etc. inside the
-        // pattern content stream find the right objects. Fall back to the page's resources
-        // so tiling patterns that reference outer fonts/images still work.
-        var patResources = ctx.Reader.ResolveDict(pdict.Get("Resources"));
-        var patFonts = ResolveFontDicts(patResources, ctx.Reader);
-        var patExtG = ResolveExtGStates(patResources, ctx.Reader);
-        var patXObj = ResolveAllXObjects(patResources, ctx.Reader);
-        if (ctx.FontDicts is not null)
-            foreach (var kv in ctx.FontDicts) patFonts.TryAdd(kv.Key, kv.Value);
-        if (ctx.AllXObjects is not null)
-            foreach (var kv in ctx.AllXObjects) patXObj.TryAdd(kv.Key, kv.Value);
-
-        var patternContext = new RenderContext(ctx.Pixels, ctx.PixelW, ctx.PixelH, ctx.Scale, ctx.MediaBox, ctx.Reader)
-        {
-            AllXObjects = patXObj,
-            FontDicts = patFonts,
-            ConvertFontsToUnicodeTtf = ctx.ConvertFontsToUnicodeTtf,
-            PdfXOverprintSim = ctx.PdfXOverprintSim,
-            PageCtm = ctx.PageCtm,
-            Patterns = ctx.Reader.ResolveDict(patResources?.Get("Pattern")) ?? ctx.Patterns,
-            Shadings = ctx.Reader.ResolveDict(patResources?.Get("Shading")) ?? ctx.Shadings,
-            // Install the path stencil so every SetPixel outside the filled shape is a no-op.
-            ClipMask = mask,
-        };
-
-        // Tile iteration: find which (i, j) tiles cover the filled region in pattern space,
-        // then render the pattern content once per tile with its origin offset by
-        // (i*XStep, j*YStep). The PDF spec describes the pattern cell as tiling at these
-        // steps (§8.7.3.3) — a real-world PDF may place pattern (0,0) outside the
-        // clipped region and rely on tile (0,-1) or similar to cover it.
-        // The cell's /BBox is what a tile actually paints, and it need not sit at the
-        // pattern origin: an SVG pattern in objectBoundingBox units converts to a cell
-        // whose BBox starts 100 units out, and one whose BBox is WIDER than its step so
-        // the tiles overlap. Deriving the index range from the region alone assumed a cell
-        // at the origin no bigger than its step, and every index it produced painted
-        // outside the filled square - the whole pattern came out blank.
-        var cellBBox = pdict.Get("BBox") is PdfArray bbArr && bbArr.Count >= 4
-            ? new[] { NumFrom(bbArr[0]), NumFrom(bbArr[1]), NumFrom(bbArr[2]), NumFrom(bbArr[3]) }
-            : null;
-        ComputePatternTileRange(edgeTable, ctx, m, xStep, yStep,
-            out var iMin, out var iMax, out var jMin, out var jMax, out var rawCount, cellBBox);
-
-        // A fine pattern covering a large area would need more tiles than the per-tile
-        // loop is capped at, leaving most of the region unpainted. Rasterise one cell to
-        // a device-sized tile and stamp it across the masked region instead.
-        if (rawCount > 8000 &&
-            TryStampTiledPattern(ctx, mask, patternContent, patternContext, patExtG, m, xStep, yStep))
-            return;
-
-        for (var j = jMin; j <= jMax; j++)
-        {
-            for (var i = iMin; i <= iMax; i++)
-            {
-                // Shift pattern.Matrix's translation so the content stream's native pattern
-                // (0,0) lands at user coord corresponding to pattern (i*XStep, j*YStep).
-                var tx = i * xStep;
-                var ty = j * yStep;
-                var tileMatrix = new[]
-                {
-                    m[0], m[1], m[2], m[3],
-                    m[4] + tx * m[0] + ty * m[2],
-                    m[5] + tx * m[1] + ty * m[3],
-                };
-                // The pattern matrix maps pattern space to the page's DEFAULT user
-                // space (PDF 32000 §8.7.3.1) — it is independent of the CTM in force
-                // when the fill runs. Composing state.Ctm here double-applied every
-                // content transform (the stamp path above already treats the matrix
-                // as default-space).
-                // The stencil has to be handed in as the tile content's STARTING clip, not
-                // just parked on the context: every draw hook re-reads the clip off the
-                // graphics state, so a context-only mask is overwritten with null by the
-                // first painting operator inside the cell and the tiles then spill past
-                // the filled path (chart bars grew until they touched each other).
-                RenderContent(patternContent, patternContext, patExtG, tileMatrix, mask);
-            }
-        }
+        if (!PaintPatternTiles(pf)) return;
     }
 
     /// <summary>
@@ -276,15 +172,13 @@ public sealed partial class SoftwarePageRenderer
     /// range that can possibly intersect it. Guards: caps the range at ±64 so a near-singular
     /// matrix or tiny step can't trigger a runaway loop. Typical real PDFs need a range of 1–3.
     /// </summary>
-    private static void ComputePatternTileRange(EdgeTable edgeTable, RenderContext ctx, double[] m,
-        double xStep, double yStep, out int iMin, out int iMax, out int jMin, out int jMax)
-        => ComputePatternTileRange(edgeTable, ctx, m, xStep, yStep, out iMin, out iMax, out jMin, out jMax, out _);
+    /// <summary>The tile index range a pattern fill must walk, and the uncapped tile count
+    /// the caller uses to decide whether to stamp a rasterised tile instead.</summary>
+    private readonly record struct PatternTileRange(int IMin, int IMax, int JMin, int JMax, long RawCount);
 
-    private static void ComputePatternTileRange(EdgeTable edgeTable, RenderContext ctx, double[] m,
-        double xStep, double yStep, out int iMin, out int iMax, out int jMin, out int jMax,
-        out long rawCount, double[]? cellBBox = null)
+    private static PatternTileRange ComputePatternTileRange(EdgeTable edgeTable, RenderContext ctx, double[] m,
+        double xStep, double yStep, double[]? cellBBox = null)
     {
-        rawCount = 0;
         // Pixel bbox of the filled region (from edge table). Edges now carry fractional
         // Y; floor/ceiling outward to snap to the enclosing integer pixel box.
         int pxMin = int.MaxValue, pxMax = int.MinValue, pyMin = int.MaxValue, pyMax = int.MinValue;
@@ -301,7 +195,7 @@ public sealed partial class SoftwarePageRenderer
             if (xTop > pxMax) pxMax = (int)Math.Ceiling(xTop);
             if (xBot > pxMax) pxMax = (int)Math.Ceiling(xBot);
         }
-        if (pxMin == int.MaxValue) { iMin = iMax = jMin = jMax = 0; return; }
+        if (pxMin == int.MaxValue) return default;
 
         // Pixel → user space: inverse of (ctx.PixelH - (user_y - LLY) * Scale).
         double PxToUserX(double px) => px / ctx.Scale + ctx.MediaBox.LLX;
@@ -314,7 +208,7 @@ public sealed partial class SoftwarePageRenderer
         // Invert pattern.Matrix (user → pattern). For an affine 2×2 with translation:
         // det=a*d-b*c; inv = [d/det, -b/det, -c/det, a/det, (c*f-d*e)/det, (b*e-a*f)/det].
         var det = m[0] * m[3] - m[1] * m[2];
-        if (Math.Abs(det) < 1e-12) { iMin = iMax = jMin = jMax = 0; return; }
+        if (Math.Abs(det) < 1e-12) return default;
         var ia = m[3] / det;
         var ib = -m[1] / det;
         var ic = -m[2] / det;
@@ -337,6 +231,7 @@ public sealed partial class SoftwarePageRenderer
             }
         }
 
+        int iMin, iMax, jMin, jMax;
         if (cellBBox is not null)
         {
             // Tile (i, j) paints the cell's BBox shifted by (i*XStep, j*YStep), so it can
@@ -363,7 +258,7 @@ public sealed partial class SoftwarePageRenderer
         // Unclamped tile count — lets the caller switch to a tile-and-stamp fill when a
         // fine pattern covers a large area (per-tile execution would be capped below and
         // leave most of the region unpainted).
-        rawCount = (long)(iMax - iMin + 1) * (jMax - jMin + 1);
+        var rawCount = (long)(iMax - iMin + 1) * (jMax - jMin + 1);
 
         // Guard against runaway. This caps HOW MANY tiles are executed, not WHERE they
         // are: clamping the indices themselves to a fixed window round zero silently
@@ -374,6 +269,7 @@ public sealed partial class SoftwarePageRenderer
         const int MaxTilesPerAxis = 129;
         if (iMax - iMin + 1 > MaxTilesPerAxis) iMax = iMin + MaxTilesPerAxis - 1;
         if (jMax - jMin + 1 > MaxTilesPerAxis) jMax = jMin + MaxTilesPerAxis - 1;
+        return new PatternTileRange(iMin, iMax, jMin, jMax, rawCount);
     }
 
     /// <summary>Read a numeric PdfObject (integer or real) into a double. Zero for other types.</summary>

@@ -1,6 +1,7 @@
 using System.Text;
 using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
+using Aspose.Pdf.IO;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf.Annotations;
@@ -17,9 +18,12 @@ public sealed class Characteristics
 
     /// <summary>When the characteristics are attached to an annotation, setting a
     /// colour writes through to the annotation's /MK dictionary ("BC"/"BG" key
-    /// passed as the first argument). Detached instances (WatermarkAnnotation)
-    /// keep plain property semantics.</summary>
+    /// passed as the first argument). A detached instance keeps plain property
+    /// semantics.</summary>
     internal System.Action<string, System.Drawing.Color>? WriteThrough;
+
+    /// <summary>Creates characteristics with a black border and a transparent background.</summary>
+    public Characteristics() { }
 
     /// <summary>Rotation of the annotation appearance.</summary>
     public Rotation Rotate { get; set; }
@@ -40,43 +44,28 @@ public sealed class Characteristics
 }
 
 /// <summary>
-/// Represents a watermark annotation that can be added to a PDF page.
-/// API-compatible with the public API WatermarkAnnotation(page, rect).
+/// Represents a watermark annotation that can be added to a PDF page: an annotation of
+/// subtype /Watermark, whose appearance is painted from the text it is given.
 /// </summary>
-public sealed partial class WatermarkAnnotation
+public partial class WatermarkAnnotation : Annotation
 {
-    private readonly Page _page;
-    private readonly Rectangle _rect;
     private string[]? _texts;
     private TextState? _textState;
-
-    /// <summary>Annotation characteristics (rotation, etc.).</summary>
-    public Characteristics Characteristics { get; } = new();
 
     public FixedPrint FixedPrint { get; } = new FixedPrint();
 
     /// <summary>
     /// Create a watermark annotation for the given page and rectangle.
     /// </summary>
-    public WatermarkAnnotation(Page page, Rectangle rect)
+    public WatermarkAnnotation(Page page, Rectangle rect) : base(page, rect)
     {
-        _page = page;
-        _rect = rect;
+        Dict.Set("Type", new PdfName("Annot"));
+        Dict.Set("Subtype", new PdfName("Watermark"));
+        Dict.Set("F", new PdfInteger(4)); // Print flag
     }
 
-    /// <summary>The annotation's rectangle. Reflects any translation applied via
-    /// <see cref="ChangeAfterResize(Matrix)"/>; otherwise the rectangle passed to
-    /// the constructor.</summary>
-    public Rectangle Rect => _rectOverride ?? _rect;
-
-    /// <summary>Text note associated with the annotation (written to /Contents).</summary>
-    public string? Contents { get; set; }
-
-    /// <summary>Annotation name (written to /NM).</summary>
-    public string? Name { get; set; }
-
-    /// <summary>Border styling written to the annotation's /BS entry.</summary>
-    public Border? Border { get; set; }
+    /// <summary>Wrap a /Watermark annotation read from a document.</summary>
+    internal WatermarkAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
     /// <summary>
     /// Set the text content and text state for the watermark.
@@ -95,85 +84,44 @@ public sealed partial class WatermarkAnnotation
         _texts = new[] { text.ToString() ?? string.Empty };
     }
 
-    /// <summary>Always <see cref="AnnotationType.Watermark"/>.</summary>
-    public AnnotationType AnnotationType => AnnotationType.Watermark;
-
     /// <summary>Watermark opacity (0..1). Painted through an /ExtGState with
-    /// matching fill/stroke alpha in the appearance stream.</summary>
-    public double Opacity
+    /// matching fill/stroke alpha in the appearance stream, which is what carries
+    /// the translucency of a watermark rather than the annotation's own /CA.</summary>
+    public new double Opacity
     {
         get => _opacity;
         set { _opacity = value; RefreshAppearance(); }
     }
     private double _opacity = 1.0;
 
-    // The dictionary handed to AnnotationCollection.Add — the public API allows
-    // configuring the annotation AFTER adding it to the page (Add, then
-    // SetTextAndState/Opacity), so mutators rebuild the appearance in place.
-    private PdfDictionary? _builtDict;
-
+    // A watermark may be configured AFTER it has joined a page (Add, then
+    // SetTextAndState/Opacity), and the page holds this annotation's own
+    // dictionary, so a mutator paints the appearance again in place.
     private void RefreshAppearance()
     {
-        if (_builtDict is null || _texts is null || _texts.Length == 0) return;
-        var apDict = new PdfDictionary();
+        if (_texts is null || _texts.Length == 0) return;
+        // The text IS the appearance, so it replaces the normal one - but only that one: any other
+        // state the annotation has been given keeps its place in the /AP it already has.
+        var apDict = InternalReader.ResolveDict(Dict.Get("AP")) ?? new PdfDictionary();
         apDict.Set("N", BuildAppearanceStream());
-        _builtDict.Set("AP", apDict);
+        Dict.Set("AP", apDict);
+        InvalidateAppearanceCache();
     }
-
-    /// <summary>Translate the watermark's rectangle through <paramref name="transform"/>.</summary>
-    public void ChangeAfterResize(Matrix transform)
-    {
-        if (transform is null) return;
-        transform.Transform(_rect.LLX, _rect.LLY, out var x1, out var y1);
-        transform.Transform(_rect.URX, _rect.URY, out var x2, out var y2);
-        _rectOverride = new Rectangle(Math.Min(x1, x2), Math.Min(y1, y2),
-                                       Math.Max(x1, x2), Math.Max(y1, y2));
-    }
-
-    private Rectangle? _rectOverride;
 
     /// <summary>
-    /// Build the annotation dictionary with appearance stream.
+    /// The annotation's dictionary, with its appearance stream painted.
     /// </summary>
     internal PdfDictionary Build()
     {
-        var dict = new PdfDictionary();
-        dict.Set("Type", new PdfName("Annot"));
-        dict.Set("Subtype", new PdfName("Watermark"));
-        var rectArr = new PdfArray();
-        rectArr.Add(new PdfReal(_rect.LLX)); rectArr.Add(new PdfReal(_rect.LLY));
-        rectArr.Add(new PdfReal(_rect.URX)); rectArr.Add(new PdfReal(_rect.URY));
-        dict.Set("Rect", rectArr);
-        dict.Set("F", new PdfInteger(4)); // Print flag
-
-        if (!string.IsNullOrEmpty(Contents))
-            dict.Set("Contents", new PdfString(System.Text.Encoding.Latin1.GetBytes(Contents!)));
-        if (!string.IsNullOrEmpty(Name))
-            dict.Set("NM", new PdfString(System.Text.Encoding.Latin1.GetBytes(Name!)));
-        if (Border is { Width: > 0 })
-        {
-            var bs = new PdfDictionary();
-            bs.Set("W", new PdfReal(Border.Width));
-            dict.Set("BS", bs);
-        }
-
-        // Build appearance stream
-        if (_texts is not null && _texts.Length > 0)
-        {
-            var apDict = new PdfDictionary();
-            var formDict = BuildAppearanceStream();
-            apDict.Set("N", formDict);
-            dict.Set("AP", apDict);
-        }
-
-        _builtDict = dict;
-        return dict;
+        RefreshAppearance();
+        return Dict;
     }
 
     private PdfStream BuildAppearanceStream()
     {
-        var width = _rect.URX - _rect.LLX;
-        var height = _rect.URY - _rect.LLY;
+        var rect = Rect ?? new Rectangle(0, 0, 0, 0);
+        var width = rect.URX - rect.LLX;
+        var height = rect.URY - rect.LLY;
         var fontSize = _textState?.FontSize ?? 12;
         var fontName = _textState?.FontName ?? _textState?.Font?.BaseFont ?? "Helvetica";
 

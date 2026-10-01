@@ -61,6 +61,7 @@ public sealed partial class Document
 
     private void SaveIncremental(Stream output)
     {
+        FlushFormContentEdits();
         // The original bytes are written by IncrementalWriter.Flush (which rewinds
         // the stream first), so nothing is pre-written here.
 

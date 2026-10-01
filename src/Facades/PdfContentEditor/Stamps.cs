@@ -1,8 +1,7 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf.Facades;
@@ -157,111 +156,22 @@ public sealed partial class PdfContentEditor
     /// </summary>
     private static List<StampBlock> FindStampBlocks(string content, Page page, Document doc)
     {
-        var blocks = FindQBlocks(content);
-        var result = new List<StampBlock>();
+        var sk = new StampBlocksState();
+        sk.content = content;
+        sk.page = page;
+        sk.doc = doc;
+        sk.blocks = FindQBlocks(sk.content);
+        sk.result = new List<StampBlock>();
 
-        var resources = doc.Reader.ResolveDict(page.Dict.Get("Resources"));
-        var xobjects = doc.Reader.ResolveDict(resources?.Get("XObject"));
+        sk.resources = sk.doc.Reader.ResolveDict(sk.page.Dict.Get("Resources"));
+        sk.xobjects = sk.doc.Reader.ResolveDict(sk.resources?.Get("XObject"));
 
-        foreach (var block in blocks)
+        foreach (var block in sk.blocks)
         {
-            // (a) %StampId= and/or %StampRect= comment immediately preceding the block.
-            // Either marker identifies a stamp block; %StampRect carries the exact
-            // page-space bounds (header/footer bands) so we can report them verbatim.
-            var extendedStart = block.Start;
-            var commentId = 0;
-            var hasComment = false;
-            Rectangle? commentRect = null;
-            if (block.Start > 0)
-            {
-                var searchStart = Math.Max(0, block.Start - 90);
-                var preceding = content.Substring(searchStart, block.Start - searchStart);
-                // %StampId, when present, sits immediately before the block or just
-                // before an optional %StampRect line — anchor at the end so a previous
-                // block's id inside the window is not picked up.
-                var idLineMatch = Regex.Match(preceding,
-                    @"%StampId=(\d+)\s*(?:%StampRect=[^\n]*)?\s*$");
-                var rectMatch = Regex.Match(preceding,
-                    @"%StampRect=(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*$");
-                if (idLineMatch.Success)
-                {
-                    hasComment = true;
-                    commentId = int.Parse(idLineMatch.Groups[1].Value);
-                    extendedStart = searchStart + idLineMatch.Index;
-                }
-                if (rectMatch.Success)
-                {
-                    hasComment = true;
-                    var ci = System.Globalization.CultureInfo.InvariantCulture;
-                    commentRect = new Rectangle(
-                        double.Parse(rectMatch.Groups[1].Value, ci), double.Parse(rectMatch.Groups[2].Value, ci),
-                        double.Parse(rectMatch.Groups[3].Value, ci), double.Parse(rectMatch.Groups[4].Value, ci));
-                    if (!idLineMatch.Success) extendedStart = searchStart + rectMatch.Index;
-                }
-            }
-
-            var blockContent = content.Substring(block.Start, block.End - block.Start);
-
-            // (b) /Name Do referencing an XObject. Capture the first XObject drawn by
-            // the block (used to recover the stamp image) and detect the
-            // /StampId dictionary marker.
-            var hasDictMarker = false;
-            var dictId = 0;
-            var isImage = false;
-            string? xname = null;
-            PdfStream? xobject = null;
-            if (xobjects is not null)
-            {
-                foreach (Match dm in Regex.Matches(blockContent, @"/([A-Za-z0-9_.\-]+)\s+Do\b"))
-                {
-                    var name = dm.Groups[1].Value;
-                    if (doc.Reader.Resolve(xobjects.Get(name)) is not PdfStream xs) continue;
-                    if (xobject is null)
-                    {
-                        xobject = xs;
-                        xname = name;
-                        isImage = xs.Dict.GetName("Subtype") == "Image";
-                    }
-                    if (xs.Dict.ContainsKey("StampId"))
-                    {
-                        hasDictMarker = true;
-                        dictId = (int)xs.Dict.GetInt("StampId", 0);
-                        isImage = xs.Dict.GetName("Subtype") == "Image";
-                        xname = name;
-                        xobject = xs;
-                        break;
-                    }
-                }
-            }
-
-            // (c) Unmarked image stamp: a block whose only operators are q/Q/gs/cm and a
-            // single image Do is the canonical image-placement shape emitted for an
-            // image stamp. GetStamps must rediscover these even when the %StampId marker
-            // was never written (or was stripped by an earlier re-serialisation), matching
-            // the GetStamps contract, which reports such blocks with StampId 0.
-            var isCleanImageStamp = isImage && xobject is not null &&
-                                    IsCleanImagePlacementBlock(blockContent);
-
-            if (!hasComment && !hasDictMarker && !isCleanImageStamp) continue;
-
-            // A %StampHidden=1 marker sits immediately before the comment cluster when the
-            // stamp was hidden via HideStampById. Detect it and extend Start to cover it so
-            // a later DeleteStamp/MoveStamp rewrite preserves (or removes) it as one unit.
-            var hidden = false;
-            if (extendedStart >= StampHiddenMarker.Length &&
-                string.CompareOrdinal(content, extendedStart - StampHiddenMarker.Length,
-                    StampHiddenMarker, 0, StampHiddenMarker.Length) == 0)
-            {
-                hidden = true;
-                extendedStart -= StampHiddenMarker.Length;
-            }
-
-            // The %StampId comment (when present) names the id; otherwise use the dict id.
-            var stampId = commentId != 0 ? commentId : dictId;
-            result.Add(new StampBlock(extendedStart, block.End, stampId, isImage, xname, xobject, commentRect, hidden));
+            FindStampBlock(sk, block);
         }
 
-        return result;
+        return sk.result;
     }
 
     private static StampInfo[] ParseStamps(string content, Page page, Document doc)
@@ -312,7 +222,7 @@ public sealed partial class PdfContentEditor
             {
                 info.Rect = exact;
             }
-            else if (TryParseStampMatrix(blockContent, out var matrix))
+            else if (TryParseStampMatrix(blockContent) is { } matrix)
             {
                 var box = page.MediaBox;
                 info.Rect = ComputeStampRect(matrix, page.RotateDegrees, box.Width, box.Height);
@@ -337,25 +247,25 @@ public sealed partial class PdfContentEditor
     /// <c>cm</c>s before its <c>Do</c>) into a single transformation matrix [a b c d e f],
     /// matching the CTM under which the image is painted.
     /// </summary>
-    private static bool TryParseStampMatrix(string block, out double[] matrix)
+    private static double[]? TryParseStampMatrix(string block)
     {
-        matrix = [1, 0, 0, 1, 0, 0];
+        double[] matrix = [1, 0, 0, 1, 0, 0];
         var doMatch = Regex.Match(block, @"/[\w.\-]+\s+Do\b");
         var prefix = doMatch.Success ? block.Substring(0, doMatch.Index) : block;
         var cms = Regex.Matches(prefix,
             @"(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+cm\b");
-        if (cms.Count == 0) return false;
+        if (cms.Count == 0) return null;
         var ci = System.Globalization.CultureInfo.InvariantCulture;
         foreach (Match cm in cms)
         {
             var t = new double[6];
             for (int i = 0; i < 6; i++)
                 if (!double.TryParse(cm.Groups[i + 1].Value, System.Globalization.NumberStyles.Float, ci, out t[i]))
-                    return false;
+                    return null;
             // CTM after executing this cm: point × t × CTM_prev (the cm applies closest to the point).
             matrix = MultiplyMatrix(t, matrix);
         }
-        return true;
+        return matrix;
     }
 
     /// <summary>Row-vector matrix product: the result R satisfies <c>point × R == (point × A) × B</c>.</summary>
@@ -475,7 +385,7 @@ public sealed partial class PdfContentEditor
     private static string ExtractFormStampText(Document doc, PdfStream form)
     {
         string content;
-        try { content = Encoding.Latin1.GetString(doc.Reader.DecodeStream(form)); }
+        try { content = Compat.Latin1.GetString(doc.Reader.DecodeStream(form)); }
         catch { return ""; }
         var sb = new StringBuilder();
         foreach (Match m in Regex.Matches(content,
@@ -736,6 +646,7 @@ public sealed partial class PdfContentEditor
             DeleteStampByIds(p, stampIds);
     }
 
+    /// <summary>Moves the stamp at the given 0-based index on the page so that its lower-left corner lands on (<c>x</c>, <c>y</c>) in points. Does nothing when no such stamp exists.</summary>
     public void MoveStamp(int pageNumber, int stampIndex, double x, double y)
     {
         MoveStampInternal(pageNumber, stamps => stampIndex >= 0 && stampIndex < stamps.Length ? stampIndex : -1, x, y);
@@ -768,7 +679,7 @@ public sealed partial class PdfContentEditor
         var sb = stampBlocks[idx];
         var block = text.Substring(sb.Start, sb.End - sb.Start);
 
-        if (!TryParseStampMatrix(block, out var m)) return;
+        if (TryParseStampMatrix(block) is not { } m) return;
         // Move so the stamp's displayed lower-left corner lands on (x, y): solve for the
         // content-space translation that yields that corner under the current page rotation.
         var w = Math.Abs(m[0]);

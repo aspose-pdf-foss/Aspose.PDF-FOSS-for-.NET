@@ -7,18 +7,9 @@ using Aspose.Pdf.IO;
 namespace Aspose.Pdf;
 
 /// <summary>
-/// The document outline (bookmark tree).
-/// </summary>
-/// <summary>
-/// Alias for <see cref="OutlineItem"/> that mirrors the the public API
-/// public type name <c>OutlineItemCollection</c>. .NET uses this type both for
-/// individual items and as the parent collection element type — this stub keeps
-/// the public API source-compatible.
-/// </summary>
-/// <summary>
-/// A single outline item that may have child items (bookmarks/TOC entries).
-/// Implements IEnumerable to allow iterating over child outline items,
-/// matching the public API.
+/// A single outline (bookmark) item that may have child items. The same type serves
+/// as an item and as the collection of its children: enumerating it yields the
+/// child items.
 /// </summary>
 public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEnumerable<OutlineItemCollection>
 {

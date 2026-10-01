@@ -3,9 +3,9 @@ using Aspose.Pdf.Vector;
 
 namespace Aspose.Pdf;
 
-/// <summary>Public-API-shape additions to <see cref="Page"/> — every method
-/// either delegates to a real working pipeline or throws
-/// NotSupportedException with a clear message about the missing capability.</summary>
+// Public-API-shape additions to <see cref="Page"/> — every method
+// either delegates to a real working pipeline or throws
+// NotSupportedException with a clear message about the missing capability.
 public sealed partial class Page
 {
     /// <summary>Event payload — fired once per page just before the
@@ -78,14 +78,6 @@ public sealed partial class Page
         device.Process(this, outputFileName);
     }
 
-    /// <summary>Apply <paramref name="stamp"/> via its
-    /// <see cref="Stamp.Put(Page)"/> override.</summary>
-    public void AddStamp(Stamp stamp)
-    {
-        if (stamp is null) return;
-        stamp.Put(this);
-    }
-
     /// <summary>Raw /Artifact … EMC blocks stamp APIs wrote into this page's content
     /// THIS session. A page the flow generates is a continuation of its source page
     /// and inherits the artifacts that page was LOADED with (five parsed
@@ -108,12 +100,26 @@ public sealed partial class Page
         AddContentStream(System.Text.Encoding.ASCII.GetBytes(sb.ToString()));
     }
 
-    /// <summary>Append vector elements; <paramref name="rectangle"/> is advisory
-    /// (the elements are emitted in full, carrying their own geometry).</summary>
+    /// <summary>Append the vector elements that lie inside <paramref name="rectangle"/>;
+    /// an element is kept in place, never moved or scaled into the rectangle, and one
+    /// whose box reaches past it is left out (probed: a page's full-width white bars
+    /// were dropped while the drawing inside the rectangle was appended unmoved, and an
+    /// area away from every element appended nothing).</summary>
     public void AddGraphics(GraphicElementCollection elements, Rectangle rectangle)
     {
-        _ = rectangle;
-        AddGraphics(elements);
+        if (elements is null || elements.Count == 0 || rectangle is null) return;
+        var inside = new GraphicElementCollection();
+        foreach (var element in elements)
+            if (ElementLiesInside(element, rectangle)) inside.Add(element);
+        AddGraphics(inside);
+    }
+
+    private static bool ElementLiesInside(GraphicElement element, Rectangle area)
+    {
+        var box = element.Rectangle;
+        return box is not null
+            && box.LLX >= area.LLX && box.URX <= area.URX
+            && box.LLY >= area.LLY && box.URY <= area.URY;
     }
 
     /// <summary>Remove the given absorbed elements from their source page: the

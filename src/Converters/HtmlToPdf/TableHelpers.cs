@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -181,9 +181,19 @@ internal static partial class HtmlToPdfConverter
             return wA;
         if (attrs.TryGetValue("style", out var st))
         {
-            var m = Regex.Match(st, @"width\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase);
+            // …in px, or in an absolute unit (the report export's `WIDTH: 177.8mm` setter
+            // cells), all measured in px here like the attribute form.
+            var m = Regex.Match(st, @"(?<![-\w])width\s*:\s*(\d+(?:\.\d+)?)\s*(px|pt|mm|cm|in)", RegexOptions.IgnoreCase);
             if (m.Success && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var w))
             {
+                w *= m.Groups[2].Value.ToLowerInvariant() switch
+                {
+                    "pt" => 1 / PxPt,
+                    "mm" => 96.0 / 25.4,
+                    "cm" => 96.0 / 2.54,
+                    "in" => 96.0,
+                    _ => 1.0,
+                };
                 // Content-box: the cell's own padding sits OUTSIDE the declared width,
                 // so the column it fixes is width + horizontal padding.
                 if (contentBox)
@@ -216,13 +226,15 @@ internal static partial class HtmlToPdfConverter
         public List<(string Inner, double StartFrac, double WidthFrac, double PadTopPt)>? Cols; // Band
         public double BorderPt, PadTopPt, PadBottomPt;             // Box
         public double PadSidePt, MarginBottomPt, BorderGray;       // Box (print-grid)
+        public double BoxWidthPt, BoxHeightPt;                     // Box (declared size)
         public double WidthFrac, ColPadPt;                         // Col (print-grid stacked column)
     }
 
     private static string DivStyleOf(string openTag)
     {
-        var m = Regex.Match(openTag, @"style\s*=\s*(""([^""]*)""|'([^']*)')", RegexOptions.IgnoreCase);
-        return m.Success ? (m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value) : "";
+        // (the value may stand unquoted: `style=border-style:None;width:800px`)
+        var m = Regex.Match(openTag, @"\bstyle\s*=\s*(""([^""]*)""|'([^']*)'|([^\s>""']+))", RegexOptions.IgnoreCase);
+        return m.Success ? (m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Success ? m.Groups[3].Value : m.Groups[4].Value) : "";
     }
 
     /// <summary>True when the document contains a float-column band: a &lt;div&gt; whose
@@ -255,8 +267,9 @@ internal static partial class HtmlToPdfConverter
 
     private static bool IsBorderBoxStyle(string style) =>
         Regex.IsMatch(style, @"border\s*:\s*solid", RegexOptions.IgnoreCase)
-        // width-first order too ("border: 1px solid gainsboro" — the class-box form).
-        || Regex.IsMatch(style, @"border\s*:\s*\d+(?:\.\d+)?\s*px\s+solid", RegexOptions.IgnoreCase);
+        // width-first order too ("border: 1px solid gainsboro" — the class-box form);
+        // a ZERO width (`border: 0px solid …`, the signature pad's) is no box at all
+        || Regex.IsMatch(style, @"border\s*:\s*(?!0+(?:\.0+)?\s*px\s)\d+(?:\.\d+)?\s*px\s+solid", RegexOptions.IgnoreCase);
 
     private static double StylePct(string style, string prop)
     {
@@ -264,6 +277,18 @@ internal static partial class HtmlToPdfConverter
         return m.Success && double.TryParse(m.Groups[1].Value,
             System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
+    }
+
+    /// <summary>Length of a declaration the style states IN ITS OWN RIGHT: the property
+    /// must open a declaration, so a `border-width` never answers a `width` question.</summary>
+    private static double StyleOwnLenPt(string style, string prop)
+    {
+        var m = Regex.Match(style, @"(?:^|;)\s*" + prop + @"\s*:\s*(\d+(?:\.\d+)?)\s*(pt|px)",
+            RegexOptions.IgnoreCase);
+        if (!m.Success || !double.TryParse(m.Groups[1].Value,
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var v)) return 0;
+        return m.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase) ? v * 0.75 : v;
     }
 
     private static double StyleLenPt(string style, string prop)
@@ -303,359 +328,40 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Index just past the `&lt;/div&gt;` matching an open tag whose content
     /// starts at <paramref name="contentStart"/>; also outputs the content end
     /// (start of that close tag). −1 when unbalanced.</summary>
-    private static int FindDivEnd(string html, int contentStart, out int contentEnd)
+    private static (int result, int contentEnd) FindDivEnd(string html, int contentStart)
     {
+        int contentEnd = default;
         var depth = 1;
         var rx = new Regex(@"<(/?)div\b[^>]*>", RegexOptions.IgnoreCase);
         for (var m = rx.Match(html, contentStart); m.Success; m = m.NextMatch())
         {
             if (m.Groups[1].Value.Length > 0) depth--; else depth++;
-            if (depth == 0) { contentEnd = m.Index; return m.Index + m.Length; }
+            if (depth == 0) { contentEnd = m.Index; return (m.Index + m.Length, contentEnd); }
         }
         contentEnd = -1;
-        return -1;
+        return (-1, contentEnd);
     }
 
     /// <summary>Scan HTML for float-column groups and bordered divs; everything else
     /// stays as plain flow fragments. Nested structures inside a column or box are
     /// resolved by the caller's recursion, not here.</summary>
-    private static List<DivSeg> SegmentDivStructures(string html,
-        IReadOnlyDictionary<string, Dictionary<string, string>>? classCss = null,
-        double contentWidthPt = 0, bool allowPxCols = false)
+    private static List<DivSeg> SegmentDivStructures(string html, IReadOnlyDictionary<string, Dictionary<string, string>>? classCss = null, double contentWidthPt = 0, bool allowPxCols = false)
     {
-        // Print-grid mode (classCss set): a div's effective style folds its CLASS
-        // rules' box declarations under the inline style, so class-styled grids
-        // (.col-xs-N width%, .infobox borders) segment like inline-styled ones.
-        string EffStyle(string openTag)
+        var dv = new DivSegmentState();
+        dv.html = html;
+        dv.classCss = classCss;
+        dv.contentWidthPt = contentWidthPt;
+        dv.allowPxCols = allowPxCols;
+        dv.segs = new List<DivSeg>();
+        dv.divRx = new Regex(@"<div\b[^>]*>", RegexOptions.IgnoreCase);
+        dv.pos = 0;
+        while (dv.pos < dv.html.Length)
         {
-            var st = DivStyleOf(openTag);
-            if (classCss is null) return st;
-            var clm = Regex.Match(openTag, @"class\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
-            if (!clm.Success) return st;
-            var sb = new StringBuilder(st);
-            foreach (var c in clm.Groups[1].Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
-                if (classCss.TryGetValue("." + c, out var d))
-                    foreach (var kv in d)
-                        if (kv.Key is "border" or "padding" or "padding-top" or "padding-bottom"
-                            or "padding-left" or "padding-right" or "margin-bottom" or "width")
-                        { sb.Append(';').Append(kv.Key).Append(':').Append(kv.Value); }
-            return sb.ToString();
+            if (!SegmentNextDiv(dv)) break;
         }
-        bool IsColScopeStyle(string st) =>
-            classCss is not null
-            && !Regex.IsMatch(st, @"float\s*:\s*left", RegexOptions.IgnoreCase)
-            && !Regex.IsMatch(st, @"border\s*:", RegexOptions.IgnoreCase)
-            && StylePct(st, "width") is > 0 and < 100;
-        var segs = new List<DivSeg>();
-        var divRx = new Regex(@"<div\b[^>]*>", RegexOptions.IgnoreCase);
-        var pos = 0;
-        while (pos < html.Length)
-        {
-            Match? hit = null; string style = "";
-            for (var m = divRx.Match(html, pos); m.Success; m = m.NextMatch())
-            {
-                var st = EffStyle(m.Value);
-                if (IsFloatColStyle(st, allowPxCols) || IsBorderBoxStyle(st) || IsColScopeStyle(st)) { hit = m; style = st; break; }
-            }
-            if (hit is null) break;
-            var afterOpen = hit.Index + hit.Length;
-            var end = FindDivEnd(html, afterOpen, out var contentEnd);
-            if (end < 0) break;
-            if (hit.Index > pos)
-                segs.Add(new DivSeg { Kind = DivSeg.Flow, Html = html[pos..hit.Index] });
-            if (IsColScopeStyle(style) && !IsFloatColStyle(style, allowPxCols) && !IsBorderBoxStyle(style))
-            {
-                segs.Add(new DivSeg
-                {
-                    Kind = DivSeg.Col,
-                    Html = html[afterOpen..contentEnd],
-                    WidthFrac = StylePct(style, "width") / 100.0,
-                    ColPadPt = StyleLenPt(style, "padding-left") + StyleLenPt(style, "padding-right"),
-                });
-                pos = end;
-                continue;
-            }
-            if (IsFloatColStyle(style, allowPxCols))
-            {
-                var cols = new List<(string, double, double, double)>();
-                var cursor = 0.0;
-                // px→fraction against the content box (px-width Bootstrap columns).
-                double PxFrac(string st3, string prop)
-                {
-                    if (contentWidthPt <= 0) return 0;
-                    var pm = Regex.Match(st3, prop + @"\s*:\s*(\d+(?:\.\d+)?)px", RegexOptions.IgnoreCase);
-                    return pm.Success && double.TryParse(pm.Groups[1].Value,
-                        System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var pv)
-                        ? pv * 0.75 / contentWidthPt : 0;
-                }
-                void AddCol(string st2, string inner)
-                {
-                    var w = StylePct(st2, "width") / 100.0;
-                    if (w <= 0) w = PxFrac(st2, "width");
-                    var ml = StylePct(st2, "margin-left") / 100.0;
-                    if (ml <= 0) ml = PxFrac(st2, "margin-left");
-                    var pr = StylePct(st2, "padding-right") / 100.0;
-                    if (pr <= 0) pr = PxFrac(st2, "padding-right") + PxFrac(st2, "margin-right");
-                    var start = cursor + ml;
-                    cols.Add((inner, start, w, StyleLenPt(st2, "padding-top")));
-                    cursor = start + w + pr;
-                }
-                AddCol(style, html[afterOpen..contentEnd]);
-                pos = end;
-                while (true)
-                {
-                    var nm = divRx.Match(html, pos);
-                    if (!nm.Success || !string.IsNullOrWhiteSpace(html[pos..nm.Index])) break;
-                    var st3 = DivStyleOf(nm.Value);
-                    if (!IsFloatColStyle(st3, allowPxCols)) break;
-                    // A float that cannot fit beside the ones already collected wraps
-                    // below them (px-column dialect): stop this band — the next loop
-                    // pass starts a fresh band for it, stacking it as its own row
-                    // (two 380px floats inside a 380px parent stack, not overlap).
-                    if (allowPxCols)
-                    {
-                        var w3 = StylePct(st3, "width") / 100.0;
-                        if (w3 <= 0) w3 = PxFrac(st3, "width");
-                        var ml3 = StylePct(st3, "margin-left") / 100.0;
-                        if (ml3 <= 0) ml3 = PxFrac(st3, "margin-left");
-                        if (cursor + ml3 + w3 > 1.02) break;
-                    }
-                    var ne = FindDivEnd(html, nm.Index + nm.Length, out var nce);
-                    if (ne < 0) break;
-                    AddCol(st3, html[(nm.Index + nm.Length)..nce]);
-                    pos = ne;
-                }
-                segs.Add(new DivSeg { Kind = DivSeg.Band, Cols = cols });
-            }
-            else
-            {
-                // A `padding: Npx` shorthand covers all four sides when no side-specific
-                // declaration is present (the class-box form).
-                var padAll = StyleLenPt(style, "padding");
-                var padT = StyleLenPt(style, "padding-top");
-                var padB = StyleLenPt(style, "padding-bottom");
-                var padL = StyleLenPt(style, "padding-left");
-                var padR = StyleLenPt(style, "padding-right");
-                segs.Add(new DivSeg
-                {
-                    Kind = DivSeg.Box,
-                    Html = html[afterOpen..contentEnd],
-                    BorderPt = BorderSolidPt(style),
-                    PadTopPt = padT > 0 ? padT : padAll,
-                    PadBottomPt = padB > 0 ? padB : padAll,
-                    PadSidePt = padL + padR > 0 ? padL + padR : 2 * padAll,
-                    MarginBottomPt = StyleLenPt(style, "margin-bottom"),
-                    BorderGray = BorderGrayOf(style),
-                });
-                pos = end;
-            }
-        }
-        if (segs.Count > 0 && pos < html.Length)
-            segs.Add(new DivSeg { Kind = DivSeg.Flow, Html = html[pos..] });
-        return segs;
-    }
-
-    /// <summary>Render a NON-HTML binary file loaded through HtmlLoadOptions:
-    /// HTML5-tokenize (a &lt;letter… tag swallows to the next '&gt;',
-    /// an unterminated one swallows the rest), lay the remaining mojibake out as one
-    /// anonymous Times New Roman 12 pt paragraph, and size the page to the min-content
-    /// width: pageW = 90+6 + W + 90 where W is the widest unbreakable segment. Whitespace
-    /// collapses to one space; FF/VT are forced line breaks; other C0 controls are
-    /// invisible fixed advances (9 pt; GS 0, DEL 6, NBSP 3).</summary>
-    private static Document? TryConvertBinaryText(string html)
-    {
-        var ttf = Text.SystemFontResolver.Resolve("Times New Roman");
-        if (ttf is null) return null;
-        Text.GlyphOutlineParser gp;
-        try { gp = new Text.GlyphOutlineParser(ttf); } catch { return null; }
-        var upm = gp.UnitsPerEm > 0 ? gp.UnitsPerEm : 1000;
-        double Adv(char ch) => gp.CMap.TryGetValue(ch, out var g)
-            ? Math.Round(gp.GetAdvanceWidth(g) * 1000.0 / upm) * 12.0 / 1000.0
-            : 6.0;
-
-        // ---- HTML5-style tokenize: keep text, swallow tags/comments.
-        var textBuf = new StringBuilder(html.Length);
-        for (var i = 0; i < html.Length;)
-        {
-            var c = html[i];
-            if (c == '<' && i + 3 < html.Length && html[i + 1] == '!' && html[i + 2] == '-' && html[i + 3] == '-')
-            {
-                var e = html.IndexOf("-->", i + 4, StringComparison.Ordinal);
-                i = e < 0 ? html.Length : e + 3;
-                continue;
-            }
-            if (c == '<' && i + 1 < html.Length
-                && (char.IsLetter(html[i + 1]) || html[i + 1] is '/' or '!' or '?'))
-            {
-                var e = html.IndexOf('>', i + 1);
-                i = e < 0 ? html.Length : e + 1;
-                continue;
-            }
-            textBuf.Append(c);
-            i++;
-        }
-        var text = textBuf.ToString();
-
-        // ---- Item stream: (advance, glyph-or-null). Paragraphs split at FF/VT.
-        // An item list per unbreakable segment; a segment boundary is a collapsed
-        // whitespace run, a position before '\', or one after '-'.
-        var paragraphs = new List<List<(double w, List<(double adv, char? ch)> items)>>();
-        var curPara = new List<(double, List<(double, char?)>)>();
-        var curSeg = new List<(double adv, char? ch)>();
-        double curSegW = 0;
-        var pendingSpace = false;
-
-        void EndSegment()
-        {
-            if (curSeg.Count > 0)
-            {
-                curPara.Add((curSegW, curSeg));
-                curSeg = new List<(double, char?)>();
-                curSegW = 0;
-            }
-        }
-        void EndParagraph()
-        {
-            EndSegment();
-            paragraphs.Add(curPara);
-            curPara = new List<(double, List<(double, char?)>)>();
-            pendingSpace = false;
-        }
-        void AddItem(double adv, char? ch)
-        {
-            if (pendingSpace)
-            {
-                // The collapsed space run becomes ONE 3 pt inter-segment separator
-                // (a space draws no ink, so it is an invisible advance).
-                EndSegment();
-                curPara.Add((3.0, new List<(double, char?)> { (3.0, null) }));
-                pendingSpace = false;
-            }
-            curSeg.Add((adv, ch));
-            curSegW += adv;
-        }
-
-        for (var i = 0; i < text.Length; i++)
-        {
-            var c = text[i];
-            if (c is ' ' or '\t' or '\r' or '\n')
-            {
-                EndSegment();
-                pendingSpace = true;
-                continue;
-            }
-            switch (c)
-            {
-                case '\f':
-                case '\v':
-                    EndParagraph();
-                    continue;
-                case ' ':
-                    AddItem(3.0, null);
-                    continue;
-                case '':
-                    AddItem(6.0, null);
-                    continue;
-            }
-            if (c < 0x20)
-            {
-                AddItem(c == 0x1D ? 0.0 : 9.0, null);
-                continue;
-            }
-            // Extra break opportunities: before '\', after '-'.
-            if (c == '\\') EndSegment();
-            AddItem(Adv(c), c);
-            if (c == '-') EndSegment();
-        }
-        EndParagraph();
-
-        // ---- Min-content width and page size.
-        double maxSeg = 0;
-        foreach (var para in paragraphs)
-            foreach (var (w, _) in para)
-                if (w > maxSeg) maxSeg = w;
-        const double left = 96.0, right = 90.0;
-        var pageW = Math.Max(595.0, left + maxSeg + right);
-        const double pageH = 842.0;
-        var limit = left + Math.Max(maxSeg, pageW - left - right);
-
-        var doc = Document.Create();
-        var fontDict = new Core.PdfDictionary();
-        var page = doc.Pages.Add(pageW, pageH);
-        EnsureFonts(page, fontDict);
-
-        // ---- Greedy wrap + emission. First baseline 88.91 from the page top,
-        // then a constant 13.5 pt pitch (per-line strut quirks stay within
-        // rendering tolerance).
-        var invc = System.Globalization.CultureInfo.InvariantCulture;
-        double baseline = 88.91;
-        var sb = new StringBuilder();
-
-        void EmitRun(double x, double y, string run)
-        {
-            if (run.Length == 0) return;
-            var (rn, hex) = Text.Type0FontEmbedder.Embed(fontDict, ttf, "TimesNewRoman", run);
-            sb.Append("BT /").Append(rn).Append(" 12 Tf 1 0 0 1 ")
-              .Append(x.ToString("F2", invc)).Append(' ')
-              .Append((pageH - y).ToString("F2", invc)).Append(" Tm <")
-              .Append(System.Convert.ToHexString(hex)).Append("> Tj ET\n");
-        }
-
-        void NextLine()
-        {
-            baseline += 13.5;
-            if (baseline > pageH - 60)
-            {
-                page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
-                sb.Clear();
-                page = doc.Pages.Add(pageW, pageH);
-                EnsureFonts(page, fontDict);
-                baseline = 88.91;
-            }
-        }
-
-        foreach (var para in paragraphs)
-        {
-            double x = left;
-            var lineHasContent = false;
-            foreach (var (w, items) in para)
-            {
-                var isSpaceSep = items.Count == 1 && items[0].ch is null
-                                 && Math.Abs(items[0].adv - 3.0) < 0.001;
-                if (!lineHasContent && isSpaceSep)
-                    continue;   // leading space at a line start is dropped
-                if (lineHasContent && !isSpaceSep && x + w > limit + 0.01)
-                {
-                    NextLine();
-                    x = left;
-                    lineHasContent = false;
-                }
-                // Emit the segment: visible glyph runs, split around invisible advances.
-                var run = new StringBuilder();
-                double runX = x;
-                foreach (var (adv, ch) in items)
-                {
-                    if (ch is { } gch)
-                    {
-                        run.Append(gch);
-                        x += adv;
-                    }
-                    else
-                    {
-                        EmitRun(runX, baseline, run.ToString());
-                        run.Clear();
-                        x += adv;
-                        runX = x;
-                    }
-                }
-                EmitRun(runX, baseline, run.ToString());
-                if (!isSpaceSep) lineHasContent = true;
-            }
-            NextLine();
-        }
-        page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
-        return doc;
+        if (dv.segs.Count > 0 && dv.pos < dv.html.Length)
+            dv.segs.Add(new DivSeg { Kind = DivSeg.Flow, Html = dv.html[dv.pos..] });
+        return dv.segs;
     }
 
     /// <summary>Expand every CSS <c>font:</c> shorthand inside a style attribute or
@@ -757,31 +463,8 @@ internal static partial class HtmlToPdfConverter
         catch { return html; }
 
         var inv = System.Globalization.CultureInfo.InvariantCulture;
-        static string ClassOf(HtmlNode n) => n.Attrs is not null && n.Attrs.TryGetValue("class", out var c) ? c : "";
-        static string StyleOf(HtmlNode n) => n.Attrs is not null && n.Attrs.TryGetValue("style", out var s2) ? s2 : "";
-        static (int start, int end)? ContentSpan(HtmlNode n) =>
-            n.Children.Count > 0 ? (n.Children[0].SrcIndex, n.Children[^1].SrcEnd) : null;
-        static double PxOf(string style, string prop)
-        {
-            var m = Regex.Match(style, prop + @"\s*:\s*(\d+(?:\.\d+)?)px", RegexOptions.IgnoreCase);
-            return m.Success && double.TryParse(m.Groups[1].Value,
-                System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
-        }
         // Column width the value cell sizes against: the nearest ancestor px-width
         // float column, else the page-content default.
-        double ColWidth(HtmlNode n)
-        {
-            for (var p2 = n.Parent; p2 is not null; p2 = p2.Parent)
-            {
-                var st = StyleOf(p2);
-                if (p2.Tag == "div" && PxOf(st, "width") > 0
-                    && Regex.IsMatch(st, @"float\s*:\s*left", RegexOptions.IgnoreCase))
-                    return PxOf(st, "width");
-            }
-            return containerPx > 0 ? containerPx : 780.0;
-        }
-
         // The rows inherit the BODY face and size — the synthesized tables carry them
         // inline so cell measurement (wrap points) and rendering use the real font
         // metrics, not the Helvetica fallback (a 180px Tahoma-bold label wraps
@@ -814,51 +497,7 @@ internal static partial class HtmlToPdfConverter
         var repls = new List<(int start, int end, string repl)>();
         foreach (var g in dom.Descendants())
         {
-            if (g.Tag != "div" || !ClassOf(g).Contains("control-group", StringComparison.OrdinalIgnoreCase))
-                continue;
-            HtmlNode? label = null, controls = null;
-            foreach (var d in g.Descendants())
-            {
-                if (label is null && d.Tag == "label") label = d;
-                if (controls is null && d.Tag == "div"
-                    && ClassOf(d).Contains("controls", StringComparison.OrdinalIgnoreCase)) controls = d;
-                if (label is not null && controls is not null) break;
-            }
-            if (label is null || controls is null) continue;
-            var labStyle = StyleOf(label);
-            var wLab = PxOf(labStyle, "width");
-            var mVal = PxOf(StyleOf(controls), "margin-left");
-            if (wLab <= 0 || mVal <= wLab
-                || !Regex.IsMatch(labStyle, @"float\s*:\s*left", RegexOptions.IgnoreCase)) continue;
-            var wVal = Math.Max(60, ColWidth(g) - mVal);
-            // A value span carrying its own CSS width sets the value cell's width —
-            // it may overflow the enclosing float column exactly as the float does
-            // in a browser (`width:210px` inside the 380px column runs past 380).
-            foreach (var d in controls.Descendants())
-                if (d.Tag == "span")
-                {
-                    var sw = PxOf(StyleOf(d), "width");
-                    if (sw > 0) wVal = sw;
-                    break;
-                }
-            // The cell's inner text box loses a few px to the cell inset; pad the
-            // value cell so its wrap width matches the span's CSS content width
-            // ("…catheters," stays on the 190px line; the inset-
-            // narrowed cell broke it a word early).
-            wVal += 6;
-            var bold = Regex.IsMatch(labStyle, @"font-weight\s*:\s*(700|bold)", RegexOptions.IgnoreCase);
-            var labText = ContentSpan(label) is { } ls2 ? html[ls2.start..ls2.end].Trim() : "";
-            var valHtml = ContentSpan(controls) is { } cs2 ? html[cs2.start..cs2.end].Trim() : "";
-            // class=fh-row marks the synthesized row for the layout pass (per-row CSS
-            // rhythm); data-fhw carries its natural width so a row wider than its
-            // float column keeps that width instead of being squeezed to fit.
-            var row = "<table class=\"fh-row\" data-fhw=\"" + (wLab + (mVal - wLab) + wVal).ToString(inv)
-                + "\"" + rowStyle + "><tr><td style=\"width:" + wLab.ToString(inv)
-                + "px;text-align:right;\">" + (bold ? "<b>" : "") + labText + (bold ? "</b>" : "")
-                + "</td><td style=\"width:" + (mVal - wLab).ToString(inv)
-                + "px\"></td><td style=\"width:" + wVal.ToString(inv)
-                + "px\">" + valHtml + "</td></tr></table>";
-            repls.Add((g.SrcIndex, g.SrcEnd, row));
+            if (!TransformFormRowGroup(g, containerPx, html, inv, rowStyle, repls)) break;
         }
         if (repls.Count == 0) return html;
         repls.Sort((a, b) => a.start.CompareTo(b.start));
@@ -878,9 +517,11 @@ internal static partial class HtmlToPdfConverter
     /// sees only structural markup (mirrors the front of <see cref="ParseBlocks"/>).</summary>
     private static string StripNonContent(string html)
     {
-        html = Regex.Replace(html, @"<(script|style|head)[^>]*>[\s\S]*?</\1>", "", RegexOptions.IgnoreCase);
+        // (a title is never content, wherever a headless document leaves it)
+        html = Regex.Replace(html, @"<(script|style|head|title)[^>]*>[\s\S]*?</\1>", "", RegexOptions.IgnoreCase);
         html = Regex.Replace(html, @"<!DOCTYPE[^>]*>", "", RegexOptions.IgnoreCase);
         html = Regex.Replace(html, @"<!--[\s\S]*?-->", "");
+        html = Regex.Replace(html, ConditionalCommentMarker, "", RegexOptions.IgnoreCase);
         // An XML prolog / processing instruction (XHTML sources) is markup, not text.
         html = Regex.Replace(html, @"<\?[\s\S]*?\?>", "");
         return html;
@@ -912,16 +553,21 @@ internal static partial class HtmlToPdfConverter
         for (var i = 0; i < sb.Length; i++)
         {
             var c = sb[i];
-            if (c is not (' ' or '\t' or '\r' or '\n' or ' ')) return false;
+            if (c is not (' ' or '\t' or '\r' or '\n' or ' ') && !IsRunMark(c)) return false;
         }
         return true;
     }
 
-    private static bool TryGetCssLength(IReadOnlyDictionary<string, Dictionary<string, string>> css,
-        string selector, string prop, out double pts)
+    private static double? TryGetCssLength(IReadOnlyDictionary<string, Dictionary<string, string>> css,
+        string selector, string prop)
     {
-        pts = 0;
-        return css.TryGetValue(selector, out var d) && d.TryGetValue(prop, out var v) && TryParseLength(v, out pts);
+        double pts = 0;
+        if (css.TryGetValue(selector, out var d) && d.TryGetValue(prop, out var v) && TryParseLength(v) is { } len)
+        {
+            pts = len;
+            return pts;
+        }
+        return null;
     }
 
     // Tags that open a block-level element; each starts a new Block on exit.

@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -94,14 +94,17 @@ internal static partial class HtmlToPdfConverter
         // that alone overflows a whole line char-splits (after moving to its own
         // line). The default char-packs the WHOLE run once any word overflows -
         // the calibrated legacy dialects keep that.
-        bool wordFirst = false)
+        bool wordFirst = false,
+        // A hyphen is a break opportunity too, the hyphen staying on its line (probed on the
+        // UA grid: `(866) 331-3925` in a 65.14 pt column draws `(866) 331-` over `3925`).
+        bool dashBreaks = false)
     {
         // Hard breaks (a cell's <br>) split first; each segment wraps on its own.
         if (text.Contains('\u0001'))
         {
             var all = new List<string>();
             foreach (var seg in text.Split('\u0001'))
-                all.AddRange(MeasuredWordWrap(seg.Trim(' '), maxWidth, face, sizePt, wordFirst));
+                all.AddRange(MeasuredWordWrap(seg.Trim(' '), maxWidth, face, sizePt, wordFirst, dashBreaks));
             return all.Count == 0 ? [""] : all.ToArray();
         }
         if (string.IsNullOrEmpty(text)) return [""];
@@ -140,7 +143,7 @@ internal static partial class HtmlToPdfConverter
         var result = new List<string>();
         var line = new StringBuilder();
         double lineW = 0;
-        foreach (var word in words)
+        foreach (var (word, spaced) in WrapUnits(words, dashBreaks))
         {
             var w = MeasureFaceText(face, word, sizePt);
             // break-word: a word that alone overflows a whole line moves to its
@@ -155,26 +158,108 @@ internal static partial class HtmlToPdfConverter
                 lineW = MeasureFaceText(face, segs[^1], sizePt);
                 continue;
             }
-            if (line.Length > 0 && lineW + spaceW + w > maxWidth)
+            var gap = line.Length > 0 && spaced ? spaceW : 0;
+            if (line.Length > 0 && lineW + gap + w > maxWidth)
             {
                 result.Add(line.ToString());
-                line.Clear(); lineW = 0;
+                line.Clear(); lineW = 0; gap = 0;
             }
-            if (line.Length > 0) { line.Append(' '); lineW += spaceW; }
-            line.Append(word); lineW += w;
+            if (gap > 0) line.Append(' ');
+            line.Append(word); lineW += gap + w;
         }
         if (line.Length > 0) result.Add(line.ToString());
         return result.Count == 0 ? [""] : result.ToArray();
     }
 
+    /// <summary>The metric flow's wrap of a block carrying emphasis runs: every word measured in
+    /// the face its run draws it in (measured: a bold fund name inside a serif sentence ends its
+    /// line where its BOLD advance does, `are as follows:` wrapping whole under it).</summary>
+    private static string[] MeasuredWordWrapRuns(Block block, double maxWidth, string face, double sizePt)
+    {
+        var text = block.Text;
+        if (text.Contains('\u0001') || !text.Contains(' ')) return MeasuredWordWrap(text, maxWidth, face, sizePt);
+        var result = new List<string>();
+        var line = new StringBuilder();
+        double lineW = 0;
+        var pos = 0;
+        foreach (var word in text.Split(' '))
+        {
+            var w = RunsMeasuredWidth(block, pos, word, face, sizePt);
+            var gap = line.Length > 0 ? RunsMeasuredWidth(block, pos - 1, " ", face, sizePt) : 0;
+            if (line.Length > 0 && lineW + gap + w > maxWidth)
+            {
+                result.Add(line.ToString());
+                line.Clear(); lineW = 0; gap = 0;
+            }
+            if (gap > 0) line.Append(' ');
+            line.Append(word); lineW += gap + w;
+            pos += word.Length + 1;
+        }
+        if (line.Length > 0) result.Add(line.ToString());
+        return result.Count == 0 ? [""] : result.ToArray();
+    }
+
+    /// <summary>The advance of a piece of the block's text starting at a character offset, each
+    /// run of it in the bold / italic variant its emphasis runs put it in.</summary>
+    private static double RunsMeasuredWidth(Block block, int at, string s, string face, double sizePt)
+    {
+        double w = 0;
+        var i = 0;
+        while (i < s.Length)
+        {
+            var bold = InEmphasisRuns(block.BoldRuns, at + i);
+            var ital = InEmphasisRuns(block.ItalicRuns, at + i);
+            var j = i + 1;
+            while (j < s.Length && InEmphasisRuns(block.BoldRuns, at + j) == bold && InEmphasisRuns(block.ItalicRuns, at + j) == ital) j++;
+            w += MeasureFaceText(face + (bold ? " Bold" : "") + (ital ? " Italic" : ""), s[i..j], sizePt);
+            i = j;
+        }
+        return w;
+    }
+
+    private static bool InEmphasisRuns(List<(int Start, int Length)>? runs, int p)
+    {
+        if (runs is null) return false;
+        foreach (var (start, length) in runs) if (p >= start && p < start + length) return true;
+        return false;
+    }
+
+    /// <summary>The units a wrap places one at a time: every word, and with dash breaks every
+    /// hyphen-ended piece of a word; a unit that continues its word joins the line with no space.</summary>
+    /// <summary>The characters inside a word that open a break opportunity: a hyphen (kept on its line) and a zero-width space (dropped).</summary>
+    private static readonly char[] DashBreakChars = { '-', '\u200B' };
+
+    private static IEnumerable<(string unit, bool spaced)> WrapUnits(string[] words, bool dashBreaks)
+    {
+        foreach (var word in words)
+        {
+            if (!dashBreaks || word.IndexOfAny(DashBreakChars) < 0 || word.Length < 2) { yield return (word, true); continue; }
+            var first = true;
+            foreach (var piece in DashSegments(word))
+            {
+                yield return (piece, first);
+                first = false;
+            }
+        }
+    }
+
     /// <summary>Cut every table nested INSIDE the top-level table out of
     /// <paramref name="tableHtml"/>, leaving a \u0002{index}\u0003 marker where
-    /// each stood; the extracted HTML goes to <paramref name="subTables"/> in
+    /// each stood; the extracted HTML goes to <c>subTables</c> in
     /// marker order. The cell that carries a marker renders that table as its
     /// own grid inside the cell.</summary>
-    private static string ExtractNestedTables(string tableHtml, out List<string> subTables)
+    private static (string result, List<string> subTables) ExtractNestedTables(string tableHtml)
     {
+        var (result, subTables, _) = ExtractNestedTablesWithHosts(tableHtml);
+        return (result, subTables);
+    }
+
+    /// <summary>The nested tables lifted out of a table's cells into markers, each with the classes of the divs open round it.</summary>
+    private static (string result, List<string> subTables, List<string[]?> hostClasses) ExtractNestedTablesWithHosts(string tableHtml)
+    {
+        List<string>? subTables = default;
         subTables = new List<string>();
+        var hostClasses = new List<string[]?>();
         var sb = new StringBuilder(tableHtml.Length);
         var pos = 0; var depth = 0;
         foreach (Match t in Regex.Matches(tableHtml, @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase))
@@ -187,6 +272,7 @@ internal static partial class HtmlToPdfConverter
                 {
                     sb.Append(tableHtml[pos..t.Index]);
                     sb.Append('\u0002').Append(subTables.Count).Append('\u0003');
+                    hostClasses.Add(OpenDivClassesBefore(tableHtml, t.Index));
                     pos = t.Index;              // start of the nested table
                 }
             }
@@ -201,7 +287,35 @@ internal static partial class HtmlToPdfConverter
             }
         }
         sb.Append(tableHtml[pos..]);
-        return sb.ToString();
+        return (sb.ToString(), subTables, hostClasses);
+    }
+
+    /// <summary>The classes of the divs still open at <paramref name="index"/> within the same
+    /// cell (outermost first); null when none carries a class.</summary>
+    private static string[]? OpenDivClassesBefore(string html, int index)
+    {
+        List<string>? found = null;
+        var depth = 0;
+        var cellDepth = 0;
+        foreach (Match m in Regex.Matches(html[..index], @"<(/?)(div|td|th)\b([^>]*)>", RegexOptions.IgnoreCase | RegexOptions.RightToLeft))
+        {
+            var tag = m.Groups[2].Value.ToLowerInvariant();
+            var closing = m.Groups[1].Value.Length > 0;
+            // (a sibling grid's cells before the table are closed pairs; the first UNPAIRED cell
+            //  opening is the host cell - the scan ends there)
+            if (tag != "div") { if (closing) cellDepth++; else if (cellDepth > 0) cellDepth--; else break; continue; }
+            if (cellDepth > 0) continue;
+            if (closing) { depth++; continue; }
+            if (depth > 0) { depth--; continue; }
+            var cm = Regex.Match(m.Groups[3].Value, @"\bclass\s*=\s*(?:""([^""]*)""|'([^']*)'|([\w-]+))", RegexOptions.IgnoreCase);
+            if (!cm.Success) continue;
+            var names = (cm.Groups[1].Success ? cm.Groups[1].Value : cm.Groups[2].Success ? cm.Groups[2].Value : cm.Groups[3].Value)
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (names.Length == 0) continue;
+            found ??= new List<string>();
+            found.InsertRange(0, names);
+        }
+        return found?.ToArray();
     }
 
     /// <summary>Rough height of a nested table: its own rows at the given
@@ -212,14 +326,14 @@ internal static partial class HtmlToPdfConverter
     /// per character, so each ideograph is its own text fragment (a plain latin
     /// line stays one run).</summary>
     private static void EmitCellLineRuns(Page page, string fontRes, double fontSize,
-        double x, double y, string text, string measureFace)
+        double x, double y, string text, string measureFace, double shear = 0)
     {
         var hasCjk = false;
         if (Environment.GetEnvironmentVariable("ASPOSE_H4_NOCJKSPLIT") is null)
         foreach (var ch in text) if (ch >= '⺀') { hasCjk = true; break; }
         if (!hasCjk)
         {
-            EmitPositionedRun(page, fontRes, fontSize, x, y, text);
+            EmitPositionedRun(page, fontRes, fontSize, x, y, text, shear);
             return;
         }
         var runX = x;
@@ -231,7 +345,7 @@ internal static partial class HtmlToPdfConverter
             if (i > runStart)
             {
                 var seg = text[runStart..i];
-                EmitPositionedRun(page, fontRes, fontSize, runX, y, seg);
+                EmitPositionedRun(page, fontRes, fontSize, runX, y, seg, shear);
                 runX += MeasureFaceText(measureFace, seg, fontSize);
             }
             if (i < text.Length)
@@ -241,7 +355,7 @@ internal static partial class HtmlToPdfConverter
                 else
                 {
                     var ideo = text[i].ToString();
-                    EmitPositionedRun(page, fontRes, fontSize, runX, y, ideo);
+                    EmitPositionedRun(page, fontRes, fontSize, runX, y, ideo, shear);
                     runX += MeasureFaceText(measureFace, ideo, fontSize);
                 }
             }
@@ -257,7 +371,7 @@ internal static partial class HtmlToPdfConverter
     private static double NestedTableWrappedHeight(string html, double rowPitch,
         string face, double fontSize, double fallbackW)
     {
-        var inner = ExtractNestedTables(html, out var subs);
+        (var inner, var subs) = ExtractNestedTables(html);
         var p = 0.75;
         var cpm = Regex.Match(inner, @"<table\b[^>]*\bcellpadding\s*=\s*[""']?(\d+(?:\.\d+)?)",
             RegexOptions.IgnoreCase);
@@ -290,13 +404,47 @@ internal static partial class HtmlToPdfConverter
         return h;
     }
 
-    private static bool TrySplitWrapperStack(string tableHtml, out string wrapperAttrs,
-        out List<(string Html, bool NewCell)> children)
+    /// <summary>Whether the wrapper's own cell (the first td under the table tag) is centred.</summary>
+    private static bool WrapperCellCentred(string tableHtml)
+        => Regex.Match(tableHtml, @"<table\b[^>]*>[\s\S]*?<td\b([^>]*)>", RegexOptions.IgnoreCase) is { Success: true } wTd
+           && Regex.IsMatch(wTd.Groups[1].Value, @"\balign\s*=\s*[""']?center", RegexOptions.IgnoreCase);
+
+    /// <summary>A centred wrapper cell centres a child grid narrower than its box: the
+    /// child's left inset (the invoice's 958px grids sit 3 pt inside the 966px body box).</summary>
+    private static double WrapperChildInset(string childHtml, bool centred, double avail)
     {
+        if (!centred) return 0;
+        var childW = DeclaredTableWidthPt(Regex.Match(childHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value);
+        return childW > 0 && childW < avail ? (avail - childW) / 2 : 0;
+    }
+
+    /// <summary>Whether every row of a wrapper body is a SINGLE cell: a row of several cells -
+    /// a spacer column beside the grid-holding one included - is a grid of columns, not a
+    /// stack (the invoice's 15px spacer column indents every nested grid).</summary>
+    private static bool WrapperRowsStackSingleCells(string body)
+    {
+        var depth = 0;
+        var cells = 0;
+        foreach (Match t in Regex.Matches(body, @"<(/?)(table|tr|td)\b[^>]*>", RegexOptions.IgnoreCase))
+        {
+            var closing = t.Groups[1].Value.Length > 0;
+            var tag = t.Groups[2].Value.ToLowerInvariant();
+            if (tag == "table") { depth += closing ? -1 : 1; continue; }
+            if (depth > 0) continue;
+            if (tag == "td" && !closing && ++cells > 1) return false;
+            if (tag == "tr" && !closing) cells = 0;
+        }
+        return true;
+    }
+
+    private static (string wrapperAttrs, List<(string Html, bool NewCell)> children)? TrySplitWrapperStack(string tableHtml)
+    {
+        string? wrapperAttrs = default;
+        List<(string Html, bool NewCell)>? children = default;
         wrapperAttrs = "";
         children = new List<(string, bool)>();
         var open = Regex.Match(tableHtml, @"<table\b([^>]*)>", RegexOptions.IgnoreCase);
-        if (!open.Success) return false;
+        if (!open.Success) return null;
         wrapperAttrs = open.Groups[1].Value;
         // body of the OUTER table = up to its matching close
         var depth = 0;
@@ -307,8 +455,9 @@ internal static partial class HtmlToPdfConverter
             if (t.Groups[1].Value.Length == 0) depth++;
             else if (--depth == 0) { bodyEnd = t.Index; break; }
         }
-        if (bodyEnd < 0) { return false; }
+        if (bodyEnd < 0) { return null; }
         var body = tableHtml[bodyStart..bodyEnd];
+        if (!WrapperRowsStackSingleCells(body)) return null;
 
         // Every row must be a single td; every td must contain only tables.
         var pos = 0;
@@ -341,14 +490,14 @@ internal static partial class HtmlToPdfConverter
                 rest = rest.TrimStart();
                 if (rest.Length == 0) break;
                 var ct = Regex.Match(rest, @"^<table\b", RegexOptions.IgnoreCase);
-                if (!ct.Success) { return false; }
+                if (!ct.Success) { return null; }
                 var cDepth = 0; var cEnd = -1;
                 foreach (Match t in Regex.Matches(rest, @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase))
                 {
                     if (t.Groups[1].Value.Length == 0) cDepth++;
                     else if (--cDepth == 0) { cEnd = t.Index + t.Length; break; }
                 }
-                if (cEnd < 0) { return false; }
+                if (cEnd < 0) { return null; }
                 children.Add((rest[..cEnd], firstInCell));
                 firstInCell = false;
                 sawChild = true;
@@ -362,28 +511,28 @@ internal static partial class HtmlToPdfConverter
         // was consumed above only when it held tables; a mixed grid keeps the
         // normal path. Approximate by requiring at least one child and NO bare
         // text between the wrapper's structural tags.
-        if (!sawChild) { return false; }
+        if (!sawChild) { return null; }
         var stripped = Regex.Replace(body, @"<table\b[\s\S]*", "", RegexOptions.IgnoreCase);
         stripped = Regex.Replace(stripped, @"<[^>]+>", "");
-        if (DecodeEntities(stripped).Trim().Length > 0) { return false; }
-        return true;
+        if (DecodeEntities(stripped).Trim().Length > 0) { return null; }
+        return (wrapperAttrs, children);
     }
 
     /// <summary>Draw one styled inline row at the flow cursor: optional full-content-width
     /// background bar (+1px bottom border), then the runs — left group at the row's left
     /// pad, right group right-aligned, or the whole group centered. Text renders in
     /// Arial (bold variant per run) as an embedded Type0 face so Cyrillic labels carry.</summary>
-    private static void RenderRowBlock(Page page, Block block, ref double y,
+    private static void RenderRowBlock(FlowPosition cursor, Block block,
         double marginLeft, double contentWidth,
         List<(Page page, Aspose.Pdf.Rectangle rect, string url, string? text)> pendingLinks)
     {
         const double PxPt = 0.75;
         var invc = System.Globalization.CultureInfo.InvariantCulture;
-        y -= block.RowMarginTopPx * PxPt;
-        var rowTop = y;
+        cursor.y -= block.RowMarginTopPx * PxPt;
+        var rowTop = cursor.y;
         var runs = block.RowRuns!;
 
-        var fontDict = page.Dict.Get("Resources") is Core.PdfDictionary res
+        var fontDict = cursor.page.Dict.Get("Resources") is Core.PdfDictionary res
             ? res.Get("Font") as Core.PdfDictionary : null;
 
         var g = new StringBuilder();
@@ -453,20 +602,20 @@ internal static partial class HtmlToPdfConverter
                     g.Append($"{(r.Color.R / 255.0).ToString("F5", invc)} {(r.Color.G / 255.0).ToString("F5", invc)} {(r.Color.B / 255.0).ToString("F5", invc)} rg ");
                     g.Append($"/{rn} {fpt.ToString("F1", invc)} Tf ");
                     g.Append($"1 0 0 1 {(x + r.PadLeftPx * PxPt).ToString("F2", invc)} {baseline.ToString("F2", invc)} Tm ");
-                    g.Append('<').Append(System.Convert.ToHexString(hex)).Append("> Tj ");
+                    g.Append('<').Append(Compat.ToHexString(hex)).Append("> Tj ");
                     g.Append("ET ");
                 }
             }
 
             if (!string.IsNullOrEmpty(r.Url))
-                pendingLinks.Add((page, new Aspose.Pdf.Rectangle(x, baseline - 0.3 * fpt, x + boxW, baseline + fpt), r.Url!, r.Text));
+                pendingLinks.Add((cursor.page, new Aspose.Pdf.Rectangle(x, baseline - 0.3 * fpt, x + boxW, baseline + fpt), r.Url!, r.Text));
 
             if (r.RightGroup) rightX += boxW + (r.MarginLeftPx + r.MarginRightPx) * PxPt;
             else leftX = x + boxW + r.MarginRightPx * PxPt;
         }
 
         if (g.Length > 0)
-            page.AddContentStream(Encoding.ASCII.GetBytes(g.ToString()));
-        y = rowTop - (block.RowHeightPx + block.RowMarginBottomPx) * PxPt;
+            cursor.page.AddContentStream(Encoding.ASCII.GetBytes(g.ToString()));
+        cursor.y = rowTop - (block.RowHeightPx + block.RowMarginBottomPx) * PxPt;
     }
 }

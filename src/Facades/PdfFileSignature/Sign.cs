@@ -215,6 +215,7 @@ public sealed partial class PdfFileSignature
         };
     }
 
+    /// <summary>Returns the image shown in the appearance of the named signature, or null when there is none or the name is null.</summary>
     public Stream? ExtractImage(SignatureName signName)
         => signName is null ? null : ExtractImage(signName.FullName);
 
@@ -354,13 +355,24 @@ public sealed partial class PdfFileSignature
         appearance.Location = sig?.Location;
         appearance.ContactInfo = sig?.ContactInfo;
         appearance.SignerName = sig?.Authority;
-        // Honour a custom appearance's font and size.
+        // Honour a custom appearance's font and size. A shaped appearance also keeps
+        // every metadata label it did not switch off, empty or not, and can spell the
+        // signer as the subject attributes it lists ("CN=trent, O=glority").
         if (sig?.CustomAppearance is { } ca)
         {
             appearance.FontFamily = ca.FontFamilyName;
             if (ca.FontSize > 0) appearance.FontSize = ca.FontSize;
+            appearance.Labels = new Security.BannerLabels(ca.ShowReason, ca.ShowLocation, ca.ShowContactInfo);
+            if (ca.UseDigitalSubjectFormat && ca.DigitalSubjectFormat is { Length: > 0 } format
+                && sig.Certificate?.FormatSubject(SubjectAbbreviations(format)) is { } subject)
+                appearance.SignerName = subject;
         }
         return appearance;
+    }
+
+    private static IEnumerable<string> SubjectAbbreviations(Forms.SubjectNameElements[] format)
+    {
+        foreach (var element in format) yield return element.ToString();
     }
 
     private static Security.PdfCertificate RequireCertificate(Forms.Signature? sig)

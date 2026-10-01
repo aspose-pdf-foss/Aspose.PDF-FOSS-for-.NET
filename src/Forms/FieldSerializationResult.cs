@@ -1,8 +1,8 @@
 namespace Aspose.Pdf;
 
 /// <summary>
-/// Per-field outcome of an <see cref="Aspose.Pdf.Forms.Form.ExportToJson"/> or
-/// <see cref="Aspose.Pdf.Forms.Form.ImportFromJson"/> call.
+/// Per-field outcome of an <c>Form.ExportToJson</c> or
+/// <c>Form.ImportFromJson</c> call.
 /// </summary>
 public sealed class FieldSerializationResult
 {

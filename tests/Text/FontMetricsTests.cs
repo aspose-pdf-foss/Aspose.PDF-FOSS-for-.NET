@@ -216,4 +216,73 @@ public class FontMetricsTests
         Assert.InRange(width, 20, 35);
     }
 
+    [Fact]
+    public void Standard14_Symbol_WidthsMatchTheOfficialAfm()
+    {
+        // Verified against the official Symbol.afm (Adobe Core 14); these
+        // three codes were wrong before (0xA0/0xAC/0xF7 -- 160/172/247).
+        Assert.Equal(750, Standard14Fonts.GetWidth("Symbol", 160));
+        Assert.Equal(987, Standard14Fonts.GetWidth("Symbol", 172));
+        Assert.Equal(384, Standard14Fonts.GetWidth("Symbol", 247));
+    }
+
+    [Fact]
+    public void Standard14_ZapfDingbats_WidthsMatchTheOfficialAfm()
+    {
+        // Verified against the official ZapfDingbats.afm (Adobe Core 14); a
+        // run of codes from 0x81 and another from 0xCC on were wrong before.
+        Assert.Equal(390, Standard14Fonts.GetWidth("ZapfDingbats", 129));
+        Assert.Equal(317, Standard14Fonts.GetWidth("ZapfDingbats", 130));
+        Assert.Equal(276, Standard14Fonts.GetWidth("ZapfDingbats", 132));
+        Assert.Equal(276, Standard14Fonts.GetWidth("ZapfDingbats", 133));
+        Assert.Equal(509, Standard14Fonts.GetWidth("ZapfDingbats", 134));
+        Assert.Equal(509, Standard14Fonts.GetWidth("ZapfDingbats", 135));
+        Assert.Equal(788, Standard14Fonts.GetWidth("ZapfDingbats", 204));
+        Assert.Equal(788, Standard14Fonts.GetWidth("ZapfDingbats", 209));
+    }
+
+    [Fact]
+    public void Standard14_FontBBox_IsDistinctPerFace()
+    {
+        // Each of the 14 faces has its OWN box (Adobe AFM); this used to
+        // group them by family (e.g. all 4 Courier weights sharing one box)
+        // and understate several by ~10%. Verified against the official AFM
+        // files for all 14.
+        Assert.Equal(new[] { -23, -250, 715, 805 }, Standard14Fonts.GetFontBBox("Courier"));
+        Assert.Equal(new[] { -113, -250, 749, 801 }, Standard14Fonts.GetFontBBox("Courier-Bold"));
+        Assert.Equal(new[] { -27, -250, 849, 805 }, Standard14Fonts.GetFontBBox("Courier-Oblique"));
+        Assert.Equal(new[] { -57, -250, 869, 801 }, Standard14Fonts.GetFontBBox("Courier-BoldOblique"));
+        Assert.Equal(new[] { -166, -225, 1000, 931 }, Standard14Fonts.GetFontBBox("Helvetica"));
+        Assert.Equal(new[] { -170, -225, 1116, 931 }, Standard14Fonts.GetFontBBox("Helvetica-Oblique"));
+        Assert.Equal(new[] { -170, -228, 1003, 962 }, Standard14Fonts.GetFontBBox("Helvetica-Bold"));
+        Assert.Equal(new[] { -174, -228, 1114, 962 }, Standard14Fonts.GetFontBBox("Helvetica-BoldOblique"));
+        Assert.Equal(new[] { -168, -218, 1000, 898 }, Standard14Fonts.GetFontBBox("Times-Roman"));
+        Assert.Equal(new[] { -169, -217, 1010, 883 }, Standard14Fonts.GetFontBBox("Times-Italic"));
+        Assert.Equal(new[] { -168, -218, 1000, 935 }, Standard14Fonts.GetFontBBox("Times-Bold"));
+        Assert.Equal(new[] { -200, -218, 996, 921 }, Standard14Fonts.GetFontBBox("Times-BoldItalic"));
+
+        // GetFontBBoxHeight is now derived from GetFontBBox, so it always
+        // agrees with it (it used to carry Courier's ury as 833, a number
+        // GetFontBBox never had).
+        foreach (var name in new[] { "Courier", "Courier-Bold", "Helvetica-Oblique", "Times-BoldItalic" })
+        {
+            var bbox = Standard14Fonts.GetFontBBox(name)!;
+            Assert.Equal(bbox[3] - bbox[1], Standard14Fonts.GetFontBBoxHeight(name));
+        }
+    }
+
+    [Fact]
+    public void Helvetica_MeasuresTheCharactersWinAnsiNamesPastLatin1ByTheirOwnWidths()
+    {
+        // A curly apostrophe is 222 wide, a curly quote 333, an en dash 556, an em dash a full em: none is measured as
+        // the '?' (556) standing for a character a face lacks.
+        var helvetica = FontRepository.FindFont("Helvetica");
+        Assert.Equal(2.22, helvetica.MeasureString("’", 10.0), 2);
+        Assert.Equal(3.33, helvetica.MeasureString("“", 10.0), 2);
+        Assert.Equal(3.33, helvetica.MeasureString("”", 10.0), 2);
+        Assert.Equal(10.0, helvetica.MeasureString("—", 10.0), 2);
+        Assert.Equal(helvetica.MeasureString("cant", 10.0) + 2.22, helvetica.MeasureString("can’t", 10.0), 2);
+        // A character WinAnsi does not name is still measured as that mark.
+        Assert.Equal(helvetica.MeasureString("?", 10.0), helvetica.MeasureString("Ж", 10.0), 2);
+    }
 }

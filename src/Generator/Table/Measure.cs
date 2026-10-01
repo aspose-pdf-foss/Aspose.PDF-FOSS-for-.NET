@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Content;
@@ -14,169 +14,74 @@ public partial class Table
     /// Simple word-wrap: splits text into lines that fit within the available width.
     /// Uses an approximate character width of 0.5 * fontSize for Helvetica.
     /// </summary>
-    private static List<string> WrapText(string text, double fontSize, double availWidth,
-        Func<string, double>? measure = null, bool overflowLongWords = false)
+    /// <summary>The words a wrap may break between: a token made only of characters no line may START
+    /// with joins the token before it, because there is no break opportunity there.</summary>
+    private static string[] JoinNoBreakBefore(string[] words, bool on)
     {
-        var lines = new List<string>();
-        if (availWidth <= 0 || fontSize <= 0)
+        if (!on || words.Length < 2) return words;
+        var kept = new List<string>(words.Length);
+        foreach (var w in words)
+            if (kept.Count > 0 && w.Length > 0
+                && w.TrimEnd(Converters.HtmlToPdfConverter.NoBreakBeforeChars.ToCharArray()).Length == 0)
+                kept[^1] = kept[^1] + " " + w;
+            else kept.Add(w);
+        return kept.ToArray();
+    }
+
+    private static List<string> WrapText(string text, double fontSize, double availWidth, Func<string, double>? measure = null, bool overflowLongWords = false, bool noBreakBefore = false, bool hangingBreakSpace = false)
+    {
+        var wt = new WrapTextState();
+        wt.text = text;
+        wt.fontSize = fontSize;
+        wt.availWidth = availWidth;
+        wt.measure = measure;
+        wt.overflowLongWords = overflowLongWords;
+        wt.hangingBreakSpace = hangingBreakSpace;
+        wt.lines = new List<string>();
+        if (wt.availWidth <= 0 || wt.fontSize <= 0)
         {
-            lines.Add(text);
-            return lines;
+            wt.lines.Add(wt.text);
+            return wt.lines;
         }
 
-        // Measure with real Helvetica AFM widths instead of a flat 0.5 em
-        // estimate — the old estimate let noticeably more characters per
-        // line than GDI+ and under-counted page breaks for long cell text.
-        // A caller that sized the column itself passes the very measure it used,
-        // so the column and the wrap agree to the last bit.
-        double MeasureWidth(string s, double sz) => measure is null ? MeasureWidthDefault(s, sz) : measure(s);
-        var words = text.Split(' ');
-        var spaceW = MeasureWidth(" ", fontSize);
-        string currentLine = "";
-        double currentWidth = 0;
+        wt.words = JoinNoBreakBefore(wt.text.Split(' '), noBreakBefore);
+        wt.spaceW = WrapMeasureWidth(wt, " ", wt.fontSize);
+        wt.currentLine = "";
+        wt.currentWidth = 0;
 
-        // A single word wider than the column splits at character level
-        // ("Jurisdiction" in a squeezed 24 pt column renders as
-        // "Juris/dictio/n"), filling each line to the width. A hyphen or en-dash
-        // inside the word is a soft break opportunity tried FIRST ("B13-9876"
-        // wraps to "B13-"/"9876"); only a segment still too wide char-splits.
-        void StartWithWord(string word, double wordW)
+        wt.lineStarted = false;
+        foreach (var word in wt.words)
         {
-            // A column auto-fit to exactly this word's width must accept it — the
-            // width comparison tolerates the last-bit error the pad add/subtract
-            // round-trip introduces.
-            if (wordW <= availWidth + 1e-6) { currentLine = word; currentWidth = wordW; return; }
-            // HTML layout: a word too wide for its column spills past the cell edge —
-            // the column was sized knowing that, and breaking it would show a split
-            // a browser never shows.
-            if (overflowLongWords) { currentLine = word; currentWidth = wordW; return; }
-            if (word.IndexOf('-') > 0 || word.IndexOf('–') > 0)
+            var wordW = WrapMeasureWidth(wt, word, wt.fontSize);
+            if (!wt.lineStarted)
             {
-                var segs = new List<string>();
-                var start = 0;
-                for (var ci = 0; ci < word.Length; ci++)
-                    if (word[ci] is '-' or '–' || ci == word.Length - 1)
-                    {
-                        segs.Add(word.Substring(start, ci - start + 1));
-                        start = ci + 1;
-                    }
-                if (segs.Count > 1)
-                {
-                    currentLine = ""; currentWidth = 0;
-                    foreach (var seg in segs)
-                    {
-                        var segW = MeasureWidth(seg, fontSize);
-                        if (currentLine.Length == 0) { StartWithWord(seg, segW); continue; }
-                        if (currentWidth + segW <= availWidth + 1e-6)
-                        {
-                            currentLine += seg;
-                            currentWidth += segW;
-                        }
-                        else
-                        {
-                            lines.Add(currentLine);
-                            StartWithWord(seg, segW);
-                        }
-                    }
-                    return;
-                }
-            }
-            var cur = ""; double cw = 0;
-            foreach (var ch in word)
-            {
-                var chW = MeasureWidth(ch.ToString(), fontSize);
-                if (cur.Length > 0 && cw + chW > availWidth + 1e-6)
-                {
-                    lines.Add(cur);
-                    cur = ""; cw = 0;
-                }
-                cur += ch; cw += chW;
-            }
-            currentLine = cur;
-            currentWidth = cw;
-        }
-
-        // "Has this line been opened yet" is NOT "is it still empty": a line opened by
-        // the empty token that leads a run of spaces has length zero and still owns
-        // every space after it. Testing emptiness dropped a paragraph's leading
-        // indent, and with it the line the indent occupies when the word behind it is
-        // too long to follow (cell paragraphs can be indented by the verbatim
-        // string that wrote them, and the shipped template gives each indent its own
-        // line).
-        var lineStarted = false;
-        foreach (var word in words)
-        {
-            var wordW = MeasureWidth(word, fontSize);
-            if (!lineStarted)
-            {
-                StartWithWord(word, wordW);
-                lineStarted = true;
+                StartWithWord(wt, word, wordW);
+                wt.lineStarted = true;
                 continue;
             }
-            var withSpaceW = currentWidth + spaceW + wordW;
-            if (withSpaceW <= availWidth + 1e-6)
+            var withSpaceW = wt.currentWidth + wt.spaceW + wordW;
+            if (withSpaceW <= wt.availWidth + 1e-6)
             {
-                currentLine += " " + word;
-                currentWidth = withSpaceW;
+                wt.currentLine += " " + word;
+                wt.currentWidth = withSpaceW;
             }
-            else if (!TryZeroWidthSplit(word))
+            else if (!TryZeroWidthSplit(wt, word))
             {
-                lines.Add(currentLine);
-                StartWithWord(word, wordW);
+                // The break falls on the space between the two words: a hanging
+                // policy keeps it on the line it broke, where it renders past
+                // the measure without displacing anything.
+                wt.lines.Add(wt.hangingBreakSpace ? wt.currentLine + " " : wt.currentLine);
+                StartWithWord(wt, word, wordW);
             }
         }
 
-        // U+200B is invisible and carries no advance, but it IS a legal wrap point. A
-        // word that will not fit whole is retried at its zero-width spaces, so a line
-        // packs the way a browser packs it instead of pushing the whole run down.
-        bool TryZeroWidthSplit(string word)
-        {
-            if (word.IndexOf(ZeroWidthSpace) < 0) return false;
-            var segs = new List<string>();
-            var segStart = 0;
-            for (var ci = 0; ci < word.Length; ci++)
-                if (word[ci] == ZeroWidthSpace || ci == word.Length - 1)
-                {
-                    segs.Add(word.Substring(segStart, ci - segStart + 1));
-                    segStart = ci + 1;
-                }
-            if (segs.Count < 2) return false;
-            var needSpace = true;
-            foreach (var seg in segs)
-            {
-                // A segment that is nothing but the break character carries no ink and
-                // no box: breaking AT a zero-width space must not leave an empty line.
-                if (seg.Trim(ZeroWidthSpace).Length == 0)
-                {
-                    if (currentLine.Length > 0) currentLine += seg;
-                    continue;
-                }
-                var segW = MeasureWidth(seg, fontSize);
-                if (currentLine.Length == 0) { StartWithWord(seg, segW); needSpace = false; continue; }
-                var add = (needSpace ? spaceW : 0) + segW;
-                if (currentWidth + add <= availWidth + 1e-6)
-                {
-                    currentLine += (needSpace ? " " : "") + seg;
-                    currentWidth += add;
-                }
-                else
-                {
-                    lines.Add(currentLine);
-                    currentLine = ""; currentWidth = 0;
-                    StartWithWord(seg, segW);
-                }
-                needSpace = false;
-            }
-            return true;
-        }
+        if (wt.currentLine.Length > 0)
+            wt.lines.Add(wt.currentLine);
 
-        if (currentLine.Length > 0)
-            lines.Add(currentLine);
+        if (wt.lines.Count == 0)
+            wt.lines.Add("");
 
-        if (lines.Count == 0)
-            lines.Add("");
-
-        return lines;
+        return wt.lines;
     }
 
     /// <summary>
@@ -191,7 +96,7 @@ public partial class Table
     /// paragraph's effective font size. Drives AutoFitToContent column sizing: the
     /// column must be at least this wide so no word is split, but multi-word content
     /// wraps within it.</summary>
-    private double MaxWordWidth(Cell cell, Row row)
+    private double MaxWordWidth(Cell cell, Row row, bool exact = false)
     {
         var cellFs = ResolveCellFontSize(cell, row);
         double max = 0;
@@ -199,12 +104,24 @@ public partial class Table
         {
             string? text;
             var fs = cellFs;
-            if (p is Text.TextFragment tf) { text = tf.Text; fs = ResolveCellParagraphFontSize(tf, cellFs, cell, row); }
+            Func<string, double>? faceMeasure = null;
+            if (p is Text.TextFragment tf)
+            {
+                fs = ResolveCellParagraphFontSize(tf, cellFs, cell, row);
+                // A paragraph of runs: a word straddling runs is summed at their own sizes.
+                if (SegmentsFlowAsRuns(tf))
+                {
+                    max = Math.Max(max, MeasureCellRuns(tf, fs).WidestWord);
+                    continue;
+                }
+                text = tf.Text;
+                faceMeasure = FragmentFaceMeasurer(tf, fs, cell, row);
+            }
             else if (p is HtmlFragment h)
             {
                 // Bold-serif HTML cell: the column sizes to the kerned Times New Roman
                 // Bold advance at the HTML default size, not the Helvetica estimate.
-                if (TryBoldOnlyHtml(h.HtmlContent, out var boldText) && BoldSerifTtf() is { } serifTtf)
+                if (TryBoldOnlyHtml(h.HtmlContent) is { } boldText && BoldSerifTtf() is { } serifTtf)
                 {
                     var bw = MeasureWidthKerned(boldText, HtmlCellFontSize, serifTtf);
                     if (bw > max) max = bw;
@@ -214,10 +131,12 @@ public partial class Table
             }
             else continue;
             if (string.IsNullOrEmpty(text)) continue;
-            foreach (var line in text.Replace("\r\n", "\n").Split('\n'))
+            foreach (var line in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
                 foreach (var word in line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
                 {
-                    var wWidth = MeasureWidth(word, fs);
+                    // With exact the bare AFM advance, as MaxLineWidth takes it.
+                    var wWidth = faceMeasure is not null ? faceMeasure(word)
+                        : exact ? MeasureWidthExactAfm(word, fs) : MeasureWidth(word, fs);
                     if (wWidth > max) max = wWidth;
                 }
         }
@@ -244,6 +163,7 @@ public partial class Table
         {
             string? text;
             var fs = cellFs;
+            Func<string, double>? faceMeasure = null;
             if (p is Text.TextFragment tf)
             {
                 text = tf.Text;
@@ -254,17 +174,39 @@ public partial class Table
                 if (!tf.TextState.FontSizeTouched && cell.DefaultCellTextState is null
                     && row.DefaultCellTextState is null && DefaultCellTextState is null)
                     fs = tf.TextState.FontSize;
+                // A paragraph of runs is as wide as its runs at their own sizes.
+                if (SegmentsFlowAsRuns(tf))
+                {
+                    max = Math.Max(max, MeasureCellRuns(tf, fs).LineWidth);
+                    continue;
+                }
+                faceMeasure = FragmentFaceMeasurer(tf, fs, cell, row);
             }
             else if (p is HtmlFragment h) text = HtmlFragment.StripHtmlTags(h.HtmlContent ?? string.Empty);
             else continue;
             if (string.IsNullOrEmpty(text)) continue;
-            foreach (var line in text.Replace("\r\n", "\n").Split('\n'))
+            foreach (var line in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
             {
-                var lw = exact ? MeasureWidthExactAfm(line, fs) : MeasureWidth(line, fs);
+                var lw = faceMeasure is not null ? faceMeasure(line)
+                    : exact ? MeasureWidthExactAfm(line, fs) : MeasureWidth(line, fs);
                 if (lw > max) max = lw;
             }
         }
         return max;
+    }
+
+    /// <summary>The measure of a cell fragment's OWN face, when it draws in one the table's
+    /// Helvetica estimate does not stand for: its embedded program's advances (the ones the
+    /// plan wraps it with), or the AFM advances of the Standard-14 face it names; null when it
+    /// draws in the table's face. The columns are sized by what the cells draw (probed: two
+    /// content-sized columns of embedded-face cells share the band by their own texts' widths).</summary>
+    private Func<string, double>? FragmentFaceMeasurer(Text.TextFragment tf, double fontSize, Cell cell, Row row)
+    {
+        if (tf.TextState.Font?.SourceFontData?.TtfData is { Length: > 12 } ttf)
+            return s => MeasureWidthWithFont(s, fontSize, ttf);
+        if (NamedStandard14Face(tf, tf.TextState.IsBold || DeclaredCellBold(cell, row), tf.TextState.IsItalic) is { } face)
+            return Text.TextPaginator.CreateMeasurer(face, fontSize, null);
+        return null;
     }
 
     /// <summary>Bare Helvetica AFM advance sum — no layout inflation. The
@@ -348,6 +290,23 @@ public partial class Table
         }
         catch { /* faces unavailable: the legacy path stays */ }
         return _serifBoldTtf;
+    }
+
+    /// <summary>The UA serif line box at <paramref name="size"/> for a caller outside
+    /// the table (the face metrics resolve on first use).</summary>
+    internal static (double Box, double Drop) UaSerifLineBox(double size)
+    {
+        BoldSerifTtf();
+        return SerifLineBox(size);
+    }
+
+    /// <summary>The pair-kerned width of <paramref name="text"/> in the UA serif at
+    /// <paramref name="size"/>, for a caller outside the table; 0 when the face is
+    /// unavailable.</summary>
+    internal static double UaSerifKernedWidth(string text, double size)
+    {
+        BoldSerifTtf();
+        return _serifTtf is null ? 0 : MeasureWidthKerned(text, size, _serifTtf);
     }
 
     /// <summary>The regular serif face (resolved together with the bold one).</summary>
@@ -435,7 +394,7 @@ public partial class Table
 
     /// <summary>Greedy word wrap measured with the embedded face's kerned advances
     /// (the metrics the styled serif cell line renders with).</summary>
-    private static List<string> WrapKernedLines(string s, double size, byte[] ttf, double avail)
+    private static List<string> WrapKernedLines(string s, double size, byte[] ttf, double avail, bool breakAnywhere = false)
     {
         var res = new List<string>();
         var cur = "";
@@ -445,6 +404,15 @@ public partial class Table
             if (cur.Length > 0 && avail > 0 && MeasureWidthKerned(cand, size, ttf) > avail + 1e-6)
             { res.Add(cur); cur = word; }
             else cur = cand;
+            // break-all: a word wider than the box fills it character by character (greedy: each line
+            // takes every character that still fits, the rest opens the next line).
+            while (breakAnywhere && avail > 0 && cur.Length > 1 && MeasureWidthKerned(cur, size, ttf) > avail + 1e-6)
+            {
+                var fit = cur.Length - 1;
+                while (fit > 1 && MeasureWidthKerned(cur[..fit], size, ttf) > avail + 1e-6) fit--;
+                res.Add(cur[..fit]);
+                cur = cur[fit..];
+            }
         }
         if (cur.Length > 0) res.Add(cur);
         return res;
@@ -461,10 +429,10 @@ public partial class Table
     /// other suffix (mm, in, pt, px, pc) makes the generator layout throw a
     /// FormatException, so an unreadable token keeps the historical fallback rather than
     /// inventing a unit. A trailing '%' is the caller's business — it needs the band.</summary>
-    private static bool TryParseWidthToken(string tok, out double points)
+    private static double? TryParseWidthToken(string tok)
     {
-        points = 0;
-        if (tok.Length == 0) return false;
+        double points = 0;
+        if (tok.Length == 0) return null;
         var num = tok;
         var scale = 1.0;
         if (tok.EndsWith("cm", StringComparison.OrdinalIgnoreCase))
@@ -475,9 +443,9 @@ public partial class Table
         if (!double.TryParse(num, NumberStyles.Float, CultureInfo.InvariantCulture, out var v)
             && !double.TryParse(num.Replace(',', '.'), NumberStyles.Float,
                 CultureInfo.InvariantCulture, out v))
-            return false;
+            return null;
         points = v * scale;
-        return true;
+        return points;
     }
 
     private static double MeasureWidth(string s, double fontSize) => MeasureWidthDefault(s, fontSize);
@@ -634,6 +602,11 @@ public partial class Table
 
     internal static string RegisterFont(Page page) => RegisterFont(page, "Helvetica");
 
+    /// <summary>True for the standard faces whose glyphs are symbols under an encoding
+    /// of their own: Symbol and ZapfDingbats.</summary>
+    internal static bool IsSymbolicStandardFace(string baseFont) =>
+        baseFont is "Symbol" or "ZapfDingbats";
+
     /// <summary>Register a standard Type1 base font (e.g. "Helvetica",
     /// "Helvetica-Bold") on the page's resource dictionary, reusing an existing
     /// matching entry, and return its resource name.</summary>
@@ -679,7 +652,11 @@ public partial class Table
         // Cell text is written as WinAnsi bytes (see ContentStreamBuilder.ToWinAnsi);
         // without the matching /Encoding the CP1252 0x80-0x9F range (€, dashes,
         // curly quotes) is undefined in the font's default StandardEncoding.
-        font.Set("Encoding", new PdfName("WinAnsiEncoding"));
+        // The two symbolic faces keep their built-in encodings: their codes are not
+        // Latin letters, and a WinAnsi one would have a reader show Symbol's alpha
+        // (code 0x61) as "a" and a dingbat as a Latin punctuation mark.
+        if (!IsSymbolicStandardFace(baseFont))
+            font.Set("Encoding", new PdfName("WinAnsiEncoding"));
         fontDict.Set(name, font);
         return name;
     }

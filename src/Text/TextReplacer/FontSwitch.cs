@@ -76,6 +76,30 @@ public sealed partial class TextReplacer
         return false;
     }
 
+    // Arabic Presentation Forms-A and -B: the blocks whose members NFKD-decompose to the
+    // base letters a replacement can reuse.
+    private const char PresentationFormsAFirst = '\uFB50';
+    private const char PresentationFormsALast = '\uFDFF';
+    private const char PresentationFormsBFirst = '\uFE70';
+    private const char PresentationFormsBLast = '\uFEFF';
+    // The hole inside Forms-A: U+FDD0-U+FDEF are permanent NONCHARACTERS, reserved by
+    // Unicode and never assigned to anything.
+    private const char NoncharacterFirst = '\uFDD0';
+    private const char NoncharacterLast = '\uFDEF';
+
+    /// <summary>Whether <paramref name="ch"/> is an Arabic presentation form, and so worth
+    /// decomposing. The reserved hole is excluded because it is not a presentation form -
+    /// and because the runtimes part company over it: .NET Framework's
+    /// <see cref="string.Normalize(System.Text.NormalizationForm)"/> rejects a
+    /// noncharacter outright ("Invalid Unicode code point found at index 0") while .NET
+    /// Core's passes it straight through. A ToUnicode map is written by whatever produced
+    /// the document and is free to name one, so the same redaction reflowed on .NET and
+    /// threw on .NET Framework.</summary>
+    private static bool IsArabicPresentationForm(char ch) =>
+        (ch >= PresentationFormsAFirst && ch <= PresentationFormsALast
+            && !(ch >= NoncharacterFirst && ch <= NoncharacterLast))
+        || (ch >= PresentationFormsBFirst && ch <= PresentationFormsBLast);
+
     /// <summary>
     /// Build a reverse map from Unicode characters to CID codes, including NFKD-decomposed
     /// variants so base Arabic characters (e.g., U+0627 Alef) can map to presentation form
@@ -99,8 +123,7 @@ public sealed partial class TextReplacer
         foreach (var (code, unicode) in toUnicode)
         {
             if (unicode.Length != 1) continue;
-            var ch = unicode[0];
-            if ((ch < '\uFB50' || ch > '\uFDFF') && (ch < '\uFE70' || ch > '\uFEFF')) continue;
+            if (!IsArabicPresentationForm(unicode[0])) continue;
 
             var decomposed = unicode.Normalize(System.Text.NormalizationForm.FormKD);
             if (decomposed.Length == 1)
@@ -112,8 +135,7 @@ public sealed partial class TextReplacer
         foreach (var (code, unicode) in toUnicode)
         {
             if (unicode.Length != 1) continue;
-            var ch = unicode[0];
-            if ((ch < '\uFB50' || ch > '\uFDFF') && (ch < '\uFE70' || ch > '\uFEFF')) continue;
+            if (!IsArabicPresentationForm(unicode[0])) continue;
 
             var decomposed = unicode.Normalize(System.Text.NormalizationForm.FormKD);
             if (decomposed.Length > 1)
@@ -208,7 +230,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>
-    /// Characters in <paramref name="text"/> for which a base-encoded simple (non-CID)
+    /// Characters in <c>text</c> for which a base-encoded simple (non-CID)
     /// subset font has NO embedded glyph. A subset embeds only the glyphs it draws and
     /// zeroes the /Widths entry (or omits the code from /FirstChar../LastChar) for the
     /// rest — so a width of 0 / an out-of-range code marks an absent glyph. Only applied

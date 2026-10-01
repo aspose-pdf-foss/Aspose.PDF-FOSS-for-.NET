@@ -89,26 +89,30 @@ internal static partial class JpxDecoder
             return 0;
         }
 
-        private void ScContext(int x, int y, out int ctx, out int xorbit)
+        private (int ctx, int xorbit) ScContext(int x, int y)
         {
+            int ctx = default;
+            int xorbit = default;
             int i = Idx(x, y);
             int hc = Math.Max(-1, Math.Min(1, Contrib(i - 1) + Contrib(i + 1)));
             int vc = Math.Max(-1, Math.Min(1, Contrib(i - _sw) + Contrib(i + _sw)));
-            ctx = ScCtx(hc, vc, out xorbit);
+            (ctx, xorbit) = ScCtx(hc, vc);
+            return (ctx, xorbit);
         }
 
-        private int ScCtx(int hc, int vc, out int xorbit)
+        private (int result, int xorbit) ScCtx(int hc, int vc)
         {
+            int xorbit = default;
             // ISO 15444-1 Table D.2
-            if (hc == 1 && vc == 1) { xorbit = 0; return 13; }
-            if (hc == 1 && vc == 0) { xorbit = 0; return 12; }
-            if (hc == 1 && vc == -1) { xorbit = 0; return 11; }
-            if (hc == 0 && vc == 1) { xorbit = 0; return 10; }
-            if (hc == 0 && vc == 0) { xorbit = 0; return 9; }
-            if (hc == 0 && vc == -1) { xorbit = 1; return 10; }
-            if (hc == -1 && vc == 1) { xorbit = 1; return 11; }
-            if (hc == -1 && vc == 0) { xorbit = 1; return 12; }
-            xorbit = 1; return 13; // (-1,-1)
+            if (hc == 1 && vc == 1) { xorbit = 0; return (13, xorbit); }
+            if (hc == 1 && vc == 0) { xorbit = 0; return (12, xorbit); }
+            if (hc == 1 && vc == -1) { xorbit = 0; return (11, xorbit); }
+            if (hc == 0 && vc == 1) { xorbit = 0; return (10, xorbit); }
+            if (hc == 0 && vc == 0) { xorbit = 0; return (9, xorbit); }
+            if (hc == 0 && vc == -1) { xorbit = 1; return (10, xorbit); }
+            if (hc == -1 && vc == 1) { xorbit = 1; return (11, xorbit); }
+            if (hc == -1 && vc == 0) { xorbit = 1; return (12, xorbit); }
+            xorbit = 1; return (13, xorbit); // (-1,-1)
         }
 
         private int Contrib(int i) => _sig[i] == 0 ? 0 : (_sgn[i] != 0 ? -1 : 1);
@@ -124,7 +128,7 @@ internal static partial class JpxDecoder
 
         private void DecodeSign(int x, int y)
         {
-            ScContext(x, y, out int ctx, out int xorbit);
+            (int ctx, int xorbit) = ScContext(x, y);
             int bit = _mq.Decode(ctx);
             _sgn[Idx(x, y)] = (byte)((bit ^ xorbit) != 0 ? 1 : 0);
         }

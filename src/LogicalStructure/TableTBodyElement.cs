@@ -3,6 +3,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.LogicalStructure;
 
+/// <summary>A table-body structure element (tag <c>/TBody</c>) that groups body rows.</summary>
 public sealed class TableTBodyElement : StructureElement
 {
     internal TableTBodyElement() : base("TBody") { }

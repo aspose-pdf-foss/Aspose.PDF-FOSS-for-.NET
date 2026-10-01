@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -27,184 +27,66 @@ internal static partial class SvgToPdfConverter
     private static void ConvertSvgPathToPdf(string d, StringBuilder sb, BboxAcc bb,
         List<(double X, double Y)>? vertices = null)
     {
-        var tokens = Regex.Matches(d, @"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?");
-        double cx = 0, cy = 0; // current point
-        double sx = 0, sy = 0; // subpath start
-        double pcx = 0, pcy = 0; // previous cubic control (for S/s)
-        double pqx = 0, pqy = 0; // previous quadratic control (for T/t)
-        char prevCmd = ' ';
+        var sp = new SvgPathState();
+        sp.tokens = Regex.Matches(d, @"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?");
+        sp.cx = 0;
+        sp.cy = 0;
+        sp.sx = 0;
+        sp.sy = 0;
+        sp.pcx = 0;
+        sp.pcy = 0;
+        sp.pqx = 0;
+        sp.pqy = 0;
+        sp.prevCmd = ' ';
 
-        var nums = new List<double>();
-        char cmd = 'M';
+        sp.nums = new List<double>();
+        sp.cmd = 'M';
 
-        void Cubic(double x1, double y1, double x2, double y2, double x3, double y3)
-        {
-            sb.Append($"{F(x1)} {F(y1)} {F(x2)} {F(y2)} {F(x3)} {F(y3)} c ");
-            bb.Add(x1, y1); bb.Add(x2, y2); bb.Add(x3, y3);
-            pcx = x2; pcy = y2;
-            cx = x3; cy = y3;
-            vertices?.Add((cx, cy));
-        }
-
-        foreach (Match token in tokens)
+        foreach (Match token in sp.tokens)
         {
             var val = token.Value;
             if (val.Length == 1 && char.IsLetter(val[0]) && !char.IsDigit(val[0]))
             {
-                cmd = val[0];
-                nums.Clear();
-                if (cmd is 'Z' or 'z')
+                sp.cmd = val[0];
+                sp.nums.Clear();
+                if (sp.cmd is 'Z' or 'z')
                 {
                     sb.Append("h ");
-                    cx = sx; cy = sy;
-                    prevCmd = 'Z';
+                    sp.cx = sp.sx; sp.cy = sp.sy;
+                    sp.prevCmd = 'Z';
                 }
                 continue;
             }
 
             if (!double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out var num))
                 continue;
-            nums.Add(num);
+            sp.nums.Add(num);
 
-            switch (cmd)
+            switch (sp.cmd)
             {
-                case 'M' when nums.Count >= 2:
-                    cx = nums[0]; cy = nums[1];
-                    sx = cx; sy = cy;
-                    sb.Append($"{F(cx)} {F(cy)} m ");
-                    bb.Add(cx, cy);
-                    vertices?.Add((cx, cy));
-                    nums.Clear(); cmd = 'L'; prevCmd = 'M';
+                case 'M': case 'm': case 'L': case 'l': case 'H': case 'h': case 'V': case 'v':
+                    ApplySvgLineCommand(sp, sb, bb, vertices);
                     break;
-                case 'm' when nums.Count >= 2:
-                    cx += nums[0]; cy += nums[1];
-                    sx = cx; sy = cy;
-                    sb.Append($"{F(cx)} {F(cy)} m ");
-                    bb.Add(cx, cy);
-                    vertices?.Add((cx, cy));
-                    nums.Clear(); cmd = 'l'; prevCmd = 'M';
+                case 'C': case 'c': case 'S': case 's': case 'Q': case 'q': case 'T': case 't': case 'A': case 'a':
+                    ApplySvgCurveCommand(sp, sb, bb, vertices, sp.cmd);
                     break;
-                case 'L' when nums.Count >= 2:
-                    cx = nums[0]; cy = nums[1];
-                    sb.Append($"{F(cx)} {F(cy)} l ");
-                    bb.Add(cx, cy);
-                    vertices?.Add((cx, cy));
-                    nums.Clear(); prevCmd = 'L';
-                    break;
-                case 'l' when nums.Count >= 2:
-                    cx += nums[0]; cy += nums[1];
-                    sb.Append($"{F(cx)} {F(cy)} l ");
-                    bb.Add(cx, cy);
-                    vertices?.Add((cx, cy));
-                    nums.Clear(); prevCmd = 'L';
-                    break;
-                case 'H' when nums.Count >= 1:
-                    cx = nums[0];
-                    sb.Append($"{F(cx)} {F(cy)} l ");
-                    bb.Add(cx, cy);
-                    vertices?.Add((cx, cy));
-                    nums.Clear(); prevCmd = 'L';
-                    break;
-                case 'h' when nums.Count >= 1:
-                    cx += nums[0];
-                    sb.Append($"{F(cx)} {F(cy)} l ");
-                    bb.Add(cx, cy);
-                    vertices?.Add((cx, cy));
-                    nums.Clear(); prevCmd = 'L';
-                    break;
-                case 'V' when nums.Count >= 1:
-                    cy = nums[0];
-                    sb.Append($"{F(cx)} {F(cy)} l ");
-                    bb.Add(cx, cy);
-                    vertices?.Add((cx, cy));
-                    nums.Clear(); prevCmd = 'L';
-                    break;
-                case 'v' when nums.Count >= 1:
-                    cy += nums[0];
-                    sb.Append($"{F(cx)} {F(cy)} l ");
-                    bb.Add(cx, cy);
-                    vertices?.Add((cx, cy));
-                    nums.Clear(); prevCmd = 'L';
-                    break;
-                case 'C' when nums.Count >= 6:
-                    Cubic(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]);
-                    nums.Clear(); prevCmd = 'C';
-                    break;
-                case 'c' when nums.Count >= 6:
-                    Cubic(cx + nums[0], cy + nums[1], cx + nums[2], cy + nums[3], cx + nums[4], cy + nums[5]);
-                    nums.Clear(); prevCmd = 'C';
-                    break;
-                case 'S' when nums.Count >= 4:
-                {
-                    var (rx, ry) = prevCmd == 'C' ? (2 * cx - pcx, 2 * cy - pcy) : (cx, cy);
-                    Cubic(rx, ry, nums[0], nums[1], nums[2], nums[3]);
-                    nums.Clear(); prevCmd = 'C';
-                    break;
-                }
-                case 's' when nums.Count >= 4:
-                {
-                    var (rx, ry) = prevCmd == 'C' ? (2 * cx - pcx, 2 * cy - pcy) : (cx, cy);
-                    Cubic(rx, ry, cx + nums[0], cy + nums[1], cx + nums[2], cy + nums[3]);
-                    nums.Clear(); prevCmd = 'C';
-                    break;
-                }
-                case 'Q' when nums.Count >= 4:
-                {
-                    var qx = nums[0]; var qy = nums[1];
-                    var ex = nums[2]; var ey = nums[3];
-                    Cubic(cx + 2.0 / 3.0 * (qx - cx), cy + 2.0 / 3.0 * (qy - cy),
-                        ex + 2.0 / 3.0 * (qx - ex), ey + 2.0 / 3.0 * (qy - ey), ex, ey);
-                    pqx = qx; pqy = qy;
-                    nums.Clear(); prevCmd = 'Q';
-                    break;
-                }
-                case 'q' when nums.Count >= 4:
-                {
-                    var qx = cx + nums[0]; var qy = cy + nums[1];
-                    var ex = cx + nums[2]; var ey = cy + nums[3];
-                    Cubic(cx + 2.0 / 3.0 * (qx - cx), cy + 2.0 / 3.0 * (qy - cy),
-                        ex + 2.0 / 3.0 * (qx - ex), ey + 2.0 / 3.0 * (qy - ey), ex, ey);
-                    pqx = qx; pqy = qy;
-                    nums.Clear(); prevCmd = 'Q';
-                    break;
-                }
-                case 'T' or 't' when nums.Count >= 2:
-                {
-                    var (qx, qy) = prevCmd == 'Q' ? (2 * cx - pqx, 2 * cy - pqy) : (cx, cy);
-                    var ex = cmd == 'T' ? nums[0] : cx + nums[0];
-                    var ey = cmd == 'T' ? nums[1] : cy + nums[1];
-                    Cubic(cx + 2.0 / 3.0 * (qx - cx), cy + 2.0 / 3.0 * (qy - cy),
-                        ex + 2.0 / 3.0 * (qx - ex), ey + 2.0 / 3.0 * (qy - ey), ex, ey);
-                    pqx = qx; pqy = qy;
-                    nums.Clear(); prevCmd = 'Q';
-                    break;
-                }
-                case 'A' or 'a' when nums.Count >= 7:
-                {
-                    var ex = cmd == 'A' ? nums[5] : cx + nums[5];
-                    var ey = cmd == 'A' ? nums[6] : cy + nums[6];
-                    ArcToBeziers(sb, bb, cx, cy, nums[0], nums[1], nums[2],
-                        nums[3] != 0, nums[4] != 0, ex, ey, ref pcx, ref pcy);
-                    cx = ex; cy = ey;
-                    vertices?.Add((cx, cy));
-                    nums.Clear(); prevCmd = 'A';
-                    break;
-                }
             }
         }
     }
 
     /// <summary>Convert an SVG elliptical arc to cubic Bezier segments
     /// (endpoint → center parameterization, PDF-ready).</summary>
-    private static void ArcToBeziers(StringBuilder sb, BboxAcc bb, double x1, double y1,
+    /// <returns>The previous control point after the arc: the last curve's second control point, or the
+    /// incoming one when the arc degenerated to a line.</returns>
+    private static (double pcx, double pcy) ArcToBeziers(StringBuilder sb, BboxAcc bb, double x1, double y1,
         double rx, double ry, double rotDeg, bool largeArc, bool sweep,
-        double x2, double y2, ref double pcx, ref double pcy)
+        double x2, double y2, double pcx, double pcy)
     {
         if (rx == 0 || ry == 0 || (x1 == x2 && y1 == y2))
         {
             sb.Append($"{F(x2)} {F(y2)} l ");
             bb.Add(x2, y2);
-            return;
+            return (pcx, pcy);
         }
         rx = Math.Abs(rx); ry = Math.Abs(ry);
         var phi = rotDeg * Math.PI / 180.0;
@@ -245,7 +127,7 @@ internal static partial class SvgToPdfConverter
         {
             var dot = ux * vx + uy * vy;
             var len = Math.Sqrt((ux * ux + uy * uy) * (vx * vx + vy * vy));
-            var ang = Math.Acos(Math.Clamp(dot / len, -1, 1));
+            var ang = Math.Acos(Compat.Clamp(dot / len, -1, 1));
             if (ux * vy - uy * vx < 0) ang = -ang;
             return ang;
         }
@@ -287,6 +169,7 @@ internal static partial class SvgToPdfConverter
             cosT1 = cosT2; sinT1 = sinT2;
             curX = ex; curY = ey;
         }
+        return (pcx, pcy);
     }
 
     /// <summary>Emit the element's transform functions as <c>cm</c> operators and

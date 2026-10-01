@@ -1,26 +1,27 @@
 using System;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
-using System.Runtime.Versioning;
 using Aspose.Pdf.Devices;
 using GdiImageFormat = System.Drawing.Imaging.ImageFormat;
-// The public colour API is Aspose.Pdf.Color (the bare Color in this namespace); the GDI+
-// Rectangle used for LockBits is aliased since bare Rectangle would resolve to Aspose.Pdf.Rectangle.
-using GdiRectangle = System.Drawing.Rectangle;
 
+// An image format here is a NAME the caller hands over (ImageFormat.Png); no GDI+ call is made on it, and the
+// managed codecs write the file on every platform.
+#pragma warning disable CA1416
 namespace Aspose.Pdf.Comparison
 {
     /// <summary>
     /// Compares two PDF pages/documents graphically by rendering them to rasters and highlighting
     /// the pixels that differ. Differences can be written as an image overlay (the source page with
-    /// changed pixels painted in <see cref="Color"/>) or collected into a PDF report.
+    /// changed pixels painted in <see cref="Color"/>) or collected into a PDF report. Rendering,
+    /// comparison and the image and PDF outputs are managed code; only the <see cref="ImagesDifference"/>
+    /// bitmap views need the platform's GDI+.
     /// </summary>
-    [SupportedOSPlatform("windows")]
     public class GraphicalPdfComparer
     {
         /// <summary>Bytes per pixel of the rasters this comparer works with (24bpp RGB).</summary>
-        internal const int BytesPerPixel = 3;
+        internal const int BytesPerPixel = ImagesDifference.BytesPerPixel;
+
+        /// <summary>Bytes per pixel of what the page renderer answers (RGBA).</summary>
+        private const int RenderedBytesPerPixel = 4;
 
         // Pages are rendered at SuperSampleFactor x the requested resolution and box-downsampled
         // with a darkening coverage gamma. GDI+ path-fill anti-aliasing blends glyph coverage
@@ -31,10 +32,22 @@ namespace Aspose.Pdf.Comparison
         private const int SuperSampleFactor = 3;
         private const double AntiAliasGamma = 3.0;
 
+        private const int DefaultDpi = 150;
+        private const double PercentScale = 100.0;
+        private const double ChannelMax = 255.0;
+        private const int JpegQuality = 100;
+        private const int RedShift = 16;
+        private const int GreenShift = 8;
+
+        // The result PDF always uses a fixed A4 page box (integer points), independent of the
+        // source page size, DPI, or overlay aspect ratio: the overlay image is stretched to fill it.
+        private const double ResultPageWidth = 595;
+        private const double ResultPageHeight = 842;
+
         private double _threshold;
 
         /// <summary>Rendering resolution used to rasterise the pages. Defaults to 150 DPI.</summary>
-        public Resolution Resolution { get; set; } = new Resolution(150);
+        public Resolution Resolution { get; set; } = new Resolution(DefaultDpi);
 
         /// <summary>Colour used to highlight differing pixels in image output. Defaults to red.</summary>
         public Color Color { get; set; } = Color.Red;
@@ -62,81 +75,35 @@ namespace Aspose.Pdf.Comparison
             if (page1 == null) throw new ArgumentNullException(nameof(page1));
             if (page2 == null) throw new ArgumentNullException(nameof(page2));
 
-            using Bitmap b1 = RenderPage(page1);
-            using Bitmap b2 = RenderPage(page2);
-
-            int w = b1.Width;
-            int h = b1.Height;
-
-            var rect1 = new GdiRectangle(0, 0, w, h);
-            var data1 = b1.LockBits(rect1, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-            var data2 = b2.LockBits(new GdiRectangle(0, 0, b2.Width, b2.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-
-            byte[] s1, s2;
-            int st1 = data1.Stride, st2 = data2.Stride;
-            try
-            {
-                s1 = new byte[st1 * h];
-                System.Runtime.InteropServices.Marshal.Copy(data1.Scan0, s1, 0, s1.Length);
-                s2 = new byte[st2 * b2.Height];
-                System.Runtime.InteropServices.Marshal.Copy(data2.Scan0, s2, 0, s2.Length);
-            }
-            finally
-            {
-                b1.UnlockBits(data1);
-                b2.UnlockBits(data2);
-            }
-
-            var source = new Bitmap(w, h, PixelFormat.Format24bppRgb);
-            var srcData = source.LockBits(rect1, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
-            int srcStride = srcData.Stride;
+            var (s1, w, h) = RenderPage(page1);
+            var (s2, w2, h2) = RenderPage(page2);
             var diff = new int[w * h];
-            int tol = (int)Math.Round(_threshold / 100.0 * 255.0);
-            int w2 = b2.Width, h2 = b2.Height;
-            try
+            int tol = (int)Math.Round(_threshold / PercentScale * ChannelMax);
+            int stride1 = ImagesDifference.StrideFor(w), stride2 = ImagesDifference.StrideFor(w2);
+            for (int y = 0; y < h; y++)
             {
-                var srcBytes = new byte[srcStride * h];
-                for (int y = 0; y < h; y++)
+                int row1 = y * stride1;
+                int row2 = y * stride2;
+                int drow = y * w;
+                for (int x = 0; x < w; x++)
                 {
-                    int r1row = y * st1;
-                    int r2row = y * st2;
-                    int orow = y * srcStride;
-                    int drow = y * w;
-                    for (int x = 0; x < w; x++)
+                    if (x >= w2 || y >= h2)
                     {
-                        int p1 = r1row + x * 4; // BGRA
-                        byte b1B = s1[p1], b1G = s1[p1 + 1], b1R = s1[p1 + 2];
-
-                        int oi = orow + x * 3;
-                        srcBytes[oi] = b1B; srcBytes[oi + 1] = b1G; srcBytes[oi + 2] = b1R;
-
-                        if (x < w2 && y < h2)
-                        {
-                            int p2 = r2row + x * 4;
-                            byte b2B = s2[p2], b2G = s2[p2 + 1], b2R = s2[p2 + 2];
-                            int d = Math.Abs(b1R - b2R);
-                            int dg = Math.Abs(b1G - b2G);
-                            int db = Math.Abs(b1B - b2B);
-                            if (dg > d) d = dg;
-                            if (db > d) d = db;
-                            diff[drow + x] = d > tol
-                                ? (b2R << 16) | (b2G << 8) | b2B
-                                : ImagesDifference.Same;
-                        }
-                        else
-                        {
-                            diff[drow + x] = ImagesDifference.Same;
-                        }
+                        diff[drow + x] = ImagesDifference.Same;
+                        continue;
                     }
+                    int p1 = row1 + x * BytesPerPixel;
+                    int p2 = row2 + x * BytesPerPixel;
+                    byte r2 = s2[p2], g2 = s2[p2 + 1], b2 = s2[p2 + 2];
+                    int d = Math.Abs(s1[p1] - r2);
+                    int dg = Math.Abs(s1[p1 + 1] - g2);
+                    int db = Math.Abs(s1[p1 + 2] - b2);
+                    if (dg > d) d = dg;
+                    if (db > d) d = db;
+                    diff[drow + x] = d > tol ? (r2 << RedShift) | (g2 << GreenShift) | b2 : ImagesDifference.Same;
                 }
-                System.Runtime.InteropServices.Marshal.Copy(srcBytes, 0, srcData.Scan0, srcBytes.Length);
             }
-            finally
-            {
-                source.UnlockBits(srcData);
-            }
-
-            return new ImagesDifference(source, diff, srcStride, h);
+            return new ImagesDifference(s1, w, diff, h);
         }
 
         /// <summary>
@@ -146,8 +113,7 @@ namespace Aspose.Pdf.Comparison
         public void ComparePagesToImage(Page page1, Page page2, string resultImagePath)
         {
             using ImagesDifference difference = GetDifference(page1, page2);
-            using Bitmap overlay = difference.Compose(ImagesDifference.ModeOverlay, Color, Color.Black);
-            overlay.Save(resultImagePath, FormatFromExtension(resultImagePath));
+            File.WriteAllBytes(resultImagePath, Overlay(difference, FormatFromExtension(resultImagePath)));
         }
 
         /// <summary>
@@ -162,12 +128,12 @@ namespace Aspose.Pdf.Comparison
 
             int count = Math.Min(document1.Pages.Count, document2.Pages.Count);
             string extension = ExtensionForFormat(imageFormat);
+            Directory.CreateDirectory(targetDirectory);
             for (int i = 1; i <= count; i++)
             {
                 using ImagesDifference difference = GetDifference(document1.Pages[i], document2.Pages[i]);
-                using Bitmap overlay = difference.Compose(ImagesDifference.ModeOverlay, Color, Color.Black);
                 string path = Path.Combine(targetDirectory, fileNamePrefix + i + extension);
-                overlay.Save(path, imageFormat);
+                File.WriteAllBytes(path, Overlay(difference, imageFormat));
             }
         }
 
@@ -209,96 +175,70 @@ namespace Aspose.Pdf.Comparison
             doc.Save(resultPdfPath);
         }
 
-        // The result PDF always uses a fixed A4 page box (integer points), independent of the
-        // source page size, DPI, or overlay aspect ratio: the overlay image is stretched to fill it.
-        private const double ResultPageWidth = 595;
-        private const double ResultPageHeight = 842;
-
         private void AppendOverlayPage(Document doc, Page page1, Page page2)
         {
             using ImagesDifference difference = GetDifference(page1, page2);
-            using Bitmap overlay = difference.Compose(ImagesDifference.ModeOverlay, Color, Color.Black);
-
             Page page = doc.Pages.Add();
             page.SetPageSize(ResultPageWidth, ResultPageHeight);
             page.PageInfo.Margin = new MarginInfo(0, 0, 0, 0);
-
-            using var ms = new MemoryStream();
-            overlay.Save(ms, GdiImageFormat.Png);
-            ms.Position = 0;
+            using var ms = new MemoryStream(Overlay(difference, GdiImageFormat.Png));
             page.AddImage(ms, new Rectangle(0, 0, ResultPageWidth, ResultPageHeight));
         }
 
-        private Bitmap RenderPage(Page page)
+        /// <summary>The source page with its differing pixels painted <see cref="Color"/>, encoded as <paramref name="format"/>.</summary>
+        private byte[] Overlay(ImagesDifference difference, GdiImageFormat format)
         {
-            var res = Resolution ?? new Resolution(150);
+            var rgb = difference.Compose(ImagesDifference.ModeOverlay, Color, Color.Black);
+            return RasterCodec.Encode(rgb, difference.Width, difference.Height, format, JpegQuality, Resolution ?? new Resolution(DefaultDpi));
+        }
+
+        /// <summary>The page as an RGB raster at <see cref="Resolution"/>, supersampled and downsampled with the coverage gamma.</summary>
+        private (byte[] Rgb, int Width, int Height) RenderPage(Page page)
+        {
+            var res = Resolution ?? new Resolution(DefaultDpi);
             var hiRes = new Resolution(res.X * SuperSampleFactor, res.Y * SuperSampleFactor);
-            var device = new PngDevice(hiRes);
-            using Bitmap hi = device.GetBitmap(page);
-            return DownsampleWithGamma(hi, SuperSampleFactor, AntiAliasGamma);
+            var rendered = new PngDevice(hiRes).Render(page);
+            return DownsampleWithGamma(rendered, SuperSampleFactor, AntiAliasGamma);
         }
 
         /// <summary>
-        /// Box-downsample a supersampled render by <paramref name="ss"/> in each axis, mapping the
+        /// Box-downsample a supersampled RGBA render by <paramref name="ss"/> in each axis, mapping the
         /// averaged ink coverage of each output pixel through <paramref name="gamma"/> so anti-aliased
         /// edges darken the way Windows-style font-gamma AA does. Coverage is taken
         /// per channel relative to a white background, so solid fills (coverage 0 or 1) are unchanged
         /// and only partial-coverage edge pixels shift.
         /// </summary>
-        private static Bitmap DownsampleWithGamma(Bitmap hi, int ss, double gamma)
+        private static (byte[] Rgb, int Width, int Height) DownsampleWithGamma(RgbaBuffer hi, int ss, double gamma)
         {
             int w = hi.Width / ss, h = hi.Height / ss;
-            var hiData = hi.LockBits(new GdiRectangle(0, 0, hi.Width, hi.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-            int hiStride = hiData.Stride;
-            byte[] src;
-            try
+            int hiStride = hi.Width * RenderedBytesPerPixel;
+            var src = hi.Data;
+            int stride = ImagesDifference.StrideFor(w);
+            var dst = new byte[stride * h];
+            double invGamma = 1.0 / gamma;
+            int area = ss * ss;
+            for (int y = 0; y < h; y++)
             {
-                src = new byte[hiStride * hi.Height];
-                System.Runtime.InteropServices.Marshal.Copy(hiData.Scan0, src, 0, src.Length);
-            }
-            finally
-            {
-                hi.UnlockBits(hiData);
-            }
-
-            var outBmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
-            var outData = outBmp.LockBits(new GdiRectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-            try
-            {
-                int outStride = outData.Stride;
-                var dst = new byte[outStride * h];
-                double invGamma = 1.0 / gamma;
-                int area = ss * ss;
-                for (int y = 0; y < h; y++)
+                int orow = y * stride;
+                for (int x = 0; x < w; x++)
                 {
-                    int orow = y * outStride;
-                    for (int x = 0; x < w; x++)
+                    int oi = orow + x * BytesPerPixel;
+                    for (int c = 0; c < BytesPerPixel; c++) // R, G, B
                     {
-                        int oi = orow + x * 4;
-                        for (int c = 0; c < 3; c++) // B, G, R
+                        double coverage = 0.0;
+                        for (int yy = 0; yy < ss; yy++)
                         {
-                            double coverage = 0.0;
-                            for (int yy = 0; yy < ss; yy++)
-                            {
-                                int srow = (y * ss + yy) * hiStride;
-                                for (int xx = 0; xx < ss; xx++)
-                                    coverage += 1.0 - src[srow + (x * ss + xx) * 4 + c] / 255.0;
-                            }
-                            coverage /= area;
-                            double shaped = Math.Pow(coverage, invGamma);
-                            dst[oi + c] = (byte)Math.Round(255.0 * (1.0 - shaped));
+                            int srow = (y * ss + yy) * hiStride;
+                            for (int xx = 0; xx < ss; xx++)
+                                coverage += 1.0 - src[srow + (x * ss + xx) * RenderedBytesPerPixel + c] / ChannelMax;
                         }
-                        dst[oi + 3] = 255; // opaque
+                        coverage /= area;
+                        double shaped = Math.Pow(coverage, invGamma);
+                        dst[oi + c] = (byte)Math.Round(ChannelMax * (1.0 - shaped));
                     }
                 }
-                System.Runtime.InteropServices.Marshal.Copy(dst, 0, outData.Scan0, dst.Length);
             }
-            finally
-            {
-                outBmp.UnlockBits(outData);
-            }
-
-            return outBmp;
+            return (dst, w, h);
         }
 
         private static GdiImageFormat FormatFromExtension(string path)

@@ -11,52 +11,49 @@ namespace Aspose.Pdf;
 public partial class Table
 {
     /// <summary>The box stage of a column render: the cell lookup, its widths, paddings and rectangles, verbatim; a return that ended the column became return false.</summary>
-    private bool RenderRowColumnBox(RowColumnState rc, int col, ref double cellX, ContentStreamBuilder builder, RowSlice slice,
-        double[] colWidths, string fontName, int[] cellMap,
-        List<(Rectangle rect, Hyperlink link)>? links, List<(byte[] data, Rectangle rect)>? imageSink,
-        List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>? optionSink, List<byte[]>? graphSink,
-        List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>? checkboxSink, Page? page,
-        List<(Note note, double x, double baseline, double size)>? footnoteSink)
+    private bool RenderRowColumnBox(RowColumnState rc)
     {
-        rc.row = slice.Plan.Row;
-        rc.gridToCell = slice.Plan.GridToCell;
+        rc.row = rc.slice.Plan.Row;
+        rc.gridToCell = rc.slice.Plan.GridToCell;
         if (rc.gridToCell is not null)
         {
-            rc.origIdx = col < rc.gridToCell.Length ? rc.gridToCell[col] : -1;
+            rc.origIdx = rc.col < rc.gridToCell.Length ? rc.gridToCell[rc.col] : -1;
             if (rc.origIdx == -2) return false;                       // own ColSpan cover — x already advanced
-            if (rc.origIdx < 0 || rc.origIdx >= rc.row.Cells.Count) { cellX += colWidths[col]; return false; }
+            if (rc.origIdx < 0 || rc.origIdx >= rc.row.Cells.Count) { rc.cellX += rc.colWidths[rc.col] + CellSpacingH; return false; }
         }
-        else if (slice.Plan.ColToCell is { } colToCell)
+        else if (rc.slice.Plan.ColToCell is { } colToCell)
         {
-            rc.origIdx = col < colToCell.Length ? colToCell[col] : -1;
+            rc.origIdx = rc.col < colToCell.Length ? colToCell[rc.col] : -1;
             if (rc.origIdx == -2) return false;                       // covered by an earlier cell's span
-            if (rc.origIdx < 0) { cellX += colWidths[col]; return false; }
+            if (rc.origIdx < 0) { rc.cellX += rc.colWidths[rc.col] + CellSpacingH; return false; }
         }
         else
         {
-            rc.origIdx = cellMap[col];
-            if (rc.origIdx >= rc.row.Cells.Count) { cellX += colWidths[col]; return false; }
+            rc.origIdx = rc.cellMap[rc.col];
+            if (rc.origIdx >= rc.row.Cells.Count) { rc.cellX += rc.colWidths[rc.col] + CellSpacingH; return false; }
         }
         rc.cell = rc.row.Cells.At(rc.origIdx);
-        rc.span = Math.Max(1, Math.Min(rc.cell.ColSpan, colWidths.Length - col));
-        rc.cellWidth = GetCellWidth(colWidths, col, rc.span);
+        rc.span = Math.Max(1, Math.Min(rc.cell.ColSpan, rc.colWidths.Length - rc.col));
+        rc.cellWidth = GetCellWidth(rc.colWidths, rc.col, rc.span);
         rc.cellBoxWidth = rc.cellWidth
-            + (LastColBoxOverhang > 0 && col + rc.span >= colWidths.Length ? LastColBoxOverhang : 0);
+            + (LastColBoxOverhang > 0 && rc.col + rc.span >= rc.colWidths.Length ? LastColBoxOverhang : 0);
         // A row-spanning cell is drawn by the span-block pass (its rect covers
         // several rows); reserve its columns and move on.
-        if (rc.gridToCell is not null && slice.Plan.EffRowSpan is not null &&
-            slice.Plan.EffRowSpan[rc.origIdx] > 1)
-        { cellX += rc.cellWidth; return false; }
+        if (rc.gridToCell is not null && rc.slice.Plan.EffRowSpan is not null &&
+            rc.slice.Plan.EffRowSpan[rc.origIdx] > 1)
+        { rc.cellX += rc.cellWidth + CellSpacingH; return false; }
         rc.padding = EffectivePad(rc.cell, rc.row);
         rc.dp = DefaultPad(rc.cell, rc.row);
         rc.padLeft = rc.padding?.Left ?? rc.dp;
         rc.padTop = rc.padding?.Top ?? 0;
+        // (a UA-boxed cell's continuation slice carries no top padding: the box was padded on its first page)
+        if (UaCellBoxes && rc.slice.LineStart > 0) rc.padTop = 0;
 
         // Record the cell's laid-out rectangle (page space) for callers that
         // query Cell.Rect/Width after save. Union across slices when a row is
         // split across pages.
         rc.cell.Width = rc.cellWidth;
-        rc.sliceRect = new Rectangle(cellX, slice.TopY - slice.Height, cellX + rc.cellBoxWidth, slice.TopY);
+        rc.sliceRect = new Rectangle(rc.cellX, rc.slice.TopY - rc.slice.Height, rc.cellX + rc.cellBoxWidth, rc.slice.TopY);
         rc.cell.Rect = rc.cell.Rect is null
             ? rc.sliceRect
             : new Rectangle(
@@ -68,43 +65,11 @@ public partial class Table
             ? rc.cell.Border ?? rc.row.DefaultCellBorder ?? rc.row.Border ?? DefaultCellBorder
             : null;
 
-        rc.bgColor = rc.cell.BackgroundColor ?? rc.row.BackgroundColor;
+        // (a row painted as a band was filled once for the whole row already)
+        rc.bgColor = rc.cell.BackgroundColor ?? (rc.row.BackgroundIsBand ? null : rc.row.BackgroundColor);
         if (rc.bgColor is not null)
         {
-            builder.SetFillColor(rc.bgColor);
-            var bgRadius = (rc.cell.Border ?? rc.row.DefaultCellBorder ?? rc.row.Border ?? DefaultCellBorder)
-                ?.RoundedBorderRadius ?? 0;
-            if (bgRadius > 0)
-                FillRoundedRect(builder, cellX + rc.bandInset,
-                    slice.TopY - slice.Height + rc.bandInset,
-                    rc.cellWidth - 2 * rc.bandInset, slice.Height - 2 * rc.bandInset, bgRadius);
-            else if (rc.pitchBorder is not null)
-            {
-                var (fl, fb, fr, ft) = SideInsets(rc.pitchBorder, half: false);
-                if (rc.cell.SpanCutLeft) fl = 0;
-                if (rc.cell.SpanCutRight) fr = 0;
-                builder.Rectangle(cellX + fl, slice.TopY - slice.Height + fb,
-                    rc.cellWidth - fl - fr, slice.Height - fb - ft);
-                builder.Fill();
-            }
-            else
-            {
-                // Over-declared grid document: a band fill on the row's LAST
-                // cell bleeds to the page's right edge — section bands paint
-                // page-wide while the content keeps the
-                // standard box — and every band covers its trailing border-
-                // spacing gap (the fills overpaint each other; the
-                // page background never shows between two banded rows).
-                var bgW = rc.cellWidth - 2 * rc.bandInset;
-                var span0 = Math.Max(1, Math.Min(rc.cell.ColSpan, colWidths.Length - col));
-                var bgDrop = HtmlBandBleedRightPt > 0 ? RowSpacingPt : 0;
-                if (HtmlBandBleedRightPt > 0 && col + span0 >= colWidths.Length)
-                    bgW = HtmlBandBleedRightPt - (cellX + rc.bandInset);
-                builder.Rectangle(cellX + rc.bandInset,
-                    slice.TopY - slice.Height + rc.bandInset - bgDrop,
-                    bgW, slice.Height - 2 * rc.bandInset + bgDrop);
-                builder.Fill();
-            }
+            FillCellBackground(rc, rc.cellX);
         }
 
         // Background IMAGE — the cell's own artwork, stretched over the box the
@@ -117,66 +82,15 @@ public partial class Table
         if (rc.cell.BackgroundImage is { } cellBgImage && !_measureOnly
             && ReadRawImageBytes(cellBgImage) is { Length: > 0 } cellBgBytes)
         {
-            var (bl, bb, br, bt) = rc.pitchBorder is not null
-                ? SideInsets(rc.pitchBorder, half: false)
-                : (0d, 0d, 0d, 0d);
-            var bgX = cellX + bl;
-            var bgY = slice.TopY - slice.Height + bb;
-            var bgW = rc.cellWidth - bl - br;
-            var bgH = slice.Height - bb - bt;
-            if (bgW > 0 && bgH > 0)
-            {
-                if (page is not null)
-                {
-                    try
-                    {
-                        var bgName = ImageStamp.FromEncodedBytes(cellBgBytes).RegisterXObject(page);
-                        builder.SaveState();
-                        builder.SetMatrix(bgW, 0, 0, bgH, bgX, bgY);
-                        builder.DrawXObject(bgName);
-                        builder.RestoreState();
-                    }
-                    catch { /* an undecodable background is simply not painted */ }
-                }
-                else
-                {
-                    imageSink?.Add((cellBgBytes, new Rectangle(bgX, bgY, bgX + bgW, bgY + bgH)));
-                }
-            }
+            DrawCellBackgroundImage(rc, cellBgBytes, rc.cellX);
         }
 
         // Border
-        if (!rc.cell.IsNoBorder)
+        // (a cell that asked for no rule still opens its boundaries in a resolved
+        // grid, and a neighbour's rule may have won them)
+        if (!rc.cell.IsNoBorder || CollapsedRulesFor(rc.colWidths.Length) is not null)
         {
-            var cellBorder = rc.cell.Border ?? rc.row.DefaultCellBorder ?? rc.row.Border ?? DefaultCellBorder;
-            // Form-grid cells stroke INSIDE their box, CSS-fashion: the stroke
-            // centre sits half a width in from the cell edge, so two abutting
-            // cells show a pair of lines one width apart (e.g. the
-            // 185.45/186.20 doublet), not one shared line; each side runs the
-            // box's full extent so the corners paint.
-            if (cellBorder is not null && FormGridCells)
-                DrawFormGridBorder(builder, cellBorder, cellX + rc.bandInset,
-                    slice.TopY - slice.Height + rc.bandInset,
-                    rc.cellWidth - 2 * rc.bandInset, slice.Height - 2 * rc.bandInset);
-            else if (rc.pitchBorder is not null)
-            {
-                var (sl, sb, sr, st) = SideInsets(rc.pitchBorder, half: true);
-                var drawn = rc.pitchBorder;
-                // A span cut by the slice edge: no rule on the cut side, the others
-                // run to the box edge there.
-                if (rc.cell.SpanCutLeft || rc.cell.SpanCutRight)
-                {
-                    var sides = rc.pitchBorder.Side;
-                    if (rc.cell.SpanCutLeft) { sides &= ~BorderSide.Left; sl = 0; }
-                    if (rc.cell.SpanCutRight) { sides &= ~BorderSide.Right; sr = 0; }
-                    drawn = new BorderInfo(sides, rc.pitchBorder.Width, rc.pitchBorder.Color);
-                }
-                DrawPitchBorder(builder, drawn, cellX + sl, slice.TopY - slice.Height + sb,
-                    rc.cellBoxWidth - sl - sr, slice.Height - sb - st);
-            }
-            else if (cellBorder is not null)
-                DrawBorder(builder, cellBorder, cellX + rc.bandInset, slice.TopY - slice.Height + rc.bandInset,
-                    rc.cellBoxWidth - 2 * rc.bandInset, slice.Height - 2 * rc.bandInset);
+            DrawCellBorder(rc, rc.cellX);
         }
 
         return true;

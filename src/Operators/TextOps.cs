@@ -8,6 +8,8 @@ namespace Aspose.Pdf.Operators;
 /// <summary>BT — Begin text object.</summary>
 public sealed class BT : BlockTextOperator
 {
+    /// <summary>Creates a <c>BT</c> operator, which begins a text object and resets the text matrix.</summary>
+    public BT() { }
     public override string ToPdf() => "BT";
     public override string ToString() => ToPdf();
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -16,6 +18,8 @@ public sealed class BT : BlockTextOperator
 /// <summary>ET — End text object.</summary>
 public sealed class ET : BlockTextOperator
 {
+    /// <summary>Creates an <c>ET</c> operator, which ends a text object.</summary>
+    public ET() { }
     public override string ToPdf() => "ET";
     public override string ToString() => ToPdf();
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -24,11 +28,14 @@ public sealed class ET : BlockTextOperator
 /// <summary>Tf — Select font and size.</summary>
 public sealed class SelectFont : TextStateOperator
 {
+    /// <summary>Gets the name of the font resource, such as <c>F1</c>, without the leading slash.</summary>
     public string FontName { get; }
+    /// <summary>Gets the font size, in unscaled text space units (points when the text matrix does not scale).</summary>
     public double Size { get; }
     /// <summary>Public-API-shape alias for <see cref="FontName"/>.</summary>
     public string Name => FontName;
 
+    /// <summary>Creates a <c>Tf</c> operator that selects the named font resource (given without the leading slash) at the given font size.</summary>
     public SelectFont(string resName, double size) { FontName = resName; Size = size; }
     public override string ToPdf() => $"/{FontName} {Fmt(Size)} Tf";
     public override string ToString() => ToPdf();
@@ -38,11 +45,17 @@ public sealed class SelectFont : TextStateOperator
 /// <summary>Tm — Set text matrix.</summary>
 public sealed class SetTextMatrix : TextPlaceOperator
 {
+    /// <summary>Gets the <c>a</c> value of the text matrix (horizontal scaling).</summary>
     public double A { get; }
+    /// <summary>Gets the <c>b</c> value of the text matrix (rotation and skew).</summary>
     public double B { get; }
+    /// <summary>Gets the <c>c</c> value of the text matrix (rotation and skew).</summary>
     public double C { get; }
+    /// <summary>Gets the <c>d</c> value of the text matrix (vertical scaling).</summary>
     public double D { get; }
+    /// <summary>Gets the <c>e</c> value of the text matrix (horizontal position of the text origin).</summary>
     public double E { get; }
+    /// <summary>Gets the <c>f</c> value of the text matrix (vertical position of the text origin).</summary>
     public double F { get; }
 
     private Aspose.Pdf.Matrix _matrix;
@@ -56,12 +69,14 @@ public sealed class SetTextMatrix : TextPlaceOperator
         set => _matrix = value;
     }
 
+    /// <summary>Creates a <c>Tm</c> operator that sets the text matrix and text line matrix to [a b c d e f]; <c>e</c> and <c>f</c> give the text origin.</summary>
     public SetTextMatrix(double a, double b, double c, double d, double e, double f)
     {
         A = a; B = b; C = c; D = d; E = e; F = f;
         _matrix = new Aspose.Pdf.Matrix(a, b, c, d, e, f);
     }
 
+    /// <summary>Creates a <c>Tm</c> operator that sets the text matrix and text line matrix to the six values of the given matrix.</summary>
     public SetTextMatrix(Aspose.Pdf.Matrix m)
         : this(m.A, m.B, m.C, m.D, m.E, m.F) { }
 
@@ -73,9 +88,12 @@ public sealed class SetTextMatrix : TextPlaceOperator
 /// <summary>Td — Move text position: translate text origin by (X, Y).</summary>
 public sealed class MoveTextPosition : TextPlaceOperator
 {
+    /// <summary>Gets or sets the horizontal offset from the start of the current line, in unscaled text space units.</summary>
     public double X { get; set; }
+    /// <summary>Gets or sets the vertical offset from the start of the current line, in unscaled text space units.</summary>
     public double Y { get; set; }
 
+    /// <summary>Creates a <c>Td</c> operator that moves to the start of the next line, offset by (<c>x</c>, <c>y</c>) from the start of the current line in unscaled text space units.</summary>
     public MoveTextPosition(double x, double y) { X = x; Y = y; }
 
     public override string ToPdf() => $"{Fmt(X)} {Fmt(Y)} Td";
@@ -86,9 +104,12 @@ public sealed class MoveTextPosition : TextPlaceOperator
 /// <summary>TD — Move text position and set leading: translate by (X, Y) and set leading to -Y.</summary>
 public sealed class MoveTextPositionSetLeading : TextPlaceOperator
 {
+    /// <summary>Gets or sets the horizontal offset from the start of the current line, in unscaled text space units.</summary>
     public double X { get; set; }
+    /// <summary>Gets or sets the vertical offset from the start of the current line, in unscaled text space units; the leading becomes its negation.</summary>
     public double Y { get; set; }
 
+    /// <summary>Creates a <c>TD</c> operator that moves to the start of the next line, offset by (<c>x</c>, <c>y</c>) in unscaled text space units, and sets the text leading to -<c>y</c>.</summary>
     public MoveTextPositionSetLeading(double x, double y) { X = x; Y = y; }
 
     public override string ToPdf() => $"{Fmt(X)} {Fmt(Y)} TD";
@@ -98,6 +119,8 @@ public sealed class MoveTextPositionSetLeading : TextPlaceOperator
 /// <summary>T* — Move to next line using current leading.</summary>
 public sealed class MoveToNextLine : TextPlaceOperator
 {
+    /// <summary>Creates a <c>T*</c> operator, which moves to the start of the next line using the current text leading.</summary>
+    public MoveToNextLine() { }
     public override string ToPdf() => "T*";
     public override string ToString() => ToPdf();
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -107,8 +130,10 @@ public sealed class MoveToNextLine : TextPlaceOperator
 /// Lets callers pattern-match on a single type when iterating an
 /// <see cref="OperatorCollection"/>:
 /// <code>foreach (Operator op in ops) if (op is TextShowOperator t) total += t.Text;</code>
+/// A plain <c>TextShowOperator</c> is also the template an <see cref="OperatorSelector"/> is given to select
+/// every text-showing operator of a content stream.
 /// </summary>
-public abstract class TextShowOperator : TextOperator
+public class TextShowOperator : TextOperator
 {
     /// <summary>The text content shown by this operator (best-effort —
     /// for TJ the array's string parts are concatenated).</summary>
@@ -116,6 +141,12 @@ public abstract class TextShowOperator : TextOperator
 
     public TextShowOperator() { }
     public TextShowOperator(Aspose.Pdf.Facades.TextProperties textProperties) : base(textProperties) { }
+
+    /// <summary>A plain text-show operator writes its text as <c>Tj</c>.</summary>
+    public override string ToPdf() => $"({EscapeText(Text)}) Tj";
+
+    private static string EscapeText(string s) =>
+        s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)").Replace("\r", "\\r").Replace("\n", "\\n");
 }
 
 /// <summary>' — Move to next line and show text.</summary>
@@ -123,12 +154,14 @@ public sealed class MoveToNextLineShowText : TextShowOperator
 {
     // Store in the base Text so polymorphic access through TextShowOperator
     // returns the shown text (was a `new` shadow that read empty via the base).
+    /// <summary>Creates a <c>'</c> operator with empty text.</summary>
     public MoveToNextLineShowText() { }
+    /// <summary>Creates a <c>'</c> operator that moves to the next line and shows the given text; null is treated as empty.</summary>
     public MoveToNextLineShowText(string text) { base.Text = text ?? string.Empty; }
     public override string ToPdf() => $"({EscapeText(Text)}) '";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
     private static string EscapeText(string s) =>
-        s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+        s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)").Replace("\r", "\\r").Replace("\n", "\\n");
 }
 
 /// <summary>" — Set word/char spacing, move to next line, and show text.</summary>
@@ -140,12 +173,13 @@ public sealed class SetSpacingMoveToNextLineShowText : TextShowOperator
     public double Aw => WordSpacing;
     /// <summary>Public-API-shape alias for <see cref="CharSpacing"/>.</summary>
     public double Ac => CharSpacing;
+    /// <summary>Creates a <c>"</c> operator that sets the word spacing to <c>aw</c> and the character spacing to <c>ac</c> (unscaled text space units), then moves to the next line and shows the text; null text is treated as empty.</summary>
     public SetSpacingMoveToNextLineShowText(double aw, double ac, string text)
     { WordSpacing = aw; CharSpacing = ac; base.Text = text ?? string.Empty; }
     public override string ToPdf() => $"{Fmt(WordSpacing)} {Fmt(CharSpacing)} ({EscapeText(Text)}) \"";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
     private static string EscapeText(string s) =>
-        s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+        s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)").Replace("\r", "\\r").Replace("\n", "\\n");
 }
 
 /// <summary>TJ — Show text with individual glyph positioning (array of strings and numeric adjustments).</summary>
@@ -199,6 +233,41 @@ public sealed class SetGlyphsPositionShowText : TextShowOperator
 
     public SetGlyphsPositionShowText(object[] items) { Items = items ?? Array.Empty<object>(); }
 
+    /// <summary>
+    /// Positioned runs shown in a given face, the array counterpart of
+    /// <see cref="ShowText(string, Aspose.Pdf.Text.Font)"/>.
+    ///
+    /// This is the form a kerned run needs: the whole run shown once, with the
+    /// adjustments between its pieces carried inline. Placing each piece
+    /// separately instead moves ink and splits the run, so the two are not
+    /// interchangeable.
+    /// </summary>
+    public SetGlyphsPositionShowText(GlyphPosition[] glyphPositions, Aspose.Pdf.Text.Font font)
+        : this((System.Collections.Generic.IEnumerable<GlyphPosition>)glyphPositions) => _font = font;
+
+    private readonly FontInfo? _font;
+
+    // One entry per element of Items: the glyph ids a string element resolved to
+    // against the face, or null for the numeric adjustments and for anything not
+    // yet resolved.
+    private byte[]?[]? _glyphIds;
+
+    /// <summary>The font these runs were created against, if any.</summary>
+    internal FontInfo? Font => _font;
+
+    /// <summary>Record what each string element resolved to against its font.</summary>
+    internal void UseGlyphIds(byte[]?[] glyphIds) => _glyphIds = glyphIds;
+
+    /// <inheritdoc cref="ShowText.Features"/>
+    public System.Collections.Generic.IReadOnlyList<string>? Features { get; set; }
+
+    /// <summary>An array of glyph positions: the exact overload keeps a call with a
+    /// <see cref="GlyphPosition"/> array from being ambiguous between the object array and
+    /// the enumerable.</summary>
+    public SetGlyphsPositionShowText(GlyphPosition[] glyphPositions)
+        : this((System.Collections.Generic.IEnumerable<GlyphPosition>)glyphPositions) { }
+
+    /// <summary>Creates a <c>TJ</c> operator from a sequence of glyph positions: each text run is followed by its position adjustment, when it has one. A null sequence gives an empty array.</summary>
     public SetGlyphsPositionShowText(System.Collections.Generic.IEnumerable<GlyphPosition> glyphPositions)
     {
         var list = new System.Collections.Generic.List<object>();
@@ -235,10 +304,15 @@ public sealed class SetGlyphsPositionShowText : TextShowOperator
         var sb = new System.Text.StringBuilder();
         sb.Append('[');
         var first = true;
-        foreach (var it in Items)
+        for (var index = 0; index < Items.Length; index++)
         {
+            var it = Items[index];
             if (!first) sb.Append(' ');
-            if (it is string s) sb.Append('(').Append(EscapeText(s)).Append(')');
+            // A run resolved against an embedded face is written as that face's
+            // own glyph ids; only an unresolved run is written as characters.
+            if (_glyphIds is not null && index < _glyphIds.Length && _glyphIds[index] is { } ids)
+                sb.Append('<').Append(Compat.ToHexString(ids)).Append('>');
+            else if (it is string s) sb.Append('(').Append(EscapeText(s)).Append(')');
             else if (it is double d) sb.Append(Fmt(d));
             else if (it is int i) sb.Append(Fmt(i));
             first = false;
@@ -249,7 +323,7 @@ public sealed class SetGlyphsPositionShowText : TextShowOperator
     public override string ToString() => ToPdf();
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
     private static string EscapeText(string s) =>
-        s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+        s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)").Replace("\r", "\\r").Replace("\n", "\\n");
 }
 
 /// <summary>Tj — Show text string.</summary>
@@ -258,15 +332,38 @@ public sealed class ShowText : TextShowOperator
     private string _text;
     private readonly FontInfo? _font;
 
+    // Set when this run has been resolved against a font registered on a page:
+    // the glyph ids to show, already encoded. A run drawn in an embedded font
+    // cannot be written as a literal string, because the font's codes are its
+    // own glyph ids rather than the characters.
+    private byte[]? _glyphIds;
+
+    /// <summary>The font this run was created against, if any.</summary>
+    internal FontInfo? Font => _font;
+
+    /// <summary>Record the glyph ids this run resolved to against its font.</summary>
+    internal void UseGlyphIds(byte[] glyphIds) => _glyphIds = glyphIds;
+
+    /// <summary>
+    /// OpenType features to apply to this run, such as `liga` for the fi and fl
+    /// ligatures or `onum` for old-style figures. None are applied unless named: a
+    /// Latin run is one glyph per character otherwise.
+    /// </summary>
+    public System.Collections.Generic.IReadOnlyList<string>? Features { get; set; }
+
     public override string Text
     {
         get => _text;
         set => _text = value ?? string.Empty;
     }
 
+    /// <summary>Creates a <c>Tj</c> operator with empty text.</summary>
     public ShowText() { _text = string.Empty; }
+    /// <summary>Creates a <c>Tj</c> operator that shows the given text; null is treated as empty.</summary>
     public ShowText(string text) { _text = text ?? string.Empty; }
+    /// <summary>Creates a <c>Tj</c> operator that shows the given text in the given font; null text is treated as empty. The font is kept so the text can be encoded as that font's glyphs when it is added to a page.</summary>
     public ShowText(string text, Aspose.Pdf.Text.Font font) { _text = text ?? string.Empty; _font = font; }
+    /// <summary>Creates a <c>Tj</c> operator that shows the given text; null is treated as empty. The <c>index</c> argument is ignored.</summary>
     public ShowText(int index, string text) { _text = text ?? string.Empty; _ = index; }
 
     /// <summary>Optional font hint kept for back-compat — does not surface in
@@ -275,6 +372,11 @@ public sealed class ShowText : TextShowOperator
 
     public override string ToPdf()
     {
+        // A run resolved against an embedded face is written as that face's own
+        // glyph ids, not as its characters.
+        if (_glyphIds is not null)
+            return $"<{Compat.ToHexString(_glyphIds)}> Tj";
+
         var escaped = _text.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
         return $"({escaped}) Tj";
     }
@@ -327,6 +429,7 @@ public sealed class SetCharacterSpacing : TextStateOperator
     public double CharSpace { get; set; }
     /// <summary>Public-API-shape alias for <see cref="CharSpace"/>.</summary>
     public double CharSpacing { get => CharSpace; set => CharSpace = value; }
+    /// <summary>Creates a <c>Tc</c> operator that sets the character spacing: extra space added after each glyph, in unscaled text space units.</summary>
     public SetCharacterSpacing(double charSpacing) { CharSpace = charSpacing; }
     public override string ToPdf() => $"{Fmt(CharSpace)} Tc";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -338,6 +441,7 @@ public sealed class SetWordSpacing : TextStateOperator
     public double WordSpace { get; set; }
     /// <summary>Public-API-shape alias for <see cref="WordSpace"/>.</summary>
     public double WordSpacing { get => WordSpace; set => WordSpace = value; }
+    /// <summary>Creates a <c>Tw</c> operator that sets the word spacing: extra space added after each single-byte space character, in unscaled text space units.</summary>
     public SetWordSpacing(double wordSpacing) { WordSpace = wordSpacing; }
     public override string ToPdf() => $"{Fmt(WordSpace)} Tw";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -346,9 +450,11 @@ public sealed class SetWordSpacing : TextStateOperator
 /// <summary>Tz — Set horizontal text scaling.</summary>
 public sealed class SetHorizontalTextScaling : TextStateOperator
 {
+    /// <summary>Gets or sets the horizontal text scaling, as a percentage of the normal glyph width (100 is normal).</summary>
     public double Scale { get; set; }
     /// <summary>Public-API-shape alias for <see cref="Scale"/>.</summary>
     public double HorizontalScaling { get => Scale; set => Scale = value; }
+    /// <summary>Creates a <c>Tz</c> operator that sets the horizontal text scaling, as a percentage of the normal glyph width (100 is normal).</summary>
     public SetHorizontalTextScaling(double horizintalScaling) { Scale = horizintalScaling; }
     public override string ToPdf() => $"{Fmt(Scale)} Tz";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -358,6 +464,7 @@ public sealed class SetHorizontalTextScaling : TextStateOperator
 public sealed class SetTextLeading : TextStateOperator
 {
     public double Leading { get; set; }
+    /// <summary>Creates a <c>TL</c> operator that sets the text leading: the distance between baselines used by <c>T*</c>, <c>'</c> and <c>"</c>, in unscaled text space units.</summary>
     public SetTextLeading(double leading) { Leading = leading; }
     public override string ToPdf() => $"{Fmt(Leading)} TL";
     public override string ToString() => ToPdf();
@@ -367,8 +474,11 @@ public sealed class SetTextLeading : TextStateOperator
 /// <summary>Tr — Set text rendering mode.</summary>
 public sealed class SetTextRenderingMode : TextStateOperator
 {
+    /// <summary>Gets the text rendering mode: 0 fill, 1 stroke, 2 fill and stroke, 3 invisible, and 4 to 7 the same four modes that also add the text to the clipping path.</summary>
     public int RenderingMode { get; }
+    /// <summary>Creates a <c>Tr</c> operator with rendering mode 0 (fill).</summary>
     public SetTextRenderingMode() { RenderingMode = 0; }
+    /// <summary>Creates a <c>Tr</c> operator with the given rendering mode: 0 fill, 1 stroke, 2 fill and stroke, 3 invisible, and 4 to 7 the same four modes that also add the text to the clipping path.</summary>
     public SetTextRenderingMode(int renderingMode) { RenderingMode = renderingMode; }
     public override string ToPdf() => $"{RenderingMode.ToString(CultureInfo.InvariantCulture)} Tr";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -380,6 +490,7 @@ public sealed class SetTextRise : TextStateOperator
     public double Rise { get; set; }
     /// <summary>Public-API-shape alias for <see cref="Rise"/>.</summary>
     public double TextRise { get => Rise; set => Rise = value; }
+    /// <summary>Creates a <c>Ts</c> operator that sets the text rise: how far to move the baseline up (positive) or down (negative), in unscaled text space units.</summary>
     public SetTextRise(double textRise) { Rise = textRise; }
     public override string ToPdf() => $"{Fmt(Rise)} Ts";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -394,6 +505,7 @@ public sealed class SetCharWidth : Operator
 {
     public double Wx { get; }
     public double Wy { get; }
+    /// <summary>Creates a <c>d0</c> operator, used in a Type 3 glyph description, that sets the glyph width (<c>wx</c>, <c>wy</c>) in glyph space; <c>wy</c> is normally 0.</summary>
     public SetCharWidth(double wx, double wy) { Wx = wx; Wy = wy; }
     public override string ToPdf() => $"{Fmt(Wx)} {Fmt(Wy)} d0";
     public override string ToString() => ToPdf();
@@ -417,6 +529,7 @@ public sealed class SetCharWidthBoundingBox : Operator
     public double Urx => URx;
     /// <summary>Public-API-shape camel-cased alias for <see cref="URy"/>.</summary>
     public double Ury => URy;
+    /// <summary>Creates a <c>d1</c> operator, used in a Type 3 glyph description, that sets the glyph width (<c>wx</c>, <c>wy</c>) and the glyph bounding box from (<c>llx</c>, <c>lly</c>) to (<c>urx</c>, <c>ury</c>), in glyph space.</summary>
     public SetCharWidthBoundingBox(double wx, double wy, double llx, double lly, double urx, double ury)
     { Wx = wx; Wy = wy; LLx = llx; LLy = lly; URx = urx; URy = ury; }
     public override string ToPdf() =>
@@ -433,10 +546,14 @@ public sealed class SetCharWidthBoundingBox : Operator
 /// an optional preceding/following position adjustment (in 1/1000 text units).</summary>
 public sealed class GlyphPosition
 {
+    /// <summary>Gets the text run.</summary>
     public string Text { get; }
+    /// <summary>Gets the position adjustment that follows the text run, in thousandths of a text space unit; positive values move the next glyph left. 0 when there is none.</summary>
     public double Position { get; }
     public bool HasPosition { get; }
+    /// <summary>Creates a glyph position holding a text run with no position adjustment.</summary>
     public GlyphPosition(string text) { Text = text; HasPosition = false; }
+    /// <summary>Creates a glyph position holding a text run followed by a position adjustment, in thousandths of a text space unit; positive values move the next glyph left.</summary>
     public GlyphPosition(string text, double position)
     { Text = text; Position = position; HasPosition = true; }
 }

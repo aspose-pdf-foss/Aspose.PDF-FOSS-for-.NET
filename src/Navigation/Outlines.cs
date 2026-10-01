@@ -6,7 +6,7 @@ namespace Aspose.Pdf;
 /// <summary>
 /// Base class for a bookmark (outline) collection. <see cref="OutlineCollection"/>
 /// derives from it, so a document's <see cref="Document.Outlines"/> and any
-/// <see cref="OutlineItem.Parent"/> are both assignable to <c>Outlines</c>
+/// <c>OutlineItem.Parent</c> are both assignable to <c>Outlines</c>
 /// (matching the public type hierarchy).
 /// </summary>
 public abstract class Outlines : IEnumerable<OutlineItemCollection>

@@ -40,7 +40,7 @@ public sealed partial class Document
 
     /// <summary>Format an /Info date (DateTime + timezone offset) as an ISO 8601
     /// XMP date string (e.g. <c>2026-06-20T12:34:56+03:00</c>) that round-trips
-    /// through <see cref="Aspose.Pdf.Xmp.XmpValue.ToDateTime"/>.</summary>
+    /// through <c>XmpValue.ToDateTime</c>.</summary>
     private static string FormatXmpDate(DateTime value, TimeSpan offset)
     {
         // PDF dates in the wild carry corrupt timezone offsets; DateTimeOffset only
@@ -87,6 +87,11 @@ public sealed partial class Document
         // /StructTreeRoot — element dicts are already in their parents' /K).
         ((Tagged.ITaggedContent)_taggedContent).Save();
 
+        // Finishing the accessibility work includes the annotations: a link the document
+        // states an address for gets that address as its alternate description, which is
+        // the only thing assistive technology has to announce (PDF/UA-1 clause 7.18.5).
+        DescribeLinkAnnotations();
+
         // Render the authored structure (headers/paragraphs/tables/figures/
         // lists/links) onto pages when the document was built purely through
         // TaggedContent and has no page content yet. A from-scratch tagged
@@ -111,10 +116,18 @@ public sealed partial class Document
                 Info.Title = "Tagged PDF";
         }
 
+        // References the caller tagged by hand (Tag(BDC), Tag(annotation)) get their file side
+        // now: after the render, so a rendered tree's own wiring is merged into, never replaced.
+        Tagged.ManualTagWiring.Wire(this, ((Tagged.ITaggedContent)_taggedContent).RootElement);
+
         bool AllPagesAreContentless()
         {
             foreach (var page in Pages)
             {
+                // A table-of-contents page draws its own title and entries; that is not the
+                // caller's content, and an authored document whose only drawn page is its TOC
+                // still wants its structure rendered.
+                if (page.TocInfo is not null) continue;
                 try
                 {
                     var contents = Reader.Resolve(page.Dict.Get("Contents"));
@@ -153,7 +166,7 @@ public sealed partial class Document
 
         if (_reader.Trailer.Get("ID") is null)
         {
-            var fileId = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+            var fileId = Compat.RandomBytes(16);
             var idArray = new PdfArray();
             idArray.Add(new PdfString(fileId, isHex: true));
             idArray.Add(new PdfString(fileId, isHex: true));

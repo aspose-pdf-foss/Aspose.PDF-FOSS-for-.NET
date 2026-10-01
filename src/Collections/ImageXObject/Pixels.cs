@@ -14,19 +14,19 @@ public partial class ImageXObject
     /// </summary>
     internal IO.PixelGetter? GetPixelSource()
     {
-        var bpc = BitsPerComponent;
-        var w = Width;
-        var decoded = _reader.DecodeStream(_stream);
+        var ps = new PixelSourceState();
+        ps.bpc = BitsPerComponent;
+        ps.w = Width;
+        ps.decoded = _reader.DecodeStream(_stream);
 
         // JPEG 2000 (JPXDecode): decode the codestream to raw samples.
-        if (IsJpeg2000 && IO.Filters.JpxDecoder.TryDecode(decoded, out var jp, out var jw, out var jh, out var jc))
+        if (IsJpeg2000 && IO.Filters.JpxDecoder.TryDecode(ps.decoded) is (var jp, var jw, var jh, var jc))
         {
-            return (int x, int y, out byte r, out byte g, out byte b) =>
+            return (int x, int y) =>
             {
                 int o = (y * jw + x) * jc;
-                if (o < 0 || o >= jp.Length) { r = g = b = 0; return; }
-                if (jc >= 3) { r = jp[o]; g = jp[o + 1]; b = jp[o + 2]; }
-                else { r = g = b = jp[o]; }
+                if (o < 0 || o >= jp.Length) return (0, 0, 0);
+                return jc >= 3 ? (jp[o], jp[o + 1], jp[o + 2]) : (jp[o], jp[o], jp[o]);
             };
         }
 
@@ -38,96 +38,23 @@ public partial class ImageXObject
         {
             try
             {
-                var (pj, pjw, pjh, pjc) = IO.Filters.JpegDecoder.Decode(decoded);
-                return (int x, int y, out byte r, out byte g, out byte b) =>
+                var (pj, pjw, pjh, pjc) = IO.Filters.JpegDecoder.Decode(ps.decoded);
+                return (int x, int y) =>
                 {
                     int o = (y * pjw + x) * pjc;
-                    if (o < 0 || o + pjc > pj.Length) { r = g = b = 0; return; }
-                    if (pjc >= 3) { r = pj[o]; g = pj[o + 1]; b = pj[o + 2]; }
-                    else { r = g = b = pj[o]; }
+                    if (o < 0 || o + pjc > pj.Length) return (0, 0, 0);
+                    return pjc >= 3 ? (pj[o], pj[o + 1], pj[o + 2]) : (pj[o], pj[o], pj[o]);
                 };
             }
             catch { return null; }
         }
 
-        // Indexed colour space — see ToPng() for the rationale.
-        var indexedPalette = ResolveIndexedPalette(out var paletteSize);
-        if (indexedPalette is not null)
-        {
-            return (int x, int y, out byte r, out byte g, out byte b) =>
-            {
-                var idx = ReadPackedIndex(decoded, x, y, w, bpc);
-                if (idx >= paletteSize) idx = paletteSize - 1;
-                var src = idx * 3;
-                r = indexedPalette[src];
-                g = indexedPalette[src + 1];
-                b = indexedPalette[src + 2];
-            };
-        }
+        (ps.indexedPalette, var paletteSize) = ResolveIndexedPalette();
+        if (IndexedSource(ps, paletteSize) is { } indexed) return indexed;
 
-        if (bpc == 1)
-        {
-            var blackIs1 = false;
-            var decodeArr = _reader.Resolve(_stream.Dict.Get("Decode"));
-            if (decodeArr is PdfArray da && da.Count >= 2)
-            {
-                var first = da[0] is PdfInteger i ? i.Value : (da[0] is PdfReal r ? (long)r.Value : 0);
-                blackIs1 = first == 1;
-            }
-            var parms = _reader.ResolveDict(_stream.Dict.Get("DecodeParms"));
-            if (parms is not null)
-            {
-                var bi1 = parms.Get("BlackIs1");
-                if (bi1 is PdfBoolean b) blackIs1 = b.Value;
-            }
-            var srcBytesPerRow = (w + 7) / 8;
-            return (int x, int y, out byte r, out byte g, out byte b) =>
-            {
-                var byteIdx = (long)y * srcBytesPerRow + (x / 8);
-                var bitIdx = 7 - (x % 8);
-                var bit = (byteIdx < decoded.Length) ? (decoded[byteIdx] >> bitIdx) & 1 : 0;
-                var v = blackIs1
-                    ? (bit == 1 ? (byte)0 : (byte)255)
-                    : (bit == 1 ? (byte)255 : (byte)0);
-                r = v; g = v; b = v;
-            };
-        }
+        if (OneBitSource(ps) is { } oneBit) return oneBit;
 
-        var components = ComponentCount;
-        if (components == 1)
-        {
-            return (int x, int y, out byte r, out byte g, out byte b) =>
-            {
-                var idx = (long)y * w + x;
-                var v = idx < decoded.Length ? decoded[idx] : (byte)0;
-                r = v; g = v; b = v;
-            };
-        }
-        if (components == 4 && ColorSpace is "DeviceCMYK")
-        {
-            return (int x, int y, out byte r, out byte g, out byte b) =>
-            {
-                var idx = ((long)y * w + x) * 4;
-                if (idx + 3 >= decoded.Length) { r = g = b = 0; return; }
-                var c = decoded[idx] / 255.0;
-                var m = decoded[idx + 1] / 255.0;
-                var yk = decoded[idx + 2] / 255.0;
-                var k = decoded[idx + 3] / 255.0;
-                r = (byte)(255 * (1 - c) * (1 - k));
-                g = (byte)(255 * (1 - m) * (1 - k));
-                b = (byte)(255 * (1 - yk) * (1 - k));
-            };
-        }
-        if (components == 3)
-        {
-            return (int x, int y, out byte r, out byte g, out byte b) =>
-            {
-                var idx = ((long)y * w + x) * 3;
-                if (idx + 2 >= decoded.Length) { r = g = b = 0; return; }
-                r = decoded[idx]; g = decoded[idx + 1]; b = decoded[idx + 2];
-            };
-        }
-        return null;
+        return ComponentSource(ps);
     }
 
     /// <summary>Convert this image's samples to grayscale (DeviceGray, 8 bpc) in place,
@@ -170,7 +97,7 @@ public partial class ImageXObject
             for (var y = 0; y < h; y++)
                 for (var x = 0; x < w; x++)
                 {
-                    getter(x, y, out var r, out var g, out var b);
+                    var (r, g, b) = getter(x, y);
                     gray[o++] = (byte)(0.299 * r + 0.587 * g + 0.114 * b + 0.5);
                 }
         }
@@ -198,7 +125,7 @@ public partial class ImageXObject
         var bpc = BitsPerComponent;
 
         // JPEG 2000 (JPXDecode): decode the codestream to raw samples.
-        if (IsJpeg2000 && IO.Filters.JpxDecoder.TryDecode(decoded, out var jp, out var jw, out var jh, out var jc))
+        if (IsJpeg2000 && IO.Filters.JpxDecoder.TryDecode(decoded) is (var jp, var jw, var jh, var jc))
             return IO.PngEncoder.Encode(jp, jw, jh, jc >= 3 ? 2 : 0, 8);
 
         // JPEG (DCTDecode): DecodeStream leaves the codestream encoded; decode it to
@@ -214,12 +141,7 @@ public partial class ImageXObject
             catch { /* fall through to the raw-sample path below */ }
         }
 
-        // Indexed colour space — look up palette indices into an RGB triple
-        // and emit a regular 24-bit RGB PNG. Indexed images use 1/2/4/8-bpc
-        // packing for the indices, so the row stride is bit-aligned, not
-        // byte-aligned-per-pixel. Bypass the 1-bit branch below so the
-        // CCITT-style polarity logic doesn't run on a 1-bpc indexed sample.
-        var indexedPalette = ResolveIndexedPalette(out var paletteSize);
+        (var indexedPalette, var paletteSize) = ResolveIndexedPalette();
         if (indexedPalette is not null)
         {
             var rgb = new byte[w * h * 3];
@@ -234,6 +156,12 @@ public partial class ImageXObject
                     rgb[dst + 1] = indexedPalette[src + 1];
                     rgb[dst + 2] = indexedPalette[src + 2];
                 }
+            // (its soft mask is its alpha, as an RGB image's is below: what it masks out shows the page under it)
+            if (HasSoftMask && TryBuildSoftMaskAlpha(w, h) is { } mask)
+            {
+                var (withAlpha, alphaColorType) = InterleaveAlpha(rgb, mask, w, h, 3);
+                return IO.PngEncoder.Encode(withAlpha, w, h, alphaColorType, 8);
+            }
             return IO.PngEncoder.Encode(rgb, w, h, colorType: 2, bitDepth: 8);
         }
 
@@ -278,9 +206,10 @@ public partial class ImageXObject
         // image (JPEG output, which cannot, still drops it). Only the gray (0) and
         // RGB (2) raster paths are promoted; other paths already return above.
         var bd = bpc > 8 ? 8 : bpc;
+        byte[]? alpha = null;
         if (bd == 8 && colorType is 0 or 2 &&
-            ((HasSoftMask && TryBuildSoftMaskAlpha(w, h, out var alpha))
-             || TryBuildColorKeyAlpha(decoded, w, h, colorType == 2 ? 3 : 1, out alpha)))
+            ((HasSoftMask && (alpha = TryBuildSoftMaskAlpha(w, h)) is not null)
+             || (alpha = TryBuildColorKeyAlpha(decoded, w, h, colorType == 2 ? 3 : 1)) is not null))
         {
             var (withAlpha, alphaColorType) = InterleaveAlpha(decoded, alpha, w, h, colorType == 2 ? 3 : 1);
             return IO.PngEncoder.Encode(withAlpha, w, h, alphaColorType, 8);
@@ -294,12 +223,12 @@ public partial class ImageXObject
     /// [min,max] range is fully transparent. The common producer shape is
     /// /Mask [255 255 255 255 255 255] — white knocked out — for annotation
     /// overlays drawn on a white ground.</summary>
-    private bool TryBuildColorKeyAlpha(byte[] decoded, int w, int h, int components, out byte[] alpha)
+    private byte[]? TryBuildColorKeyAlpha(byte[] decoded, int w, int h, int components)
     {
-        alpha = System.Array.Empty<byte>();
+        byte[] alpha = System.Array.Empty<byte>();
         if (_reader.Resolve(_stream.Dict.Get("Mask")) is not PdfArray maskArr
             || maskArr.Count != components * 2)
-            return false;
+            return null;
         var lo = new int[components];
         var hi = new int[components];
         for (var c = 0; c < components; c++)
@@ -307,7 +236,7 @@ public partial class ImageXObject
             lo[c] = _reader.Resolve(maskArr[c * 2]) is PdfInteger l ? (int)l.Value : 0;
             hi[c] = _reader.Resolve(maskArr[c * 2 + 1]) is PdfInteger u ? (int)u.Value : 0;
         }
-        if (decoded.Length < w * h * components) return false;
+        if (decoded.Length < w * h * components) return null;
         alpha = new byte[w * h];
         for (var i = 0; i < w * h; i++)
         {
@@ -319,22 +248,21 @@ public partial class ImageXObject
             }
             alpha[i] = masked ? (byte)0 : (byte)255;
         }
-        return true;
+        return alpha;
     }
 
     /// <summary>Decode the image's /SMask soft mask into a per-pixel alpha plane
     /// resampled to this image's dimensions (0=transparent, 255=opaque).</summary>
-    private bool TryBuildSoftMaskAlpha(int w, int h, out byte[] alpha)
+    private byte[]? TryBuildSoftMaskAlpha(int w, int h)
     {
-        alpha = System.Array.Empty<byte>();
-        var raw = Devices.SoftwarePageRenderer.ResolveSMaskAlpha(
-            _stream.Dict.Get("SMask"), _reader, out var mw, out var mh);
-        if (raw is null || mw <= 0 || mh <= 0) return false;
+        byte[] alpha = System.Array.Empty<byte>();
+        (var raw, var mw, var mh) = Devices.SoftwarePageRenderer.ResolveSMaskAlpha(_stream.Dict.Get("SMask"), _reader);
+        if (raw is null || mw <= 0 || mh <= 0) return null;
 
         if (mw == w && mh == h)
         {
             alpha = raw;
-            return true;
+            return alpha;
         }
         // Nearest-neighbour resample the mask onto the base-image grid.
         var scaled = new byte[w * h];
@@ -350,7 +278,7 @@ public partial class ImageXObject
             }
         }
         alpha = scaled;
-        return true;
+        return alpha;
     }
 
     private static byte[] CmykToRgb(byte[] cmyk, int width, int height)
@@ -395,12 +323,13 @@ public partial class ImageXObject
     /// produce a best-effort RGB palette by replicating gray or treating CMYK
     /// as RGBA-like inversion.
     /// </summary>
-    private byte[]? ResolveIndexedPalette(out int paletteSize)
+    private (byte[]? result, int paletteSize) ResolveIndexedPalette()
     {
+        int paletteSize = default;
         paletteSize = 0;
         var csObj = _reader.Resolve(_stream.Dict.Get("ColorSpace"));
-        if (csObj is not PdfArray arr || arr.Count < 4) return null;
-        if (arr[0] is not PdfName name || name.Value != "Indexed") return null;
+        if (csObj is not PdfArray arr || arr.Count < 4) return (null, paletteSize);
+        if (arr[0] is not PdfName name || name.Value != "Indexed") return (null, paletteSize);
 
         var hival = arr[2] is PdfInteger hi ? (int)hi.Value : 255;
         paletteSize = hival + 1;
@@ -410,7 +339,7 @@ public partial class ImageXObject
         // device bases (an indexed-of-DeviceN palette is 1 byte per entry, not 3).
         var info = Devices.SoftwarePageRenderer.ResolveImageColorSpace(arr, _reader);
         var lookup = info.Palette;
-        if (lookup is null) return null;
+        if (lookup is null) return (null, paletteSize);
         var baseComps = info.PaletteComponents;
 
         var rgb = new byte[paletteSize * 3];
@@ -445,7 +374,7 @@ public partial class ImageXObject
             rgb[dst + 1] = g;
             rgb[dst + 2] = b;
         }
-        return rgb;
+        return (rgb, paletteSize);
     }
 
     /// <summary>

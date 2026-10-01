@@ -13,131 +13,15 @@ internal static partial class HtmlToPdfConverter
     {
         switch (node.Tag)
         {
-            case "div":
-            {
-                var d = tc.CreateDivElement();
-                parent.AppendChild(d);
-                foreach (var c in node.Children) EmitStructureElement(c, d, tc);
+            case "div": case "h1": case "h2": case "h3": case "h4": case "h5": case "h6": case "p": case "ul": case "ol": case "li":
+                EmitBlockStructureElement(node, parent, tc, node.Tag);
                 break;
-            }
-            case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
-                parent.AppendChild(tc.CreateHeaderElement(node.Tag[1] - '0'));
+            case "img": case "input": case "textarea": case "select": case "button": case "b": case "strong": case "u": case "i": case "em":
+                EmitInlineStructureElement(node, parent, tc, node.Tag);
                 break;
-            case "p":
-                parent.AppendChild(tc.CreateParagraphElement());
+            case "table": case "thead": case "tbody": case "tfoot": case "tr": case "th": case "td":
+                EmitTableStructureElement(node, parent, tc, node.Tag);
                 break;
-            case "ul": case "ol":
-            {
-                var l = tc.CreateListElement();
-                parent.AppendChild(l);
-                foreach (var c in node.Children) EmitStructureElement(c, l, tc);
-                break;
-            }
-            case "li":
-            {
-                // A list item expands to LI → { Lbl (bullet/label), [Link], LBody (text) };
-                // its inline children are represented by these, not walked further.
-                var li = tc.CreateListLIElement();
-                parent.AppendChild(li);
-                li.AppendChild(tc.CreateListLblElement());
-                if (HasDescendant(node, "a"))
-                    li.AppendChild(tc.CreateLinkElement());
-                li.AppendChild(tc.CreateListLBodyElement());
-                break;
-            }
-            case "img":
-            {
-                var fig = tc.CreateFigureElement();
-                if (node.Attrs is not null && node.Attrs.TryGetValue("alt", out var alt)
-                    && !string.IsNullOrEmpty(alt))
-                    fig.AlternativeText = alt;
-                parent.AppendChild(fig);
-                break;
-            }
-            case "input":
-            {
-                // Each rendered interactive control becomes a Form structure element
-                // (wrapping the widget's object reference). A type="hidden" input has no
-                // widget and produces nothing.
-                var type = node.Attrs is not null && node.Attrs.TryGetValue("type", out var ty)
-                    ? ty.Trim().ToLowerInvariant() : "";
-                if (type != "hidden")
-                    parent.AppendChild(tc.CreateFormElement());
-                break;
-            }
-            case "textarea":
-            case "select":
-            case "button":
-                parent.AppendChild(tc.CreateFormElement());
-                break;
-            case "b": case "strong": case "u": case "i": case "em":
-            {
-                // Inline emphasis inside a TABLE CELL becomes a Span element — the
-                // cell's content model is structured per run. Free-flow emphasis
-                // (and empty icon elements) melts into its paragraph's text and
-                // produces no element of its own.
-                var inCell = false;
-                for (var a = node.Parent; a is not null; a = a.Parent)
-                    if (a.Tag is "td" or "th") { inCell = true; break; }
-                var hasText = !string.IsNullOrWhiteSpace(node.Text);
-                if (!hasText)
-                    foreach (var dnode in node.Descendants())
-                        if (!string.IsNullOrWhiteSpace(dnode.Text)) { hasText = true; break; }
-                if (!inCell || !hasText) break;
-                var sp = tc.CreateSpanElement();
-                parent.AppendChild(sp);
-                foreach (var c in node.Children) EmitStructureElement(c, sp, tc);
-                break;
-            }
-            case "table":
-            {
-                var tbl = tc.CreateTableElement();
-                parent.AppendChild(tbl);
-                foreach (var c in node.Children) EmitStructureElement(c, tbl, tc);
-                break;
-            }
-            case "thead":
-            {
-                var th = tc.CreateTableTHeadElement();
-                parent.AppendChild(th);
-                foreach (var c in node.Children) EmitStructureElement(c, th, tc);
-                break;
-            }
-            case "tbody":
-            {
-                var tb = tc.CreateTableTBodyElement();
-                parent.AppendChild(tb);
-                foreach (var c in node.Children) EmitStructureElement(c, tb, tc);
-                break;
-            }
-            case "tfoot":
-            {
-                var tf = tc.CreateTableTFootElement();
-                parent.AppendChild(tf);
-                foreach (var c in node.Children) EmitStructureElement(c, tf, tc);
-                break;
-            }
-            case "tr":
-            {
-                var tr = tc.CreateTableTRElement();
-                parent.AppendChild(tr);
-                foreach (var c in node.Children) EmitStructureElement(c, tr, tc);
-                break;
-            }
-            case "th":
-            {
-                var thc = tc.CreateTableTHElement();
-                parent.AppendChild(thc);
-                foreach (var c in node.Children) EmitStructureElement(c, thc, tc);
-                break;
-            }
-            case "td":
-            {
-                var td = tc.CreateTableTDElement();
-                parent.AppendChild(td);
-                foreach (var c in node.Children) EmitStructureElement(c, td, tc);
-                break;
-            }
             // Transparent wrappers: descend without emitting an element of their own.
             case "html": case "body": case "#root": case "section": case "article": case "main":
                 foreach (var c in node.Children) EmitStructureElement(c, parent, tc);
@@ -250,5 +134,154 @@ internal static partial class HtmlToPdfConverter
         foreach (var (fontDict, used) in usedByDict)
             foreach (var key in new List<string>(fontDict.Keys))
                 if (!used.Contains(key)) fontDict.Remove(key);
+    }
+
+    /// <summary>The block elements: divisions, headings, paragraphs and lists become their structure elements.</summary>
+    private static void EmitBlockStructureElement(HtmlNode node, Aspose.Pdf.LogicalStructure.StructureElement parent, Tagged.ITaggedContent tc, string tag)
+    {
+        switch (tag)
+        {
+            case "div":
+            {
+                var d = tc.CreateDivElement();
+                parent.AppendChild(d);
+                foreach (var c in node.Children) EmitStructureElement(c, d, tc);
+                break;
+            }
+            case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
+                parent.AppendChild(tc.CreateHeaderElement(node.Tag[1] - '0'));
+                break;
+            case "p":
+                parent.AppendChild(tc.CreateParagraphElement());
+                break;
+            case "ul": case "ol":
+            {
+                var l = tc.CreateListElement();
+                parent.AppendChild(l);
+                foreach (var c in node.Children) EmitStructureElement(c, l, tc);
+                break;
+            }
+            case "li":
+            {
+                // A list item expands to LI → { Lbl (bullet/label), [Link], LBody (text) };
+                // its inline children are represented by these, not walked further.
+                var li = tc.CreateListLIElement();
+                parent.AppendChild(li);
+                li.AppendChild(tc.CreateListLblElement());
+                if (HasDescendant(node, "a"))
+                    li.AppendChild(tc.CreateLinkElement());
+                li.AppendChild(tc.CreateListLBodyElement());
+                break;
+            }
+        }
+    }
+
+    /// <summary>The inline and form elements: figures, form controls and the emphasis spans.</summary>
+    private static void EmitInlineStructureElement(HtmlNode node, Aspose.Pdf.LogicalStructure.StructureElement parent, Tagged.ITaggedContent tc, string tag)
+    {
+        switch (tag)
+        {
+            case "img":
+            {
+                var fig = tc.CreateFigureElement();
+                if (node.Attrs is not null && node.Attrs.TryGetValue("alt", out var alt)
+                    && !string.IsNullOrEmpty(alt))
+                    fig.AlternativeText = alt;
+                parent.AppendChild(fig);
+                break;
+            }
+            case "input":
+            {
+                // Each rendered interactive control becomes a Form structure element
+                // (wrapping the widget's object reference). A type="hidden" input has no
+                // widget and produces nothing.
+                var type = node.Attrs is not null && node.Attrs.TryGetValue("type", out var ty)
+                    ? ty.Trim().ToLowerInvariant() : "";
+                if (type != "hidden")
+                    parent.AppendChild(tc.CreateFormElement());
+                break;
+            }
+            case "textarea":
+            case "select":
+            case "button":
+                parent.AppendChild(tc.CreateFormElement());
+                break;
+            case "b": case "strong": case "u": case "i": case "em":
+            {
+                // Inline emphasis inside a TABLE CELL becomes a Span element — the
+                // cell's content model is structured per run. Free-flow emphasis
+                // (and empty icon elements) melts into its paragraph's text and
+                // produces no element of its own.
+                var inCell = false;
+                for (var a = node.Parent; a is not null; a = a.Parent)
+                    if (a.Tag is "td" or "th") { inCell = true; break; }
+                var hasText = !string.IsNullOrWhiteSpace(node.Text);
+                if (!hasText)
+                    foreach (var dnode in node.Descendants())
+                        if (!string.IsNullOrWhiteSpace(dnode.Text)) { hasText = true; break; }
+                if (!inCell || !hasText) break;
+                var sp = tc.CreateSpanElement();
+                parent.AppendChild(sp);
+                foreach (var c in node.Children) EmitStructureElement(c, sp, tc);
+                break;
+            }
+        }
+    }
+
+    /// <summary>The table elements: the table, its row groups, rows and cells.</summary>
+    private static void EmitTableStructureElement(HtmlNode node, Aspose.Pdf.LogicalStructure.StructureElement parent, Tagged.ITaggedContent tc, string tag)
+    {
+        switch (tag)
+        {
+            case "table":
+            {
+                var tbl = tc.CreateTableElement();
+                parent.AppendChild(tbl);
+                foreach (var c in node.Children) EmitStructureElement(c, tbl, tc);
+                break;
+            }
+            case "thead":
+            {
+                var th = tc.CreateTableTHeadElement();
+                parent.AppendChild(th);
+                foreach (var c in node.Children) EmitStructureElement(c, th, tc);
+                break;
+            }
+            case "tbody":
+            {
+                var tb = tc.CreateTableTBodyElement();
+                parent.AppendChild(tb);
+                foreach (var c in node.Children) EmitStructureElement(c, tb, tc);
+                break;
+            }
+            case "tfoot":
+            {
+                var tf = tc.CreateTableTFootElement();
+                parent.AppendChild(tf);
+                foreach (var c in node.Children) EmitStructureElement(c, tf, tc);
+                break;
+            }
+            case "tr":
+            {
+                var tr = tc.CreateTableTRElement();
+                parent.AppendChild(tr);
+                foreach (var c in node.Children) EmitStructureElement(c, tr, tc);
+                break;
+            }
+            case "th":
+            {
+                var thc = tc.CreateTableTHElement();
+                parent.AppendChild(thc);
+                foreach (var c in node.Children) EmitStructureElement(c, thc, tc);
+                break;
+            }
+            case "td":
+            {
+                var td = tc.CreateTableTDElement();
+                parent.AppendChild(td);
+                foreach (var c in node.Children) EmitStructureElement(c, td, tc);
+                break;
+            }
+        }
     }
 }

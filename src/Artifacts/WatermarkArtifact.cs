@@ -1,6 +1,5 @@
-using System.IO;
+﻿using System.IO;
 using Aspose.Pdf.Content;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -10,7 +9,7 @@ namespace Aspose.Pdf;
 /// Artifacts are marked content sequences that allow PDF processors to
 /// distinguish page content from non-content elements like watermarks.
 /// </summary>
-public class WatermarkArtifact : Artifact
+public partial class WatermarkArtifact : Artifact
 {
     /// <summary>Creates an instance of a Watermark artifact.</summary>
     public WatermarkArtifact() : base(ArtifactType.Pagination, ArtifactSubtype.Watermark)
@@ -55,58 +54,30 @@ public class WatermarkArtifact : Artifact
 
     internal byte[] BuildContentStream(Page page, string fontResourceName)
     {
-        // Apply page-number substitution: replace the configured token with the
-        // 1-based page number. A null/empty token disables substitution.
-        var renderText = Text;
-        if (!string.IsNullOrEmpty(renderText) && !string.IsNullOrEmpty(PageNumberReplacementString))
-            renderText = renderText.Replace(PageNumberReplacementString, page.Number.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var wc = new WatermarkContentState();
+        wc.page = page;
+        wc.fontResourceName = fontResourceName;
+        wc.renderText = Text!;
+        if (!string.IsNullOrEmpty(wc.renderText) && !string.IsNullOrEmpty(PageNumberReplacementString))
+            wc.renderText = wc.renderText.Replace(PageNumberReplacementString, wc.page.Number.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
-        if (string.IsNullOrEmpty(renderText)) return [];
+        if (string.IsNullOrEmpty(wc.renderText)) return [];
 
-        var pageWidth = page.Width;
-        var pageHeight = page.Height;
-        var fontSize = TextState?.FontSize ?? 12;
+        wc.pageWidth = wc.page.Width;
+        wc.pageHeight = wc.page.Height;
+        wc.fontSize = TextState?.FontSize ?? 12;
 
-        // Estimate text dimensions
-        var charWidth = fontSize * 0.5; // approximate
-        var textWidth = renderText!.Length * charWidth;
-        var textHeight = fontSize;
+        wc.charWidth = wc.fontSize * 0.5; // approximate
+        wc.textWidth = wc.renderText!.Length * wc.charWidth;
+        wc.textHeight = wc.fontSize;
 
-        // Calculate position based on alignment / explicit Position / margins
-        double x, y;
-        if (Position is { } pos)
-        {
-            x = pos.X;
-            y = pos.Y;
-        }
-        else
-        {
-            switch (ArtifactHorizontalAlignment)
-            {
-                case HorizontalAlignment.Left:
-                    x = LeftMargin > 0 ? LeftMargin : 36; break;
-                case HorizontalAlignment.Right:
-                    x = pageWidth - textWidth - (RightMargin > 0 ? RightMargin : 36); break;
-                default: // Center / None
-                    x = (pageWidth - textWidth) / 2; break;
-            }
-            switch (ArtifactVerticalAlignment)
-            {
-                case VerticalAlignment.Top:
-                    y = pageHeight - fontSize - (TopMargin > 0 ? TopMargin : 36); break;
-                case VerticalAlignment.Bottom:
-                    y = BottomMargin > 0 ? BottomMargin : 36; break;
-                default: // Center / None
-                    y = (pageHeight - textHeight) / 2; break;
-            }
-        }
+        PlaceWatermark(wc);
 
-        // Compute bounding box for /BBox in the BDC properties dict.
-        var bbox = ComputeBBox(x, y, textWidth, textHeight);
-        Rectangle = bbox;
+        wc.bbox = ComputeBBox(wc.x, wc.y, wc.textWidth, wc.textHeight);
+        Rectangle = wc.bbox;
 
-        var builder = new ContentStreamBuilder();
-        builder.SaveState();
+        wc.builder = new ContentStreamBuilder();
+        wc.builder.SaveState();
 
         // Compensate for the page's /Rotate. The position/alignment above is
         // computed in visual (display) coordinates via page.Width/page.Height,
@@ -114,62 +85,21 @@ public class WatermarkArtifact : Artifact
         // coordinates into the page's raw content space so the watermark lands
         // at the intended visual location and reads upright (not rotated 90°/
         // mirrored) on /Rotate 90/180/270 pages.
-        ApplyPageRotation(builder, page);
+        ApplyPageRotation(wc.builder, wc.page);
 
-        // Apply opacity
-        if (Opacity < 1.0)
-        {
-            var gs = new ExtGState
-            {
-                FillAlpha = Opacity,
-                StrokeAlpha = Opacity,
-            };
-            var gsName = page.AddExtGState(gs);
-            builder.SetExtGState(gsName);
-        }
+        ApplyWatermarkPaint(wc);
 
-        // Set text color
-        if (TextState?.ForegroundColor is { } fg)
-            builder.SetFillColor(fg.R / 255.0, fg.G / 255.0, fg.B / 255.0);
-        else
-            builder.SetFillColor(0, 0, 0);
+        wc.ci = System.Globalization.CultureInfo.InvariantCulture;
+        wc.bboxStr = $"[{wc.bbox.LLX.ToString("0.##", wc.ci)} {wc.bbox.LLY.ToString("0.##", wc.ci)} {wc.bbox.URX.ToString("0.##", wc.ci)} {wc.bbox.URY.ToString("0.##", wc.ci)}]";
+        wc.dict = $"<</Type /{Type} /Subtype /{Subtype} /BBox {wc.bboxStr}>>";
+        wc.builder.BeginMarkedContentWithProps("Artifact", wc.dict);
 
-        // Begin marked content for artifact — use BDC with properties so the
-        // /Type, /Subtype, and /BBox round-trip through ArtifactCollection.
-        var ci = System.Globalization.CultureInfo.InvariantCulture;
-        var bboxStr = $"[{bbox.LLX.ToString("0.##", ci)} {bbox.LLY.ToString("0.##", ci)} {bbox.URX.ToString("0.##", ci)} {bbox.URY.ToString("0.##", ci)}]";
-        var dict = $"<</Type /{Type} /Subtype /{Subtype} /BBox {bboxStr}>>";
-        builder.BeginMarkedContentWithProps("Artifact", dict);
+        ShowWatermarkText(wc);
 
-        if (Math.Abs(Rotation) > 0.1)
-        {
-            var rad = Rotation * Math.PI / 180;
-            var cos = Math.Cos(rad);
-            var sin = Math.Sin(rad);
-            var cx = pageWidth / 2;
-            var cy = pageHeight / 2;
+        wc.builder.EndMarkedContent();
+        wc.builder.RestoreState();
 
-            builder.BeginText();
-            builder.SetFont(fontResourceName, fontSize);
-            builder.SetTextMatrix(cos, sin, -sin, cos,
-                x * cos - y * sin + cx * (1 - cos) + cy * sin,
-                x * sin + y * cos + cy * (1 - cos) - cx * sin);
-            builder.ShowText(renderText);
-            builder.EndText();
-        }
-        else
-        {
-            builder.BeginText();
-            builder.SetFont(fontResourceName, fontSize);
-            builder.MoveTextPosition(x, y);
-            builder.ShowText(renderText);
-            builder.EndText();
-        }
-
-        builder.EndMarkedContent();
-        builder.RestoreState();
-
-        return builder.Build();
+        return wc.builder.Build();
     }
 
     private static Rectangle ComputeBBox(double x, double y, double width, double height)
@@ -271,21 +201,17 @@ public class WatermarkArtifact : Artifact
     /// </summary>
     public void AddToPage(Page page)
     {
-        if (SourceImage is not null && OperatingSystem.IsWindows())
+        if (SourceImage is not null && Compat.IsWindows())
         {
             AddImageWatermark(page);
             return;
         }
-        // Register the artifact's own font when it is a Standard-14 face (e.g. a
-        // Courier watermark must not come out as Helvetica), falling back to
-        // Helvetica otherwise. RegisterFont may return a name other than "F1"
-        // when the page's existing resources already use that slot — a page may
-        // reserve /F1 for an embedded subset that lacks our watermark glyphs
-        // (g/p/q/y), so emitting SetFont("F1", ...) into our content stream
-        // renders the text invisibly.
-        var baseFont = TextState?.FontName is { Length: > 0 } fn && Standard14Fonts.IsStandard14(fn)
-            ? fn : "Helvetica";
-        var fontName = Table.RegisterFont(page, baseFont);
+        // Register the face the watermark is written with. RegisterFont may return
+        // a name other than "F1" when the page's existing resources already use that
+        // slot — a page may reserve /F1 for an embedded subset that lacks our
+        // watermark glyphs (g/p/q/y), so emitting SetFont("F1", ...) into our content
+        // stream renders the text invisibly.
+        var fontName = Table.RegisterFont(page, WrittenFace);
 
         var content = BuildTextWatermark(page, fontName);
         if (IsBackground)
@@ -299,6 +225,23 @@ public class WatermarkArtifact : Artifact
         }
     }
 
+    /// <summary>The Standard-14 face the watermark is written with: the text state's
+    /// family and style mapped onto the core faces (Arial + Bold is Helvetica-Bold, a
+    /// Courier watermark stays Courier); Helvetica without a text state.</summary>
+    private string WrittenFace =>
+        TextState is null ? "Helvetica" : TextBuilder.MapToStandard14Public(TextState);
+
+    /// <summary>The distance between the baselines of stacked watermark lines: the
+    /// named face's hhea ascent + descent + line gap when the repository holds it (Arial:
+    /// 1.15 em), else the written face's ascent + descent (the AFM faces carry no gap).</summary>
+    private static double LinePitch(string baseFont, double fontSize, double ascent, double descent)
+    {
+        var ttf = FontRepository.FindFontData(baseFont)?.TtfData;
+        if (ttf is { Length: > 12 } && FontRepository.ReadTtfHheaExtent(ttf) is { } extent)
+            return (extent.ascent + extent.descent + extent.lineGap) * fontSize / 1000.0;
+        return ascent + descent;
+    }
+
     /// <summary>Emit the text watermark with its glyphs inside a Form XObject:
     /// the page-level block is a clean <c>q … /Artifact «props» BDC /FrmN Do EMC Q</c>
     /// and the text (colour + BT…ET) lives in the form. Keeping the drawing in a
@@ -306,122 +249,74 @@ public class WatermarkArtifact : Artifact
     /// out of <c>Resources.Forms[name]</c>.</summary>
     private byte[] BuildTextWatermark(Page page, string fontResourceName)
     {
-        var renderText = Text;
-        if (!string.IsNullOrEmpty(renderText) && !string.IsNullOrEmpty(PageNumberReplacementString))
-            renderText = renderText.Replace(PageNumberReplacementString, page.Number.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        if (string.IsNullOrEmpty(renderText)) return [];
+        var tw = new TextWatermarkBuildState();
+        tw.page = page;
+        tw.fontResourceName = fontResourceName;
+        tw.renderText = Text;
+        if (!string.IsNullOrEmpty(tw.renderText) && !string.IsNullOrEmpty(PageNumberReplacementString))
+            tw.renderText = tw.renderText.Replace(PageNumberReplacementString, tw.page.Number.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (string.IsNullOrEmpty(tw.renderText)) return [];
 
-        var pageWidth = page.Width;
-        var pageHeight = page.Height;
-        var fontSize = TextState?.FontSize ?? 12;
-        var baseFont = TextState?.FontName ?? TextState?.Font?.FontName ?? "Helvetica";
+        tw.pageWidth = tw.page.Width;
+        tw.pageHeight = tw.page.Height;
+        tw.fontSize = TextState?.FontSize ?? 12;
+        tw.baseFont = TextState?.FontName ?? TextState?.Font?.FontName ?? "Helvetica";
 
-        var textWidth = MeasureTextWidth(renderText!, baseFont, fontSize);
+        tw.lines = tw.renderText!.Replace("\r\n", "\n").Split('\n');
+        tw.writtenFace = WrittenFace;
+        tw.textWidth = 0;
+        foreach (var line in tw.lines) tw.textWidth = Math.Max(tw.textWidth, MeasureTextWidth(line, tw.writtenFace, tw.fontSize));
 
-        // Vertical extent of the text line: the written face's ascent+descent box.
-        var ascent = Math.Abs(Standard14Fonts.GetWrittenFaceAscent(baseFont)) * fontSize / 1000.0;
-        var descent = Math.Abs(Standard14Fonts.GetWrittenFaceDescent(baseFont)) * fontSize / 1000.0;
-        if (ascent <= 0) ascent = fontSize * 0.75;
-        if (descent <= 0) descent = fontSize * 0.2;
-        var textHeight = ascent + descent;
+        tw.ascent = Math.Abs(Standard14Fonts.GetWrittenFaceAscent(tw.baseFont)) * tw.fontSize / 1000.0;
+        tw.descent = Math.Abs(Standard14Fonts.GetWrittenFaceDescent(tw.baseFont)) * tw.fontSize / 1000.0;
+        if (tw.ascent <= 0) tw.ascent = tw.fontSize * 0.75;
+        if (tw.descent <= 0) tw.descent = tw.fontSize * 0.2;
+        tw.pitch = LinePitch(tw.baseFont, tw.fontSize, tw.ascent, tw.descent);
+        tw.textHeight = tw.ascent + tw.descent + (tw.lines.Length - 1) * tw.pitch;
 
-        double x, y;
-        // An explicit Position gives the text BOX floor; the baseline sits one
-        // descent above it.
-        if (Position is { } pos) { x = pos.X; y = pos.Y + descent; }
+        // An explicit Position gives the text BOX floor; the baseline of the last
+        // line sits one descent above it.
+        if (Position is { } pos) { tw.x = pos.X; tw.y = pos.Y + tw.descent; }
         else
         {
-            x = ArtifactHorizontalAlignment switch
+            tw.x = ArtifactHorizontalAlignment switch
             {
                 HorizontalAlignment.Left => LeftMargin > 0 ? LeftMargin : 36,
-                HorizontalAlignment.Right => pageWidth - textWidth - (RightMargin > 0 ? RightMargin : 36),
-                _ => (pageWidth - textWidth) / 2,
+                HorizontalAlignment.Right => tw.pageWidth - tw.textWidth - (RightMargin > 0 ? RightMargin : 36),
+                _ => (tw.pageWidth - tw.textWidth) / 2,
             };
             // Baseline position: the centred case centres the ascent+descent box
             // and sets the baseline one descent above its floor.
-            y = ArtifactVerticalAlignment switch
+            tw.y = ArtifactVerticalAlignment switch
             {
-                VerticalAlignment.Top => pageHeight - fontSize - (TopMargin > 0 ? TopMargin : 36),
+                VerticalAlignment.Top => tw.pageHeight - tw.fontSize - (TopMargin > 0 ? TopMargin : 36),
                 VerticalAlignment.Bottom => BottomMargin > 0 ? BottomMargin : 36,
-                _ => (pageHeight - textHeight) / 2 + descent,
+                _ => (tw.pageHeight - tw.textHeight) / 2 + tw.descent,
             };
         }
 
-        var bbox = ComputeBBox(x, y - descent, textWidth, textHeight);
-        Rectangle = bbox;
+        tw.bbox = ComputeBBox(tw.x, tw.y - tw.descent, tw.textWidth, tw.textHeight);
+        Rectangle = tw.bbox;
 
-        var ci = System.Globalization.CultureInfo.InvariantCulture;
-        string F(double v) => v.ToString("0.####", ci);
-
-        // Form content: colour + text run at absolute page coordinates; the form's
-        // BBox spans the page so no placement matrix is needed on the page side.
-        var inner = new System.Text.StringBuilder();
-        var fg = TextState?.ForegroundColor;
-        inner.Append(fg is { } c
-            ? $"{F(c.R / 255.0)} {F(c.G / 255.0)} {F(c.B / 255.0)} rg\n"
+        tw.ci = System.Globalization.CultureInfo.InvariantCulture;
+        tw.inner = new System.Text.StringBuilder();
+        tw.fg = TextState?.ForegroundColor;
+        tw.inner.Append(tw.fg is { } c
+            ? $"{WatermarkNum(tw, c.R / 255.0)} {WatermarkNum(tw, c.G / 255.0)} {WatermarkNum(tw, c.B / 255.0)} rg\n"
             : "0 0 0 rg\n");
-        inner.Append("BT\n");
-        inner.Append($"/{fontResourceName} {F(fontSize)} Tf\n");
-        // A ROTATED watermark carries its rotation on the PAGE-LEVEL cm (composed
-        // after the /Rotate compensation) with the form's text at the origin —
-        // the output takes exactly this shape (q R·cm /Fm Do Q), and rotation
-        // inside the form's Tm renders mirrored on /Rotate pages.
-        string? rotationCm = null;
-        if (Math.Abs(Rotation) > 0.1)
-        {
-            var rad = Rotation * Math.PI / 180;
-            var cos = Math.Cos(rad);
-            var sin = Math.Sin(rad);
-            var cx = pageWidth / 2;
-            var cy = pageHeight / 2;
-            rotationCm = $"{F(cos)} {F(sin)} {F(-sin)} {F(cos)} " +
-                $"{F(x * cos - y * sin + cx * (1 - cos) + cy * sin)} " +
-                $"{F(x * sin + y * cos + cy * (1 - cos) - cx * sin)} cm";
-            inner.Append("0 0 Td\n");
-        }
-        else
-        {
-            inner.Append($"{F(x)} {F(y)} Td\n");
-        }
-        inner.Append($"({EscapeTextLiteral(renderText)}) Tj\n");
-        inner.Append("ET\n");
+        tw.inner.Append("BT\n");
+        tw.inner.Append($"/{tw.fontResourceName} {WatermarkNum(tw, tw.fontSize)} Tf\n");
+        tw.rotationCm = null;
+        PlaceTextWatermarkLines(tw);
+        tw.inner.Append("ET\n");
 
-        var formName = page.AddStampForm(System.Text.Encoding.ASCII.GetBytes(inner.ToString()));
-
-        var sb = new System.Text.StringBuilder("q\n");
-        // Compose the /Rotate compensation and the watermark rotation into ONE cm —
-        // a single composed matrix is emitted ahead of the form.
-        if (rotationCm is not null && PageRotationMatrix(page) is { } pm)
-        {
-            var rad2 = Rotation * Math.PI / 180;
-            var rc = Math.Cos(rad2); var rs = Math.Sin(rad2);
-            var cx2 = pageWidth / 2; var cy2 = pageHeight / 2;
-            double re = x * rc - y * rs + cx2 * (1 - rc) + cy2 * rs;
-            double rf = x * rs + y * rc + cy2 * (1 - rc) - cx2 * rs;
-            // [rotation] × [pageRot] (row-vector composition).
-            double na = rc * pm[0] + rs * pm[2];
-            double nb = rc * pm[1] + rs * pm[3];
-            double nc = -rs * pm[0] + rc * pm[2];
-            double nd = -rs * pm[1] + rc * pm[3];
-            double ne = re * pm[0] + rf * pm[2] + pm[4];
-            double nf = re * pm[1] + rf * pm[3] + pm[5];
-            sb.Append($"{F(na)} {F(nb)} {F(nc)} {F(nd)} {F(ne)} {F(nf)} cm\n");
-        }
-        else
-        {
-            if (PageRotationCm(page) is { } rot) sb.Append(rot).Append('\n');
-            if (rotationCm is not null) sb.Append(rotationCm).Append('\n');
-        }
-        if (Opacity < 1.0)
-        {
-            var gs = new ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity };
-            sb.Append($"/{page.AddExtGState(gs)} gs\n");
-        }
-        var bboxStr = $"[{bbox.LLX.ToString("0.##", ci)} {bbox.LLY.ToString("0.##", ci)} {bbox.URX.ToString("0.##", ci)} {bbox.URY.ToString("0.##", ci)}]";
-        sb.Append($"/Artifact <</Type /{Type} /Subtype /{Subtype} /BBox {bboxStr}>> BDC\n");
-        sb.Append($"/{formName} Do\n");
-        sb.Append("EMC\nQ\n");
-        return System.Text.Encoding.ASCII.GetBytes(sb.ToString());
+        tw.formName = tw.page.AddStampForm(System.Text.Encoding.ASCII.GetBytes(tw.inner.ToString()));
+        ComposeTextWatermarkForm(tw);
+        tw.bboxStr = $"[{tw.bbox.LLX.ToString("0.##", tw.ci)} {tw.bbox.LLY.ToString("0.##", tw.ci)} {tw.bbox.URX.ToString("0.##", tw.ci)} {tw.bbox.URY.ToString("0.##", tw.ci)}]";
+        tw.sb.Append($"/Artifact <</Type /{Type} /Subtype /{Subtype} /BBox {tw.bboxStr}>> BDC\n");
+        tw.sb.Append($"/{tw.formName} Do\n");
+        tw.sb.Append("EMC\nQ\n");
+        return System.Text.Encoding.ASCII.GetBytes(tw.sb.ToString());
     }
 
     private static string EscapeTextLiteral(string s) =>

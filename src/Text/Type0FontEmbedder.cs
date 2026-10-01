@@ -37,11 +37,17 @@ internal static class Type0FontEmbedder
         /// to — a conjunct, a reph, a half form. They need /W entries like any other
         /// glyph, but they have no ToUnicode source character of their own.</summary>
         public readonly HashSet<ushort> ShapedGlyphs = new();
+        /// <summary>Glyphs that stand for SEVERAL characters — an fi ligature for "fi" —
+        /// with the text each one means. A ligature has no source character of its own,
+        /// so without this the text under it cannot be extracted from the page at all;
+        /// with it the glyph maps back to the whole string it replaced.</summary>
+        public readonly Dictionary<ushort, string> GlyphText = new();
         public PdfDictionary CidFont = null!;
         public PdfDictionary Type0Font = null!;
-        public PdfStream FontFile = null!;   // the embedded /FontFile2 stream
+        public PdfStream FontFile = null!;   // the embedded program: /FontFile2, or /FontFile3 for CFF
         public byte[] Ttf = null!;           // the ORIGINAL font program (subset source)
         public bool SubsetDirty;             // new glyphs since the last sparse subset
+        public bool WholeUnits;              // advances in whole units (WholeUnitAdvances)
     }
 
     // Live embedded fonts across all documents — walked at save time so the
@@ -65,6 +71,8 @@ internal static class Type0FontEmbedder
             {
                 if (!_liveFonts[i].TryGetTarget(out var st)) { _liveFonts.RemoveAt(i); continue; }
                 if (!st.SubsetDirty || (st.UsedGlyphs.Count == 0 && st.ShapedGlyphs.Count == 0)) continue;
+                // The subsetter cuts a 'glyf' table; a CFF program has none and is embedded whole.
+                if (FontProgramFlavour.IsOpenTypeCff(st.Ttf)) { st.SubsetDirty = false; continue; }
                 try
                 {
                     var gids = new HashSet<int> { 0 }; // keep .notdef
@@ -99,13 +107,24 @@ internal static class Type0FontEmbedder
     /// </summary>
     public static (string resName, byte[] hexGlyphIds) Embed(
         PdfDictionary fontDict, byte[] ttfData, string fontName, string text,
-        bool stripSpacesInBaseFont = false, string? resNameHint = null)
+        bool stripSpacesInBaseFont = false, string? resNameHint = null,
+        IReadOnlyList<string>? features = null)
     {
         var pageFonts = _cache.GetValue(fontDict, static _ => new PageFonts());
         if (!pageFonts.ByTtf.TryGetValue(ttfData, out var st))
         {
             st = BuildFont(fontDict, ttfData, fontName, stripSpacesInBaseFont, resNameHint);
             pageFonts.ByTtf[ttfData] = st;
+        }
+        // A caller naming its resource gets that name even when the face was first embedded
+        // under another (a band's Arial as F1): the same font object is filed under the hint
+        // too, so content that continues onto an overflow page - which inherits fonts by
+        // NAME and owns a default F1 of its own - still reaches this face.
+        if (resNameHint is { Length: > 0 } && st.ResName != resNameHint && !fontDict.ContainsKey(resNameHint)
+            && fontDict.Get(st.ResName) is { } fontObj)
+        {
+            fontDict.Set(resNameHint, fontObj);
+            st.ResName = resNameHint;
         }
 
         // Encode the text to 2-byte glyph ids (CID = GID under Identity), accumulating any
@@ -114,6 +133,44 @@ internal static class Type0FontEmbedder
         // UTF-16 units would look each half up in the cmap and emit two .notdef glyphs.
         var hex = new System.Collections.Generic.List<byte>(text.Length * 2);
         var added = false;
+        // Features the CALLER asked for -- ligatures, old-style figures, a stylistic set --
+        // are a different question from whether a script needs shaping to be legible, and
+        // they apply to Latin too. A glyph that swallowed several characters is recorded
+        // with the text it stands for, so the page can still be read back.
+        if (features is { Count: > 0 } && ShapeFeatureRun(st, text, features) is { } featured)
+        {
+            for (var i = 0; i < featured.Length; i++)
+            {
+                var (gid, cluster) = featured[i];
+                var next = i + 1 < featured.Length ? featured[i + 1].Cluster : text.Length;
+                if (st.ShapedGlyphs.Add(gid)) added = true;
+
+                // What this glyph replaced: everything from its own cluster up to the
+                // next glyph's.
+                //
+                // ⚠ Recorded against the GLYPH even when it stands for a single
+                // character, which the by-character map cannot do: `onum` gives the
+                // digit zero a SECOND glyph on the same page, and a map keyed by
+                // character has room for only the first. Measured as a defect -- the
+                // old-style digits drew at exactly the right width and extracted as
+                // Ž, ž, ſ, because the glyph they were drawn with had no entry at all.
+                if (cluster >= 0 && next <= text.Length && next > cluster)
+                {
+                    var stands = text[cluster..next];
+                    if (!st.GlyphText.TryGetValue(gid, out var known) || known != stands)
+                    {
+                        st.GlyphText[gid] = stands;
+                        added = true;
+                    }
+                }
+
+                hex.Add((byte)(gid >> 8));
+                hex.Add((byte)(gid & 0xFF));
+            }
+            if (added) { RefreshWidthsAndToUnicode(st); st.SubsetDirty = true; }
+            return (st.ResName, hex.ToArray());
+        }
+
         // A complex script (Devanagari, Telugu, …) is not one glyph per codepoint: its
         // conjuncts and its reph are glyphs the FONT substitutes in, and some marks are
         // drawn before the consonant they follow in memory. Shape the run first when the
@@ -148,8 +205,9 @@ internal static class Type0FontEmbedder
 
     /// <summary>
     /// Measure <paramref name="text"/> at <paramref name="fontSize"/> using the same
-    /// rounded 1000-unit advances the embedded font's /W array declares, so stamp
-    /// layout agrees exactly with what extraction later measures from the file.
+    /// 1000-unit advances the embedded font's /W array declares, so stamp layout
+    /// agrees exactly with what extraction later measures from the file. Neither
+    /// side rounds: see PdfWidth for why the fraction is worth carrying.
     /// </summary>
     public static double MeasureText(PdfDictionary fontDict, byte[] ttfData, string fontName,
         string text, double fontSize, bool stripSpacesInBaseFont = false, string? resNameHint = null)
@@ -164,10 +222,14 @@ internal static class Type0FontEmbedder
         // Measure what will actually be WRITTEN: a shaped run is a different glyph
         // sequence (a conjunct is one glyph where the text had three), so measuring the
         // codepoints instead would over-measure every Indic line.
+        // A complex script (Devanagari, Telugu, …) is not one glyph per codepoint: its
+        // conjuncts and its reph are glyphs the FONT substitutes in, and some marks are
+        // drawn before the consonant they follow in memory. Shape the run first when the
+        // font carries rules for it; every other script keeps the straight cmap walk.
         if (ShapeRun(st, text) is { } shaped)
         {
             foreach (var gid in shaped)
-                total += Math.Round(st.Parser.GetAdvanceWidth(gid) * 1000.0 / st.Upm);
+                total += WholeUnitAdvances.PerMille(st.Parser.GetAdvanceWidth(gid), st.Upm, st.WholeUnits);
             return total * fontSize / 1000.0;
         }
         // Same codepoint walk as Embed: a surrogate pair is ONE glyph.
@@ -180,7 +242,7 @@ internal static class Type0FontEmbedder
                 i++;
             }
             var gid = st.Parser.GlyphIdOrLookAlike(cp);
-            total += Math.Round(st.Parser.GetAdvanceWidth(gid) * 1000.0 / st.Upm);
+            total += WholeUnitAdvances.PerMille(st.Parser.GetAdvanceWidth(gid), st.Upm, st.WholeUnits);
         }
         return total * fontSize / 1000.0;
     }
@@ -230,13 +292,27 @@ internal static class Type0FontEmbedder
         bboxArr.Add(new PdfInteger(1000)); bboxArr.Add(new PdfInteger(ascent));
         descriptorDict.Set("FontBBox", bboxArr);
 
+        // An OpenType font with CFF outlines is not a TrueType program: it travels as a
+        // /FontFile3 of subtype /OpenType under a CIDFontType0 descendant (PDF 32000-1
+        // §9.9, Table 126). Written as a /FontFile2 under a CIDFontType2, the descendant
+        // font disagrees with the program it carries, and a reader that checks says so.
+        var openTypeCff = FontProgramFlavour.IsOpenTypeCff(ttfData);
         var fontFileStream = new PdfStream(new PdfDictionary(), ttfData);
-        fontFileStream.Dict.Set("Length1", new PdfInteger(ttfData.Length));
-        descriptorDict.Set("FontFile2", fontFileStream);
+        if (openTypeCff)
+        {
+            // /Length1 belongs to a Type1 or TrueType program; a /FontFile3 has none.
+            fontFileStream.Dict.Set("Subtype", new PdfName("OpenType"));
+            descriptorDict.Set("FontFile3", fontFileStream);
+        }
+        else
+        {
+            fontFileStream.Dict.Set("Length1", new PdfInteger(ttfData.Length));
+            descriptorDict.Set("FontFile2", fontFileStream);
+        }
 
         var cidFont = new PdfDictionary();
         cidFont.Set("Type", new PdfName("Font"));
-        cidFont.Set("Subtype", new PdfName("CIDFontType2"));
+        cidFont.Set("Subtype", new PdfName(openTypeCff ? "CIDFontType0" : "CIDFontType2"));
         cidFont.Set("BaseFont", new PdfName(baseFontName));
         var cidSystemInfo = new PdfDictionary();
         cidSystemInfo.Set("Registry", new PdfString(System.Text.Encoding.ASCII.GetBytes("Adobe")));
@@ -245,7 +321,9 @@ internal static class Type0FontEmbedder
         cidFont.Set("CIDSystemInfo", cidSystemInfo);
         cidFont.Set("FontDescriptor", descriptorDict);
         cidFont.Set("DW", new PdfInteger(500));
-        cidFont.Set("CIDToGIDMap", new PdfName("Identity"));
+        // /CIDToGIDMap is a CIDFontType2 entry; a CIDFontType0's CIDs reach its glyphs
+        // through the charset of the CFF program itself.
+        if (!openTypeCff) cidFont.Set("CIDToGIDMap", new PdfName("Identity"));
 
         var type0Font = new PdfDictionary();
         type0Font.Set("Type", new PdfName("Font"));
@@ -266,6 +344,7 @@ internal static class Type0FontEmbedder
             Type0Font = type0Font,
             FontFile = fontFileStream,
             Ttf = ttfData,
+            WholeUnits = WholeUnitAdvances.Holds(ttfData),
         };
         lock (_liveFonts) _liveFonts.Add(new WeakReference<FontState>(state));
         return state;
@@ -295,6 +374,24 @@ internal static class Type0FontEmbedder
         }
     }
 
+    /// <summary>The glyph run for <paramref name="text"/> once the caller's own OpenType
+    /// features have been applied, each glyph with the cluster it came from; null when
+    /// none of them changed anything.</summary>
+    private static (ushort Glyph, int Cluster)[]? ShapeFeatureRun(
+        FontState st, string text, IReadOnlyList<string> features)
+    {
+        try
+        {
+            return OpenType.TextShaper.ShapeFeatures(st.Ttf, text, features: features,
+                glyphOf: cp => (ushort)st.Parser.GlyphIdOrLookAlike(cp));
+        }
+        catch
+        {
+            // A malformed layout table must never cost the caller its text.
+            return null;
+        }
+    }
+
     /// <summary>The shaped glyph run for <paramref name="text"/>, or null when the run
     /// needs no shaping (every script but the Indic ones) or the font carries no layout
     /// rules for it. Both the writer and the measurer go through here so a line is
@@ -313,6 +410,24 @@ internal static class Type0FontEmbedder
         }
     }
 
+    /// <summary>
+    /// A glyph advance in PDF's 1000-unit space, kept at the precision the face
+    /// actually has.
+    ///
+    /// A face is rarely drawn at 1000 units per em -- 2000 and 2048 are the
+    /// common ones -- so scaling an advance into /W usually lands between
+    /// integers. Rounding it there moves every following glyph on the line by up
+    /// to half a unit, and the error accumulates: the drift is far below a point
+    /// but it crosses pixel boundaries, so a line of text disagrees with the
+    /// same line laid out from the unrounded advance in a handful of places.
+    /// A whole number is still written as an integer, so nothing changes for a
+    /// face that is drawn at 1000.
+    /// </summary>
+    private static PdfObject PdfWidth(double width) =>
+        width == Math.Floor(width)
+            ? new PdfInteger((int)width)
+            : new PdfReal(width);
+
     private static void RefreshWidthsAndToUnicode(FontState st)
     {
         var wArray = new PdfArray();
@@ -320,9 +435,8 @@ internal static class Type0FontEmbedder
         void AddWidth(int gid)
         {
             if (!widthsWritten.Add(gid)) return;
-            var pdfWidth = (int)Math.Round(st.Parser.GetAdvanceWidth(gid) * 1000.0 / st.Upm);
             var widthArr = new PdfArray();
-            widthArr.Add(new PdfInteger(pdfWidth));
+            widthArr.Add(PdfWidth(WholeUnitAdvances.PerMille(st.Parser.GetAdvanceWidth(gid), st.Upm, st.WholeUnits)));
             wArray.Add(new PdfInteger(gid));
             wArray.Add(widthArr);
         }
@@ -332,12 +446,13 @@ internal static class Type0FontEmbedder
         foreach (var gid in st.ShapedGlyphs) AddWidth(gid);
         if (wArray.Count > 0) st.CidFont.Set("W", wArray);
 
-        var toUnicode = BuildToUnicodeCMap(st.UsedGlyphs);
+        var toUnicode = BuildToUnicodeCMap(st.UsedGlyphs, st.GlyphText);
         st.Type0Font.Set("ToUnicode", new PdfStream(new PdfDictionary(),
             System.Text.Encoding.ASCII.GetBytes(toUnicode)));
     }
 
-    private static string BuildToUnicodeCMap(Dictionary<int, int> usedGlyphs)
+    private static string BuildToUnicodeCMap(
+        Dictionary<int, int> usedGlyphs, Dictionary<ushort, string>? glyphText = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("/CIDInit /ProcSet findresource begin");
@@ -350,8 +465,30 @@ internal static class Type0FontEmbedder
         sb.AppendLine("1 begincodespacerange");
         sb.AppendLine("<0000> <FFFF>");
         sb.AppendLine("endcodespacerange");
-        sb.AppendLine($"{usedGlyphs.Count} beginbfchar");
+        // One entry per glyph: when two characters share a glyph (the space and the
+        // no-break space in every Latin face) the lower codepoint names it, so extracted
+        // text reads its plain spaces back as spaces.
+        var byGid = new SortedDictionary<int, int>();
         foreach (var (charCode, gid) in usedGlyphs)
+            if (!byGid.TryGetValue(gid, out var cur) || charCode < cur) byGid[gid] = charCode;
+
+        // A glyph standing for SEVERAL characters is written as the whole string it
+        // replaced -- "<0043> <00660069>" for an fi ligature -- which a bfchar entry
+        // allows and which is the only way the text under it can be read back. It wins
+        // over any single character that happens to share the glyph.
+        var multi = new SortedDictionary<int, string>();
+        if (glyphText is not null)
+            foreach (var (gid, stands) in glyphText)
+                if (stands.Length > 0) { multi[gid] = stands; byGid.Remove(gid); }
+
+        sb.AppendLine($"{byGid.Count + multi.Count} beginbfchar");
+        foreach (var (gid, stands) in multi)
+        {
+            var utf16 = new System.Text.StringBuilder();
+            foreach (var ch in stands) utf16.Append(((int)ch).ToString("X4"));
+            sb.AppendLine($"<{gid:X4}> <{utf16}>");
+        }
+        foreach (var (gid, charCode) in byGid)
         {
             // Supplementary-plane codepoints are written as their UTF-16BE surrogate
             // pair (PDF 32000 §9.10.3) — "<gid> <D83DDC4D>" — not as 5-digit hex.

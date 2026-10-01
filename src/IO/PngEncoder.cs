@@ -1,4 +1,3 @@
-using System.IO.Compression;
 
 namespace Aspose.Pdf.IO;
 
@@ -51,26 +50,23 @@ internal static class PngEncoder
         // IDAT chunk — filtered + compressed pixel data
         WriteChunk(output, "IDAT", writer =>
         {
-            using var compressed = new MemoryStream();
-            using (var zlib = new ZLibStream(compressed, CompressionMode.Compress, leaveOpen: true))
+            var raw = new MemoryStream();
+            for (var y = 0; y < height; y++)
             {
-                for (var y = 0; y < height; y++)
-                {
-                    zlib.WriteByte(0); // filter type: None
-                    var rowStart = y * rowBytes;
-                    // Clamp to [0, rowBytes]: once rowStart runs past the buffer
-                    // (pixels shorter than height*rowBytes) the available length
-                    // would go negative, which previously made the pad loop below
-                    // iterate billions of times. Clamp so short buffers just pad.
-                    var rowLen = Math.Max(0, Math.Min(rowBytes, pixels.Length - rowStart));
-                    if (rowLen > 0)
-                        zlib.Write(pixels, rowStart, rowLen);
-                    // Pad with zeros if pixel data is short
-                    for (var p = rowLen; p < rowBytes; p++)
-                        zlib.WriteByte(0);
-                }
+                raw.WriteByte(0); // filter type: None
+                var rowStart = y * rowBytes;
+                // Clamp to [0, rowBytes]: once rowStart runs past the buffer
+                // (pixels shorter than height*rowBytes) the available length
+                // would go negative, which previously made the pad loop below
+                // iterate billions of times. Clamp so short buffers just pad.
+                var rowLen = Math.Max(0, Math.Min(rowBytes, pixels.Length - rowStart));
+                if (rowLen > 0)
+                    raw.Write(pixels, rowStart, rowLen);
+                // Pad with zeros if pixel data is short
+                for (var p = rowLen; p < rowBytes; p++)
+                    raw.WriteByte(0);
             }
-            writer.Write(compressed.ToArray());
+            writer.Write(Filters.ManagedDeflater.DeflateZlib(raw.ToArray()));
         });
 
         // IEND chunk
@@ -127,7 +123,7 @@ internal static class PngEncoder
         // Data
         output.Write(dataBytes);
         // CRC (over type + data)
-        var crc = CalculateCrc(typeBytes, dataBytes);
+        var crc = Crc32.Finish(Crc32.Update(Crc32.Update(Crc32.Start, typeBytes, 0, typeBytes.Length), dataBytes, 0, dataBytes.Length));
         WriteUInt32BE(output, crc);
     }
 
@@ -138,38 +134,4 @@ internal static class PngEncoder
         s.WriteByte((byte)(value >> 8));
         s.WriteByte((byte)(value & 0xFF));
     }
-
-    #region CRC-32
-
-    private static readonly uint[] CrcTable = BuildCrcTable();
-
-    private static uint[] BuildCrcTable()
-    {
-        var table = new uint[256];
-        for (uint n = 0; n < 256; n++)
-        {
-            var c = n;
-            for (var k = 0; k < 8; k++)
-            {
-                if ((c & 1) != 0)
-                    c = 0xEDB88320 ^ (c >> 1);
-                else
-                    c >>= 1;
-            }
-            table[n] = c;
-        }
-        return table;
-    }
-
-    private static uint CalculateCrc(byte[] type, byte[] data)
-    {
-        var crc = 0xFFFFFFFF;
-        foreach (var b in type)
-            crc = CrcTable[(crc ^ b) & 0xFF] ^ (crc >> 8);
-        foreach (var b in data)
-            crc = CrcTable[(crc ^ b) & 0xFF] ^ (crc >> 8);
-        return crc ^ 0xFFFFFFFF;
-    }
-
-    #endregion
 }

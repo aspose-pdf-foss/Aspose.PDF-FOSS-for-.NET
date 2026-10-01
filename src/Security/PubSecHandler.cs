@@ -37,7 +37,7 @@ internal static class PubSecHandler
         var (keyLen, sha256, cfm, version, revision) = Info(algo);
 
         // Enveloped content = 20-byte seed + 4-byte permissions (big-endian).
-        var seed = System.Security.Cryptography.RandomNumberGenerator.GetBytes(20);
+        var seed = Compat.RandomBytes(20);
         var p = (int)permissions;
         var content = new byte[24];
         Array.Copy(seed, content, 20);
@@ -58,10 +58,12 @@ internal static class PubSecHandler
     /// <summary>Open a certificate-encrypted document: recover the seed from a
     /// recipient envelope with the private key, derive the file key, attach a
     /// decryptor to <paramref name="reader"/>, and return the permissions.</summary>
-    public static int Open(PdfReader reader, PdfDictionary encryptDict, CertificateEncryptionOptions options)
-    {
-        var privateKey = LoadPrivateKey(options);
+    public static int Open(PdfReader reader, PdfDictionary encryptDict, CertificateEncryptionOptions options) =>
+        Open(reader, encryptDict, LoadPrivateKey(options));
 
+    /// <summary>Open a certificate-encrypted document with the recipient's RSA private key itself.</summary>
+    public static int Open(PdfReader reader, PdfDictionary encryptDict, RsaKey privateKey)
+    {
         var version = (int)encryptDict.GetInt("V");
 
         // Two on-disk layouts: modern (/V 4-5) keeps /Recipients inside a crypt
@@ -99,22 +101,27 @@ internal static class PubSecHandler
         var seed = content[..20];
         var perms = (content[20] << 24) | (content[21] << 16) | (content[22] << 8) | content[23];
         var sha256 = cfm == "AESV3";
-        var fileKey = ComputeFileKey(seed, recipients, sha256, keyLen);
+        // Metadata left in the clear is said in the crypt filter (or, for the
+        // legacy layout, the dictionary itself), and it changes the key.
+        var encryptMetadata = !((cfDict ?? encryptDict).Get("EncryptMetadata") is PdfBoolean { Value: false });
+        var fileKey = ComputeFileKey(seed, recipients, sha256, keyLen, encryptMetadata);
         var revision = version == 5 ? 6 : 4;
 
         reader.AttachDecryptor(PdfDecryptor.CreateWithFileKey(fileKey, version, revision, cfm));
         return perms;
     }
 
-    private static byte[] ComputeFileKey(byte[] seed, List<byte[]> recipients, bool sha256, int keyLen)
+    internal static byte[] ComputeFileKey(byte[] seed, List<byte[]> recipients, bool sha256, int keyLen, bool encryptMetadata = true)
     {
-        // §7.6.5.2: hash(seed || bytes of each recipient item), truncated to key length.
-        var total = seed.Length;
+        // §7.6.5.2: hash(seed || bytes of each recipient item [|| FF FF FF FF when the
+        // metadata is not encrypted]), truncated to key length.
+        var total = seed.Length + (encryptMetadata ? 0 : 4);
         foreach (var r in recipients) total += r.Length;
         var buf = new byte[total];
         var off = 0;
         Array.Copy(seed, 0, buf, off, seed.Length); off += seed.Length;
         foreach (var r in recipients) { Array.Copy(r, 0, buf, off, r.Length); off += r.Length; }
+        if (!encryptMetadata) buf.AsSpan(off, 4).Fill(0xFF);
 
         var hash = sha256 ? ShaDigest.Sha256(buf) : HmacSha.Sha1Hash(buf);
         return hash[..keyLen];

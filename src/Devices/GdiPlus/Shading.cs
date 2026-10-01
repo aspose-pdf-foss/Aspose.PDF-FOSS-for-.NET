@@ -90,7 +90,7 @@ public sealed partial class GdiPlusPageRenderer
             input[0] = lo + t * (hi - lo);
             var col = fn.Evaluate(input);
             if (col is null) { if (ShDebug2) Console.WriteLine($"[shs] eval null at t={t}"); return null; }
-            SoftwarePageRenderer.ComponentsToRgb(col, cs, out var r, out var g, out var b, tint, altName);
+            var (r, g, b) = SoftwarePageRenderer.ComponentsToRgb(col, cs, tint, altName);
             colors[i] = GdiColor.FromArgb(alpha, r, g, b);
         }
         if (ShDebug2) Console.WriteLine($"[shs] cs={cs} alt={altName} c0={colors[0]} c63={colors[^1]}");
@@ -171,7 +171,7 @@ public sealed partial class GdiPlusPageRenderer
             var bcol = new List<GdiColor>();
             var bpos = new List<float>();
             float prev = -1f;
-            void Add(float pp, GdiColor cc) { pp = Math.Clamp(pp, 0f, 1f); if (pp <= prev) pp = prev + 1e-4f; if (pp > 1f) pp = 1f; if (pp <= prev) return; bpos.Add(pp); bcol.Add(cc); prev = pp; }
+            void Add(float pp, GdiColor cc) { pp = Compat.Clamp(pp, 0f, 1f); if (pp <= prev) pp = prev + 1e-4f; if (pp > 1f) pp = 1f; if (pp <= prev) return; bpos.Add(pp); bcol.Add(cc); prev = pp; }
             // /Extend controls whether the area beyond each axis end is painted: hold the
             // edge colour where true, leave transparent (hard stop) where false.
             var clear = GdiColor.FromArgb(0, 0, 0, 0);
@@ -452,8 +452,7 @@ public sealed partial class GdiPlusPageRenderer
     private GdiColor MeshColor(double[]? comp, ShadingBase shading, byte alpha)
     {
         if (comp is null || comp.Length == 0) return GdiColor.FromArgb(alpha, 0, 0, 0);
-        SoftwarePageRenderer.ComponentsToRgb(comp, shading.ColorSpaceName, out var r, out var g, out var b,
-            shading.TintTransform, shading.AltSpaceName);
+        var (r, g, b) = SoftwarePageRenderer.ComponentsToRgb(comp, shading.ColorSpaceName, shading.TintTransform, shading.AltSpaceName);
         return GdiColor.FromArgb(alpha, r, g, b);
     }
 
@@ -485,10 +484,10 @@ public sealed partial class GdiPlusPageRenderer
                 for (var j = 0; j < N; j++)
                 {
                     double v0 = (double)j / N, v1 = (double)(j + 1) / N;
-                    EvalPatch(p, u0, v0, out var x00, out var y00);
-                    EvalPatch(p, u1, v0, out var x10, out var y10);
-                    EvalPatch(p, u1, v1, out var x11, out var y11);
-                    EvalPatch(p, u0, v1, out var x01, out var y01);
+                    var (x00, y00) = EvalPatch(p, u0, v0);
+                    var (x10, y10) = EvalPatch(p, u1, v0);
+                    var (x11, y11) = EvalPatch(p, u1, v1);
+                    var (x01, y01) = EvalPatch(p, u0, v1);
                     var col = BilinearColor(p.CornerColors, (u0 + u1) * 0.5, (v0 + v1) * 0.5);
                     quad[0] = new PointF((float)x00, (float)y00);
                     quad[1] = new PointF((float)x10, (float)y10);
@@ -502,8 +501,10 @@ public sealed partial class GdiPlusPageRenderer
     }
 
     // Tensor-product surface S(u,v) = ΣΣ B_i(u) B_j(v) P[i,j] over the 4×4 control net.
-    private static void EvalPatch(MeshPatch p, double u, double v, out double x, out double y)
+    private static (double x, double y) EvalPatch(MeshPatch p, double u, double v)
     {
+        double x = default;
+        double y = default;
         double sx = 0, sy = 0;
         for (var i = 0; i < 4; i++)
         {
@@ -516,6 +517,7 @@ public sealed partial class GdiPlusPageRenderer
             }
         }
         x = sx; y = sy;
+        return (x, y);
     }
 
     private static double Bernstein(int i, double t) => i switch

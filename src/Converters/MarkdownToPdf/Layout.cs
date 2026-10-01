@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Content;
@@ -244,6 +244,7 @@ internal static partial class MarkdownToPdfConverter
         try
         {
             flow.Page.AddImage(img.Data, new Rectangle(x, yTop - img.H, x + img.W, yTop));
+            flow.PageEmpty = false;
         }
         catch
         {
@@ -254,106 +255,53 @@ internal static partial class MarkdownToPdfConverter
 
     private static void LayoutTable(Flow flow, TableBlk table)
     {
-        var top = flow.OpenBlock(ParaGap);
-        var size = BaseFontSize;
-        var rows = table.Rows;
-        var cols = rows.Max(r => r.Count);
+        var mt = new MarkdownTableState();
+        mt.flow = flow;
+        mt.table = table;
+        mt.top = mt.flow.OpenBlock(ParaGap);
+        mt.size = BaseFontSize;
+        mt.rows = mt.table.Rows;
+        mt.cols = mt.rows.Max(r => r.Count);
 
-        // Header runs render bold.
-        var styled = new List<List<List<Run>>>();
-        for (var r = 0; r < rows.Count; r++)
+        mt.styled = new List<List<List<Run>>>();
+        for (var r = 0; r < mt.rows.Count; r++)
         {
             var row = new List<List<Run>>();
-            for (var c = 0; c < cols; c++)
+            for (var c = 0; c < mt.cols; c++)
             {
-                var runs = c < rows[r].Count ? rows[r][c] : new List<Run>();
+                var runs = c < mt.rows[r].Count ? mt.rows[r][c] : new List<Run>();
                 if (r == 0) runs = runs.Select(x2 => x2 with { Style = (byte)(x2.Style | 1) }).ToList();
                 row.Add(runs);
             }
-            styled.Add(row);
+            mt.styled.Add(row);
         }
 
-        // Natural (unwrapped) column widths; columns whose natural width no longer
-        // fits share the remaining span equally and wrap their cells.
-        var natural = new double[cols];
-        for (var c = 0; c < cols; c++)
-            foreach (var row in styled)
-                natural[c] = Math.Max(natural[c], MeasureRuns(row[c], size));
-        var avail = flow.ContentWidth - 2 * CellPad - (cols - 1) * CellGutter;
-        var widths = (double[])natural.Clone();
-        if (natural.Sum() > avail)
+        mt.natural = new double[mt.cols];
+        for (var c = 0; c < mt.cols; c++)
+            foreach (var row in mt.styled)
+                mt.natural[c] = Math.Max(mt.natural[c], MeasureRuns(row[c], mt.size));
+        mt.avail = mt.flow.ContentWidth - 2 * CellPad - (mt.cols - 1) * CellGutter;
+        mt.widths = (double[])mt.natural.Clone();
+        if (mt.natural.Sum() > mt.avail)
         {
-            var flexible = Enumerable.Range(0, cols).ToList();
-            var remaining = avail;
-            bool changed = true;
-            while (changed)
-            {
-                changed = false;
-                var share = remaining / Math.Max(1, flexible.Count);
-                for (var fi = flexible.Count - 1; fi >= 0; fi--)
-                {
-                    var c = flexible[fi];
-                    if (natural[c] <= share)
-                    {
-                        widths[c] = natural[c];
-                        remaining -= natural[c];
-                        flexible.RemoveAt(fi);
-                        changed = true;
-                    }
-                }
-            }
-            foreach (var c in flexible)
-                widths[c] = remaining / flexible.Count;
+            FitTableColumns(mt);
         }
 
-        var colX = new double[cols];
-        var xCursor = flow.Margin + CellPad;
-        for (var c = 0; c < cols; c++)
+        mt.colX = new double[mt.cols];
+        mt.xCursor = mt.flow.Margin + CellPad;
+        for (var c = 0; c < mt.cols; c++)
         {
-            colX[c] = xCursor;
-            xCursor += widths[c] + CellGutter;
+            mt.colX[c] = mt.xCursor;
+            mt.xCursor += mt.widths[c] + CellGutter;
         }
 
-        // Track the row's FIRST BASELINE directly: the probed uniform advance is
-        // firstBase(r+1) − firstBase(r) = maxLines(r)·13.5 + 3 (the header seats its
-        // baseline 2.21 + ascent under the table top).
-        var firstBase = top + HeaderTopPad + AscentEm * size;
-        var lastMax = 0;
-        for (var r = 0; r < styled.Count; r++)
+        mt.firstBase = mt.top + HeaderTopPad + AscentEm * mt.size;
+        mt.lastMax = 0;
+        for (var r = 0; r < mt.styled.Count; r++)
         {
-            var cellLines = new List<List<List<Seg>>>();
-            for (var c = 0; c < cols; c++)
-                cellLines.Add(WrapRuns(styled[r][c], size, widths[c], widths[c]));
-            var maxLines = Math.Max(1, cellLines.Max(cl => cl.Count));
-
-            if (r > 0) firstBase += lastMax * size * LineHeightEm + RowPad;
-            if (r > 0 && firstBase + (maxLines - 1) * size * LineHeightEm + DescentEm * size > flow.Limit)
-            {
-                flow.NewPage();
-                firstBase = flow.Top + RowPad + AscentEm * size;
-            }
-            lastMax = maxLines;
-
-            for (var c = 0; c < cols; c++)
-            {
-                var lines = cellLines[c];
-                if (lines.Count == 0) continue;
-                // A short cell centres vertically in its row.
-                var cellBase = firstBase + (maxLines - lines.Count) * size * LineHeightEm / 2;
-                for (var k = 0; k < lines.Count; k++)
-                {
-                    var x = colX[c];
-                    if (r == 0)
-                    {
-                        // Header cells centre over their column.
-                        var w = SegsWidth(lines[k], size);
-                        x = colX[c] + (widths[c] - w) / 2;
-                    }
-                    EmitRunLine(flow, x, cellBase + k * size * LineHeightEm, lines[k], size);
-                }
-            }
+            LayoutStyledRow(mt, r);
         }
-        flow.CloseBlock(firstBase - AscentEm * size + lastMax * size * LineHeightEm + RowPad, ParaGap);
+        mt.flow.CloseBlock(mt.firstBase - AscentEm * mt.size + mt.lastMax * mt.size * LineHeightEm + RowPad, ParaGap);
     }
 
     private sealed record Seg(string Text, byte Style, string? Uri);
@@ -438,6 +386,9 @@ internal static partial class MarkdownToPdfConverter
     /// Links render blue with a per-word underline and carry a link annotation.</summary>
     private static void EmitRunLine(Flow flow, double x, double baselineTop, List<Seg> segs, double size)
     {
+        // A line on the page is content: a block whose lines ran over onto this page leaves
+        // its gap to the next block (the next block opened flush under it, as at a page top).
+        flow.PageEmpty = false;
         var y = flow.PageH - baselineTop;
         var cursor = x;
         foreach (var seg in segs)

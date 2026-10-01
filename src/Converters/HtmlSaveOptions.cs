@@ -17,18 +17,22 @@ public class HtmlSaveOptions : UnifiedSaveOptions
 {
     // ── Constructors ─────────────────────────────────────────────────────────
 
+    /// <summary>Creates HTML save options with the defaults: HTML5 output with fixed (absolutely positioned) layout.</summary>
     public HtmlSaveOptions() { }
 
+    /// <summary>Creates HTML5 save options; <c>fixedLayout</c> chooses absolutely positioned text (<c>true</c>) or flowing layout (<c>false</c>).</summary>
     public HtmlSaveOptions(bool fixedLayout)
     {
         FixedLayout = fixedLayout;
     }
 
+    /// <summary>Creates save options for the given HTML flavour (XHTML or HTML5), with fixed layout.</summary>
     public HtmlSaveOptions(HtmlDocumentType documentType)
     {
         DocumentType = documentType;
     }
 
+    /// <summary>Creates save options for the given HTML flavour; <c>fixedLayout</c> chooses absolutely positioned text (<c>true</c>) or flowing layout (<c>false</c>).</summary>
     public HtmlSaveOptions(HtmlDocumentType documentType, bool fixedLayout)
     {
         DocumentType = documentType;

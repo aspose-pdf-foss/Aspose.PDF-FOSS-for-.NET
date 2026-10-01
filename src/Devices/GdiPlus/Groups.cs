@@ -1,4 +1,4 @@
-using System.Drawing;
+﻿using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.Versioning;
@@ -21,7 +21,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     /// original bitmap). Output is 32bpp ARGB.</summary>
     private static Bitmap? BoxDownsample(Bitmap src, int dw, int dh)
     {
-        int sw = src.Width, sh = src.Height;
+        int sw = src.Width;
+        int sh = src.Height;
         if (dw <= 0 || dh <= 0 || dw >= sw || dh >= sh) return null;
         var fmt = src.PixelFormat;
         if (fmt is not (PixelFormat.Format1bppIndexed or PixelFormat.Format8bppIndexed
@@ -30,11 +31,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
 
         // Per-destination-pixel channel sums; accumulate row by row so the source is
         // touched once, sequentially (the sources this path exists for are huge).
-        var sumR = new long[dw * dh];
-        var sumG = new long[dw * dh];
-        var sumB = new long[dw * dh];
-        var sumA = new long[dw * dh];
-        var cnt = new long[dw * dh];
+        var sums = new BoxSums(dw * dh);
 
         // Palette lookups for indexed formats.
         GdiColor[]? pal = fmt is PixelFormat.Format1bppIndexed or PixelFormat.Format8bppIndexed
@@ -43,61 +40,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         var data = src.LockBits(new System.Drawing.Rectangle(0, 0, sw, sh), ImageLockMode.ReadOnly, fmt);
         try
         {
-            int stride = data.Stride;
-            var row = new byte[Math.Abs(stride)];
-            for (int y = 0; y < sh; y++)
-            {
-                System.Runtime.InteropServices.Marshal.Copy(data.Scan0 + (nint)y * stride, row, 0, row.Length);
-                int dy = (int)((long)y * dh / sh);
-                int rowBase = dy * dw;
-                switch (fmt)
-                {
-                    case PixelFormat.Format1bppIndexed:
-                    {
-                        var c0 = pal![0]; var c1 = pal[1];
-                        for (int x = 0; x < sw; x++)
-                        {
-                            int bit = (row[x >> 3] >> (7 - (x & 7))) & 1;
-                            var c = bit == 0 ? c0 : c1;
-                            int di = rowBase + (int)((long)x * dw / sw);
-                            sumR[di] += c.R; sumG[di] += c.G; sumB[di] += c.B; sumA[di] += c.A; cnt[di]++;
-                        }
-                        break;
-                    }
-                    case PixelFormat.Format8bppIndexed:
-                    {
-                        for (int x = 0; x < sw; x++)
-                        {
-                            var c = pal![row[x]];
-                            int di = rowBase + (int)((long)x * dw / sw);
-                            sumR[di] += c.R; sumG[di] += c.G; sumB[di] += c.B; sumA[di] += c.A; cnt[di]++;
-                        }
-                        break;
-                    }
-                    case PixelFormat.Format24bppRgb:
-                    {
-                        for (int x = 0; x < sw; x++)
-                        {
-                            int o = x * 3;
-                            int di = rowBase + (int)((long)x * dw / sw);
-                            sumB[di] += row[o]; sumG[di] += row[o + 1]; sumR[di] += row[o + 2]; sumA[di] += 255; cnt[di]++;
-                        }
-                        break;
-                    }
-                    default: // 32bpp
-                    {
-                        bool hasAlpha = fmt == PixelFormat.Format32bppArgb;
-                        for (int x = 0; x < sw; x++)
-                        {
-                            int o = x * 4;
-                            int di = rowBase + (int)((long)x * dw / sw);
-                            sumB[di] += row[o]; sumG[di] += row[o + 1]; sumR[di] += row[o + 2];
-                            sumA[di] += hasAlpha ? row[o + 3] : 255; cnt[di]++;
-                        }
-                        break;
-                    }
-                }
-            }
+            ReadSourceBoxes(sw, sh, dw, dh, fmt, sums, pal, data);
         }
         finally { src.UnlockBits(data); }
 
@@ -105,21 +48,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         var ddata = dst.LockBits(new System.Drawing.Rectangle(0, 0, dw, dh), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
         try
         {
-            var drow = new byte[dw * 4];
-            for (int y = 0; y < dh; y++)
-            {
-                int b = y * dw;
-                for (int x = 0; x < dw; x++)
-                {
-                    long n = Math.Max(1, cnt[b + x]);
-                    int o = x * 4;
-                    drow[o] = (byte)(sumB[b + x] / n);
-                    drow[o + 1] = (byte)(sumG[b + x] / n);
-                    drow[o + 2] = (byte)(sumR[b + x] / n);
-                    drow[o + 3] = (byte)(sumA[b + x] / n);
-                }
-                System.Runtime.InteropServices.Marshal.Copy(drow, 0, ddata.Scan0 + (nint)y * ddata.Stride, drow.Length);
-            }
+            WriteDownsampledRows(dw, dh, sums, ddata);
         }
         finally { dst.UnlockBits(ddata); }
         return dst;
@@ -157,7 +86,15 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             sgfx.CompositingQuality = CompositingQuality.HighQuality;
             sgfx.Transform = world;
             sgfx.Clip = _g.Clip;
-            sgfx.DrawImage(bmp, dest);
+            if (PrintedPageImage)
+            {
+                sgfx.CompositingQuality = CompositingQuality.AssumeLinear;
+                DrawPrintedImage(sgfx, bmp, world, dest, null);
+            }
+            else
+            {
+                sgfx.DrawImage(bmp, dest);
+            }
         }
 
         _g.Flush();
@@ -235,7 +172,15 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             sgfx.CompositingQuality = CompositingQuality.HighQuality;
             sgfx.Transform = world;
             sgfx.Clip = _g.Clip;
-            sgfx.DrawImage(bmp, dest);
+            if (PrintedPageImage)
+            {
+                sgfx.CompositingQuality = CompositingQuality.AssumeLinear;
+                DrawPrintedImage(sgfx, bmp, world, dest, null);
+            }
+            else
+            {
+                sgfx.DrawImage(bmp, dest);
+            }
         }
 
         _g.Flush();
@@ -286,51 +231,53 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         }
     }
 
-    private void DrawFormXObject(PdfStream formStream, GraphicsState state,
-        bool forceComposite = false)
+    private void DrawFormXObject(PdfStream formStream, GraphicsState state, bool forceComposite = false)
     {
-        // A form hidden by the default optional-content configuration renders as
+        var gf = new GdiFormXObjectDrawState();
+        gf.formStream = formStream;
+        gf.state = state;
+        gf.forceComposite = forceComposite;
+        // A form hidden by the default optional-gf.content configuration renders as
         // if absent (e.g. a print-only /Background layer wrapping the page scan).
-        if (SoftwarePageRenderer.IsOcHidden(formStream.Dict.Get("OC"), _reader, _ocgHidden)) return;
+        if (SoftwarePageRenderer.IsOcHidden(gf.formStream.Dict.Get("OC"), _reader, _ocgHidden)) return;
         if (_formDepth > 64) return;
         _formDepth++;
-        var savedScope = _scope;
-        var savedGdi = _g.Save();
+        gf.savedScope = _scope;
+        gf.savedGdi = _g.Save();
         try
         {
-            byte[] content;
-            try { content = _reader.DecodeStream(formStream); }
+            try { gf.content = _reader.DecodeStream(gf.formStream); }
             catch { return; }
 
-            var formResources = _reader.ResolveDict(formStream.Dict.Get("Resources"));
-            var formScope = BuildScope(formResources);
-            // Does this group's OWN content potentially blend against its backdrop, i.e. does
+            var formResources = _reader.ResolveDict(gf.formStream.Dict.Get("Resources"));
+            gf.formScope = BuildScope(formResources);
+            // Does this group's OWN gf.content potentially blend against its backdrop, i.e. does
             // it define a non-Normal blend ExtGState it can apply to an interior fill? If so it
             // must render onto a copy of the real backdrop so that interior blend sees it;
             // otherwise it can render in isolation (transparent layer) and composite at its
             // Do-time alpha/blend — which composes correctly against the coverage-alpha page.
             // Checked before the parent merge so only the group's own gstates count.
             bool hasInternalBlend = false;
-            if (formScope.ExtGStates is not null)
-                foreach (var eg in formScope.ExtGStates.Values)
+            if (gf.formScope.ExtGStates is not null)
+                foreach (var eg in gf.formScope.ExtGStates.Values)
                     if (eg.GetName("BM") is { } bm && bm != "Normal") { hasInternalBlend = true; break; }
             // Merge parent resources for fallback lookups (PDF 32000 §8.10 forms may
             // reference names defined only in the enclosing scope).
-            MergeInto(formScope.XObjects, savedScope.XObjects);
-            MergeInto(formScope.Fonts, savedScope.Fonts);
-            MergeInto(formScope.ExtGStates, savedScope.ExtGStates);
-            formScope.Patterns ??= savedScope.Patterns;
-            formScope.Shadings ??= savedScope.Shadings;
-            formScope.ColorSpaces ??= savedScope.ColorSpaces;
-            formScope.Properties ??= savedScope.Properties;
-            _scope = formScope;
+            MergeInto(gf.formScope.XObjects, gf.savedScope.XObjects);
+            MergeInto(gf.formScope.Fonts, gf.savedScope.Fonts);
+            MergeInto(gf.formScope.ExtGStates, gf.savedScope.ExtGStates);
+            gf.formScope.Patterns ??= gf.savedScope.Patterns;
+            gf.formScope.Shadings ??= gf.savedScope.Shadings;
+            gf.formScope.ColorSpaces ??= gf.savedScope.ColorSpaces;
+            gf.formScope.Properties ??= gf.savedScope.Properties;
+            _scope = gf.formScope;
 
-            var formMatrix = ExtractFormMatrix(formStream.Dict);
-            var effectiveCtm = formMatrix is not null
-                ? GraphicsState.MultiplyMatrices(formMatrix, state.Ctm)
-                : (double[])state.Ctm.Clone();
+            gf.formMatrix = ExtractFormMatrix(gf.formStream.Dict);
+            gf.effectiveCtm = gf.formMatrix is not null
+                ? GraphicsState.MultiplyMatrices(gf.formMatrix, gf.state.Ctm)
+                : (double[])gf.state.Ctm.Clone();
 
-            var bboxClip = BuildBBoxClip(formStream.Dict, effectiveCtm);
+            gf.bboxClip = BuildBBoxClip(gf.formStream.Dict, gf.effectiveCtm);
 
             // Transparency group compositing (PDF 32000 §11.6.6): when the form is a
             // transparency group invoked with a non-trivial composite — group fill-alpha
@@ -343,69 +290,33 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             // forceComposite: an annotation appearance drawn under a /CA constant alpha
             // is composited as a transparency group even without a /Group declaration
             // (PDF 32000 §12.5.2 treats the whole annotation as one group).
-            var groupDict = _reader.ResolveDict(formStream.Dict.Get("Group"));
-            bool isTransparencyGroup = groupDict is not null && groupDict.GetName("S") == "Transparency";
-            // An isolated group (/I true) establishes a transparent backdrop: its contents
-            // blend only against each other, shielded from the page/parent backdrop
-            // (PDF 32000 §11.4.5). Rendering it inline would let a child's blend mode reach
-            // the real backdrop (e.g. a Multiply circle multiplying the page instead of only
-            // its sibling), so isolated groups must always composite through their own layer —
-            // even when invoked with a trivial Normal / ca=1 composite.
-            bool isIsolatedGroup = isTransparencyGroup
-                && groupDict!.Get("I") is PdfBoolean iso0 && iso0.Value;
-            // A knockout group (/K true) must composite through its own layer even when
-            // invoked trivially: its elements replace each other and blend only against
-            // the group's INITIAL backdrop, which rendering inline cannot express — an
-            // interior Multiply child would blend with its sibling instead of knocking
-            // it out.
-            bool isKnockoutGroup = isTransparencyGroup
-                && groupDict!.Get("K") is PdfBoolean ko0 && ko0.Value;
-            bool needsComposite = (isTransparencyGroup || forceComposite) &&
-                (state.FillAlpha < 0.999
-                 || (!string.IsNullOrEmpty(state.BlendMode) && state.BlendMode != "Normal")
-                 || state.SoftMask is not null
-                 || isIsolatedGroup
-                 || isKnockoutGroup);
+            ClassifyFormTransparency(gf);
 
             // Inside a coverage pre-pass, a transparency-group Do contributes a BINARY
-            // footprint to the enclosing group's outer-blend mask: any pixel its content
+            // footprint to the enclosing group's outer-blend mask: any pixel its gf.content
             // touches counts as fully covered (the outer blend applies at
             // full strength across a nested layer's whole footprint, keeping fractional
-            // weights only for direct content). Q_OBM=bin experiment.
-            if (_inCoveragePass && isTransparencyGroup && ObMode is "bin" or "nal" or "bin2")
+            // weights only for direct gf.content). Q_OBM=bin experiment.
+            if (_inCoveragePass && gf.isTransparencyGroup && ObMode is "bin" or "nal" or "bin2")
             {
-                if (ObMode == "bin2") StampCenterCellGroupCoverage(content, effectiveCtm, bboxClip);
-                else StampBinarizedGroupCoverage(content, effectiveCtm, bboxClip);
-                bboxClip?.Dispose();
+                if (ObMode == "bin2") StampCenterCellGroupCoverage(gf.content, gf.effectiveCtm, gf.bboxClip);
+                else StampBinarizedGroupCoverage(gf.content, gf.effectiveCtm, gf.bboxClip);
+                gf.bboxClip?.Dispose();
                 return;
             }
 
-            if (needsComposite)
+            if (gf.needsComposite)
             {
-                // /I true = isolated group: contents blend against a transparent backdrop.
-                // Default (/I false) = non-isolated: contents blend against the page backdrop,
-                // so backdrop-dependent blend modes (e.g. Difference vs the white page) resolve
-                // correctly only if the group renders onto a copy of that backdrop.
-                // A forced (annotation /CA) composite has no group dict and is isolated.
-                bool isolated = groupDict is null
-                    || (groupDict.Get("I") is PdfBoolean iso && iso.Value);
-                // /K true = knockout group: each element composites against the group's
-                // INITIAL backdrop, not the accumulated result — later opaque elements knock
-                // out earlier ones (topmost wins) and a blend mode on a child sees only the
-                // initial backdrop, so overlapping children do NOT blend with each other
-                // (PDF 32000 §11.4.5, §7.3.4).
-                bool isKnockout = groupDict is not null
-                    && groupDict.Get("K") is PdfBoolean kn && kn.Value;
-                RenderGroupComposited(content, effectiveCtm, bboxClip, state, isolated, isKnockout, hasInternalBlend);
+                CompositeFormLayer(gf, hasInternalBlend);
             }
             else
-                RenderContentStream(content, effectiveCtm, bboxClip, state);
-            bboxClip?.Dispose();
+                RenderContentStream(gf.content, gf.effectiveCtm, gf.bboxClip, gf.state);
+            gf.bboxClip?.Dispose();
         }
         finally
         {
-            _scope = savedScope;
-            _g.Restore(savedGdi);
+            _scope = gf.savedScope;
+            _g.Restore(gf.savedGdi);
             _formDepth--;
         }
     }

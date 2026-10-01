@@ -116,6 +116,7 @@ public sealed partial class TextFragmentAbsorber
                 var gSeg = BuildSegment(grun, gText, gSegStart, gSegEnd, ri);
                 gSeg.Position = ComputeSegmentPosition(grun, gSegStart);
                 gSeg.Rectangle = ComputeSegmentRectangle(grun, gText, gSegStart, gSegEnd);
+                SetInkBox(gSeg, grun, gSegStart, gSegEnd);
                 PopulateCharacters(gSeg, grun, gSegStart, gSegEnd);
                 fragment.Segments.Add(gSeg);
             }
@@ -145,6 +146,7 @@ public sealed partial class TextFragmentAbsorber
 
             // Compute segment bounding rectangle
             seg.Rectangle = ComputeSegmentRectangle(run, segText, segStartInRun, segEndInRun);
+            SetInkBox(seg, run, segStartInRun, segEndInRun);
 
             // Populate per-character layout (position + glyph rectangle).
             PopulateCharacters(seg, run, segStartInRun, segEndInRun);
@@ -198,6 +200,12 @@ public sealed partial class TextFragmentAbsorber
         seg.Characters.Clear();
         for (var ci = segStartInRun; ci <= segEndInRun && ci < run.Text.Length; ci++)
         {
+            if (CharAdvanceSpan(run, ci) is { } span)
+            {
+                seg.Characters.Add(new CharInfo(AdvancePosition(run, span.Start),
+                    AdvanceRectangle(run, span.Start, span.End - span.Start, faceDescent: true)));
+                continue;
+            }
             var charText = run.Text.Substring(ci, 1);
             var pos = ComputeSegmentPosition(run, ci);
             var rect = ComputeSegmentRectangle(run, charText, ci, ci);
@@ -205,16 +213,62 @@ public sealed partial class TextFragmentAbsorber
         }
     }
 
+    /// <summary>The text-space span a character's glyph advances over: from where the pen
+    /// stands when it is shown - past any TJ number before it, the first glyph's too - to
+    /// the end of its own advance, before any TJ number after it. A space that stands for
+    /// a TJ gap (it has no advance of its own) spans the gap from the glyph before it; any
+    /// other glyph with no advance measured reaches to the next glyph. Null when the run
+    /// tracks no per-character advances.</summary>
+    private static (double Start, double End)? CharAdvanceSpan(RawTextRun run, int ci)
+    {
+        var cum = run.CharCumWidths;
+        if (cum is null || ci >= cum.Length) return null;
+        var start = cum[ci];
+        var ends = run.CharEndPositions;
+        double end;
+        if (ends is not null && ci < ends.Length) end = ends[ci];
+        else if (ci + 1 < cum.Length) end = cum[ci + 1];
+        else return null;
+        if (end > start) return (start, end);
+        if (run.Text[ci] == ' ' && ci > 0 && ends is not null && ci - 1 < ends.Length && ends[ci - 1] < start)
+            return (ends[ci - 1], start);
+        // No advance of its own was measured (a font whose glyphs measure 0 wide has its
+        // advances shared out evenly over the run): the glyph reaches to the next one.
+        return (start, ci + 1 < cum.Length ? Math.Max(start, cum[ci + 1]) : start);
+    }
+
     /// <summary>Computes a segment's page-space position from its run and within-run offset.</summary>
+    /// <summary>Records the segment's glyph-bearing box and baseline: the part of
+    /// [segStart..segEnd] inside the run's ink range, measured like the segment
+    /// rectangle; null when that part is blank.</summary>
+    private static void SetInkBox(TextSegment seg, RawTextRun run, int segStart, int segEnd)
+    {
+        // The baseline is recorded for upright text only; a rotated or flipped run
+        // keeps its plain box in the page content box.
+        var upright = run.TmB == 0 && run.TmC == 0 && run.TmD > 0 && run.Ctm.B == 0 && run.Ctm.C == 0 && run.Ctm.D > 0;
+        seg.BaselineY = upright ? ApplyCtm(run.X, run.Y, run.Ctm).y : null;
+        var inkStart = run.InkCharStart >= 0 ? run.InkCharStart : 0;
+        var inkEnd = run.InkCharEnd >= 0 ? run.InkCharEnd - 1 : run.Text.Length - 1;
+        var s = Math.Max(segStart, inkStart);
+        var e = Math.Min(segEnd, inkEnd);
+        if (e < s || e >= run.Text.Length) { seg.InkRectangle = null; return; }
+        var text = run.Text.Substring(s, e - s + 1);
+        seg.InkRectangle = text.Trim().Length == 0 ? null : ComputeSegmentRectangle(run, text, s, e);
+    }
+
     private static Position ComputeSegmentPosition(RawTextRun run, int segStartInRun)
     {
-        double segX = run.X, segY = run.Y;
-        if (segStartInRun > 0 && segStartInRun < run.Text.Length)
-        {
-            var prefW = MeasureRunPrefix(run, segStartInRun);
-            segX = run.X + run.TmA * prefW * run.HScaling;
-            segY = run.Y + run.TmB * prefW * run.HScaling;
-        }
+        var prefW = segStartInRun > 0 && segStartInRun < run.Text.Length
+            ? MeasureRunPrefix(run, segStartInRun) : 0;
+        return AdvancePosition(run, prefW);
+    }
+
+    /// <summary>The page position of the point <paramref name="advance"/> along the run's
+    /// baseline (text space, before horizontal scaling), lowered by the font's descent.</summary>
+    private static Position AdvancePosition(RawTextRun run, double advance)
+    {
+        var segX = run.X + run.TmA * advance * run.HScaling;
+        var segY = run.Y + run.TmB * advance * run.HScaling;
         // Apply descent offset — fall back to Standard-14 AFM descent
         double segDescentOff = 0;
         double effectiveDescent = 0;
@@ -245,16 +299,23 @@ public sealed partial class TextFragmentAbsorber
         else
             segW = EstimateWidth(segText, run.FontSize);
 
-        // Segment boxes share the fragment's canonical line box.
-        var (descentOff, segAscentH) = ComputeDescentAscent(run, coreFaceDescent: false);
+        var prefW = segStartInRun > 0 && segStartInRun < run.Text.Length
+            ? MeasureRunPrefix(run, segStartInRun) : 0;
+        return AdvanceRectangle(run, prefW, segW);
+    }
 
-        double segX = run.X, segY = run.Y;
-        if (segStartInRun > 0 && segStartInRun < run.Text.Length)
-        {
-            var prefW = MeasureRunPrefix(run, segStartInRun);
-            segX = run.X + run.TmA * prefW * run.HScaling;
-            segY = run.Y + run.TmB * prefW * run.HScaling;
-        }
+    /// <summary>The page box of <paramref name="segW"/> of advance starting
+    /// <paramref name="advance"/> along the run's baseline (both text space, before
+    /// horizontal scaling), from the descent to the ascent. Segment boxes share the fragment's
+    /// canonical line box, which seats a bare standard face on its baseline; a character's box
+    /// (<paramref name="faceDescent"/>) reaches down to the face's own descent, as its glyph does -
+    /// a redaction drawn from it covers the descenders of the scan under an OCR text layer too.</summary>
+    private static Rectangle AdvanceRectangle(RawTextRun run, double advance, double segW, bool faceDescent = false)
+    {
+        var (descentOff, segAscentH) = ComputeDescentAscent(run, coreFaceDescent: faceDescent);
+
+        var segX = run.X + run.TmA * advance * run.HScaling;
+        var segY = run.Y + run.TmB * advance * run.HScaling;
         var scaledSegW = segW * run.HScaling;
         var (x1, y1) = ApplyCtm(segX + run.TmC * descentOff, segY + run.TmD * descentOff, run.Ctm);
         var (x2, y2) = ApplyCtm(segX + run.TmA * scaledSegW + run.TmC * segAscentH,

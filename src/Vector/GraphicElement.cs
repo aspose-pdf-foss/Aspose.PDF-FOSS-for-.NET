@@ -7,6 +7,10 @@ namespace Aspose.Pdf.Vector;
 /// extracted from a PDF content stream.</summary>
 public class GraphicElement
 {
+    /// <summary>Creates an empty graphic element that draws nothing and has an empty bounding box.</summary>
+    public GraphicElement() { }
+
+    /// <summary>Gets the element's bounding box in page space. The base element returns an empty rectangle at the origin.</summary>
     public virtual Rectangle Rectangle { get; } = new Rectangle(0, 0, 0, 0);
 
     /// <summary>The element's page-space anchor (the lower-left corner of its bounding
@@ -42,6 +46,17 @@ public class GraphicElement
     /// (null for form children and un-absorbed elements). Lets bulk operations
     /// batch their rewrites.</summary>
     internal GraphicsEditState? SourceEditState => EditState;
+
+    /// <summary>The page this element was absorbed from; a form's child answers its form's page. Null for an
+    /// element no absorber produced.</summary>
+    public Page? SourcePage => EditState?.Page ?? ParentPlacement?.SourcePage;
+
+    /// <summary>The content-stream operators that draw this element: a path's construction operators and the
+    /// operator that paints it; for a form placement, those of every element it holds. A new list on each call.</summary>
+    public List<Operator> Operators => DrawingOperators();
+
+    /// <summary>What <see cref="Operators"/> answers; nothing for an element with no source.</summary>
+    internal virtual List<Operator> DrawingOperators() => new();
 
     /// <summary>Sum of the ancestors' page-space Position moves.</summary>
     internal (double Dx, double Dy) AncestorTranslation()
@@ -106,38 +121,12 @@ public class GraphicElement
 
     protected virtual void GetInitialPoint(out double x, out double y) { x = 0; y = 0; }
 
-    /// <summary>Serial number for the emitted SVG document ids ("body_N").</summary>
-    private static int _svgBodyCounter;
-
     /// <summary>Render this element alone as a standalone SVG document sized to
     /// its bounding box (CSS pixels, 1pt = 4/3 px).</summary>
-    public string SaveToSvg()
-    {
-        var id = System.Threading.Interlocked.Increment(ref _svgBodyCounter);
-        var r = Rectangle;
-        var w = Math.Max(0.0, r.URX - r.LLX);
-        var h = Math.Max(0.0, r.URY - r.LLY);
-        var pxW = (int)Math.Ceiling(w * 4.0 / 3.0) + 1;
-        var pxH = (int)Math.Ceiling(h * 4.0 / 3.0) + 1;
-        var sb = new System.Text.StringBuilder();
-        sb.Append("<?xml version=\"1.0\" standalone=\"no\"?>\n");
-        sb.Append("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n");
-        sb.Append($"<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" " +
-            $"version=\"1.1\" id=\"body_{id}\" width=\"{pxW}\" height=\"{pxH}\">\n\n");
-        sb.Append("<g transform=\"matrix(1.3333 0 0 1.3333 0 0)\">\n");
-        AppendSvgContent(sb, r.LLX, r.LLY, h);
-        sb.Append("</g>\n");
-        sb.Append("</svg>");
-        return sb.ToString();
-    }
+    public string SaveToSvg() => SvgWriter.Document(new[] { this }, Rectangle);
 
     /// <summary>Render this element alone to an SVG file (see <see cref="SaveToSvg()"/>).</summary>
-    public void SaveToSvg(string svgFilePath)
-    {
-        var dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(svgFilePath));
-        if (!string.IsNullOrEmpty(dir)) System.IO.Directory.CreateDirectory(dir);
-        System.IO.File.WriteAllText(svgFilePath, SaveToSvg());
-    }
+    public void SaveToSvg(string svgFilePath) => SvgWriter.Save(svgFilePath, SaveToSvg());
 
     /// <summary>Append the element's SVG markup in element-local coordinates:
     /// the element's bounding-box lower-left corner maps to (0,0), y still
@@ -146,6 +135,10 @@ public class GraphicElement
         double originX, double originY, double boxHeight)
     {
     }
+
+    /// <summary>What the element paints over, in page space: its <see cref="Rectangle"/>, and for a
+    /// stroked path half the line width beyond it. An SVG of the element is sized to this.</summary>
+    internal virtual Rectangle PaintBounds => Rectangle;
 }
 
 /// <summary>The painting parameters a sub-path was drawn with: fill and/or
@@ -165,7 +158,7 @@ internal sealed record SubPathStyle(
 /// construction operators (in their original user-space coordinates), the CTM in
 /// effect when it was drawn, and the painting operator that closed it. The public
 /// <see cref="Rectangle"/> is the path's bounding box transformed into page space,
-/// so it is stable across an extract → <see cref="Page.AddGraphics"/> → re-extract
+/// so it is stable across an extract → <c>Page.AddGraphics</c> → re-extract
 /// round-trip (the same operators are re-emitted under the same CTM).</summary>
 public sealed class SubPath : GraphicElement
 {
@@ -189,7 +182,27 @@ public sealed class SubPath : GraphicElement
     // Page-space translation accumulated by assignments to Position.
     private double _dx, _dy;
 
+    /// <summary>The region the sub-path was clipped to where it was painted; null when nothing clipped it.</summary>
+    internal ClipRegion? PaintClip;
+
     public override Rectangle Rectangle => _rectangle;
+
+    internal override Rectangle PaintBounds
+    {
+        get
+        {
+            if (_style.Stroke is null) return _rectangle;
+            var half = _style.LineWidth * CtmScale() / 2;
+            return new Rectangle(_rectangle.LLX - half, _rectangle.LLY - half, _rectangle.URX + half, _rectangle.URY + half);
+        }
+    }
+
+    /// <summary>How the CTM scales a length (the square root of its determinant); 1 for a degenerate one.</summary>
+    private double CtmScale()
+    {
+        var det = Math.Abs(_ctm.A * _ctm.D - _ctm.B * _ctm.C);
+        return det > 0 ? Math.Sqrt(det) : 1.0;
+    }
 
     /// <summary>The sub-path's page-space anchor (bounding-box lower-left). Assigning a
     /// new point translates the whole sub-path by the delta and rewrites the source
@@ -208,6 +221,8 @@ public sealed class SubPath : GraphicElement
     internal override (double Dx, double Dy) SourceTranslation => (_dx, _dy);
 
     internal override Aspose.Pdf.Matrix? SourceCtm => _ctm;
+
+    internal override List<Aspose.Pdf.Operator> DrawingOperators() => new(_construction) { _paint };
 
     internal override GraphicElement Clone(XFormPlacement xFormPlacement) => this;
 
@@ -253,14 +268,12 @@ public sealed class SubPath : GraphicElement
     internal override void AppendSvgContent(System.Text.StringBuilder sb,
         double originX, double originY, double boxHeight)
     {
-        var d = BuildLocalPathData(originX, originY);
+        var d = LocalPathData(_ctm, _construction, originX, originY);
         var paint = new System.Text.StringBuilder();
         if (_style.Stroke is { } sc)
         {
-            var det = Math.Abs(_ctm.A * _ctm.D - _ctm.B * _ctm.C);
-            var scale = det > 0 ? Math.Sqrt(det) : 1.0;
             paint.Append($"stroke=\"{Hex(sc.R, sc.G, sc.B)}\" ");
-            paint.Append($"stroke-width=\"{F(_style.LineWidth * scale)}\" ");
+            paint.Append($"stroke-width=\"{F(_style.LineWidth * CtmScale())}\" ");
             paint.Append($"stroke-linejoin=\"{(_style.LineJoin == 1 ? "round" : _style.LineJoin == 2 ? "bevel" : "miter")}\" ");
         }
         else
@@ -276,13 +289,34 @@ public sealed class SubPath : GraphicElement
         {
             paint.Append("fill=\"none\" ");
         }
-        sb.Append($"\t<path id=\"\"  transform=\"matrix(1 0 0 -1 0 {F(boxHeight + 1)})\"  " +
-            $"d=\"{d}\" {paint}/>\n");
+        if (PaintClip is null)
+        {
+            sb.Append($"\t<path id=\"\"  transform=\"matrix(1 0 0 -1 0 {F(boxHeight + 1)})\"  " +
+                $"d=\"{d}\" {paint}/>\n");
+            return;
+        }
+        // Clipped: each region of the chain becomes a clipPath in the same local space as the path,
+        // applied by one nested group per region inside the group that flips the y axis.
+        var ids = new List<string>();
+        foreach (var region in PaintClip.Chain())
+        {
+            var id = SvgWriter.NextClipId();
+            ids.Add(id);
+            var clipData = new System.Text.StringBuilder();
+            foreach (var (ctm, ops) in region.Paths) clipData.Append(LocalPathData(ctm, ops, originX, originY));
+            sb.Append($"\t<clipPath id=\"{id}\"><path d=\"{clipData}\" clip-rule=\"{(region.EvenOdd ? "evenodd" : "nonzero")}\"/></clipPath>\n");
+        }
+        sb.Append($"\t<g transform=\"matrix(1 0 0 -1 0 {F(boxHeight + 1)})\">");
+        foreach (var id in ids) sb.Append($"<g clip-path=\"url(#{id})\">");
+        sb.Append($"<path d=\"{d}\" {paint}/>");
+        foreach (var _ in ids) sb.Append("</g>");
+        sb.Append("</g>\n");
     }
 
-    /// <summary>The path data in element-local page-space coordinates
-    /// (bounding-box lower-left at the origin, y upward).</summary>
-    private string BuildLocalPathData(double originX, double originY)
+    /// <summary>The path data of <paramref name="construction"/>, built under <paramref name="ctm"/>, in
+    /// element-local page-space coordinates (<paramref name="originX"/>, <paramref name="originY"/> at the origin, y upward).</summary>
+    private static string LocalPathData(Aspose.Pdf.Matrix ctm, IEnumerable<Aspose.Pdf.Operator> construction,
+        double originX, double originY)
     {
         var sb = new System.Text.StringBuilder();
         double curX = 0, curY = 0;   // current point in user space
@@ -291,12 +325,12 @@ public sealed class SubPath : GraphicElement
             sb.Append(cmd);
             for (var i = 0; i + 1 < userXy.Length; i += 2)
             {
-                var (px, py) = _ctm.TransformPoint(userXy[i], userXy[i + 1]);
+                var (px, py) = ctm.TransformPoint(userXy[i], userXy[i + 1]);
                 if (i > 0 || cmd == 'C') sb.Append(' ');
                 sb.Append(F(px - originX)).Append(' ').Append(F(py - originY));
             }
         }
-        foreach (var op in _construction)
+        foreach (var op in construction)
         {
             switch (op)
             {
@@ -324,24 +358,30 @@ public sealed class SubPath : GraphicElement
         return sb.ToString();
     }
 
+    /// <summary>Whether this sub-path is stroked only, and thinner than <paramref name="width"/> points.</summary>
+    internal bool IsStrokedThinnerThan(double width) =>
+        _style.Stroke is not null && _style.Fill is null && _style.LineWidth < width;
+
     private static string Hex(double r, double g, double b) =>
         $"#{Clamp(r):X2}{Clamp(g):X2}{Clamp(b):X2}";
 
-    private static int Clamp(double v) => Math.Clamp((int)Math.Round(v * 255), 0, 255);
+    private static int Clamp(double v) => Compat.Clamp((int)Math.Round(v * 255), 0, 255);
 
     private static string F(double v) => v.ToString("G", System.Globalization.CultureInfo.InvariantCulture);
 }
 
 /// <summary>Mutable collection of <see cref="GraphicElement"/> entries.
-/// Consumed by <see cref="Page.AddGraphics"/> and produced by
+/// Consumed by <c>Page.AddGraphics</c> and produced by
 /// <c>GraphicsAbsorber</c>. Indexed 1-based, like the other document
 /// collections (pages, annotations).</summary>
 public sealed class GraphicElementCollection : IEnumerable<GraphicElement>
 {
     private readonly List<GraphicElement> _items = new();
 
+    /// <summary>Creates an empty collection.</summary>
     public GraphicElementCollection() { }
 
+    /// <summary>Gets the number of elements in the collection.</summary>
     public int Count => _items.Count;
 
     /// <summary>1-based element access.</summary>
@@ -375,9 +415,13 @@ public sealed class GraphicElementCollection : IEnumerable<GraphicElement>
         _items.Add(item);
     }
 
+    /// <summary>Removes all elements from the collection; the pages they came from are not changed.</summary>
     public void Clear() => _items.Clear();
+    /// <summary>Returns true when the collection holds the given element.</summary>
     public bool Contains(GraphicElement item) => _items.Contains(item);
+    /// <summary>Copies the elements into <c>array</c>, starting at the zero-based <c>arrayIndex</c>.</summary>
     public void CopyTo(GraphicElement[] array, int arrayIndex) => _items.CopyTo(array, arrayIndex);
+    /// <summary>Removes the given element from the collection and returns true if it was found; the source page is not changed (use <c>GraphicElement.Remove</c> for that).</summary>
     public bool Remove(GraphicElement item) => _items.Remove(item);
 
     public IEnumerator<GraphicElement> GetEnumerator() => _items.GetEnumerator();

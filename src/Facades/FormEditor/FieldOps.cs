@@ -158,13 +158,13 @@ public sealed partial class FormEditor
         // at 12.5pt) — the size the appearance generator reads back from /DA, so the
         // DA must be in place BEFORE the caption assignment regenerates the appearance.
         var captionSize = (ury - lly) / 2;
-        btn.Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(
+        btn.Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(
             string.Format(System.Globalization.CultureInfo.InvariantCulture, "/Helv {0:0.##} Tf 0 g", captionSize))));
         btn.NormalCaption = label;
 
         // Wire the button's activation action to a SubmitForm action targeting the URL.
         var action = new SubmitFormAction();
-        action.Dict.Set("F", new PdfString(System.Text.Encoding.Latin1.GetBytes(url)));
+        action.Dict.Set("F", new PdfString(Compat.Latin1.GetBytes(url)));
         action.Flags = SubmitFormAction.Xfdf;
         btn.OnActivated = action;
 

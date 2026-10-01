@@ -45,37 +45,65 @@ public class AnnotationSelector
         Selected.Add(annotation);
     }
 
+    /// <summary>Called for each bleed-mark annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(BleedMarkAnnotation bleedMark) => Match(bleedMark);
+    /// <summary>Called for each caret annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(CaretAnnotation caret) => Match(caret);
+    /// <summary>Called for each circle annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(CircleAnnotation circle) => Match(circle);
+    /// <summary>Called for each colour-bar annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(ColorBarAnnotation colorBar) => Match(colorBar);
+    /// <summary>Called for each file-attachment annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(FileAttachmentAnnotation attachment) => Match(attachment);
+    /// <summary>Called for each free-text annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(FreeTextAnnotation freetext) => Match(freetext);
+    /// <summary>Called for each highlight annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(HighlightAnnotation highlight) => Match(highlight);
+    /// <summary>Called for each ink annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(InkAnnotation ink) => Match(ink);
+    /// <summary>Called for each line annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(LineAnnotation line) => Match(line);
+    /// <summary>Called for each link annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(LinkAnnotation link) => Match(link);
+    /// <summary>Called for each movie annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(MovieAnnotation movie) => Match(movie);
+    /// <summary>Called for each 3D annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(PDF3DAnnotation pdf3D) => Match(pdf3D);
+    /// <summary>Called for each page-information annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(PageInformationAnnotation pageInformation) => Match(pageInformation);
+    /// <summary>Called for each polygon annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(PolygonAnnotation polygon) => Match(polygon);
+    /// <summary>Called for each polyline annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(PolylineAnnotation polyline) => Match(polyline);
+    /// <summary>Called for each popup annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(PopupAnnotation popup) => Match(popup);
+    /// <summary>Called for each redaction annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(RedactionAnnotation redact) => Match(redact);
+    /// <summary>Called for each registration-mark annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(RegistrationMarkAnnotation registrationMark) => Match(registrationMark);
+    /// <summary>Called for each rich-media annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(RichMediaAnnotation richMedia) => Match(richMedia);
+    /// <summary>Called for each screen annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(ScreenAnnotation screen) => Match(screen);
+    /// <summary>Called for each square annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(SquareAnnotation square) => Match(square);
+    /// <summary>Called for each squiggly annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(SquigglyAnnotation squiggly) => Match(squiggly);
+    /// <summary>Called for each stamp annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(StampAnnotation stamp) => Match(stamp);
+    /// <summary>Called for each strike-out annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(StrikeOutAnnotation strikeOut) => Match(strikeOut);
+    /// <summary>Called for each text (sticky note) annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(TextAnnotation text) => Match(text);
+    /// <summary>Called for each trim-mark annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(TrimMarkAnnotation trimMark) => Match(trimMark);
+    /// <summary>Called for each underline annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(UnderlineAnnotation underline) => Match(underline);
 
     /// <summary>Visit the WatermarkAnnotation builder type.</summary>
     public virtual void Visit(WatermarkAnnotation watermark) { _ = watermark; }
 
+    /// <summary>Called for each widget annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(WidgetAnnotation widget) => Match(widget);
 }
 
@@ -87,11 +115,13 @@ public class AnnotationSelector
 // bare ctor + visitor-Accept hookup needed to compile reflection-equivalent
 // callers.
 
+/// <summary>A bleed-mark printer's-mark annotation placed at one corner of the page for pre-press work. This library stores the position but draws no appearance for it.</summary>
 public sealed partial class BleedMarkAnnotation : Annotation
 {
     internal BleedMarkAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
     public override void Accept(AnnotationSelector visitor) => visitor.Visit(this);
 
+    /// <summary>Creates a bleed-mark printer's-mark annotation (/PrinterMark) on <c>page</c> for the given corner. The rectangle is empty and no appearance is drawn.</summary>
     public BleedMarkAnnotation(Page page, PrinterMarkCornerPosition position) : base(page, new Rectangle(0, 0, 0, 0))
     {
         Dict.Set("Subtype", new PdfName("PrinterMark"));
@@ -104,6 +134,7 @@ public sealed partial class BleedMarkAnnotation : Annotation
     public PrinterMarkCornerPosition Position { get; set; } = PrinterMarkCornerPosition.TopLeft;
 }
 
+/// <summary>A colour-bar printer's-mark annotation: a strip of tint patches (0 to 100%) of one CMYK channel, placed in the margin outside the trim box.</summary>
 public sealed partial class ColorBarAnnotation : Annotation
 {
     // Tint percentages (low-to-high) of the stepped colour scale.
@@ -122,7 +153,47 @@ public sealed partial class ColorBarAnnotation : Annotation
         // Print-only, non-interactive mark.
         Dict.Set("F", new PdfInteger(4));
         _colorOfCMYK = colorOfCMYK;
+        Rect = ShiftOutsideTrimBox(page, rect);
         UpdateAppearances();
+    }
+
+    /// <summary>A colour bar is a pre-press mark, so it lives in the margin OUTSIDE the trim
+    /// box: a horizontal bar moves to the top or bottom strip between the trim box and the
+    /// media box (whichever side its centre is nearer), a vertical bar to the left or right
+    /// strip; along its long axis it keeps its extent, across it takes the smaller of its own
+    /// thickness and the strip, centred in the strip. A page whose trim box is the media box
+    /// keeps the bar where it was asked for.</summary>
+    private static Rectangle ShiftOutsideTrimBox(Page page, Rectangle rect)
+    {
+        var media = page.MediaBox;
+        var trim = page.TrimBox;
+        if (trim is null || media is null) return rect;
+        if (trim.LLX <= media.LLX && trim.LLY <= media.LLY && trim.URX >= media.URX && trim.URY >= media.URY) return rect;
+        var w = rect.URX - rect.LLX;
+        var h = rect.URY - rect.LLY;
+        if (w < h)
+        {
+            var toLeft = (rect.LLX + rect.URX) / 2 < (media.LLX + media.URX) / 2;
+            var (stripLow, stripHigh) = toLeft ? (media.LLX, trim.LLX) : (trim.URX, media.URX);
+            var (low, high) = CentredInStrip(stripLow, stripHigh, w);
+            return new Rectangle(low, rect.LLY, high, rect.URY);
+        }
+        else
+        {
+            var toBottom = (rect.LLY + rect.URY) / 2 < (media.LLY + media.URY) / 2;
+            var (stripLow, stripHigh) = toBottom ? (media.LLY, trim.LLY) : (trim.URY, media.URY);
+            var (low, high) = CentredInStrip(stripLow, stripHigh, h);
+            return new Rectangle(rect.LLX, low, rect.URX, high);
+        }
+    }
+
+    private static (double low, double high) CentredInStrip(double stripLow, double stripHigh, double thickness)
+    {
+        var strip = stripHigh - stripLow;
+        if (strip <= 0) return (stripLow, stripHigh);
+        var t = Math.Min(thickness, strip);
+        var low = stripLow + (strip - t) / 2;
+        return (low, low + t);
     }
 
     /// <summary>Always <see cref="AnnotationType.ColorBar"/>.</summary>
@@ -135,6 +206,26 @@ public sealed partial class ColorBarAnnotation : Annotation
         get => _colorOfCMYK;
         set { _colorOfCMYK = value; UpdateAppearances(); }
     }
+
+    /// <summary>The XFDF spelling of a CMYK channel: the colour's lower-case name.</summary>
+    internal static string XfdfColorName(ColorsOfCMYK color) => color switch
+    {
+        ColorsOfCMYK.Cyan => "cyan",
+        ColorsOfCMYK.Magenta => "magenta",
+        ColorsOfCMYK.Yellow => "yellow",
+        _ => "black",
+    };
+
+    /// <summary>The CMYK channel an XFDF colour name spells; any other name is an
+    /// argument error.</summary>
+    internal static ColorsOfCMYK FromXfdfColorName(string name) => name switch
+    {
+        "cyan" => ColorsOfCMYK.Cyan,
+        "magenta" => ColorsOfCMYK.Magenta,
+        "yellow" => ColorsOfCMYK.Yellow,
+        "black" => ColorsOfCMYK.Black,
+        _ => throw new ArgumentException($"'{name}' is not the XFDF name of a CMYK channel.", nameof(name)),
+    };
 
     private Color ColorBarTintColor(double tintPercent)
     {
@@ -235,6 +326,7 @@ public sealed partial class ColorBarAnnotation : Annotation
     }
 }
 
+/// <summary>A 3D annotation that shows 3D artwork (U3D or PRC data) in a rectangle on the page. The artwork, its views and its poster image can be read from an existing document.</summary>
 public sealed partial class PDF3DAnnotation : Annotation
 {
     private byte[] _imagePreview = System.Array.Empty<byte>();
@@ -242,12 +334,14 @@ public sealed partial class PDF3DAnnotation : Annotation
 
     internal PDF3DAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
+    /// <summary>Creates a 3D annotation (/3D) on <c>page</c> at <c>rect</c> that shows the given 3D artwork. The artwork is held in memory; a new annotation does not write a /3DD stream on save.</summary>
     public PDF3DAnnotation(Page page, Rectangle rect, PDF3DArtwork pdf3DArtwork) : base(page, rect)
     {
         Dict.Set("Subtype", new PdfName("3D"));
         Pdf3DArtwork = pdf3DArtwork;
     }
 
+    /// <summary>Creates a 3D annotation on <c>page</c> at <c>rect</c> for the given artwork. The activation mode is accepted but has no effect in this library.</summary>
     public PDF3DAnnotation(Page page, Rectangle rect, PDF3DArtwork pdf3DArtwork, PDF3DActivation activation)
         : this(page, rect, pdf3DArtwork)
     {
@@ -298,6 +392,7 @@ public sealed partial class PDF3DAnnotation : Annotation
         }
     }
 
+    /// <summary>Gets or sets the 3D model data of the artwork, or null when there is no artwork. For an annotation read from a document, setting it also replaces the data of its /3DD stream so the change is saved.</summary>
     public PDF3DContent? Content
     {
         get => Pdf3DArtwork?.Content;
@@ -308,19 +403,18 @@ public sealed partial class PDF3DAnnotation : Annotation
             // /3DD stream — replace its data so the assignment survives a save.
             if (_stream3d is not null && value is not null)
             {
-                var bytes = value.GetAsByteArray();
-                using var ms = new MemoryStream();
-                using (var z = new System.IO.Compression.ZLibStream(ms, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
-                    z.Write(bytes, 0, bytes.Length);
-                _stream3d.ReplaceData(ms.ToArray());
+                var compressed = IO.Filters.ManagedDeflater.DeflateZlib(value.GetAsByteArray());
+                _stream3d.ReplaceData(compressed);
                 _stream3d.Dict.Set("Filter", new PdfName("FlateDecode"));
                 _stream3d.Dict.Remove("DecodeParms");
-                _stream3d.Dict.Set("Length", new PdfInteger(ms.Length));
+                _stream3d.Dict.Set("Length", new PdfInteger(compressed.Length));
             }
         }
     }
 
+    /// <summary>Gets the lighting scheme of the artwork, or null when there is no artwork.</summary>
     public PDF3DLightingScheme? LightingScheme => Pdf3DArtwork?.LightingScheme;
+    /// <summary>Gets the render mode of the artwork, or null when there is no artwork.</summary>
     public PDF3DRenderMode? RenderMode => Pdf3DArtwork?.RenderMode;
 
     private PDF3DViewArray? _fallbackViews;
@@ -330,6 +424,7 @@ public sealed partial class PDF3DAnnotation : Annotation
     /// reports an empty collection rather than null.</summary>
     public PDF3DViewArray ViewArray => Pdf3DArtwork?.ViewArray ?? (_fallbackViews ??= new PDF3DViewArray());
 
+    /// <summary>Selects which view of the artwork's view array is the default view, by 1-based index; an out-of-range index is ignored.</summary>
     public void SetDefaultViewIndex(int index) => _defaultViewIndex = index;
 
     /// <summary>The annotation's poster image. For an annotation read from a
@@ -365,7 +460,7 @@ public sealed partial class PDF3DAnnotation : Annotation
             byte[] samples;
             try { samples = reader.DecodeStream(img, img.ObjectNumber, img.Generation); }
             catch { return System.Array.Empty<byte>(); }
-            return OperatingSystem.IsWindows()
+            return Compat.IsWindows()
                 ? EncodePosterJpeg(reader, img, samples) ?? samples
                 : samples;
         }
@@ -423,6 +518,7 @@ public sealed partial class PDF3DAnnotation : Annotation
         }
     }
 
+    /// <summary>Sets the poster (preview) image from the bytes of <c>image</c>; null clears it. The image is kept in memory and returned by <c>GetImagePreview</c>.</summary>
     public void SetImagePreview(Stream image)
     {
         if (image is null) { _imagePreview = System.Array.Empty<byte>(); return; }
@@ -431,6 +527,7 @@ public sealed partial class PDF3DAnnotation : Annotation
         _imagePreview = ms.ToArray();
     }
 
+    /// <summary>Sets the poster (preview) image from the file at <c>filename</c>; a missing file clears it. The image is kept in memory and returned by <c>GetImagePreview</c>.</summary>
     public void SetImagePreview(string filename)
     {
         _imagePreview = string.IsNullOrEmpty(filename) || !File.Exists(filename)
@@ -613,11 +710,13 @@ public sealed partial class PDF3DAnnotation : Annotation
     }
 }
 
+/// <summary>A page-information printer's-mark annotation that shows the file name and date in the page margin.</summary>
 public sealed partial class PageInformationAnnotation : Annotation
 {
     internal PageInformationAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
     public override void Accept(AnnotationSelector visitor) => visitor.Visit(this);
 
+    /// <summary>Creates a page-information printer's-mark annotation on <c>page</c> at <c>rect</c>. On save its appearance shows the output file name and the date.</summary>
     public PageInformationAnnotation(Page page, Rectangle rect) : base(page, rect)
     {
         Dict.Set("Subtype", new PdfName("PrinterMark"));
@@ -649,6 +748,7 @@ public sealed partial class PageInformationAnnotation : Annotation
     }
 }
 
+/// <summary>A registration-mark printer's-mark annotation placed at the middle of one page side for pre-press alignment. This library stores the position but draws no appearance for it.</summary>
 public sealed partial class RegistrationMarkAnnotation : Annotation
 {
     internal RegistrationMarkAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -668,11 +768,13 @@ public sealed partial class RegistrationMarkAnnotation : Annotation
     public PrinterMarkSidePosition Position { get; set; } = PrinterMarkSidePosition.Top;
 }
 
+/// <summary>A trim-mark printer's-mark annotation placed at one corner of the page to show where the sheet is cut. This library stores the position but draws no appearance for it.</summary>
 public sealed partial class TrimMarkAnnotation : Annotation
 {
     internal TrimMarkAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
     public override void Accept(AnnotationSelector visitor) => visitor.Visit(this);
 
+    /// <summary>Creates a trim-mark printer's-mark annotation (/PrinterMark) on <c>page</c> for the given corner. The rectangle is empty and no appearance is drawn.</summary>
     public TrimMarkAnnotation(Page page, PrinterMarkCornerPosition position) : base(page, new Rectangle(0, 0, 0, 0))
     {
         Dict.Set("Subtype", new PdfName("PrinterMark"));
@@ -685,7 +787,7 @@ public sealed partial class TrimMarkAnnotation : Annotation
     public PrinterMarkCornerPosition Position { get; set; } = PrinterMarkCornerPosition.TopLeft;
 }
 
-/// <summary>The set of printer's-mark families <see cref="PrinterMarkAnnotation.AddPrinterMarks"/>
+/// <summary>The set of printer's-mark families <c>PrinterMarkAnnotation.AddPrinterMarks</c>
 /// generates on a page (PDF 32000 pre-press marks).</summary>
 [System.Flags]
 public enum PrinterMarksKind
@@ -706,7 +808,7 @@ public enum PrinterMarksKind
     All = TrimMarks | BleedMarks | RegistrationMarks | ColorBars | PageInformation,
 }
 
-/// <summary>Aggregate printer's-mark generator. <see cref="AddPrinterMarks"/> adds the
+/// <summary>Aggregate printer's-mark generator. <c>AddPrinterMarks</c> adds the
 /// requested standard pre-press marks (trim, bleed, registration, colour bars and
 /// page information) to every page of a document.</summary>
 public sealed partial class PrinterMarkAnnotation : Annotation
@@ -897,7 +999,8 @@ public partial class WidgetAnnotation
     public override void Accept(AnnotationSelector visitor) => visitor.Visit(this);
 }
 
-public sealed partial class WatermarkAnnotation
+public partial class WatermarkAnnotation
 {
-    public void Accept(AnnotationSelector visitor) => visitor.Visit(this);
+    /// <summary>Passes this watermark to <c>visitor.Visit(WatermarkAnnotation)</c>; the default selector ignores watermarks.</summary>
+    public override void Accept(AnnotationSelector visitor) => visitor.Visit(this);
 }

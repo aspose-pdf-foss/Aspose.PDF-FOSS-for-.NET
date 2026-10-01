@@ -26,8 +26,9 @@ File.WriteAllBytes("page1.png", pngBytes);
 ## Page renderer
 
 `IPageRenderer` is the rendering extension point. Provide your own
-implementation (e.g. backed by Skia or PDFium) to plug in an alternative
-backend; otherwise the built-in renderer described above is used.
+implementation (for example one backed by a native graphics library) and pass
+it to a device constructor to plug in an alternative backend; otherwise the
+built-in renderer described above is used.
 
 ```csharp
 public interface IPageRenderer
@@ -42,9 +43,10 @@ public interface IPageRenderer
 The software renderer covers the full graphics model: paths with dash
 patterns (each dash element is widened to at least the line width, as the
 PDF rasterisation convention requires); clipping; text in every font type
-(Type 1, CFF, TrueType, Type 0 / CID, Type 3); images in every standard filter
+(Type 1, CFF, TrueType, Type 0 / CID, Type 3) and every text rendering mode,
+stroked and clipping modes included; images in every standard filter
 (Flate, LZW, RunLength, CCITT, JPEG baseline and progressive, JPEG 2000,
-JBIG2); stencil masks, soft masks (`/SMask`) and colour-key masks; ICC,
+JBIG2); stencil masks, alpha and luminosity soft masks (`/SMask`) and colour-key masks; ICC,
 Indexed, Separation, DeviceN, CalRGB and Lab colour spaces; blend modes and
 transparency groups; overprint; tiling and shading patterns with all seven
 shading types (function-based, axial, radial, free-form and lattice-form
@@ -70,6 +72,11 @@ var device = new PngDevice();
 using var stream = File.Create("page1.png");
 device.Process(doc.Pages[1], stream);
 ```
+
+Set `TransparentBackground = true` to keep the bare page transparent in the
+PNG, so only the content carries colour. `ThumbnailDevice` (same constructors,
+without a renderer argument) also writes PNG and is meant for small previews:
+`new ThumbnailDevice(200, 283)` draws the page into that pixel size.
 
 ### Custom resolution
 
@@ -130,7 +137,8 @@ byte[] jpeg = device.Process(doc.Pages[1]);
 The built-in managed encoder writes baseline JFIF with the device resolution
 recorded in the header; on Windows the platform (GDI+) codec is used instead.
 Plug in a different encoder (SkiaSharp, ImageSharp, etc.) by registering a
-callback, which takes precedence on every platform:
+`JpegEncoder` callback (`byte[] (byte[] rgba, int width, int height, int quality)`),
+which takes precedence on every platform:
 
 ```csharp
 JpegDevice.SetEncoder((rgba, width, height, quality) =>
@@ -209,8 +217,14 @@ and therefore imply a 1-bit image regardless of `Depth`. `ColorDepth` offers
 `Default` (24-bit), `Format1bpp`, `Format4bpp`, `Format8bpp` and
 `Format24bpp`; `Brightness` (0–1, default 0.5) is the threshold for the 1-bit
 conversion. `SkipBlankPages` drops empty pages and `CoordinateType` selects
-the page box. `Shape` and `Margins` are stored for API compatibility only: each
-page keeps its native aspect ratio and crop-box extents.
+the page box. `Shape` (`Landscape` / `Portrait`) turns a frame of the other
+orientation by 90°. `Margins` is stored for API compatibility only.
+
+`TiffDevice.BinarizeBradley(input, output, threshold)` converts an existing
+TIFF (its first page) to a bilevel, LZW-compressed TIFF using Bradley's
+adaptive threshold — a pixel turns black when it is darker than the mean of
+its neighbourhood by more than `threshold` (a fraction of that mean), which
+keeps scanned text legible under uneven lighting.
 
 ## SVG (vector output)
 
@@ -229,7 +243,27 @@ using var stream = File.Create("page1.svg");
 device.Process(doc.Pages[1], stream);
 ```
 
-`Process(page, outputFileName)` writes to a path.
+`Process(page, outputFileName)` writes to a path. `Document.Save(path, new
+SvgSaveOptions())` writes every page (page N after the first as
+`<stem>_N.svg`), or a ZIP archive of them with `CompressOutputToZipArchive =
+true`.
+
+To export only a page's vector graphics (its painted paths), use
+`SvgExtractor` (`Aspose.Pdf.Vector`). `Extract(page)` returns one SVG per
+cluster of touching or overlapping elements; `SvgExtractionOptions` can put
+every sub-path in its own SVG (`ExtractEverySubPathToSvg`), group nearby
+elements (`AutoGrouping`, `GroupStrength`), limit extraction to an area
+(`ExtractionAreaBound`) or drop hairlines (`MinStrokeWidth`).
+`Page.TrySaveVectorGraphics(path)` writes all of a page's vector graphics as a
+single SVG.
+
+```csharp
+using Aspose.Pdf.Vector;
+
+var extractor = new SvgExtractor(new SvgExtractionOptions { AutoGrouping = true });
+List<string> svgs = extractor.Extract(doc.Pages[1]);
+extractor.Extract(doc.Pages[1], "vector_out");   // 1.svg, 2.svg, ...
+```
 
 ## Text
 
@@ -269,9 +303,9 @@ var res2 = new Resolution(300, 600);   // 300 x DPI, 600 y DPI
 ```
 
 The default is 150 DPI. The page is rendered at exactly the requested
-resolution — the output is `round(points × dpi / 72)` pixels on each axis
-(A4 at 150 DPI = 1240 × 1754) — and the DPI is recorded in the JPEG and TIFF
-headers. One guard applies: when the page at the requested DPI would
+resolution — the output is `points × dpi / 72` pixels on each axis, truncated
+to whole pixels (a 595 × 842 pt A4 page at 150 DPI = 1239 × 1754) — and the
+DPI is recorded in the JPEG and TIFF headers. One guard applies: when the page at the requested DPI would
 exceed 40 million pixels, the resolution is halved until it fits.
 
 The `(width, height)` device constructors pin the output size instead: the page

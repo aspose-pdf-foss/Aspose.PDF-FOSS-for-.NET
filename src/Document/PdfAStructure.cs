@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using System.Text;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
@@ -25,10 +25,28 @@ public sealed partial class Document
         "Formula", "Form",
     };
 
+    /// <summary>Declare the document tagged and clear any suspect marking: /MarkInfo
+    /// /Marked true, and /Suspects false when the file states one. A conversion that is
+    /// about to make a document accessible says so in the catalog, and a region the producer
+    /// once flagged as suspect is no longer one after the structure is repaired.</summary>
+    private void MarkAsTagged()
+    {
+        var markInfo = _reader.ResolveDict(_reader.Catalog.Get("MarkInfo"));
+        if (markInfo is null)
+        {
+            markInfo = new PdfDictionary();
+            _reader.Catalog.Set("MarkInfo", markInfo);
+        }
+        markInfo.Set("Marked", PdfBoolean.True);
+        if (markInfo.Get("Suspects") is not null) markInfo.Set("Suspects", PdfBoolean.False);
+    }
+
     /// <summary>Report each distinct structure type used in the tree that is
     /// neither standard nor role-mapped (following /RoleMap chains) to a
-    /// standard type — the clause-6.8.3.4 vocabulary.</summary>
-    private void ReportUnmappedStructureTypes(PdfDictionary structRoot, PdfFormatConversionOptions options)
+    /// standard type — the clause-6.8.3.4 vocabulary, which parts 2 and 3 number
+    /// 6.7.3.4.</summary>
+    private void ReportUnmappedStructureTypes(PdfDictionary structRoot,
+        PdfFormatConversionOptions options, string part)
     {
         var roleMap = _reader.ResolveDict(structRoot.Get("RoleMap"));
         bool MapsToStandard(string type)
@@ -54,7 +72,7 @@ public sealed partial class Document
                 options.ConversionLog.Add(new PdfAViolation
                 {
                     Rule = "StructureRoleMap",
-                    Clause = "6.8.3.4",
+                    Clause = part == "1" ? "6.8.3.4" : "6.7.3.4",
                     Description = $"Non-standard structure type '{s}' not mapped to functionally equivalent standard type",
                 });
             }
@@ -599,141 +617,32 @@ public sealed partial class Document
 
     private void FixAnnotationsForPdfA(Page page, PdfFormatConversionOptions options, bool fix, bool strip)
     {
-        var annotsObj = _reader.Resolve(page.Dict.Get("Annots"));
-        if (annotsObj is not PdfArray annotsArr) return;
+        var fa = new PdfAAnnotationFixState();
+        fa.page = page;
+        fa.options = options;
+        fa.fix = fix;
+        fa.strip = strip;
+        fa.annotsObj = _reader.Resolve(fa.page.Dict.Get("Annots"));
+        if (fa.annotsObj is not PdfArray annotsArr) return;
 
-        // PDF/A-1 prohibits the PDF 1.5+ annotation subtypes that later parts allow.
-        var isPdfA1 = options.Format is PdfFormat.PDF_A_1A or PdfFormat.PDF_A_1B;
+        fa.isPdfA1 = fa.options.Format is PdfFormat.PDF_A_1A or PdfFormat.PDF_A_1B;
 
-        var indicesToRemove = new List<int>();
+        fa.indicesToRemove = new List<int>();
 
         for (var i = 0; i < annotsArr.Count; i++)
         {
-            var annotDict = _reader.ResolveDict(annotsArr[i]);
-            if (annotDict is null) continue;
-
-            var subtype = annotDict.GetName("Subtype");
-
-            // PDF/A-4f (ISO 19005-4) permits embedded files, so FileAttachment
-            // annotations stay as authored — no violation, no stripping.
-            var allowedByPart = subtype == "FileAttachment" && options.Format is PdfFormat.PDF_A_4F;
-
-            // Check prohibited subtypes
-            if (subtype is not null && !allowedByPart &&
-                (ConvertProhibitedAnnotationSubtypes.Contains(subtype) ||
-                 (isPdfA1 && PdfA1ProhibitedAnnotationSubtypes.Contains(subtype))))
-            {
-                // ISO 19005-2 §6.8: for part 2 a file attachment is an EMBEDDED-FILES
-                // violation (the log clause the corpus reads back is "6.8"), and one
-                // the conversion can only repair by stripping — under
-                // ConvertErrorAction.None the file stays and the conversion fails.
-                var isA2FileAttachment = subtype == "FileAttachment"
-                    && options.Format is PdfFormat.PDF_A_2A or PdfFormat.PDF_A_2B or PdfFormat.PDF_A_2U;
-                options.ConversionLog.Add(new PdfAViolation
-                {
-                    Rule = "AnnotationType",
-                    Description = $"Annotation type '{subtype}' is not allowed in PDF/A",
-                    PageNumber = page.Number,
-                    Clause = isA2FileAttachment ? "6.8" : null,
-                    Convertable = !isA2FileAttachment || strip,
-                });
-                if (strip)
-                {
-                    // PDF/A-4: a stripped FileAttachment's payload survives as a
-                    // document embedded file (the conversion migrates the attachments
-                    // there). Plain part 4 restricts attachments to PDF documents, so
-                    // non-PDF payloads drop with the annotation; 4e takes any file type.
-                    if (subtype == "FileAttachment"
-                        && options.Format is PdfFormat.PDF_A_4 or PdfFormat.PDF_A_4E)
-                        MigrateFileAttachmentToEmbeddedFiles(annotDict,
-                            pdfOnly: options.Format is PdfFormat.PDF_A_4);
-                    indicesToRemove.Add(i);
-                }
-                continue;
-            }
-
-            // Fix Print flag (bit 3, value 4) — except for Widget/Popup
-            if (subtype != "Widget" && subtype != "Popup")
-            {
-                var flags = (int)annotDict.GetInt("F");
-                if ((flags & 4) == 0)
-                {
-                    options.ConversionLog.Add(new PdfAViolation
-                    {
-                        Rule = "AnnotationPrintFlag",
-                        Description = $"Annotation (type '{subtype ?? "unknown"}') missing Print flag",
-                        PageNumber = page.Number,
-                    });
-                    if (fix)
-                    {
-                        annotDict.Set("F", new PdfInteger(flags | 4));
-                    }
-                }
-            }
-
-            // Check/remove prohibited actions on annotations. PDF/X (ISO 15930)
-            // prohibits interactive behaviour outright — EVERY annotation /A is a
-            // violation there, whatever its type; PDF/A prohibits only the
-            // executable/media set.
-            var isPdfXTarget = options.Format is PdfFormat.PDF_X_1A or PdfFormat.PDF_X_3 or PdfFormat.PDF_X_4;
-            var actionObj = _reader.ResolveDict(annotDict.Get("A"));
-            if (actionObj is not null)
-            {
-                var actionType = actionObj.GetName("S");
-                if (actionType is not null && (isPdfXTarget || ConvertProhibitedActionTypes.Contains(actionType)))
-                {
-                    options.ConversionLog.Add(new PdfAViolation
-                    {
-                        Rule = "ActionType",
-                        Description = isPdfXTarget
-                            ? $"Annotation action '{actionType}' is not allowed in PDF/X"
-                            : $"Action type '{actionType}' is not allowed in PDF/A",
-                        PageNumber = page.Number,
-                    });
-                    if (strip)
-                    {
-                        annotDict.Remove("A");
-                    }
-                }
-            }
-
-            // Check/remove AA on annotations
-            var annotAa = _reader.ResolveDict(annotDict.Get("AA"));
-            if (annotAa is not null)
-            {
-                var hasProhibited = false;
-                foreach (var key in annotAa.Keys)
-                {
-                    var ad = _reader.ResolveDict(annotAa.Get(key));
-                    if (ad is null) continue;
-                    var at = ad.GetName("S");
-                    if (at is not null && ConvertProhibitedActionTypes.Contains(at))
-                    {
-                        hasProhibited = true;
-                        options.ConversionLog.Add(new PdfAViolation
-                        {
-                            Rule = "ActionType",
-                            Description = $"Action type '{at}' is not allowed in PDF/A",
-                            PageNumber = page.Number,
-                        });
-                    }
-                }
-                if (strip && hasProhibited)
-                {
-                    annotDict.Remove("AA");
-                }
-            }
+            if (!FixAnnotationForPdfA(fa, annotsArr, i)) break;
         }
 
         // Remove prohibited annotations (reverse order to preserve indices)
-        if (strip && indicesToRemove.Count > 0)
+        if (fa.strip && fa.indicesToRemove.Count > 0)
         {
-            for (var i = indicesToRemove.Count - 1; i >= 0; i--)
+            for (var i = fa.indicesToRemove.Count - 1; i >= 0; i--)
             {
-                annotsArr.RemoveAt(indicesToRemove[i]);
+                annotsArr.RemoveAt(fa.indicesToRemove[i]);
             }
             if (annotsArr.Count == 0)
-                page.Dict.Remove("Annots");
+                fa.page.Dict.Remove("Annots");
         }
     }
 
@@ -817,9 +726,9 @@ public sealed partial class Document
         var oci = options.OutputIntent?.OutputConditionIdentifier
             ?? (options.TargetFormat == PdfFormat.PDF_X_4 ? "CGATS TR001" : "Custom");
         outputIntentDict.Set("OutputConditionIdentifier",
-            new PdfString(Encoding.Latin1.GetBytes(oci)));
+            new PdfString(Compat.Latin1.GetBytes(oci)));
         outputIntentDict.Set("RegistryName",
-            new PdfString(Encoding.Latin1.GetBytes("http://www.color.org")));
+            new PdfString(Compat.Latin1.GetBytes("http://www.color.org")));
 
         // Embed ICC profile if provided
         if (options.IccProfileFileName is not null && File.Exists(options.IccProfileFileName))
@@ -852,9 +761,9 @@ public sealed partial class Document
         outputIntentDict.Set("Type", new PdfName("OutputIntent"));
         outputIntentDict.Set("S", new PdfName("GTS_PDFA1"));
         outputIntentDict.Set("OutputConditionIdentifier",
-            new PdfString(Encoding.Latin1.GetBytes("sRGB IEC61966-2.1")));
+            new PdfString(Compat.Latin1.GetBytes("sRGB IEC61966-2.1")));
         outputIntentDict.Set("RegistryName",
-            new PdfString(Encoding.Latin1.GetBytes("http://www.color.org")));
+            new PdfString(Compat.Latin1.GetBytes("http://www.color.org")));
 
         var outputIntents = _reader.Resolve(_reader.Catalog.Get("OutputIntents")) as PdfArray;
         if (outputIntents is null)

@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text;
 
 namespace Aspose.Pdf.Text;
@@ -26,6 +27,38 @@ internal sealed class TrueTypeSubsetter
         ParseHead();
     }
 
+    // A symbolic subset: the cmap keys each single-byte code at 0xF000 + code in a (3,0)
+    // subtable, and a glyph's advance may be set in place of its own (font units).
+    private IReadOnlyDictionary<int, int>? _symbolicCodes;
+    private IReadOnlyDictionary<int, int>? _advances;
+
+    /// <summary>
+    /// Subset to the glyphs <paramref name="codeGlyphs"/> names (code → glyph id), as the
+    /// program of a symbolic simple font: its (3,0) cmap maps 0xF000 + code to the glyph, so
+    /// a PDF reader finds it without an /Encoding. <paramref name="advances"/> (glyph id →
+    /// advance in font units), when given, replaces those glyphs' advances, so the program
+    /// agrees with the widths the font dictionary states.
+    /// </summary>
+    public byte[] SubsetSymbolic(IReadOnlyDictionary<int, int> codeGlyphs, IReadOnlyDictionary<int, int>? advances = null)
+    {
+        _symbolicCodes = codeGlyphs;
+        _advances = advances;
+        try { return Subset([]).fontData; }
+        finally { _symbolicCodes = null; _advances = null; }
+    }
+
+    /// <summary>
+    /// <see cref="Subset(IEnumerable{int})"/> with <paramref name="advances"/> (glyph id →
+    /// advance in font units) replacing those glyphs' own advances.
+    /// </summary>
+    public (byte[] fontData, Dictionary<int, int> glyphMap) Subset(IEnumerable<int> charCodes,
+        IReadOnlyDictionary<int, int>? advances)
+    {
+        _advances = advances;
+        try { return Subset(charCodes); }
+        finally { _advances = null; }
+    }
+
     /// <summary>
     /// Create a subset font containing only the glyphs for the given character codes.
     /// Returns (subsetFontData, oldGlyphId -> newGlyphId mapping).
@@ -40,6 +73,9 @@ internal sealed class TrueTypeSubsetter
             if (_parser.CMap.TryGetValue(code, out var gid) && gid > 0 && gid < _numGlyphs)
                 neededGlyphs.Add(gid);
         }
+        if (_symbolicCodes is not null)
+            foreach (var gid in _symbolicCodes.Values)
+                if (gid > 0 && gid < _numGlyphs) neededGlyphs.Add(gid);
 
         // 2. Resolve composite glyph dependencies
         var locaOffsets = ParseLoca();
@@ -166,7 +202,14 @@ internal sealed class TrueTypeSubsetter
     /// dependencies of kept glyphs are kept. Returns the original data when the
     /// font carries no loca/glyf to rebuild.
     /// </summary>
-    public byte[] SubsetSparse(IEnumerable<int> glyphIds)
+    public byte[] SubsetSparse(IEnumerable<int> glyphIds) => SubsetSparse(glyphIds, keepCmap: false);
+
+    /// <summary>
+    /// The sparse subset, optionally keeping the program's own cmap table: a simple
+    /// (single-byte) TrueType font is drawn through its cmap, so its subset needs one, while
+    /// a CID-keyed font never consults it.
+    /// </summary>
+    public byte[] SubsetSparse(IEnumerable<int> glyphIds, bool keepCmap)
     {
         var needed = new SortedSet<int> { 0 };
         foreach (var gid in glyphIds)
@@ -236,6 +279,8 @@ internal sealed class TrueTypeSubsetter
         if (TrimmedName() is { } nm) tables["name"] = nm;
         else if (_tables.TryGetValue("name", out var nt)) tables["name"] = CopyBytes(nt.offset, nt.length);
         if (StubPost() is { } post) tables["post"] = post;
+        if (keepCmap && _tables.TryGetValue("cmap", out var cmap))
+            tables["cmap"] = CopyBytes(cmap.offset, cmap.length);
         return AssembleFont(tables);
     }
 
@@ -427,6 +472,7 @@ internal sealed class TrueTypeSubsetter
         foreach (var gid in glyphs)
         {
             var width = gid < _parser.GlyphWidths.Length ? _parser.GlyphWidths[gid] : 0;
+            if (_advances is not null && _advances.TryGetValue(gid, out var advance)) width = advance;
             WriteUInt16(result, idx * 4, (ushort)width);
             WriteUInt16(result, idx * 4 + 2, (ushort)OriginalLsb(gid));
             idx++;
@@ -485,7 +531,10 @@ internal sealed class TrueTypeSubsetter
         // Build a minimal cmap with a format 4 subtable
         // Map original char codes to new glyph IDs
         var mappings = new List<(int charCode, int newGid)>();
-        foreach (var (charCode, oldGid) in _parser.CMap)
+        var source = _symbolicCodes is not null
+            ? _symbolicCodes.Select(p => (Code: 0xF000 + p.Key, Gid: p.Value))
+            : _parser.CMap.Select(p => (Code: p.Key, Gid: p.Value));
+        foreach (var (charCode, oldGid) in source)
         {
             if (glyphMap.TryGetValue(oldGid, out var newGid))
                 mappings.Add((charCode, newGid));
@@ -515,8 +564,8 @@ internal sealed class TrueTypeSubsetter
         segments.Add((0xFFFF, 0xFFFF, 1));
 
         var segCount = segments.Count;
-        var searchRange = 2 * (int)Math.Pow(2, Math.Floor(Math.Log2(segCount)));
-        var entrySelector = (int)Math.Floor(Math.Log2(segCount));
+        var searchRange = 2 * (int)Math.Pow(2, Math.Floor(Compat.Log2(segCount)));
+        var entrySelector = (int)Math.Floor(Compat.Log2(segCount));
         var rangeShift = 2 * segCount - searchRange;
 
         // Format 4 subtable
@@ -561,7 +610,7 @@ internal sealed class TrueTypeSubsetter
         WriteUInt16(cmap, 2, 1); // 1 subtable
         // Encoding record: platform 3, encoding 1, offset 12
         WriteUInt16(cmap, 4, 3); // platformID (Windows)
-        WriteUInt16(cmap, 6, 1); // encodingID (Unicode BMP)
+        WriteUInt16(cmap, 6, (ushort)(_symbolicCodes is not null ? 0 : 1)); // encodingID (Symbol / Unicode BMP)
         WriteUInt32(cmap, 8, 12); // offset to subtable
         Array.Copy(subtable, 0, cmap, 12, subtableLen);
 
@@ -575,8 +624,8 @@ internal sealed class TrueTypeSubsetter
     private static byte[] AssembleFont(Dictionary<string, byte[]> tables)
     {
         var numTables = tables.Count;
-        var searchRange = (int)Math.Pow(2, Math.Floor(Math.Log2(numTables))) * 16;
-        var entrySelector = (int)Math.Floor(Math.Log2(numTables));
+        var searchRange = (int)Math.Pow(2, Math.Floor(Compat.Log2(numTables))) * 16;
+        var entrySelector = (int)Math.Floor(Compat.Log2(numTables));
         var rangeShift = numTables * 16 - searchRange;
 
         // Calculate total size

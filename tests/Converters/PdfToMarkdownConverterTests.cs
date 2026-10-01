@@ -237,7 +237,7 @@ public class PdfToMarkdownConverterTests
         // "---" might appear in page break settings but not from line detection
         Assert.Contains("Some text", md);
         // Count occurrences of "---" - should only be 0 since it's a single page
-        var ruleCount = md.Split("---").Length - 1;
+        var ruleCount = md.Split(new[] { "---" }, StringSplitOptions.None).Length - 1;
         Assert.Equal(0, ruleCount);
     }
 }

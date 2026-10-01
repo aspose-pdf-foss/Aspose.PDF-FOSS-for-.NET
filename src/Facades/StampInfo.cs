@@ -8,6 +8,9 @@ namespace Aspose.Pdf.Facades;
 /// </summary>
 public sealed class StampInfo
 {
+    /// <summary>Creates an empty stamp description with <c>StampId</c> -1; instances are normally returned by <c>PdfContentEditor.GetStamps</c>.</summary>
+    public StampInfo() { }
+
     /// <summary>
     /// The stamp identifier. This is the /StampId value if one was stored
     /// in the content stream metadata, or -1 if none.
@@ -43,7 +46,7 @@ public sealed class StampInfo
             // bytes but cannot decode them here is a platform limit, not an absent image,
             // and a null is indistinguishable from "no image at all". The raw bytes stay
             // available through ImageBytes.
-            if (!OperatingSystem.IsWindows())
+            if (!Compat.IsWindows())
                 throw new PlatformNotSupportedException(
                     "StampInfo.Image returns a System.Drawing.Image, which is supported only on "
                     + "Windows; use ImageBytes for the undecoded stamp image.");

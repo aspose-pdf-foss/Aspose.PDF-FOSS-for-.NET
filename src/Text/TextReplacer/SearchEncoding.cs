@@ -35,7 +35,7 @@ public sealed partial class TextReplacer
             return sb.ToString();
         }
 
-        return Encoding.Latin1.GetString(bytes);
+        return Compat.Latin1.GetString(bytes);
     }
 
     /// <summary>
@@ -154,7 +154,7 @@ public sealed partial class TextReplacer
             return result.ToArray();
         }
 
-        return Encoding.Latin1.GetBytes(text);
+        return Compat.Latin1.GetBytes(text);
     }
 
     /// <summary>
@@ -195,7 +195,7 @@ public sealed partial class TextReplacer
         if (isHex)
         {
             ms.WriteByte((byte)'<');
-            ms.Write(Encoding.ASCII.GetBytes(Convert.ToHexString(data)));
+            ms.Write(Encoding.ASCII.GetBytes(Compat.ToHexString(data)));
             ms.WriteByte((byte)'>');
         }
         else

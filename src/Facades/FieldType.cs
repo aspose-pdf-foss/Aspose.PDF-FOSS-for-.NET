@@ -1,7 +1,7 @@
 namespace Aspose.Pdf.Facades;
 
 /// <summary>
-/// The type of an AcroForm field, as used by <see cref="FormEditor.AddField"/>
+/// The type of an AcroForm field, as used by <c>FormEditor.AddField</c>
 /// and related facade operations.
 /// </summary>
 public enum FieldType

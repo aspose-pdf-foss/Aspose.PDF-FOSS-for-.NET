@@ -152,4 +152,28 @@ public class TaggedContentTests
         using var doc2 = Document.Open(saved);
         Assert.Equal("Bob", doc2.Info.Author);
     }
+
+    [Fact]
+    public void AdjustPosition_LeftMargin_MovesTheParagraphRight()
+    {
+        double Placed(Aspose.Pdf.Tagged.PositionSettings? settings)
+        {
+            using var document = new Document();
+            var content = document.TaggedContent;
+            var paragraph = content.CreateParagraphElement();
+            content.RootElement.AppendChild(paragraph);
+            paragraph.SetText("Text.");
+            if (settings is not null) paragraph.AdjustPosition(settings);
+            using var saved = new System.IO.MemoryStream();
+            document.Save(saved);
+            using var reopened = new Document(new System.IO.MemoryStream(saved.ToArray()));
+            var absorber = new Aspose.Pdf.Text.TextFragmentAbsorber("Text.");
+            reopened.Pages[1].Accept(absorber);
+            return absorber.TextFragments[1].Rectangle!.LLX;
+        }
+
+        var plain = Placed(null);
+        var moved = Placed(new Aspose.Pdf.Tagged.PositionSettings { Margin = new MarginInfo { Left = 300, Top = 20 } });
+        Assert.InRange(moved - plain, 299.0, 301.0);
+    }
 }

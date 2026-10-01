@@ -4,7 +4,6 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Operators;
 using Aspose.Pdf.Shading;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -17,7 +16,7 @@ public sealed partial class Page
     /// frame <see cref="Annotations.Annotation.GetRectangle(bool)"/> reports and the
     /// one a viewer shows — so on a page carrying /Rotate the page-rotation frame is
     /// composed into the placement matrix, exactly as
-    /// <see cref="AddImage(byte[], Rectangle)"/> does. Without it a stamp anchored to a
+    /// <c>AddImage</c> does. Without it a stamp anchored to a
     /// rotated page's annotation lands sideways and off-box. Unrotated pages are
     /// unaffected (the frame is the identity).</para></summary>
     public void AddStamp(ImageStamp stamp)
@@ -29,7 +28,7 @@ public sealed partial class Page
 
     /// <summary>Apply a page stamp to this page. Delegates to
     /// <see cref="PdfPageStamp.ApplyTo(Page)"/> rather than the generic
-    /// <see cref="AddStamp(Aspose.Pdf.Stamps.Stamp)"/> path: a PdfPageStamp registers
+    /// <see cref="AddStamp(Stamp)"/> path: a PdfPageStamp registers
     /// its source-page Form XObject in this page's /Resources/XObject and emits a
     /// `… /Fm0 Do …` draw call, but the generic path re-wraps that draw in an inner
     /// Form XObject whose resources deliberately omit /XObject, leaving /Fm0 unresolved
@@ -41,7 +40,18 @@ public sealed partial class Page
         stamp.ApplyTo(this);
     }
 
-    public void AddStamp(Aspose.Pdf.Stamps.Stamp stamp)
+    /// <summary>Apply <paramref name="stamp"/> to this page through its <see cref="Stamp.Put(Page)"/>.
+    /// Stamps that draw through the content pipeline land in <see cref="ApplyStamp"/>; a page
+    /// stamp applies itself.</summary>
+    public void AddStamp(Stamp stamp)
+    {
+        if (stamp is null) throw new ArgumentNullException(nameof(stamp));
+        stamp.Put(this);
+    }
+
+    /// <summary>The content pipeline behind <see cref="AddStamp(Stamp)"/>: the stamp builds its
+    /// content stream against this page and lands as a Form XObject.</summary>
+    internal void ApplyStamp(Stamp stamp)
     {
         // Register Helvetica in the page resources and pass the resolved
         // resource name into the stamp. If the page already uses "F1" for an
@@ -54,7 +64,7 @@ public sealed partial class Page
         // content with a Do operator. Emitting the stamp as a form (rather than
         // inline content) keeps the page content stream a simple reference and
         // surfaces the stamp under the page's /Resources/XObject (page.Resources.Forms).
-        var formName = AddStampForm(stampBytes, stampId: stamp.StampId,
+        var formName = AddStampForm(stampBytes, stamp.FormBBox, stampId: stamp.StampId,
             startAtExistingCount: stamp.NameFormAfterExistingXObjects);
         // Embed a %StampId comment ahead of the Do reference when the stamp carries an
         // id, so PdfContentEditor.GetStamps / DeleteStampById can identify it on reload.
@@ -150,10 +160,6 @@ public sealed partial class Page
     }
 
     /// <summary>
-    /// Flatten all annotations on this page — render their visual appearance
-    /// into the page content stream and remove them from the annotations array.
-    /// </summary>
-    /// <summary>
     /// Flattens all annotations into the page's content stream.
     /// Each annotation's appearance stream (AP/N) is drawn at the annotation's Rect position
     /// by computing a CTM that maps the appearance's BBox to the Rect. The annotation is then
@@ -212,7 +218,7 @@ public sealed partial class Page
             // position the appearance at Rect.LLX/LLY, compensating for BBox origin.
             var (sx, sy, tx, ty) = ComputeAppearanceCtm(rect, appearanceStream);
 
-            var writer = new StreamWriter(appendContent, System.Text.Encoding.ASCII, leaveOpen: true);
+            var writer = Compat.LeaveOpenWriter(appendContent, System.Text.Encoding.ASCII);
             writer.Write(
                 $"q {Format(sx)} 0 0 {Format(sy)} {Format(tx)} {Format(ty)} cm\n");
             writer.Flush();

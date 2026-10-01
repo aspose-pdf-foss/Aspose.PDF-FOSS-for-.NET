@@ -17,6 +17,7 @@ public sealed class Circle : Shape
     /// <summary>Centre Y (alias for <see cref="CenterY"/>).</summary>
     public double PosY { get => CenterY; set => CenterY = value; }
 
+    /// <summary>Creates a circle with the given centre and radius, in points relative to the graph.</summary>
     public Circle(double centerX, double centerY, double radius)
     {
         CenterX = centerX; CenterY = centerY; Radius = radius;

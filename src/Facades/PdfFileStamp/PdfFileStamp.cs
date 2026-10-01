@@ -1,6 +1,5 @@
 using System.Text;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 
 namespace Aspose.Pdf.Facades;
 

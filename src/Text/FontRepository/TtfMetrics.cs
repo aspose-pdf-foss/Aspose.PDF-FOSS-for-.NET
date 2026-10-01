@@ -342,7 +342,7 @@ public partial class FontRepository
                     }
                     else if (platformID == 1 && languageID == 0)
                     {
-                        macEnglish ??= System.Text.Encoding.Latin1.GetString(data, strStart, length);
+                        macEnglish ??= Compat.Latin1.GetString(data, strStart, length);
                     }
                 }
                 var fam = winEnglish ?? macEnglish ?? winAny;
@@ -370,6 +370,51 @@ public partial class FontRepository
         return "Unknown";
     }
 
+    /// <summary>
+    /// The face's PostScript name (name id 6), which is what a PDF /BaseFont
+    /// carries. It is not the full name: Lato's full name is "Lato Regular"
+    /// while its PostScript name is "Lato-Regular", and a reader comparing font
+    /// names sees the difference.
+    /// </summary>
+    internal static string? ReadTtfPostScriptName(byte[] data)
+    {
+        if (data.Length < 12) return null;
+        var numTables = ReadUInt16BE(data, 4);
+        for (int i = 0; i < numTables; i++)
+        {
+            var offset = 12 + i * 16;
+            if (offset + 16 > data.Length) break;
+            if (System.Text.Encoding.ASCII.GetString(data, offset, 4) != "name") continue;
+            return ParsePostScriptName(data, (int)ReadUInt32BE(data, offset + 8));
+        }
+        return null;
+    }
+
+    private static string? ParsePostScriptName(byte[] data, int tableOffset)
+    {
+        const int PostScriptNameId = 6;
+        if (tableOffset + 6 > data.Length) return null;
+        var count = ReadUInt16BE(data, tableOffset + 2);
+        var stringOffset = tableOffset + ReadUInt16BE(data, tableOffset + 4);
+        for (int i = 0; i < count; i++)
+        {
+            var recOff = tableOffset + 6 + i * 12;
+            if (recOff + 12 > data.Length) break;
+            var platformID = ReadUInt16BE(data, recOff);
+            if (ReadUInt16BE(data, recOff + 6) != PostScriptNameId) continue;
+
+            var length = ReadUInt16BE(data, recOff + 8);
+            var strStart = stringOffset + ReadUInt16BE(data, recOff + 10);
+            if (strStart + length > data.Length) continue;
+
+            var name = platformID is 3 or 0
+                ? System.Text.Encoding.BigEndianUnicode.GetString(data, strStart, length)
+                : Compat.Latin1.GetString(data, strStart, length);
+            if (name.Length > 0) return name;
+        }
+        return null;
+    }
+
     private static string ParseNameTable(byte[] data, int tableOffset)
     {
         if (tableOffset + 6 > data.Length) return "Unknown";
@@ -394,7 +439,7 @@ public partial class FontRepository
             if (platformID == 3 || platformID == 0)
                 name = System.Text.Encoding.BigEndianUnicode.GetString(data, strStart, length);
             else if (platformID == 1)
-                name = System.Text.Encoding.Latin1.GetString(data, strStart, length);
+                name = Compat.Latin1.GetString(data, strStart, length);
             else continue;
             var english = (platformID == 3 && (languageID & 0x3FF) == 0x009) // any en-* LCID
                           || (platformID == 1 && languageID == 0)

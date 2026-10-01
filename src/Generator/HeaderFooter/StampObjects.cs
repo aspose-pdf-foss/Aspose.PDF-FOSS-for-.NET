@@ -1,6 +1,5 @@
 ﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -108,20 +107,29 @@ public sealed partial class HeaderFooter
         // already carries the first text line's font-size inset, which
         // applies to text baselines, not to a table's top edge. The
         // header's left margin becomes the table's flow offset.
-        var tableTop = hf.isHeader ? hf.pageHeight - hf.mTop : hf.y;
-        // Per-page working clones of interactive fields in a footer table:
-        // the SAME footer renders on every page, and each page must carry
-        // its own field + widget (one AcroForm field per page, all at the
-        // same footer rectangle).
-        List<(Cell cell, int idx, Aspose.Pdf.Forms.CheckboxField proto, Aspose.Pdf.Forms.CheckboxField clone)>? fieldSwaps = null;
-        var footerBottomBound = 36.0;
-        PlaceFooterTable(hf, tbl, ref fieldSwaps, ref tableTop, ref footerBottomBound);
+        hf.tableTop = hf.isHeader ? hf.pageHeight - hf.mTop : hf.y;
+        hf.fieldSwaps = null;
+        hf.footerBottomBound = 36.0;
+        PlaceFooterTable(hf, tbl);
         if (tbl.FlowLeftOffset == 0) tbl.FlowLeftOffset = hf.mLeft;
-        if (!hf.isHeader) tbl.SuppressBaselineLift = true;
-        var contents = tbl.BuildMultiPage(hf.page, tableTop, hf.isHeader ? 36 : footerBottomBound);
-        if (fieldSwaps is not null)
+        // The table's columns fit the BAND (its side margins, 90 by default), not the
+        // page's content box: probed, "300 200 200" on a 650 pt page draws 470 wide from
+        // x 90 (201.4 / 134.3 / 134.3), 415 wide on a 595 pt page.
+        // A CENTRED band table scales in proportion; a left one keeps its declared widths
+        // and its last column takes what is left of the band (probed: "165 172 165" on a
+        // 495 pt band centres its middle text on 50 + 165 + 86).
+        if (tbl.UsableWidthOverride <= 0)
         {
-            foreach (var (c, idx, proto, clone) in fieldSwaps)
+            tbl.UsableWidthOverride = hf.page.Width - hf.mLeft - (Margin.RightTouched ? Margin.Right : DefaultBandMargin);
+            tbl.FitColumnsToBand = tbl.Alignment == HorizontalAlignment.Center;
+        }
+        // A footer table seats its rows exactly as a body table does (probed: "300 200 200"
+        // Arial 11 cells with LineSpacing 5 put their baseline 13.68 under the row top in
+        // both places); the band suppressed the baseline lift and sat 2.3 pt low.
+        var contents = tbl.BuildMultiPage(hf.page, hf.tableTop, hf.isHeader ? 36 : hf.footerBottomBound);
+        if (hf.fieldSwaps is not null)
+        {
+            foreach (var (c, idx, proto, clone) in hf.fieldSwaps)
             {
                 c.Paragraphs[idx] = proto;
                 // Register the placed clone in the AcroForm for THIS page (the
@@ -145,7 +153,7 @@ public sealed partial class HeaderFooter
     }
 
     /// <summary>Seats a footer table above the page's bottom margin and swaps its check boxes for the page's own.</summary>
-    private void PlaceFooterTable(StampParagraphsState hf, Table tbl, ref List<(Cell cell, int idx, Aspose.Pdf.Forms.CheckboxField proto, Aspose.Pdf.Forms.CheckboxField clone)>? fieldSwaps, ref double tableTop, ref double footerBottomBound)
+    private void PlaceFooterTable(StampParagraphsState hf, Table tbl)
     {
         if (!hf.isHeader)
         {
@@ -168,7 +176,7 @@ public sealed partial class HeaderFooter
                 // (widget rect (90,60)-(100,70) with a 14 pt caption baseline
                 // at 60.6).
                 var bandBottom = Margin.BottomTouched ? Margin.Bottom : 60.0;
-                tableTop = bandBottom + tbl.GetHeight(hf.page);
+                hf.tableTop = bandBottom + tbl.GetHeight(hf.page);
                 if (hf.document is not null)
                 {
                     foreach (var r in tbl.Rows)
@@ -182,7 +190,7 @@ public sealed partial class HeaderFooter
                                         Height = proto.Height,
                                         Style = proto.Style,
                                     };
-                                    (fieldSwaps ??= new()).Add((c, pidx, proto, clone));
+                                    (hf.fieldSwaps ??= new()).Add((c, pidx, proto, clone));
                                     c.Paragraphs[pidx] = clone;
                                 }
                 }
@@ -194,15 +202,15 @@ public sealed partial class HeaderFooter
                 // top edge sits at the page margin, not at the footer's own
                 // Margin.Bottom), so pass an extended bottom bound to keep
                 // the whole table on this page.
-                tableTop = hf.page.PageInfo?.Margin is { BottomTouched: true } pbm ? pbm.Bottom
+                hf.tableTop = hf.page.PageInfo?.Margin is { BottomTouched: true } pbm ? pbm.Bottom
                     : hf.document?.PageInfo?.Margin is { BottomTouched: true } dbm ? dbm.Bottom
                     : 72;
                 // The footer's own Margin.Top is the gap between the page's
                 // bottom margin line and the table's top edge (probed: a
                 // 14 pt Margin.Top on a 72 pt page margin seats the table
                 // top at 734 on a 792 pt page).
-                if (Margin.TopTouched && Margin.Top > 0) tableTop -= Margin.Top;
-                footerBottomBound = -hf.pageHeight;
+                if (Margin.TopTouched && Margin.Top > 0) hf.tableTop -= Margin.Top;
+                hf.footerBottomBound = -hf.pageHeight;
             }
         }
     }
@@ -242,10 +250,7 @@ public sealed partial class HeaderFooter
             si.boxOffY = (si.boxH - si.imgH) / 2;
         }
 
-        si.imgRight = Margin.RightTouched ? Margin.Right
-            : hf.page.PageInfo?.Margin is { RightTouched: true } prm ? prm.Right
-            : hf.document?.PageInfo?.Margin is { RightTouched: true } drm ? drm.Right
-            : DefaultBandMargin;
+        si.imgRight = Margin.RightTouched ? Margin.Right : DefaultBandMargin;
         si.boxX = img.HorizontalAlignment switch
         {
             HorizontalAlignment.Right => hf.page.Width - si.imgRight - si.boxW,
@@ -281,7 +286,7 @@ public sealed partial class HeaderFooter
         si.svgViewH = 0;
         if (Table.IsSvg(img, si.imgData))
         {
-            var raster = ImageRasterizer.RasterizeSvg(si.imgData, out var vw, out var vh);
+            var (raster, vw, vh) = ImageRasterizer.RasterizeSvgWithSize(si.imgData);
             if (raster is not null) { si.imgData = raster; si.svgViewW = vw; si.svgViewH = vh; }
         }
         return true;

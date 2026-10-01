@@ -325,9 +325,9 @@ internal static partial class MarkdownRenderer
     /// <summary>True when every glyph of the paragraph shares one font size and style, the
     /// size is at least the most common size, and the run is either bold/italic or at least
     /// 1.8× the common size (HeuristicHeaderDetector.CheckTextFeatures).</summary>
-    private static bool IsHeuristicHeader(List<Line> paragraph, double commonSize, out double fontSize)
+    private static double? IsHeuristicHeader(List<Line> paragraph, double commonSize)
     {
-        fontSize = 0;
+        double fontSize = 0;
         double size = -1;
         var style = FontStyles.Regular;
         var have = false;
@@ -340,14 +340,14 @@ internal static partial class MarkdownRenderer
             var fStyle = f.TextState.FontStyle;
             var fSize = f.TextState.FontSize;
             if (!have) { size = fSize; style = fStyle; have = true; continue; }
-            if (fStyle != style) return false;
-            if (Math.Abs(size - fSize) > FontSizeEqualityThreshold) return false;
+            if (fStyle != style) return null;
+            if (Math.Abs(size - fSize) > FontSizeEqualityThreshold) return null;
         }
-        if (!have || size < 0) return false;
-        if (size < commonSize) return false;
-        if (style == FontStyles.Regular && size < HeaderFontSizeRatio * commonSize) return false;
+        if (!have || size < 0) return null;
+        if (size < commonSize) return null;
+        if (style == FontStyles.Regular && size < HeaderFontSizeRatio * commonSize) return null;
         fontSize = size;
-        return true;
+        return fontSize;
     }
 
     private static void AddDistinct(List<double> sizes, double s)

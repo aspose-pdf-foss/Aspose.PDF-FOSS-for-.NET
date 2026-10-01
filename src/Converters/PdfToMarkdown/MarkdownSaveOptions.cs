@@ -7,6 +7,9 @@ namespace Aspose.Pdf.PdfToMarkdown
     /// </summary>
     public class MarkdownSaveOptions : SaveOptions
     {
+        /// <summary>Creates Markdown save options with their default values; resources go into a <c>resources</c> sub-directory.</summary>
+        public MarkdownSaveOptions() { }
+
         /// <summary>
         /// Name of the sub-directory (created next to the output file) that extracted
         /// image/vector resources are written into and referenced from.

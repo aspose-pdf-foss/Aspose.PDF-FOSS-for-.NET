@@ -2,16 +2,28 @@
 
 ## Prerequisites
 
-- [.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) or later
+- A project targeting .NET Framework 4.8, a runtime that consumes .NET Standard 2.0,
+  or .NET 8 / 9 / 10 — the library ships `netstandard2.0`, `net48`, `net8.0`,
+  `net9.0` and `net10.0` builds (the examples below use the [.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) or later)
 - Any OS: Windows, macOS, or Linux
 
-The only runtime dependency is the **`System.Drawing.Common`** NuGet package, used by a handful of image-interop members that are Windows-only on .NET 8 (they throw `PlatformNotSupportedException` on Linux/macOS): the members that return a `System.Drawing` object (`ImageDevice.GetBitmap`, `FigureElement.Image`, `StampInfo.Image`; `XImage.Grayscaled` returns `null` instead), the hOCR overloads of `Document.Convert` that hand each page to the callback as a `System.Drawing.Image`, EMF output in `PdfConverter`, and EMF/WMF stamp images. The rest of the library — text, forms, parsing, encryption & signing, and page→image rendering via `PngDevice`/`JpegDevice`/`BmpDevice`/`GifDevice`/`TiffDevice` — runs on Windows, macOS, and Linux. On Windows the image devices rasterise through GDI+; elsewhere (or when the environment variable `ASPOSE_PDF_FORCE_SOFTWARE_RENDERER=1` is set) they use the library's own managed rasteriser.
+On the modern targets the only runtime dependency is the **`System.Drawing.Common`** NuGet package; the `netstandard2.0` and `net48` builds also pull in `System.Text.Json`, `System.Memory`, `System.Security.Cryptography.Pkcs`, `System.Text.Encoding.CodePages` and `Microsoft.Bcl.HashCode`, which carry APIs those base class libraries lack. `System.Drawing.Common` is used by a handful of image-interop members that are Windows-only (they throw `PlatformNotSupportedException` on Linux/macOS): the members that return a `System.Drawing` object (`ImageDevice.GetBitmap`, `PdfViewer.DecodePage`, `FigureElement.Image`, `StampInfo.Image`, the `Bitmap` views of `ImagesDifference`; `XImage.Grayscaled` returns `null` instead), the hOCR overloads of `Document.Convert` that hand each page to the callback as a `System.Drawing.Image`, EMF output in `PdfConverter`, GIF output of `PdfConverter.MergeImages`, and EMF/WMF stamp images. The rest of the library — text, forms, parsing, encryption & signing, page comparison, and page→image rendering via `PngDevice`/`JpegDevice`/`BmpDevice`/`GifDevice`/`TiffDevice` — runs on Windows, macOS, and Linux. On Windows the image devices rasterise through GDI+; elsewhere (or when the environment variable `ASPOSE_PDF_FORCE_SOFTWARE_RENDERER=1` is set) they use the library's own managed rasteriser.
 
-Printing is not implemented: `PdfViewer.PrintDocument` throws `PlatformNotSupportedException` — render pages to images and hand them to your own printing stack. `Aspose.Pdf.Printing.PrintingOptionalDependencyGuard.EnsureDependenciesAvailable()` checks that `System.Drawing.Common` can be loaded and throws `MissingOptionalDependencyException` (naming the package to install) when it cannot.
+Printing runs on Windows, where `System.Drawing.Printing` can reach the print spooler: `PdfViewer.PrintDocument` and its siblings submit a job to an installed printer. Each page goes to the printer as drawing commands (glyph outlines, paths and the page's own images), so it prints at the printer's resolution; it is sent as an image rendered at `PdfViewer.Resolution` dpi only when `PrintAsImage`, `PrintAsGrayscale` or `UseIntermidiateImage` is set, or when the page cannot be drawn as commands (Type 3 text, transparency groups, blend modes, soft masks). A print-to-file job with a `.pdf` target needs no printer and works anywhere. `Aspose.Pdf.Printing.PrintingOptionalDependencyGuard.EnsureDependenciesAvailable()` checks that `System.Drawing.Common` can be loaded and throws `MissingOptionalDependencyException` (naming the package to install) when it cannot.
 
 ## Installation
 
-Build from source:
+Install the [`Aspose.PDF.FOSS`](https://www.nuget.org/packages/Aspose.PDF.FOSS/) package from NuGet:
+
+```bash
+dotnet add package Aspose.PDF.FOSS --version 26.10.0
+```
+
+```xml
+<PackageReference Include="Aspose.PDF.FOSS" Version="26.10.0" />
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET.git
@@ -32,7 +44,8 @@ Reference the built project directly:
 ```bash
 dotnet new console -n PdfDemo
 cd PdfDemo
-# (add the project reference shown above to PdfDemo.csproj)
+dotnet add package Aspose.PDF.FOSS --version 26.10.0
+# (or add the project reference shown above to PdfDemo.csproj)
 ```
 
 ### Open a PDF and extract text
@@ -110,10 +123,13 @@ using var doc6 = Document.Open("drawing.svg", new SvgLoadOptions());
 
 // From plain text
 using var doc7 = new Document("notes.txt", new TxtLoadOptions());
+
+// From PostScript / Encapsulated PostScript
+using var doc8 = new Document("artwork.eps", new PsLoadOptions());
 ```
 
-`HtmlLoadOptions`, `MdLoadOptions`, `SvgLoadOptions`, and `TxtLoadOptions` all
-live in the `Aspose.Pdf` namespace. Each has constructor overloads
+`HtmlLoadOptions`, `MdLoadOptions`, `SvgLoadOptions`, `TxtLoadOptions`, and
+`PsLoadOptions` all live in the `Aspose.Pdf` namespace. Each has constructor overloads
 (`new Document(path | stream, options)`); HTML, Markdown, and SVG additionally
 have the static factory (`Document.Open(path | byte[], options)`), so either
 form can be used for those. `Document.Open(...)` also has plain PDF overloads
@@ -164,7 +180,7 @@ byte[] bytes = doc.ToArray();
 doc.Save();
 ```
 
-`doc.Save()` (no argument) writes back to the source: to the file path the document was opened from, or (as an incremental update) into the stream passed to `new Document(stream)` when that stream is writable and seekable. A document created from a byte array, from `Document.Open(stream)`, or from a read-only stream has no writable source; `doc.Save()` then only finalises the in-memory document (paragraph layout, stamp materialisation) and writes nothing — use `doc.Save(path)`, `doc.Save(stream)`, or `doc.ToArray()` to get the bytes.
+`doc.Save()` (no argument) writes back to the source: to the file path the document was opened from, or (as an incremental update) into the stream passed to `new Document(stream)` when that stream is writable and seekable. Once content has been removed for good — by a redaction or by `HiddenDataSanitizer` — the whole document is rewritten over that stream instead, so the removed content does not survive in an earlier revision. A document created from a byte array (`Document.Open(byte[])`), from `Document.Open(stream)`, from a read-only stream, or converted from HTML, Markdown, SVG, text or PostScript has no writable source; `doc.Save()` then only finalises the in-memory document (paragraph layout, stamp materialisation) and writes nothing — use `doc.Save(path)`, `doc.Save(stream)`, or `doc.ToArray()` to get the bytes.
 
 ### Saving as PDF/A
 
@@ -186,10 +202,11 @@ doc.Save("output_pdfa2b.pdf");
 - [Bookmarks & Navigation](bookmarks-and-navigation.md) — outlines, named destinations, page labels
 - [Security and Encryption](security-and-encryption.md) — encrypt, decrypt, digital signatures
 - [Metadata & XMP](metadata-and-xmp.md) — document info dictionary and XMP packet
-- [Converters](converters.md) — PDF to / from HTML, Markdown, SVG, text
-- [Rendering](rendering.md) — render pages to PNG, JPEG, BMP, TIFF
+- [Converters](converters.md) — PDF to / from HTML, Markdown, SVG, text; PostScript / EPS to PDF
+- [Rendering](rendering.md) — render pages to PNG, JPEG, BMP, GIF, TIFF, SVG
 - [Optimization](optimization.md) — compress images, subset fonts, PDF/A
 - [Working with Tables](working-with-tables.md) — extract and create tables
 - [Tagged PDF](tagged-pdf.md) — accessible PDFs with structure trees
 - [Facades](facades.md) — high-level API for common tasks
+- [Comparison](comparison.md) — side-by-side, text and graphical comparison of pages and documents
 - [API Reference](api-reference.md) — complete class and method listing

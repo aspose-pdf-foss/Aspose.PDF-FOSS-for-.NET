@@ -81,17 +81,17 @@ internal sealed class RsaKey
         Array.Copy(digestInfo, 0, padded, 3 + psLen, digestInfo.Length);
 
         // RSA private key operation: signature = padded^d mod n
-        var m = new BigInteger(padded, isUnsigned: true, isBigEndian: true);
+        var m = Compat.BigIntegerFromUnsignedBigEndian(padded);
 
         BigInteger s;
         if (P is not null && Q is not null && Dp is not null && Dq is not null && InverseQ is not null)
         {
             // CRT optimization
-            var p = new BigInteger(P, isUnsigned: true, isBigEndian: true);
-            var q = new BigInteger(Q, isUnsigned: true, isBigEndian: true);
-            var dp = new BigInteger(Dp, isUnsigned: true, isBigEndian: true);
-            var dq = new BigInteger(Dq, isUnsigned: true, isBigEndian: true);
-            var qInv = new BigInteger(InverseQ, isUnsigned: true, isBigEndian: true);
+            var p = Compat.BigIntegerFromUnsignedBigEndian(P);
+            var q = Compat.BigIntegerFromUnsignedBigEndian(Q);
+            var dp = Compat.BigIntegerFromUnsignedBigEndian(Dp);
+            var dq = Compat.BigIntegerFromUnsignedBigEndian(Dq);
+            var qInv = Compat.BigIntegerFromUnsignedBigEndian(InverseQ);
 
             var m1 = BigInteger.ModPow(m, dp, p);
             var m2 = BigInteger.ModPow(m, dq, q);
@@ -106,12 +106,12 @@ internal sealed class RsaKey
         }
         else
         {
-            var n = new BigInteger(Modulus, isUnsigned: true, isBigEndian: true);
-            var d = new BigInteger(PrivateExponent, isUnsigned: true, isBigEndian: true);
+            var n = Compat.BigIntegerFromUnsignedBigEndian(Modulus);
+            var d = Compat.BigIntegerFromUnsignedBigEndian(PrivateExponent);
             s = BigInteger.ModPow(m, d, n);
         }
 
-        var result = s.ToByteArray(isUnsigned: true, isBigEndian: true);
+        var result = Compat.ToUnsignedBigEndian(s);
         // Pad to key length
         if (result.Length < keyLen)
         {

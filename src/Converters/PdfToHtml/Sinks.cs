@@ -68,7 +68,7 @@ public sealed partial class PdfToHtmlConverter
             }
             // The same image drawn on many pages (a logo, a letterhead) is written once
             // and referenced repeatedly, keyed by content.
-            var key = Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(png));
+            var key = Compat.ToHexString(Compat.Sha1(png));
             if (!_byContent.TryGetValue(key, out var entry))
             {
                 var name = $"img_{++Counter:00}.png";
@@ -106,7 +106,7 @@ public sealed partial class PdfToHtmlConverter
         {
             if (EmbedDataUris)
                 return "data:image/png;base64," + Convert.ToBase64String(png);
-            var key = Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(png));
+            var key = Compat.ToHexString(Compat.Sha1(png));
             if (!_byContent.TryGetValue(key, out var entry))
             {
                 var name = $"img_{++Counter:00}.png";

@@ -14,6 +14,7 @@ public sealed class Dash
     /// <summary>Raw dash-pattern array (alternating on/off lengths).</summary>
     public int[] Pattern { get; }
 
+    /// <summary>Creates a dash pattern of <c>on</c> units of dash followed by <c>off</c> units of gap.</summary>
     public Dash(int on, int off)
     {
         On = on;

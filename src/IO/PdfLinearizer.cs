@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -19,7 +19,7 @@ namespace Aspose.Pdf.IO;
 /// entry offset, and the /Prev link) are emitted as fixed-width placeholders and patched once
 /// every byte position is final, so a single forward pass produces the file.
 /// </summary>
-internal static class PdfLinearizer
+internal static partial class PdfLinearizer
 {
     // Private marker on the primary hint stream so a subsequent linearize cycle recognizes and
     // drops the previous one (keeping re-save idempotent). Readers ignore unknown stream keys.
@@ -56,148 +56,73 @@ internal static class PdfLinearizer
 
     private static byte[] LinearizeCore(byte[] src)
     {
-        var reader = PdfReader.FromBytes(src);
+        var lz = new LinearizeState();
+        lz.src = src;
+        lz.reader = PdfReader.FromBytes(lz.src);
 
         // Encrypted documents: re-laying-out object bytes by offset is unsound (encryption
         // keys depend on object identity/position). Keep the compact output.
-        if (reader.IsDecrypted || reader.Trailer.Get("Encrypt") is not null) return src;
+        if (lz.reader.IsDecrypted || lz.reader.Trailer.Get("Encrypt") is not null) return lz.src;
 
-        // Drop the linearization infrastructure carried over from a previously-linearized save —
-        // the stale linearization parameter dictionary (its /Linearized key) and the primary hint
-        // stream this linearizer emitted (its private /AsposeHint marker, see below). A fresh pair
-        // is written each time; copying the old ones forward would accumulate one hint stream per
-        // save cycle (a size regression that breaks re-save idempotency).
-        var skip = new HashSet<int>();
-        foreach (var e in reader.XRefTable.Entries.Values)
+        lz.skip = new HashSet<int>();
+        foreach (var e in lz.reader.XRefTable.Entries.Values)
         {
             if (!e.InUse || e.ObjectNumber == 0 || e.StreamObjectNumber > 0) continue;
-            var b = ExtractObjectBytes(src, e.Offset, e.ObjectNumber);
+            var b = ExtractObjectBytes(lz.src, e.Offset, e.ObjectNumber);
             if (b is null) continue;
             if (IndexOf(b, "/Linearized", 0) >= 0 || IndexOf(b, HintMarker, 0) >= 0)
-                skip.Add(e.ObjectNumber);
+                lz.skip.Add(e.ObjectNumber);
         }
 
-        var objs = new Dictionary<int, RawObject>();
-        foreach (var entry in reader.XRefTable.Entries.Values)
+        lz.objs = new Dictionary<int, RawObject>();
+        foreach (var entry in lz.reader.XRefTable.Entries.Values)
         {
             if (!entry.InUse || entry.ObjectNumber == 0) continue;
-            if (entry.StreamObjectNumber > 0) return src; // compressed object — keep compact output
-            if (skip.Contains(entry.ObjectNumber)) continue;
-            var bytes = ExtractObjectBytes(src, entry.Offset, entry.ObjectNumber);
-            if (bytes is null) return src; // compressed/odd object — give up, keep compact output
-            objs[entry.ObjectNumber] = new RawObject(entry.ObjectNumber, bytes);
+            if (entry.StreamObjectNumber > 0) return lz.src; // compressed object — keep compact output
+            if (lz.skip.Contains(entry.ObjectNumber)) continue;
+            var bytes = ExtractObjectBytes(lz.src, entry.Offset, entry.ObjectNumber);
+            if (bytes is null) return lz.src; // compressed/odd object — give up, keep compact output
+            lz.objs[entry.ObjectNumber] = new RawObject(entry.ObjectNumber, bytes);
         }
-        if (objs.Count == 0) return src;
-        if (reader.Trailer.Get("Root") is not PdfIndirectRef rootRef) return src;
+        if (lz.objs.Count == 0) return lz.src;
+        if (lz.reader.Trailer.Get("Root") is not PdfIndirectRef rootRef) return lz.src;
 
-        var catalog = reader.Catalog;
-        var pagesRoot = reader.ResolveDict(catalog.Get("Pages"));
-        int pageCount = pagesRoot?.Get("Count") is PdfInteger pc ? (int)pc.Value : 1;
-        int firstPageNum = FindFirstPageObjectNumber(reader, pagesRoot) ?? rootRef.ObjectNumber;
+        lz.catalog = lz.reader.Catalog;
+        lz.pagesRoot = lz.reader.ResolveDict(lz.catalog.Get("Pages"));
+        lz.pageCount = lz.pagesRoot?.Get("Count") is PdfInteger pc ? (int)pc.Value : 1;
+        lz.firstPageNum = FindFirstPageObjectNumber(lz.reader, lz.pagesRoot) ?? rootRef.ObjectNumber;
 
-        var firstPageSet = CollectFirstPageSection(reader, catalog, rootRef.ObjectNumber, firstPageNum);
+        lz.firstPageSet = CollectFirstPageSection(lz.reader, lz.catalog, rootRef.ObjectNumber, lz.firstPageNum);
 
-        int maxNum = objs.Keys.Max();
-        int linObjNum = maxNum + 1;
-        int hintObjNum = maxNum + 2;
-        int size = maxNum + 3;
+        lz.maxNum = lz.objs.Keys.Max();
+        lz.linObjNum = lz.maxNum + 1;
+        lz.hintObjNum = lz.maxNum + 2;
+        lz.size = lz.maxNum + 3;
 
-        var firstSection = objs.Values.Where(o => firstPageSet.Contains(o.Num)).OrderBy(o => o.Num).ToList();
-        var restSection = objs.Values.Where(o => !firstPageSet.Contains(o.Num)).OrderBy(o => o.Num).ToList();
+        lz.firstSection = lz.objs.Values.Where(o => lz.firstPageSet.Contains(o.Num)).OrderBy(o => o.Num).ToList();
+        lz.restSection = lz.objs.Values.Where(o => !lz.firstPageSet.Contains(o.Num)).OrderBy(o => o.Num).ToList();
 
-        // The two tables PARTITION the file (PDF 32000-1 Annex F): the first-page table
-        // carries the linearization dictionary, the hint stream and the first-page objects;
-        // the main table carries everything else and opens on object 0's free entry. Listing
-        // every object in BOTH still resolves - a reader finds the first-page entries before
-        // it walks /Prev - but it writes each first-page object twice and puts the main
-        // table's leading subsection at odds with the section it actually describes.
-        var firstXrefNums = new List<int> { linObjNum, hintObjNum };
-        firstXrefNums.AddRange(firstSection.Select(o => o.Num));
-        firstXrefNums = firstXrefNums.Distinct().OrderBy(n => n).ToList();
-        var allNums = restSection.Select(o => o.Num).Distinct().OrderBy(n => n).ToList();
+        lz.firstXrefNums = new List<int> { lz.linObjNum, lz.hintObjNum };
+        lz.firstXrefNums.AddRange(lz.firstSection.Select(o => o.Num));
+        lz.firstXrefNums = lz.firstXrefNums.Distinct().OrderBy(n => n).ToList();
+        lz.allNums = lz.restSection.Select(o => o.Num).Distinct().OrderBy(n => n).ToList();
 
-        var ms = new MemoryStream();
-        var offsets = new Dictionary<int, long>();
-        var xrefEntryPos = new Dictionary<(int section, int num), long>(); // placeholder offset positions
-        var lin = new Dictionary<string, long>();
-        long prevPos = 0;
-        void W(string s) { var b = Encoding.ASCII.GetBytes(s); ms.Write(b, 0, b.Length); }
+        lz.ms = new MemoryStream();
+        lz.offsets = new Dictionary<int, long>();
+        lz.xrefEntryPos = new Dictionary<(int section, int num), long>(); // placeholder offset positions
+        lz.lin = new Dictionary<string, long>();
+        lz.prevPos = 0;
 
-        // 1. Header — mirror PdfWriter.WriteHeader (version, binary comment, producer comment).
-        // Linearizing re-serialises a document the writer has already emitted; it must carry
-        // that document's version over. Stamping a fixed version here silently rewrote the
-        // header of every linearized save, so a document converted to an older version came
-        // back reporting a newer one.
-        W($"%PDF-{HeaderVersion(src)}\n");
-        ms.WriteByte((byte)'%'); ms.Write(new byte[] { 0xE2, 0xE3, 0xCF, 0xD3 }, 0, 4); ms.WriteByte((byte)'\n');
-        W("%   \n");
+        WriteLinearizationHead(lz, rootRef);
 
-        // 2. Linearization parameter dictionary (fixed-width placeholders).
-        offsets[linObjNum] = ms.Position;
-        W($"{linObjNum} 0 obj\n<< /Linearized 1 /L "); lin["L"] = ms.Position; W(Z());
-        W(" /H [ "); lin["Hoff"] = ms.Position; W(Z()); W(" "); lin["Hlen"] = ms.Position; W(Z());
-        W($" ] /O {firstPageNum} /E "); lin["E"] = ms.Position; W(Z());
-        W($" /N {pageCount} /T "); lin["T"] = ms.Position; W(Z());
-        W(" >>\nendobj\n");
+        WriteLinearizedFirstSection(lz);
 
-        // 3. First-page cross-reference section + trailer (/Prev patched later).
-        long firstXrefPos = ms.Position;
-        EmitXref(ms, firstXrefNums, xrefEntryPos, section: 0, W, withFreeHead: false);
-        W($"trailer\n<< /Size {size} /Root {rootRef.ObjectNumber} 0 R");
-        if (reader.Trailer.Get("Info") is PdfIndirectRef inf) W($" /Info {inf.ObjectNumber} 0 R");
-        var idStr = TrailerIdString(reader.Trailer); if (idStr is not null) W(" /ID " + idStr);
-        W(" /Prev "); prevPos = ms.Position; W(Z());
-        W(" >>\nstartxref\n0\n%%EOF\n");
+        WriteLinearizedMainSection(lz);
 
-        // 4. First-page section bodies.
-        foreach (var o in firstSection) { offsets[o.Num] = ms.Position; ms.Write(o.Bytes, 0, o.Bytes.Length); W("\n"); }
+        lz.buf = lz.ms.ToArray();
 
-        // 5. Primary hint stream (inside the first section; /H points here).
-        offsets[hintObjNum] = ms.Position;
-        long hintPos = ms.Position;
-        var hintBytes = BuildHintStream();
-        W($"{hintObjNum} 0 obj\n<< /Length {hintBytes.Length} /S {hintBytes.Length} {HintMarker} true >>\nstream\n");
-        long hintStart = ms.Position; ms.Write(hintBytes, 0, hintBytes.Length); long hintEnd = ms.Position;
-        W("\nendstream\nendobj\n");
-        long firstSectionEnd = ms.Position;
-
-        // 6. Remaining objects.
-        foreach (var o in restSection) { offsets[o.Num] = ms.Position; ms.Write(o.Bytes, 0, o.Bytes.Length); W("\n"); }
-
-        // 6b. Reserved space. A linearizer reserves room (between the body and the main
-        // cross-reference table) for the overflow hint data of a single-pass write; real
-        // linearizers (e.g. Acrobat) emit a comparable reservation, so
-        // small linearized files settle on a multi-kilobyte floor rather than the compact size
-        // a plain save produces. The region is PDF whitespace and carries no semantics.
-        const int ReservedSpace = 2048;
-        ms.Write(Enumerable.Repeat((byte)' ', ReservedSpace).ToArray(), 0, ReservedSpace);
-        W("\n");
-
-        // 7. Main cross-reference section + trailer. The main trailer carries /Size (and /ID,
-        // /Encrypt where they apply) and nothing else: /Root and /Info belong to the
-        // first-page trailer, which is the one the file-final startxref points at and the one
-        // a reader reads first (PDF 32000-1 Annex F.3.7). Repeating them here is 26 bytes of
-        // the only part of the file a reader is guaranteed to fetch.
-        long mainXrefPos = ms.Position;
-        EmitXref(ms, allNums, xrefEntryPos, section: 1, W, withFreeHead: true);
-        W($"trailer\n<< /Size {size}");
-        if (idStr is not null) W(" /ID " + idStr);
-        if (reader.Trailer.Get("Encrypt") is PdfIndirectRef enc) W($" /Encrypt {enc.ObjectNumber} 0 R");
-        W($" >>\nstartxref\n{firstXrefPos}\n%%EOF\n");
-
-        var buf = ms.ToArray();
-
-        // Patch every fixed-width placeholder now that offsets are final.
-        Patch(buf, lin["L"], buf.Length);
-        Patch(buf, lin["Hoff"], hintPos);
-        Patch(buf, lin["Hlen"], hintEnd - hintStart);
-        Patch(buf, lin["E"], firstSectionEnd);
-        Patch(buf, lin["T"], mainXrefPos);
-        Patch(buf, prevPos, mainXrefPos);
-        foreach (var kv in xrefEntryPos)
-            Patch(buf, kv.Value, offsets.TryGetValue(kv.Key.num, out var off) ? off : 0);
-
-        return buf;
+        PatchLinearizationOffsets(lz);
+        return lz.buf;
     }
 
     // Emit a traditional xref section, recording each entry's 10-digit offset placeholder

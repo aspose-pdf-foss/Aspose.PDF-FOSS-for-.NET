@@ -1,4 +1,4 @@
-using System.Drawing;
+﻿using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.Versioning;
@@ -30,11 +30,17 @@ public sealed partial class GdiPlusPageRenderer
         if (rawBytes is { Length: > 0 } && state.FontName is { } fn3 && _scope.Fonts is not null
             && _scope.Fonts.TryGetValue(fn3, out var fd3) && fd3.GetName("Subtype") == "Type3")
         {
+            if (_vectorTarget)
+            {
+                // Printed as an image instead: see TryRenderPageToGraphics.
+                _vectorNeedsImage = true;
+                return;
+            }
             DrawType3Text(rawBytes, state, fd3);
             return;
         }
 
-        var parser = ResolveParser(state.FontName, out var hScale);
+        (var parser, var hScale) = ResolveParser(state.FontName);
         var metrics = ResolveMetrics(state.FontName);
         var cid = ResolveCid(state.FontName);
         var fill = ColorFrom(state.FillR, state.FillG, state.FillB, state.FillAlpha);
@@ -59,7 +65,8 @@ public sealed partial class GdiPlusPageRenderer
                 || parser is CffGlyphSource { IsCidKeyed: true }))
             DrawCidText(rawBytes, cid, parser, metrics, state, hScale, fill);
         else
-            DrawSimpleText(text, rawBytes, parser, metrics, state, hScale, fill, EncGidMap(state.FontName, parser));
+            DrawSimpleText(text, rawBytes, parser, metrics, state, hScale, fill,
+                EncGidMap(state.FontName, parser), UndefinedCodes(state.FontName));
     }
 
     private int[]? EncGidMap(string? fontName, IGlyphOutlineSource? parser)
@@ -76,8 +83,34 @@ public sealed partial class GdiPlusPageRenderer
         return map;
     }
 
+    /// <summary>The codes this run's font blanks - the shared rule in
+    /// <see cref="SoftwarePageRenderer.BuildUndefinedCodes"/>, cached per font dict.</summary>
+    private bool[]? UndefinedCodes(string? fontName)
+    {
+        if (fontName is null || _scope.Fonts is null || !_scope.Fonts.TryGetValue(fontName, out var fd))
+            return null;
+        if (_undefinedCodes.TryGetValue(fd, out var cached)) return cached;
+        var map = SoftwarePageRenderer.BuildUndefinedCodes(fd, _reader);
+        _undefinedCodes[fd] = map;
+        return map;
+    }
+
+    /// <summary>For a StandardEncoding quote code, the character it shows; null for any other code.</summary>
+    /// <remarks>A form whose Helvetica apostrophes were 0x27 printed straight quotes where the
+    /// reference prints quoteright.</remarks>
+    private static char? StandardQuote(byte code) => code switch
+    {
+        StandardQuoteRightCode => '\u2019',
+        StandardQuoteLeftCode => '\u2018',
+        _ => null,
+    };
+
+    private const byte StandardQuoteRightCode = 0x27;
+    private const byte StandardQuoteLeftCode = 0x60;
+
     private void DrawSimpleText(string text, byte[]? rawBytes, IGlyphOutlineSource? parser,
-        FontMetrics? metrics, GraphicsState state, double hScale, GdiColor fill, int[]? encGidMap)
+        FontMetrics? metrics, GraphicsState state, double hScale, GdiColor fill, int[]? encGidMap,
+        bool[]? undefined)
     {
         var tm = (double[])state.TextMatrix.Clone();
         var ctm = state.Ctm;
@@ -109,12 +142,18 @@ public sealed partial class GdiPlusPageRenderer
             text = new string(chars);
         }
         bool useBytes = rawBytes is not null && rawBytes.Length == text.Length;
+        var builtInStandard = useBytes && metrics is { ShowsStandardEncodingQuotes: true };
+        var dingbats = useFallback && useBytes && parser == _dingbatsParser;
         using var brush = new SolidBrush(fill);
 
         for (int i = 0; i < text.Length; i++)
         {
             var ch = text[i];
             int gid = 0;
+            // The two quote codes StandardEncoding and WinAnsi disagree on in the ASCII range.
+            var standardQuote = builtInStandard ? StandardQuote(rawBytes![i]) : null;
+            if (standardQuote is { } quote) ch = quote;
+            if (dingbats) ch = TextAbsorber.DingbatCharacter(rawBytes![i]);
             if (useFallback && parser is not null)
             {
                 // Host substitute: map the decoded Unicode char straight through its cmap.
@@ -133,17 +172,22 @@ public sealed partial class GdiPlusPageRenderer
 
                 if (gid == 0)
                 {
-                    if (useBytes && parser.CMap.TryGetValue(rawBytes![i], out gid) && gid > 0) { }
+                    if (useBytes && standardQuote is null && parser.CMap.TryGetValue(rawBytes![i], out gid) && gid > 0) { }
                     else if (parser.CMap.TryGetValue(ch, out gid) && gid > 0) { }
                     else gid = 0;
                 }
             }
-            if (parser is not null && gid > 0)
-                PaintGlyph(parser, gid, tm, ctm, tfs, th, state.Rise, hScale, upm, brush);
+            var blank = undefined is not null && rawBytes is not null && i < rawBytes.Length
+                && rawBytes[i] < undefined.Length && undefined[rawBytes[i]];
+            if (parser is not null && gid > 0 && !blank)
+                PaintGlyph(parser, gid, dingbats ? SeatDingbat(parser, gid, rawBytes![i], tm, tfs, th, upm) : tm,
+                    ctm, tfs, th, state.Rise, hScale, upm, brush);
 
             int charWidth = 500;
-            if (useBytes && metrics is not null) charWidth = metrics.GetWidth(rawBytes![i]);
-            else if (metrics is not null) charWidth = metrics.GetWidth(ch);
+            int widthCode = useBytes ? rawBytes![i] : ch;
+            if (metrics is not null) charWidth = metrics.GetWidth(widthCode);
+            double advance = charWidth;
+            if (PrintsReferenceAdvances && metrics is not null) advance = metrics.GetWidthExact(widthCode);
             // With a host substitute and no PDF /Widths, take the advance from the
             // substitute program so the run doesn't collapse to uniform 500-unit steps.
             // Same when the font dict carries NO explicit width for this code (no
@@ -151,124 +195,74 @@ public sealed partial class GdiPlusPageRenderer
             // the metrics' constant default would spread every glyph to the same step.
             if ((charWidth == 0 || (ch > 0xFF && (charWidth == 500 || charWidth <= 0))
                  || (useFallback && metrics is null)
-                 || (metrics is not null && !metrics.HasExplicitWidth(useBytes ? rawBytes![i] : ch)))
+                 || (metrics is not null && !metrics.HasExplicitWidth(widthCode)))
                 && parser is not null && gid > 0)
             {
                 var adv = parser.GetAdvanceWidth(gid);
-                if (adv > 0 && parser.UnitsPerEm > 0) charWidth = adv * 1000 / parser.UnitsPerEm;
+                if (adv > 0 && parser.UnitsPerEm > 0) advance = charWidth = adv * 1000 / parser.UnitsPerEm;
             }
-            double tx = (charWidth / 1000.0 * tfs + state.CharSpacing + (ch == ' ' ? state.WordSpacing : 0)) * th;
+            double tx = (advance / 1000.0 * tfs + state.CharSpacing + (ch == ' ' ? state.WordSpacing : 0)) * th;
             tm = GraphicsState.MultiplyMatrices(new double[] { 1, 0, 0, 1, tx, 0 }, tm);
         }
     }
 
-    private void DrawCidText(byte[] rawBytes, CidFontInfo cid, IGlyphOutlineSource? parser,
-        FontMetrics? metrics, GraphicsState state, double hScale, GdiColor fill)
+    /// <summary>Whether a glyph advances by its font's width as written, fraction and all, rather
+    /// than by that width rounded to a whole thousandth of an em.</summary>
+    /// <remarks>
+    /// So the reference prints: a run of Times New Roman whose /Widths are 722.168 drifted 0.014
+    /// printer pixels right of ours per glyph at 10 points, until the stems of the fifth and later
+    /// glyphs crossed onto the next pixel. Advanced by the written widths, the run's outlines land
+    /// on the reference's pixels. Scoped to print output, whose reference is measured; the raster
+    /// renders' templates were not re-measured against it.
+    /// </remarks>
+    private bool PrintsReferenceAdvances => _vectorTarget || PrintedPageImage;
+
+    private void DrawCidText(byte[] rawBytes, CidFontInfo cid, IGlyphOutlineSource? parser, FontMetrics? metrics, GraphicsState state, double hScale, GdiColor fill)
     {
-        var tm = (double[])state.TextMatrix.Clone();
-        var ctm = state.Ctm;
-        var tfs = state.FontSize;
-        var th = state.HorizontalScaling / 100.0;
-        var upm = parser is not null && parser.UnitsPerEm > 0 ? parser.UnitsPerEm : 1000;
-        using var brush = new SolidBrush(fill);
+        var ct = new GdiCidTextDrawState();
+        ct.rawBytes = rawBytes;
+        ct.cid = cid;
+        ct.parser = parser;
+        ct.metrics = metrics;
+        ct.state = state;
+        ct.hScale = hScale;
+        ct.fill = fill;
+        ct.tm = (double[])ct.state.TextMatrix.Clone();
+        ct.ctm = ct.state.Ctm;
+        ct.tfs = ct.state.FontSize;
+        ct.th = ct.state.HorizontalScaling / 100.0;
+        ct.upm = ct.parser is not null && ct.parser.UnitsPerEm > 0 ? ct.parser.UnitsPerEm : 1000;
+        using var brush = new SolidBrush(ct.fill);
 
         // Predefined legacy national CMaps (GBK-EUC-H, ETen-B5-H, …) encode their
         // show-strings in a national multi-byte charset (mixed 1-/2-byte), not as
         // Adobe CIDs. Decode and render them separately from the 2-byte CID path.
-        if (cid.LegacyCodepage != 0)
+        if (ct.cid.LegacyCodepage != 0)
         {
-            DrawLegacyCjkText(rawBytes, cid, parser, metrics, tm, ctm, tfs, th, state.Rise, hScale,
-                state.CharSpacing, state.WordSpacing, brush);
+            DrawLegacyCjkText(ct.rawBytes, ct.cid, ct.parser, ct.metrics, ct.tm, ct.ctm, ct.tfs, ct.th, ct.state.Rise, ct.hScale,
+                ct.state.CharSpacing, ct.state.WordSpacing, brush);
             return;
         }
 
-        // Non-embedded predefined CJK CIDFonts have no /FontFile*, so parser is null.
-        // PDF 32000 §9.6.6 expects the reader to supply a system font matching the
-        // /CIDSystemInfo. Mirror SoftwarePageRenderer.DrawCidText: route glyph lookup
-        // through a broad-coverage system CJK font (CID/Unicode → cmap).
-        Text.IGlyphOutlineSource? fallback = null;
-        if (parser is null)
+        ct.fallback = null;
+        if (ct.parser is null)
         {
-            var canFallback = cid.IsUnicodeEncoding
-                              || (cid.Ordering is not null && cid.Ordering != "Identity");
+            var canFallback = ct.cid.IsUnicodeEncoding
+                              || (ct.cid.Ordering is not null && ct.cid.Ordering != "Identity");
             // Resolve a system font by the CID ordering/base name (Korea1 -> Malgun,
             // GB1 -> SimSun, Japan1 -> MS Mincho), not the single generic broad-coverage
             // font: that one covers Han but not Hangul, so non-embedded Korean text
             // (UniKS-UTF16-H) was dropped while Chinese on the same page rendered.
             // ResolveNamed falls back to the generic font itself.
-            if (canFallback) fallback = Text.CjkFallbackFont.ResolveNamed(cid.CjkBaseFont, cid.Ordering);
+            if (canFallback) ct.fallback = Text.CjkFallbackFont.ResolveNamed(ct.cid.CjkBaseFont, ct.cid.Ordering);
         }
-        var fbUpm = fallback is not null && fallback.UnitsPerEm > 0 ? fallback.UnitsPerEm : 1000;
+        ct.fbUpm = ct.fallback is not null && ct.fallback.UnitsPerEm > 0 ? ct.fallback.UnitsPerEm : 1000;
 
-        var vertical = cid.IsVertical;
-        // 1-byte custom CMaps (codespace <00> <FF>) show one CID per byte.
-        var step = cid.IsTwoByteEncoding ? 2 : 1;
-        for (int i = 0; i + step <= rawBytes.Length; i += step)
+        ct.vertical = ct.cid.IsVertical;
+        ct.step = ct.cid.IsTwoByteEncoding ? 2 : 1;
+        for (int i = 0; i + ct.step <= ct.rawBytes.Length; i += ct.step)
         {
-            int code = step == 2 ? (rawBytes[i] << 8) | rawBytes[i + 1] : rawBytes[i];
-            int c = cid.CodeToCid(code);
-            // The /W table is keyed by Adobe CIDs. A Unicode CMap (Uni*-UTF16/UCS2)
-            // hands back the codepoint, so map it to the collection's real CID for
-            // the width lookup — the authored half-width Latin runs (/W 1..96 = 500
-            // in a Korea1 invoice) are otherwise missed and set at /DW 1000.
-            int widthKey = c;
-            if (cid.IsUnicodeEncoding && cid.Ordering is not null && cid.Ordering != "Identity"
-                && Text.AdobeCidTables.UnicodeToCid(cid.Ordering, c) is int realCid)
-                widthKey = realCid;
-            int charWidth = metrics?.GetWidth(widthKey) ?? 1000;
-
-            // Vertical writing (-V CMap, PDF 32000 §9.7.4.3): the pen runs DOWN the
-            // column. Each glyph's origin is displaced by the position vector
-            // v = (vx, vy) — default (w0/2, /DW2 vy) — so the glyph centres on the
-            // column axis with its body below the pen; the pen then advances by the
-            // vertical displacement w1 (default /DW2, per-CID /W2 override).
-            var glyphTm = tm;
-            double w1y = 0;
-            if (vertical)
-            {
-                var (w1, vx, vy) = cid.VerticalMetrics(c, charWidth);
-                w1y = w1;
-                glyphTm = GraphicsState.MultiplyMatrices(
-                    new double[] { 1, 0, 0, 1, -vx / 1000.0 * tfs, -vy / 1000.0 * tfs }, tm);
-            }
-
-            if (parser is not null)
-            {
-                int gid = parser is CffGlyphSource cff && cff.IsCidKeyed ? cff.CidToGid(c) : cid.ResolveGid(c);
-                // Some producers show CIDs the embedded CID-keyed CFF never defines
-                // (a constant high byte over a small identity charset). Paint the
-                // low-byte glyph instead; only reached when the charset
-                // lookup missed, so valid CIDs are untouched.
-                if (gid == 0 && c > 0xFF && parser is CffGlyphSource cffLow && cffLow.IsCidKeyed)
-                    gid = cffLow.CidToGid(c & 0xFF);
-                if (gid > 0)
-                    PaintGlyph(parser, gid, glyphTm, ctm, tfs, th, state.Rise, hScale, upm, brush);
-            }
-            else if (fallback is not null)
-            {
-                int fbGid;
-                if (cid.IsUnicodeEncoding)
-                    fallback.CMap.TryGetValue(c, out fbGid);
-                else
-                    fbGid = Text.CjkFallbackFont.ResolveFallbackGid(cid.Ordering, c, fallback);
-                if (fbGid > 0)
-                    PaintGlyph(fallback, fbGid, glyphTm, ctm, tfs, th, state.Rise, hScale, fbUpm, brush);
-            }
-
-            if (vertical)
-            {
-                // Advance down: w1 is negative (downward) in glyph space; Tc adds to
-                // the travel. Tz applies to horizontal displacements only (§9.3.4).
-                double ty = w1y / 1000.0 * tfs - state.CharSpacing;
-                tm = GraphicsState.MultiplyMatrices(new double[] { 1, 0, 0, 1, 0, ty }, tm);
-            }
-            else
-            {
-                // Tw applies only to the SINGLE-BYTE code 32 (PDF 32000 §9.3.3) —
-                // a 2-byte <0020> space in a UTF16/UCS2 CMap never takes it.
-                double tx = (charWidth / 1000.0 * tfs + state.CharSpacing + (step == 1 && code == 32 ? state.WordSpacing : 0)) * th;
-                tm = GraphicsState.MultiplyMatrices(new double[] { 1, 0, 0, 1, tx, 0 }, tm);
-            }
+            DrawCidGlyph(ct, i, brush);
         }
     }
 
@@ -333,9 +327,12 @@ public sealed partial class GdiPlusPageRenderer
     private void PaintGlyph(IGlyphOutlineSource parser, int gid, double[] tm, double[] ctm,
         double tfs, double th, double rise, double hScale, int upm, SolidBrush brush)
     {
-        var outline = parser.GetOutline(gid);
+        var curveSource = PrintedPageImage ? parser as CffGlyphSource : null;
+        var outline = curveSource is not null ? curveSource.GetCurveOutline(gid) : parser.GetOutline(gid);
         if (outline is null || outline.Contours.Length == 0) return;
-        using var path = BuildGlyphPath(outline);
+        using var path = _vectorTarget ? BuildPrintedGlyphPath(outline)
+            : curveSource is not null ? BuildCubicGlyphPath(outline)
+            : BuildGlyphPath(outline);
         if (path.PointCount == 0) return;
 
         var s = new double[] { hScale / upm, 0, 0, 1.0 / upm, 0, 0 };
@@ -405,7 +402,9 @@ public sealed partial class GdiPlusPageRenderer
             _g.CompositingQuality = CompositingQuality.AssumeLinear;
         try
         {
-            _g.FillPath(brush, path);
+            if (!StrokesOnly(_curTextMode)) _g.FillPath(brush, path);
+            if (Strokes(_curTextMode) && _curTextState is { } strokeState)
+                StrokeGlyph(path, GraphicsState.MultiplyMatrices(GraphicsState.MultiplyMatrices(s, param), tm), strokeState);
             if (TextBold > 0)
             {
                 // Device-space pen: divide by the world scale so the stroke stays
@@ -420,6 +419,54 @@ public sealed partial class GdiPlusPageRenderer
             }
         }
         finally { _g.Transform = saved; _g.CompositingQuality = savedCq; }
+    }
+
+    /// <summary>The width a glyph outline is stroked with, in user space.</summary>
+    /// <remarks>
+    /// Sent to a printer, never thinner than one of the printer surface's own units, a hundredth of
+    /// an inch: the reference stroked text given 0.5 and 0.25 point lines 0.96 XPS units wide, that
+    /// hundredth exactly, where its lines of the same widths kept them. So widened, a bold heading
+    /// drawn as filled and stroked text left 0 pixels outside its template's match window, not 3,033.
+    /// </remarks>
+    private double GlyphStrokeWidth(double lineWidth)
+    {
+        if (!_vectorTarget) return lineWidth;
+        var e = _layoutToSheet!.Elements;
+        var sheetUnitsPerLayoutPixel = Math.Sqrt(Math.Abs(e[0] * e[3] - e[1] * e[2]));
+        return Math.Max(lineWidth, SheetUnit / sheetUnitsPerLayoutPixel / _scale);
+    }
+
+    /// <summary>One of a printer surface's own units, in those units.</summary>
+    private const double SheetUnit = 1.0;
+
+    /// <summary>Text rendering modes that stroke the glyph outline (PDF 32000 §9.3.6): stroke,
+    /// fill then stroke, and their clipping twins.</summary>
+    private static bool Strokes(int mode) => mode is 1 or 2 or 5 or 6;
+
+    /// <summary>Text rendering modes that stroke the outline without filling it.</summary>
+    private static bool StrokesOnly(int mode) => mode is 1 or 5;
+
+    /// <summary>
+    /// Stroke a glyph outline with the graphics state's pen. The outline is in font units and
+    /// the line width in user space, so the width is divided by the scale text space takes on its
+    /// way to user space - the text matrix, the font size and the 1/units-per-em - and the pen
+    /// then scales with the glyph like any user-space stroke.
+    /// </summary>
+    /// <remarks>
+    /// A producer's faux bold is often exactly this: a regular face drawn in mode 2 with a half
+    /// point stroke. Filled only, a printed "TradeGothicCondEighteen,Bold" heading came out with
+    /// 6 pixel stems where the reference's are 9.
+    /// </remarks>
+    private void StrokeGlyph(GraphicsPath path, double[] glyphToUser, GraphicsState state)
+    {
+        var scale = Math.Sqrt(Math.Abs(glyphToUser[0] * glyphToUser[3] - glyphToUser[1] * glyphToUser[2]));
+        if (scale < 1e-12) return;
+        using var pen = new Pen(ColorFrom(state.StrokeR, state.StrokeG, state.StrokeB, state.StrokeAlpha),
+            (float)(GlyphStrokeWidth(state.LineWidth) / scale))
+        {
+            LineJoin = LineJoin.Miter,
+        };
+        _g.DrawPath(pen, path);
     }
 
     /// <summary>
@@ -488,6 +535,136 @@ public sealed partial class GdiPlusPageRenderer
             }
         }
         finally { mask.UnlockBits(mr); _bitmap.UnlockBits(dr); }
+    }
+
+    /// <summary>
+    /// Convert a glyph outline to the path a PRINTER receives. It differs from
+    /// <see cref="BuildGlyphPath"/> in two places, both the reference's, and both invisible in a
+    /// fill of the outline but not in the device-rounded outline a printer driver stores:
+    /// </summary>
+    /// <remarks>
+    /// <para>An on-curve point, two off-curve points and an on-curve point make ONE cubic whose
+    /// control points lie 4/3 of the way from each end to its neighbouring off-curve point -
+    /// not the two quadratics split at the implied midpoint. Every other run converts as usual.</para>
+    /// <para>A contour's closing edge back to its first point is not drawn: closing the figure
+    /// draws it.</para>
+    /// <para>Measured on 300 pt Calibri glyphs through the XPS Document Writer: all six outlines
+    /// byte-identical to the reference's print, where the usual conversion matched three. On the
+    /// corpus: a fitted A4 print 2,242 -> 247 pixels outside its template's match window (the
+    /// reference's own print: 229), a half-scale Type1 page 1,615 -> 167.</para>
+    /// </remarks>
+    private static GraphicsPath BuildPrintedGlyphPath(GlyphOutline outline)
+    {
+        var path = new GraphicsPath(FillMode.Winding);
+        var offCurve = new List<ContourPoint>(PairedOffCurvePoints);
+        foreach (var contour in outline.Contours)
+        {
+            var start = Array.FindIndex(contour, c => c.OnCurve);
+            if (contour.Length < 2 || start < 0)
+            {
+                // No on-curve anchor to start from: the usual conversion handles it.
+                using var usual = BuildGlyphPath(new GlyphOutline(new[] { contour }, 0, 0, 0, 0));
+                if (usual.PointCount > 0) path.AddPath(usual, false);
+                continue;
+            }
+
+            path.StartFigure();
+            var from = contour[start];
+            for (var k = 1; k <= contour.Length; k++)
+            {
+                var point = contour[(start + k) % contour.Length];
+                if (!point.OnCurve)
+                {
+                    offCurve.Add(point);
+                    continue;
+                }
+                AddPrintedSegment(path, from, offCurve, point, closing: k == contour.Length);
+                offCurve.Clear();
+                from = point;
+            }
+            path.CloseFigure();
+        }
+        return path;
+    }
+
+    /// <summary>How many off-curve points in a row the reference turns into one cubic.</summary>
+    private const int PairedOffCurvePoints = 2;
+
+    /// <summary>Where a cubic's control point sits along its end's tangent to the off-curve
+    /// point, for a pair of off-curve points drawn as one cubic.</summary>
+    private const double PairedControlReach = 4.0 / 3.0;
+
+    /// <summary>Where a cubic's control point sits for an exact quadratic (degree elevation).</summary>
+    private const double QuadraticControlReach = 2.0 / 3.0;
+
+    /// <summary>One on-curve-to-on-curve stretch of a printed glyph contour.</summary>
+    private static void AddPrintedSegment(GraphicsPath path, ContourPoint from, List<ContourPoint> offCurve,
+        ContourPoint to, bool closing)
+    {
+        if (offCurve.Count == 0)
+        {
+            if (!closing) path.AddLine((float)from.X, (float)from.Y, (float)to.X, (float)to.Y);
+            return;
+        }
+        if (offCurve.Count == PairedOffCurvePoints)
+        {
+            AddCubic(path, from, offCurve[0], offCurve[1], to, PairedControlReach);
+            return;
+        }
+        for (var q = 0; q < offCurve.Count; q++)
+        {
+            var control = offCurve[q];
+            var end = q + 1 < offCurve.Count
+                ? new ContourPoint((control.X + offCurve[q + 1].X) * 0.5, (control.Y + offCurve[q + 1].Y) * 0.5, true)
+                : to;
+            AddCubic(path, from, control, control, end, QuadraticControlReach);
+            from = end;
+        }
+    }
+
+    /// <summary>A cubic from <paramref name="from"/> to <paramref name="to"/> whose control points
+    /// lie <paramref name="reach"/> of the way towards <paramref name="nearFrom"/> and
+    /// <paramref name="nearTo"/>.</summary>
+    private static void AddCubic(GraphicsPath path, ContourPoint from, ContourPoint nearFrom, ContourPoint nearTo,
+        ContourPoint to, double reach)
+    {
+        path.AddBezier(
+            (float)from.X, (float)from.Y,
+            (float)(from.X + reach * (nearFrom.X - from.X)), (float)(from.Y + reach * (nearFrom.Y - from.Y)),
+            (float)(to.X + reach * (nearTo.X - to.X)), (float)(to.Y + reach * (nearTo.Y - to.Y)),
+            (float)to.X, (float)to.Y);
+    }
+
+    /// <summary>Convert a glyph outline whose curves are cubic (each an on-curve point, two
+    /// off-curve control points and an on-curve point, as a CFF program draws them) to a path.</summary>
+    private static GraphicsPath BuildCubicGlyphPath(GlyphOutline outline)
+    {
+        var path = new GraphicsPath(FillMode.Winding);
+        foreach (var contour in outline.Contours)
+        {
+            if (contour.Length < 2 || !contour[0].OnCurve) continue;
+            path.StartFigure();
+            var i = 0;
+            while (i + 1 < contour.Length)
+            {
+                var from = contour[i];
+                if (contour[i + 1].OnCurve)
+                {
+                    path.AddLine((float)from.X, (float)from.Y, (float)contour[i + 1].X, (float)contour[i + 1].Y);
+                    i++;
+                    continue;
+                }
+                if (i + 3 >= contour.Length) break;
+                var c1 = contour[i + 1];
+                var c2 = contour[i + 2];
+                var to = contour[i + 3];
+                path.AddBezier((float)from.X, (float)from.Y, (float)c1.X, (float)c1.Y,
+                    (float)c2.X, (float)c2.Y, (float)to.X, (float)to.Y);
+                i += 3;
+            }
+            path.CloseFigure();
+        }
+        return path;
     }
 
     /// <summary>Convert a glyph outline (font units, Y-up, quadratic contours) to a path.</summary>
@@ -590,7 +767,10 @@ public sealed partial class GdiPlusPageRenderer
                     var savedScope = _scope;
                     var savedGdi = _g.Save();
                     _scope = glyphScope;
-                    try { RenderContentStream(cp, glyphCtm, null); }
+                    // A glyph opening with `d1` describes a shape and no colour: it is painted in
+                    // the colour the text is set in (PDF 32000 §9.6.5), so the char proc
+                    // starts from the state that shows it.
+                    try { RenderContentStream(cp, glyphCtm, null, state); }
                     finally { _scope = savedScope; _g.Restore(savedGdi); }
                 }
             }
@@ -600,17 +780,18 @@ public sealed partial class GdiPlusPageRenderer
         }
     }
 
-    private IGlyphOutlineSource? ResolveParser(string? fontName, out double hScale)
+    private (IGlyphOutlineSource? result, double hScale) ResolveParser(string? fontName)
     {
+        double hScale = default;
         hScale = 1.0;
         if (fontName is null || _scope.Fonts is null || !_scope.Fonts.TryGetValue(fontName, out var fd))
-            return null;
-        if (_glyphCache.TryGetValue(fd, out var c)) { hScale = c.hScale; return c.parser; }
+            return (null, hScale);
+        if (_glyphCache.TryGetValue(fd, out var c)) { hScale = c.hScale; return (c.parser, hScale); }
         var scratch = new Dictionary<string, (IGlyphOutlineSource? parser, double hScale)>();
-        var p = SoftwarePageRenderer.GetGlyphParser(_scope.Fonts, _reader, scratch, fontName, out hScale,
+        var resolved = SoftwarePageRenderer.GetGlyphParser(_scope.Fonts, _reader, scratch, fontName,
             ConvertFontsToUnicodeTtf);
-        _glyphCache[fd] = (p, hScale);
-        return p;
+        _glyphCache[fd] = resolved;
+        return resolved;
     }
 
     /// <summary>Resolve a host-font glyph source to draw a simple-font run whose own
@@ -640,6 +821,11 @@ public sealed partial class GdiPlusPageRenderer
         if (_fallbackParsers.TryGetValue(name, out var cached)) return cached;
 
         Text.GlyphOutlineParser? parser = null;
+        if (name == DingbatsFontName)
+        {
+            _dingbatsParser ??= NewParser(FontRepository.DjVuDingbatsProgram);
+            if (_dingbatsParser is not null) return _fallbackParsers[name] = _dingbatsParser;
+        }
         var ttf = Text.SystemFontResolver.Resolve(name) ?? Text.SystemFontResolver.Resolve("Arial");
         if (ttf is { Length: > 0 })
         {
@@ -647,6 +833,54 @@ public sealed partial class GdiPlusPageRenderer
         }
         _fallbackParsers[name] = parser;
         return parser;
+    }
+
+    /// <summary>The standard face whose codes are dingbats rather than letters.</summary>
+    /// <remarks>No host carries it. The reference draws an unembedded ZapfDingbats code as the
+    /// dingbat its encoding names, in a DejaVu face: a form's checked box, code 0x38, shows the
+    /// heavy ballot X, stroke for stroke that face's U+2718, where a Latin substitute shows "8".
+    /// </remarks>
+    private const string DingbatsFontName = "ZapfDingbats";
+
+    /// <summary>The built-in dingbats face, once parsed.</summary>
+    private Text.GlyphOutlineParser? _dingbatsParser;
+
+    /// <summary>The text matrix that seats a dingbat's outline where the reference draws it: the
+    /// ink's left edge at <see cref="DingbatInkLeft"/> of the em past the pen, whatever the
+    /// substitute face's own left bearing.</summary>
+    private static double[] SeatDingbat(IGlyphOutlineSource parser, int gid, byte code, double[] tm,
+        double tfs, double th, int upm)
+    {
+        if (parser.GetOutline(gid) is not { } outline) return tm;
+        var shift = (DingbatInkLeft(code) * upm - outline.XMin) / upm * tfs * th;
+        return GraphicsState.MultiplyMatrices(new double[] { 1, 0, 0, 1, shift, 0 }, tm);
+    }
+
+    /// <summary>Where the reference puts a dingbat's ink, as a share of the em past the pen.</summary>
+    /// <remarks>
+    /// Measured on every code printed at 48 points, from the outlines the XPS writer received:
+    /// each glyph is the substitute face's own outline, not scaled and not moved vertically, only
+    /// slid sideways. For the codes listed here its ink starts at the pen; for the rest at 35
+    /// thousandths of the em, the left bearing ITC Zapf Dingbats gives nearly all its glyphs. No
+    /// property of the outlines, the Zapf metrics or the Unicode blocks separates the two sets.
+    /// </remarks>
+    private static double DingbatInkLeft(byte code) => code switch
+    {
+        >= 0x26 and <= 0x28 or 0x2C or >= 0x33 and <= 0x34 or >= 0x37 and <= 0x38
+            or >= 0x41 and <= 0x50 or >= 0x54 and <= 0x59 or >= 0x5B and <= 0x63
+            or >= 0x67 and <= 0x6D or >= 0x74 and <= 0x77 or >= 0xA1 and <= 0xA3
+            or >= 0xA5 and <= 0xA7 or >= 0xA9 and <= 0xAA or >= 0xAC and <= 0xD3
+            or 0xD7 or 0xE7 or 0xF7 or 0xF9 => 0,
+        _ => DingbatBearing,
+    };
+
+    /// <summary>The left bearing, in ems, of nearly every ITC Zapf Dingbats glyph (35/1000).</summary>
+    private const double DingbatBearing = 0.035;
+
+    private static Text.GlyphOutlineParser? NewParser(byte[]? program)
+    {
+        if (program is not { Length: > 0 }) return null;
+        try { return new Text.GlyphOutlineParser(program); } catch { return null; }
     }
 
     private FontMetrics? ResolveMetrics(string? fontName)

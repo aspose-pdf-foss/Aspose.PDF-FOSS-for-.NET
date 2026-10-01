@@ -13,19 +13,23 @@ public sealed partial class ParagraphAbsorber
     private ParagraphAbsorberOptions _options;
     private readonly List<PageMarkup> _pageMarkups = [];
 
+    /// <summary>Creates a paragraph absorber with default options.</summary>
     public ParagraphAbsorber() : this(new ParagraphAbsorberOptions()) { }
 
+    /// <summary>Creates a paragraph absorber with the given options; <c>null</c> uses default options.</summary>
     public ParagraphAbsorber(ParagraphAbsorberOptions paragraphAbsorberOptions)
     {
         _options = paragraphAbsorberOptions ?? new ParagraphAbsorberOptions();
     }
 
+    /// <summary>Creates a paragraph absorber with default options and the given <c>SectionsSearchDepth</c> (stored only).</summary>
     public ParagraphAbsorber(int sectionsSearchDepth)
         : this(new ParagraphAbsorberOptions())
     {
         SectionsSearchDepth = sectionsSearchDepth;
     }
 
+    /// <summary>Creates a paragraph absorber with the given options (<c>null</c> uses defaults) and <c>SectionsSearchDepth</c> (stored only).</summary>
     public ParagraphAbsorber(int sectionsSearchDepth, ParagraphAbsorberOptions paragraphAbsorberOptions)
         : this(paragraphAbsorberOptions)
     {
@@ -292,135 +296,25 @@ public sealed partial class ParagraphAbsorber
 
     private List<MarkupSection> FindSectionsHorizontal(List<TextFragment> fragments, double pageW, double pageH)
     {
-        // Section model: every fragment
-        // contributes a line box [baseline, baseline + 1.1·fontSize] rasterized on a
-        // 1-pt row grid anchored at integer user-space Y; sections split at any run
-        // of at least round(pageH·override) + 2 consecutive EMPTY rows (default
-        // override 0.005 — "unset" is not zero). Columns split analogously on 1-pt
-        // X columns with a font-size floor: max(round(pageW·hOverride) + 2,
-        // round(0.8·(F + 2))).
-        var vOv = _options.HasVerticalOverride ? _options.SectionUnbreakingVerticalOverride : 0.005;
-        var hOv = _options.HasHorizontalOverride ? _options.SectionUnbreakingHorizontalOverride : 0.005;
-        var vRun = (int)Math.Round(pageH * vOv, MidpointRounding.ToEven) + 2;
+        var sh = new SectionSplitState();
+        sh.fragments = fragments;
+        sh.pageW = pageW;
+        sh.pageH = pageH;
+        sh.vOv = _options.HasVerticalOverride ? _options.SectionUnbreakingVerticalOverride : 0.005;
+        sh.hOv = _options.HasHorizontalOverride ? _options.SectionUnbreakingHorizontalOverride : 0.005;
+        sh.vRun = (int)Math.Round(sh.pageH * sh.vOv, MidpointRounding.ToEven) + 2;
 
-        var avgFontSize = fragments.Average(f => f.FontSize > 0 ? f.FontSize : 12);
-        var pageBodyRight = fragments.Max(f => f.Rectangle?.URX ?? 0);
+        sh.avgFontSize = sh.fragments.Average(f => f.FontSize > 0 ? f.FontSize : 12);
+        sh.pageBodyRight = sh.fragments.Max(f => f.Rectangle?.URX ?? 0);
 
-        var sections = new List<MarkupSection>();
+        sh.sections = new List<MarkupSection>();
 
         // Recursive raster splitter: rows first, then columns per band; a region
         // that split in either direction is re-examined (a 3-column page needs
         // per-column row splits that page-wide rows can't see — text in the other
         // columns masks the gaps).
-        void SplitRegion(List<TextFragment> frags, bool byRows, int depth)
-        {
-            if (frags.Count == 0) return;
-            List<double> cuts = new();
-            if (byRows)
-            {
-                var rows = new HashSet<int>();
-                int rowMin = int.MaxValue, rowMax = int.MinValue;
-                foreach (var f in frags)
-                {
-                    var b = f.PositionOrNull?.YIndent ?? f.Rectangle?.LLY ?? 0;
-                    var fs = f.FontSize > 0 ? f.FontSize : 12;
-                    var top = b + 1.1 * fs;
-                    for (var r = (int)Math.Floor(b); r < top; r++)
-                    {
-                        if (r + 1 <= b) continue;
-                        rows.Add(r);
-                        if (r < rowMin) rowMin = r;
-                        if (r > rowMax) rowMax = r;
-                    }
-                }
-                if (GridDebug) Console.Error.WriteLine($"[grid] rows {rowMin}..{rowMax} n={frags.Count} vRun={vRun} filled={rows.Count}");
-                if (rowMin <= rowMax)
-                {
-                    var emptyStart = int.MinValue; // rows/columns may be negative in a text frame
-                    for (var r = rowMin; r <= rowMax + 1; r++)
-                    {
-                        var empty = r <= rowMax && !rows.Contains(r);
-                        if (empty && emptyStart == int.MinValue) emptyStart = r;
-                        else if (!empty && emptyStart != int.MinValue)
-                        {
-                            if (r - emptyStart >= vRun)
-                                cuts.Add(emptyStart + (r - emptyStart) / 2.0);
-                            emptyStart = int.MinValue;
-                        }
-                    }
-                }
-            }
-            else
-            {
-                // The column floor rides the PAGE-wide average font size — the
-                // reference computes it once per markup, so a band whose own average
-                // is dragged down by superscript-citation runs keeps the page floor
-                // (the 9.5 pt gap before an author's citation digit must NOT
-                // split at the page's 10 pt floor, while the 12.4 pt gap between a
-                // heading number and its text still does).
-                var hRun = Math.Max((int)Math.Round(pageW * hOv, MidpointRounding.ToEven) + 2,
-                                    (int)Math.Round(0.8 * (avgFontSize + 2), MidpointRounding.ToEven));
-                var cols = new HashSet<int>();
-                int colMin = int.MaxValue, colMax = int.MinValue;
-                foreach (var f in frags)
-                {
-                    var r = f.Rectangle;
-                    if (r is null) continue;
-                    for (var c = (int)Math.Floor(r.LLX); c < r.URX; c++)
-                    {
-                        if (c + 1 <= r.LLX) continue;
-                        cols.Add(c);
-                        if (c < colMin) colMin = c;
-                        if (c > colMax) colMax = c;
-                    }
-                }
-                if (colMin <= colMax)
-                {
-                    var emptyStart = int.MinValue; // rows/columns may be negative in a text frame
-                    for (var c = colMin; c <= colMax + 1; c++)
-                    {
-                        var empty = c <= colMax && !cols.Contains(c);
-                        if (empty && emptyStart == int.MinValue) emptyStart = c;
-                        else if (!empty && emptyStart != int.MinValue)
-                        {
-                            if (c - emptyStart >= hRun)
-                                cuts.Add(emptyStart + (c - emptyStart) / 2.0);
-                            emptyStart = int.MinValue;
-                        }
-                    }
-                }
-            }
-
-            if (GridDebug) Console.Error.WriteLine($"[grid] byRows={byRows} depth={depth} cuts={string.Join(",", cuts)}");
-            if (cuts.Count == 0)
-            {
-                // Try the other axis before emitting (rows -> columns -> rows ...); a
-                // two-column page with no full-width band splits on its gutter first.
-                if (byRows) { SplitRegion(frags, byRows: false, depth); return; }
-                var lines = GroupIntoLines(frags);
-                lines.Sort(TopToBottomThenLeft);
-                if (lines.Count > 0)
-                    sections.Add(BuildSection(lines, pageBodyRight));
-                return;
-            }
-
-            var groups = new Dictionary<int, List<TextFragment>>();
-            foreach (var f in frags)
-            {
-                var key = byRows ? (f.PositionOrNull?.YIndent ?? f.Rectangle?.LLY ?? 0)
-                                 : (f.Rectangle?.LLX ?? 0);
-                var g = 0;
-                if (byRows) { foreach (var c in cuts) if (key < c) g++; }
-                else { foreach (var c in cuts) if (key >= c) g++; }
-                if (!groups.TryGetValue(g, out var list)) groups[g] = list = [];
-                list.Add(f);
-            }
-            foreach (var kv in groups)
-                SplitRegion(kv.Value, byRows: !byRows, depth + 1);
-        }
-
-        SplitRegion(fragments, byRows: true, 0);
-        return sections;
+        SplitRegion(sh, sh.fragments, byRows: true, 0);
+        return sh.sections;
     }
 
     /// <summary>Reading order for lines: top to bottom, and among the halves of one

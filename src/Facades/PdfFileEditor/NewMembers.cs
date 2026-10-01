@@ -3,12 +3,10 @@ using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Facades;
 
-/// <summary>
-/// Real-only additions to <see cref="PdfFileEditor"/>: exception-handling
-/// state, Try* wrappers around the existing working methods, and
-/// MemoryStream/file overloads for SplitToBulks/SplitToPages that wrap the
-/// real byte[] implementations already present in PdfFileEditor.cs.
-/// </summary>
+// Real-only additions to <see cref="PdfFileEditor"/>: exception-handling
+// state, Try* wrappers around the existing working methods, and
+// MemoryStream/file overloads for SplitToBulks/SplitToPages that wrap the
+// real byte[] implementations already present in PdfFileEditor.cs.
 public sealed partial class PdfFileEditor
 {
     /// <summary>When true, Try* methods propagate exceptions; when false
@@ -251,10 +249,12 @@ public sealed partial class PdfFileEditor
         return true;
     }
 
+    /// <summary>Resizes the contents of the given pages of the source file to the new width and height in points, with automatic margins, and saves the result to <c>destination</c>. A null <c>pages</c> array means every page; returns true.</summary>
     public bool ResizeContents(string source, string destination, int[] pages,
         double newWidth, double newHeight)
         => ResizeContents(source, destination, pages, BuildSizeParams(newWidth, newHeight, percent: false));
 
+    /// <summary>Resizes the contents of the given pages of the source stream to the new width and height in points, with automatic margins, and writes the result to <c>destination</c>. A null <c>pages</c> array means every page; returns true.</summary>
     public bool ResizeContents(Stream source, Stream destination, int[] pages,
         double newWidth, double newHeight)
         => ResizeContents(source, destination, pages, BuildSizeParams(newWidth, newHeight, percent: false));
@@ -319,15 +319,19 @@ public sealed partial class PdfFileEditor
 
     // ── MakeBooklet stream wrappers (real — wraps byte[] MakeBooklet) ────────
 
+    /// <summary>Writes a booklet of the input PDF to the output stream: each output page holds two source pages side by side, ordered so that the sheets printed double-sided and folded form a booklet. Returns true.</summary>
     public bool MakeBooklet(Stream inputStream, Stream outputStream)
         => WriteBytes(outputStream, MakeBooklet(ReadStream(inputStream)));
 
+    /// <summary>Writes a booklet of the input PDF to the output stream using the given sheet size, ordered so that the sheets printed double-sided and folded form a booklet. Returns true.</summary>
     public bool MakeBooklet(Stream inputStream, Stream outputStream, PageSize pageSize)
         => WriteBytes(outputStream, MakeBooklet(ReadStream(inputStream), pageSize));
 
+    /// <summary>Writes a booklet to the output stream where output page i shows source page <c>leftPages[i]</c> on the left and <c>rightPages[i]</c> on the right; an out-of-range page number leaves that half blank. Returns true.</summary>
     public bool MakeBooklet(Stream inputStream, Stream outputStream, int[] leftPages, int[] rightPages)
         => WriteBytes(outputStream, MakeBooklet(ReadStream(inputStream), leftPages, rightPages));
 
+    /// <summary>Writes a booklet with the given sheet size to the output stream where output page i shows source page <c>leftPages[i]</c> on the left and <c>rightPages[i]</c> on the right. Returns true.</summary>
     public bool MakeBooklet(Stream inputStream, Stream outputStream, PageSize pageSize, int[] leftPages, int[] rightPages)
         => WriteBytes(outputStream, MakeBooklet(ReadStream(inputStream), pageSize, leftPages, rightPages));
 
@@ -339,26 +343,33 @@ public sealed partial class PdfFileEditor
 
     // ── MakeNUp (real — basic grid imposition + side-by-side) ────────────────
 
+    /// <summary>Places the pages of the input file onto sheets of <c>x</c> columns by <c>y</c> rows and saves the result to <c>outputFile</c>. The sheet size is the size of the first source page; returns true.</summary>
     public bool MakeNUp(string inputFile, string outputFile, int x, int y)
         => WriteFile(outputFile, MakeNUpCore(File.ReadAllBytes(inputFile), x, y, pageSize: null));
 
+    /// <summary>Places the pages of the input file onto sheets of the given size, <c>x</c> columns by <c>y</c> rows, and saves the result to <c>outputFile</c>. Returns true.</summary>
     public bool MakeNUp(string inputFile, string outputFile, int x, int y, PageSize pageSize)
         => WriteFile(outputFile, MakeNUpCore(File.ReadAllBytes(inputFile), x, y, pageSize));
 
+    /// <summary>Places the pages of the input PDF onto sheets of <c>x</c> columns by <c>y</c> rows and writes the result to the output stream. The sheet size is the size of the first source page; returns true.</summary>
     public bool MakeNUp(Stream inputStream, Stream outputStream, int x, int y)
         => WriteBytes(outputStream, MakeNUpCore(ReadStream(inputStream), x, y, pageSize: null));
 
+    /// <summary>Places the pages of the input PDF onto sheets of the given size, <c>x</c> columns by <c>y</c> rows, and writes the result to the output stream. Returns true.</summary>
     public bool MakeNUp(Stream inputStream, Stream outputStream, int x, int y, PageSize pageSize)
         => WriteBytes(outputStream, MakeNUpCore(ReadStream(inputStream), x, y, pageSize));
 
+    /// <summary>Pairs page i of the first file with page i of the second file side by side on one output page and saves the result to <c>outputFile</c>. Returns true.</summary>
     public bool MakeNUp(string firstInputFile, string secondInputFile, string outputFile)
         => WriteFile(outputFile, MakeNUpTwoFiles(
             File.ReadAllBytes(firstInputFile), File.ReadAllBytes(secondInputFile), isSidewise: true));
 
+    /// <summary>Pairs page i of the first PDF with page i of the second PDF side by side on one output page and writes the result to the output stream. Returns true.</summary>
     public bool MakeNUp(Stream firstInputStream, Stream secondInputStream, Stream outputStream)
         => WriteBytes(outputStream, MakeNUpTwoFiles(
             ReadStream(firstInputStream), ReadStream(secondInputStream), isSidewise: true));
 
+    /// <summary>Combines page i of every input file onto one output page, side by side when <c>isSidewise</c> is true or stacked vertically otherwise, and saves the result to <c>outputFile</c>. Throws when no files are given.</summary>
     public bool MakeNUp(string[] inputFiles, string outputFile, bool isSidewise)
     {
         if (inputFiles is null || inputFiles.Length == 0)
@@ -367,6 +378,7 @@ public sealed partial class PdfFileEditor
         return WriteFile(outputFile, MakeNUpMany(bytes, isSidewise));
     }
 
+    /// <summary>Combines page i of every input PDF onto one output page, side by side when <c>isSidewise</c> is true or stacked vertically otherwise, and writes the result to the output stream. Throws when no streams are given.</summary>
     public bool MakeNUp(Stream[] inputStreams, Stream outputStream, bool isSidewise)
     {
         if (inputStreams is null || inputStreams.Length == 0)
@@ -622,27 +634,32 @@ public sealed partial class PdfFileEditor
 
     // ── SplitToBulks / SplitToPages: file/stream wrappers over real byte[] impls ─
 
+    /// <summary>Splits the PDF file into several documents, one per page range; each range is <c>[start, end]</c> (1-based, inclusive). Returns one read-only stream per part.</summary>
     public MemoryStream[] SplitToBulks(string inputFile, int[][] numberOfPage)
     {
         var bulks = SplitToBulks(File.ReadAllBytes(inputFile), numberOfPage);
         return bulks.Select(b => new MemoryStream(b, writable: false)).ToArray();
     }
 
+    /// <summary>Splits the PDF in the stream into several documents, one per page range; each range is <c>[start, end]</c> (1-based, inclusive). Returns one read-only stream per part.</summary>
     public MemoryStream[] SplitToBulks(Stream inputStream, int[][] numberOfPage)
     {
         var bulks = SplitToBulks(ReadStream(inputStream), numberOfPage);
         return bulks.Select(b => new MemoryStream(b, writable: false)).ToArray();
     }
 
+    /// <summary>Splits the PDF in the stream into single-page documents and returns one read-only stream per page.</summary>
     public MemoryStream[] SplitToPages(Stream inputStream)
     {
         var pages = SplitToPages(ReadStream(inputStream));
         return pages.Select(p => new MemoryStream(p, writable: false)).ToArray();
     }
 
+    /// <summary>Splits the PDF file into single-page documents saved to files named from the template: <c>%NUM%</c> or <c>{0}</c> is replaced by the 1-based page number, otherwise <c>_N</c> is added before the extension.</summary>
     public void SplitToPages(string inputFile, string fileNameTemplate)
         => WriteSplitPages(SplitToPages(File.ReadAllBytes(inputFile)), fileNameTemplate);
 
+    /// <summary>Splits the PDF in the stream into single-page documents saved to files named from the template: <c>%NUM%</c> or <c>{0}</c> is replaced by the 1-based page number, otherwise <c>_N</c> is added before the extension.</summary>
     public void SplitToPages(Stream inputStream, string fileNameTemplate)
         => WriteSplitPages(SplitToPages(ReadStream(inputStream)), fileNameTemplate);
 

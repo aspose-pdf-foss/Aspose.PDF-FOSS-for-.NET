@@ -22,16 +22,16 @@ internal static class RsaKeyTransport
         var eb = new byte[keyLen];
         eb[1] = 0x02;
         var psLen = keyLen - data.Length - 3;
-        var ps = System.Security.Cryptography.RandomNumberGenerator.GetBytes(psLen);
+        var ps = Compat.RandomBytes(psLen);
         for (var i = 0; i < psLen; i++)
-            while (ps[i] == 0) ps[i] = System.Security.Cryptography.RandomNumberGenerator.GetBytes(1)[0];
+            while (ps[i] == 0) ps[i] = Compat.RandomBytes(1)[0];
         ps.CopyTo(eb, 2);
         eb[2 + psLen] = 0x00;
         data.CopyTo(eb, 3 + psLen);
 
-        var m = new BigInteger(eb, isUnsigned: true, isBigEndian: true);
-        var n = new BigInteger(key.Modulus, isUnsigned: true, isBigEndian: true);
-        var e = new BigInteger(key.PublicExponent, isUnsigned: true, isBigEndian: true);
+        var m = Compat.BigIntegerFromUnsignedBigEndian(eb);
+        var n = Compat.BigIntegerFromUnsignedBigEndian(key.Modulus);
+        var e = Compat.BigIntegerFromUnsignedBigEndian(key.PublicExponent);
         return ToFixed(BigInteger.ModPow(m, e, n), keyLen);
     }
 
@@ -39,7 +39,7 @@ internal static class RsaKeyTransport
     public static byte[] DecryptPkcs1(RsaKey key, byte[] ciphertext)
     {
         var keyLen = key.Modulus.Length;
-        var c = new BigInteger(ciphertext, isUnsigned: true, isBigEndian: true);
+        var c = Compat.BigIntegerFromUnsignedBigEndian(ciphertext);
         var eb = ToFixed(PrivateOp(key, c), keyLen);
 
         if (eb[0] != 0x00 || eb[1] != 0x02)
@@ -55,25 +55,25 @@ internal static class RsaKeyTransport
     {
         if (key.P is not null && key.Q is not null && key.Dp is not null && key.Dq is not null && key.InverseQ is not null)
         {
-            var p = new BigInteger(key.P, isUnsigned: true, isBigEndian: true);
-            var q = new BigInteger(key.Q, isUnsigned: true, isBigEndian: true);
-            var dp = new BigInteger(key.Dp, isUnsigned: true, isBigEndian: true);
-            var dq = new BigInteger(key.Dq, isUnsigned: true, isBigEndian: true);
-            var qInv = new BigInteger(key.InverseQ, isUnsigned: true, isBigEndian: true);
+            var p = Compat.BigIntegerFromUnsignedBigEndian(key.P);
+            var q = Compat.BigIntegerFromUnsignedBigEndian(key.Q);
+            var dp = Compat.BigIntegerFromUnsignedBigEndian(key.Dp);
+            var dq = Compat.BigIntegerFromUnsignedBigEndian(key.Dq);
+            var qInv = Compat.BigIntegerFromUnsignedBigEndian(key.InverseQ);
             var m1 = BigInteger.ModPow(m, dp, p);
             var m2 = BigInteger.ModPow(m, dq, q);
             var h = (qInv * (m1 - m2)) % p;
             if (h.Sign < 0) h += p;
             return m2 + h * q;
         }
-        var n = new BigInteger(key.Modulus, isUnsigned: true, isBigEndian: true);
-        var d = new BigInteger(key.PrivateExponent, isUnsigned: true, isBigEndian: true);
+        var n = Compat.BigIntegerFromUnsignedBigEndian(key.Modulus);
+        var d = Compat.BigIntegerFromUnsignedBigEndian(key.PrivateExponent);
         return BigInteger.ModPow(m, d, n);
     }
 
     private static byte[] ToFixed(BigInteger v, int length)
     {
-        var raw = v.ToByteArray(isUnsigned: true, isBigEndian: true);
+        var raw = Compat.ToUnsignedBigEndian(v);
         if (raw.Length == length) return raw;
         var padded = new byte[length];
         Array.Copy(raw, 0, padded, length - Math.Min(raw.Length, length),
@@ -102,8 +102,8 @@ internal static class PubSecEnvelope
     /// as one /Recipients entry.</summary>
     public static byte[] Build(byte[] content, X509Certificate2 recipient)
     {
-        var cek = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);   // AES-128 content-encryption key
-        var iv  = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        var cek = Compat.RandomBytes(16);   // AES-128 content-encryption key
+        var iv  = Compat.RandomBytes(16);
         var encryptedContent = new AesCipher(cek).EncryptCbc(content, iv, pkcs7Padding: true);
 
         using var rsa = recipient.GetRSAPublicKey()

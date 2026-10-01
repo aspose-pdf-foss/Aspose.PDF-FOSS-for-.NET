@@ -32,6 +32,7 @@ public sealed class PdfPageEditor : System.IDisposable
     private float _moveX;
     private float _moveY;
 
+    /// <summary>Creates a page editor with no document bound; call <c>BindPdf</c> before editing.</summary>
     public PdfPageEditor() { }
 
     /// <summary>Bind directly at construction time. Caller owns the <paramref name="document"/>'s lifetime.</summary>
@@ -58,9 +59,6 @@ public sealed class PdfPageEditor : System.IDisposable
         _document = Document.Open(pdfData);
     }
 
-    /// <summary>
-    /// Bind a PDF stream for editing.
-    /// </summary>
     /// <summary>Bind to an existing <see cref="Document"/>; caller owns lifetime.
     /// A null argument unbinds (clears the bound document) rather than throwing, so
     /// callers can release the editor's reference before disposing; subsequent edit
@@ -70,6 +68,7 @@ public sealed class PdfPageEditor : System.IDisposable
         _document = srcDoc;
     }
 
+    /// <summary>Reads the whole stream (from the start when it is seekable) and binds that PDF for editing.</summary>
     public void BindPdf(Stream stream)
     {
         using var ms = new MemoryStream();
@@ -119,25 +118,20 @@ public sealed class PdfPageEditor : System.IDisposable
         });
     }
 
-    /// <summary>
-    /// Save the bound document and return PDF bytes.
-    /// </summary>
     /// <summary>The currently-bound document, or throws if none.</summary>
     public Document Document => _document
         ?? throw new InvalidOperationException("No document bound. Call BindPdf first.");
 
-    /// <summary>Page size to apply to subsequent operations (no-op stored).</summary>
+    /// <summary>The size to resize the target pages to when the changes are applied (<c>ApplyChanges</c> or <c>Save</c>); null leaves the page size unchanged.</summary>
     public PageSize? PageSize { get; set; }
 
-    /// <summary>Horizontal alignment for subsequent operations (no-op stored).</summary>
+    /// <summary>Where a page's content sits horizontally on the resized page when <c>PageSize</c> is set: left (the default), centre or right.</summary>
     public HorizontalAlignment HorizontalAlignment { get; set; } = HorizontalAlignment.None;
 
-    /// <summary>Vertical alignment for subsequent operations (no-op stored).
-    /// Canonical naming: property name is VerticalAlignmentType but type is
-    /// VerticalAlignment.</summary>
+    /// <summary>Where a page's content sits vertically on the resized page when <c>PageSize</c> is set: bottom (the default), centre or top.</summary>
     public VerticalAlignment VerticalAlignmentType { get; set; } = Aspose.Pdf.VerticalAlignment.None;
 
-    /// <summary>Zoom factor for subsequent operations (no-op stored).</summary>
+    /// <summary>The factor a page's content is scaled by when it is resized to <c>PageSize</c> (1 = unscaled).</summary>
     public float Zoom { get; set; } = 1.0f;
 
     /// <summary>Apply queued changes to the bound document — resizes the target
@@ -229,17 +223,24 @@ public sealed class PdfPageEditor : System.IDisposable
                 // to a zero origin as well — otherwise aligned content computed this
                 // way lands outside a negative-origin box (e.g. [0 -612 792 0]).
                 var box = page.MediaBox;
-                double scaledW = box.Width * sx, scaledH = box.Height * sx;
+                // The offsets are computed in the VISIBLE frame - a page rotated 90/270
+                // centres its zoomed content with the rotated width and height - and then
+                // applied as they are to the content's own axes (measured on a 792 x 612
+                // box shown upright at Zoom 0.85: the reference writes `cm ... 45.9 59.4`,
+                // the halves of 612 x 0.15 and 792 x 0.15, not 59.4 45.9).
+                var rot = ((page.RotateDegrees % 360) + 360) % 360;
+                var (visW, visH) = rot is 90 or 270 ? (box.Height, box.Width) : (box.Width, box.Height);
+                double scaledW = visW * sx, scaledH = visH * sx;
                 tx += HorizontalAlignment switch
                 {
-                    Aspose.Pdf.HorizontalAlignment.Center => (box.Width - scaledW) / 2,
-                    Aspose.Pdf.HorizontalAlignment.Right => box.Width - scaledW,
+                    Aspose.Pdf.HorizontalAlignment.Center => (visW - scaledW) / 2,
+                    Aspose.Pdf.HorizontalAlignment.Right => visW - scaledW,
                     _ => 0,
                 };
                 ty += VerticalAlignmentType switch
                 {
-                    Aspose.Pdf.VerticalAlignment.Center => (box.Height - scaledH) / 2,
-                    Aspose.Pdf.VerticalAlignment.Top => box.Height - scaledH,
+                    Aspose.Pdf.VerticalAlignment.Center => (visH - scaledH) / 2,
+                    Aspose.Pdf.VerticalAlignment.Top => visH - scaledH,
                     _ => 0,
                 };
                 tx -= sx * box.LLX;
@@ -256,6 +257,7 @@ public sealed class PdfPageEditor : System.IDisposable
         }
     }
 
+    /// <summary>Applies the pending page changes to the bound document and returns it as PDF bytes. Throws if no document is bound.</summary>
     public byte[] Save()
     {
         if (_document is null)

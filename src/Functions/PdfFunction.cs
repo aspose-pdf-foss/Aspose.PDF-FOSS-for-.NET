@@ -1,4 +1,4 @@
-// PDF function dictionaries — PDF32000_2008 §7.10
+﻿// PDF function dictionaries — PDF32000_2008 §7.10
 //
 // Functions define mathematical mappings from inputs to outputs.
 // Used in colour spaces (tint transforms), shading patterns, soft masks.
@@ -8,6 +8,7 @@
 using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
+using Aspose.Pdf.IO.Filters;
 
 namespace Aspose.Pdf.Functions;
 
@@ -49,19 +50,23 @@ public abstract class PdfFunction
 
     // ── Factory ──────────────────────────────────────────────────────────────
 
-    /// <summary>Parse a PDF function from a dictionary/stream reference.</summary>
-    internal static PdfFunction? Parse(PdfObject? obj, PdfReader reader)
+    /// <summary>Parse a PDF function from a dictionary/stream reference. Without a
+    /// reader the object must stand alone: its entries are direct and a stream's
+    /// bytes are decoded by its own filters.</summary>
+    internal static PdfFunction? Parse(PdfObject? obj, PdfReader? reader)
     {
         if (obj is null) return null;
         try
         {
             PdfDictionary dict;
             byte[]? streamData = null;
-            var resolved = reader.Resolve(obj);
+            var resolved = Resolve(obj, reader);
             if (resolved is PdfStream stream)
             {
                 dict = stream.Dict;
-                streamData = reader.DecodeStream(stream);
+                streamData = reader is null
+                    ? StreamFilter.Decode(stream.RawData, stream.Dict)
+                    : reader.DecodeStream(stream);
             }
             else if (resolved is PdfDictionary d)
                 dict = d;
@@ -72,7 +77,7 @@ public abstract class PdfFunction
             return ft switch
             {
                 0 => SampledFunction.Create(dict, reader, streamData),
-                2 => ExponentialFunction.Create(dict),
+                2 => ExponentialFunction.Create(dict, reader),
                 3 => StitchingFunction.Create(dict, reader),
                 4 => PostScriptFunction.Create(dict, streamData),
                 _ => null,
@@ -82,6 +87,26 @@ public abstract class PdfFunction
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// <summary>A function entry that is an array, followed through an indirect
+    /// reference: a producer may store /Encode, /Bounds, /C0 or /Domain as their own
+    /// objects, and an unresolved reference reads as an absent entry.</summary>
+    internal static PdfArray? ArrayEntry(PdfDictionary dict, string key, PdfReader? reader)
+        => Resolve(dict.Get(key), reader) as PdfArray;
+
+    /// <summary>A numeric function entry, followed through an indirect reference.</summary>
+    internal static double NumberEntry(PdfDictionary dict, string key, PdfReader? reader, double defaultValue)
+        => Resolve(dict.Get(key), reader) switch
+        {
+            PdfInteger i => i.Value,
+            PdfReal r => r.Value,
+            _ => defaultValue,
+        };
+
+    /// <summary>An entry followed through an indirect reference where there is a
+    /// reader to follow it with; a standalone object's entries are its own.</summary>
+    private static PdfObject? Resolve(PdfObject? obj, PdfReader? reader)
+        => reader is not null ? reader.Resolve(obj) : obj is PdfNull ? null : obj;
 
     internal static double[][] ParsePairs(PdfArray? arr)
     {
@@ -118,13 +143,13 @@ public sealed class ExponentialFunction : PdfFunction
         return result;
     }
 
-    internal static ExponentialFunction? Create(PdfDictionary dict)
+    internal static ExponentialFunction? Create(PdfDictionary dict, PdfReader? reader)
     {
-        var domain = ParsePairs(dict.Get("Domain") as PdfArray);
-        var range = dict.Get("Range") is PdfArray r ? ParsePairs(r) : null;
-        var n = PdfArrayHelper.GetDoubleFromDict(dict, "N", 1);
-        var c0Arr = dict.Get("C0") as PdfArray;
-        var c1Arr = dict.Get("C1") as PdfArray;
+        var domain = ParsePairs(ArrayEntry(dict, "Domain", reader));
+        var range = ArrayEntry(dict, "Range", reader) is { } r ? ParsePairs(r) : null;
+        var n = NumberEntry(dict, "N", reader, 1);
+        var c0Arr = ArrayEntry(dict, "C0", reader);
+        var c1Arr = ArrayEntry(dict, "C1", reader);
         var c0 = c0Arr is not null ? PdfArrayHelper.ToDoubleArray(c0Arr) : [0.0];
         var c1 = c1Arr is not null ? PdfArrayHelper.ToDoubleArray(c1Arr) : [1.0];
         return new ExponentialFunction(domain, range, c0, c1, n);
@@ -168,11 +193,11 @@ public sealed class StitchingFunction : PdfFunction
         return Functions[k].Evaluate([t]);
     }
 
-    internal static StitchingFunction? Create(PdfDictionary dict, PdfReader reader)
+    internal static StitchingFunction? Create(PdfDictionary dict, PdfReader? reader)
     {
-        var domain = ParsePairs(dict.Get("Domain") as PdfArray);
-        var range = dict.Get("Range") is PdfArray r ? ParsePairs(r) : null;
-        var fnArr = reader.Resolve(dict.Get("Functions")) as PdfArray;
+        var domain = ParsePairs(ArrayEntry(dict, "Domain", reader));
+        var range = ArrayEntry(dict, "Range", reader) is { } r ? ParsePairs(r) : null;
+        var fnArr = ArrayEntry(dict, "Functions", reader);
         if (fnArr is null) return null;
         var fns = new List<PdfFunction>();
         foreach (var item in fnArr)
@@ -180,9 +205,9 @@ public sealed class StitchingFunction : PdfFunction
             var f = Parse(item, reader);
             if (f is not null) fns.Add(f);
         }
-        var boundsArr = dict.Get("Bounds") as PdfArray;
+        var boundsArr = ArrayEntry(dict, "Bounds", reader);
         var bounds = boundsArr is not null ? PdfArrayHelper.ToDoubleArray(boundsArr) : [];
-        var encodeArr = dict.Get("Encode") as PdfArray;
+        var encodeArr = ArrayEntry(dict, "Encode", reader);
         var encode = encodeArr is not null ? ParsePairs(encodeArr) : [];
         return new StitchingFunction(domain, range, fns.ToArray(), bounds, encode);
     }
@@ -222,6 +247,11 @@ public sealed class SampledFunction : PdfFunction
 {
     public int[] Size { get; }
     public int BitsPerSample { get; }
+
+    /// <summary>How samples are interpolated: 1 for multilinear, 3 for a cubic spline.
+    /// ⚠ The spline is applied to a function of ONE input; a function of several
+    /// stays multilinear whatever it declares.</summary>
+    public int Order { get; }
     private readonly double[] _samples;
     private readonly int _nOutputs;
     private readonly double[][]? _encode; // per input: sample-grid range (default [0, Size_i-1])
@@ -229,11 +259,11 @@ public sealed class SampledFunction : PdfFunction
 
     private SampledFunction(double[][] domain, double[][]? range,
         int[] size, int bitsPerSample, double[] samples, int nOutputs,
-        double[][]? encode, double[][]? decode)
+        double[][]? encode, double[][]? decode, int order)
         : base(domain, range)
     {
         Size = size; BitsPerSample = bitsPerSample; _samples = samples; _nOutputs = nOutputs;
-        _encode = encode; _decode = decode;
+        _encode = encode; _decode = decode; Order = order;
     }
 
     protected override double[] EvaluateCore(double[] inputs)
@@ -257,6 +287,13 @@ public sealed class SampledFunction : PdfFunction
             double e1 = _encode is not null && i < _encode.Length ? _encode[i][1] : Size[i] - 1;
             var t = hi - lo != 0 ? (x - lo) / (hi - lo) : 0;
             e[i] = Math.Max(0, Math.Min(Size[i] - 1, e0 + t * (e1 - e0)));
+        }
+
+        if (Order == CubicOrder && m == 1 && Size[0] > 2)
+        {
+            for (int c = 0; c < _nOutputs; c++)
+                result[c] = NaturalCubicSpline(c, Size[0], e[0]);
+            return Decoded(result);
         }
 
         // Accumulate the 2^m interpolation corners.
@@ -284,8 +321,46 @@ public sealed class SampledFunction : PdfFunction
             }
         }
 
-        // Decode: map raw samples [0, 2^bps-1] onto /Decode (default /Range,
-        // default [0,1] when neither is present).
+        return Decoded(result);
+    }
+
+    /// <summary>The /Order that asks for a cubic spline rather than multilinear
+    /// interpolation (§7.10.2).</summary>
+    private const int CubicOrder = 3;
+
+    /// <summary>
+    /// One output of a one-input function, interpolated at the encoded position
+    /// <paramref name="x"/> by the natural cubic spline through all its samples:
+    /// knots at the sample positions 0 .. n-1, second derivative zero at both ends.
+    /// </summary>
+    private double NaturalCubicSpline(int output, int n, double x)
+    {
+        var y = new double[n];
+        for (int i = 0; i < n; i++) y[i] = _samples[i * _nOutputs + output];
+
+        // Second derivatives at the knots: the tridiagonal system of unit spacing,
+        // solved forwards and back (Thomas algorithm), zero at both ends.
+        var second = new double[n];
+        var upper = new double[n];
+        var rhs = new double[n];
+        for (int i = 1; i < n - 1; i++)
+        {
+            var diagonal = 4 - upper[i - 1];
+            upper[i] = 1 / diagonal;
+            rhs[i] = (6 * (y[i + 1] - 2 * y[i] + y[i - 1]) - rhs[i - 1]) / diagonal;
+        }
+        for (int i = n - 2; i > 0; i--) second[i] = rhs[i] - upper[i] * second[i + 1];
+
+        var k = Math.Min((int)Math.Floor(x), n - 2);
+        var b = x - k;
+        var a = 1 - b;
+        return a * y[k] + b * y[k + 1] + ((a * a * a - a) * second[k] + (b * b * b - b) * second[k + 1]) / 6;
+    }
+
+    /// <summary>Raw samples [0, 2^bps-1] mapped onto /Decode (default /Range,
+    /// default [0,1] when neither is present).</summary>
+    private double[] Decoded(double[] result)
+    {
         var maxSample = (double)((1L << BitsPerSample) - 1);
         for (int c = 0; c < _nOutputs; c++)
         {
@@ -298,26 +373,27 @@ public sealed class SampledFunction : PdfFunction
         return result;
     }
 
-    internal static SampledFunction? Create(PdfDictionary dict, PdfReader reader, byte[]? streamData)
+    internal static SampledFunction? Create(PdfDictionary dict, PdfReader? reader, byte[]? streamData)
     {
         if (streamData is null) return null;
-        var domain = ParsePairs(dict.Get("Domain") as PdfArray);
-        var range = dict.Get("Range") is PdfArray r ? ParsePairs(r) : null;
-        var sizeArr = dict.Get("Size") as PdfArray;
+        var domain = ParsePairs(ArrayEntry(dict, "Domain", reader));
+        var range = ArrayEntry(dict, "Range", reader) is { } r ? ParsePairs(r) : null;
+        var sizeArr = ArrayEntry(dict, "Size", reader);
         if (sizeArr is null) return null;
         var size = new int[sizeArr.Count];
         for (int i = 0; i < sizeArr.Count; i++)
             size[i] = PdfArrayHelper.GetInt(sizeArr, i);
-        var bps = (int)dict.GetInt("BitsPerSample");
+        var bps = (int)NumberEntry(dict, "BitsPerSample", reader, 0);
         if (bps <= 0) bps = 8;
-        var encode = dict.Get("Encode") is PdfArray enc ? ParsePairs(enc) : null;
-        var decode = dict.Get("Decode") is PdfArray dec ? ParsePairs(dec) : null;
+        var encode = ArrayEntry(dict, "Encode", reader) is { } enc ? ParsePairs(enc) : null;
+        var decode = ArrayEntry(dict, "Decode", reader) is { } dec ? ParsePairs(dec) : null;
         var nOutputs = range?.Length ?? 1;
         var totalSamples = 1;
         foreach (var s in size) totalSamples *= s;
         totalSamples *= nOutputs;
         var samples = DecodeSamples(streamData, bps, totalSamples);
-        return new SampledFunction(domain, range, size, bps, samples, nOutputs, encode, decode);
+        var order = (int)NumberEntry(dict, "Order", reader, 1);
+        return new SampledFunction(domain, range, size, bps, samples, nOutputs, encode, decode, order);
     }
 
     private static double[] DecodeSamples(byte[] data, int bps, int count)
@@ -335,8 +411,23 @@ public sealed class SampledFunction : PdfFunction
         }
         else if (bps == 32)
         {
+            // Unsigned: a sample with its top bit set is large, not negative.
             for (int i = 0; i < count && i * 4 + 3 < data.Length; i++)
-                result[i] = (data[i * 4] << 24) | (data[i * 4 + 1] << 16) | (data[i * 4 + 2] << 8) | data[i * 4 + 3];
+                result[i] = (uint)((data[i * 4] << 24) | (data[i * 4 + 1] << 16) | (data[i * 4 + 2] << 8) | data[i * 4 + 3]);
+        }
+        else if (bps is 12 or 24)
+        {
+            // Samples that do not fill whole bytes evenly: read bit by bit, most
+            // significant first, straight across byte boundaries.
+            for (int i = 0; i < count; i++)
+            {
+                long value = 0;
+                var bit = (long)i * bps;
+                if ((bit + bps + 7) / 8 > data.Length) break;
+                for (int b = 0; b < bps; b++, bit++)
+                    value = (value << 1) | (uint)((data[bit / 8] >> (7 - (int)(bit % 8))) & 1);
+                result[i] = value;
+            }
         }
         else if (bps is 1 or 2 or 4)
         {

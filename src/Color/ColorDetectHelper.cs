@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Core;
@@ -12,6 +12,20 @@ namespace Aspose.Pdf;
 /// </summary>
 internal static class ColorDetectHelper
 {
+    /// <summary>What a page's content, images, colour-space resources and annotations were seen to
+    /// use. Each flag only ever goes from false to true as the walk accumulates, and the verdict
+    /// reads them at the end: RGB or CMYK anywhere makes the page Rgb, gray alone makes it
+    /// Grayscale, and a page whose only colour values were 0 and 1 is BlackAndWhite.</summary>
+    private sealed class ColorUsage
+    {
+        public bool hasRgb;
+        public bool hasGray;
+        public bool hasCmyk;
+        /// <summary>A colour operator, image or annotation colour was present at all - even one
+        /// whose values were plain black or white.</summary>
+        public bool hasAnyColor;
+    }
+
     /// <summary>
     /// Determine the color type of a page based on its content stream operators
     /// and image color spaces.
@@ -22,34 +36,31 @@ internal static class ColorDetectHelper
         var contentStreams = GetContentStreams(page, reader);
         var resources = reader.ResolveDict(page.Dict.Get("Resources"));
 
-        var hasRgb = false;
-        var hasGray = false;
-        var hasCmyk = false;
-        var hasAnyColor = false;
+        var usage = new ColorUsage();
 
         // Analyze content stream operators
         foreach (var streamBytes in contentStreams)
         {
-            AnalyzeContentStream(streamBytes, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+            AnalyzeContentStream(streamBytes, usage);
         }
 
         // Analyze image XObject color spaces and resources
         if (resources is not null)
         {
-            AnalyzeImageColorSpaces(resources, reader, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
-            AnalyzeColorSpaceResources(resources, reader, ref hasRgb, ref hasGray, ref hasCmyk);
+            AnalyzeImageColorSpaces(resources, reader, usage);
+            AnalyzeColorSpaceResources(resources, reader, usage);
         }
 
         // Analyze annotation appearance stream content (Form XObjects)
-        AnalyzeAnnotations(page, reader, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+        AnalyzeAnnotations(page, reader, usage);
 
         // Determine the dominant color type:
         // RGB or CMYK present -> Rgb
         // Only gray operators -> Grayscale
         // No color operators or only black/white values -> BlackAndWhite
-        if (hasRgb || hasCmyk)
+        if (usage.hasRgb || usage.hasCmyk)
             return ColorType.Rgb;
-        if (hasGray)
+        if (usage.hasGray)
             return ColorType.Grayscale;
 
         // If color operators were found but none set hasGray/hasRgb/hasCmyk,
@@ -59,7 +70,7 @@ internal static class ColorDetectHelper
     }
 
     private static void AnalyzeContentStream(byte[] streamBytes,
-        ref bool hasRgb, ref bool hasGray, ref bool hasCmyk, ref bool hasAnyColor)
+        ColorUsage usage)
     {
         var lexer = new PdfLexer(streamBytes);
         var operands = new List<PdfObject>();
@@ -101,12 +112,12 @@ internal static class ColorDetectHelper
                     if (op == "BI")
                     {
                         // Inline image: check its color space
-                        AnalyzeInlineImage(lexer, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+                        AnalyzeInlineImage(lexer, usage);
                         operands.Clear();
                         break;
                     }
 
-                    ClassifyOperator(op, operands, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+                    ClassifyOperator(op, operands, usage);
                     operands.Clear();
                     break;
                 }
@@ -118,135 +129,32 @@ internal static class ColorDetectHelper
     }
 
     private static void ClassifyOperator(string op, List<PdfObject> operands,
-        ref bool hasRgb, ref bool hasGray, ref bool hasCmyk, ref bool hasAnyColor)
+        ColorUsage usage)
     {
         switch (op)
         {
-            // RGB fill/stroke
-            case "rg" when operands.Count >= 3:
-            {
-                hasAnyColor = true;
-                var r = Num(operands[0]);
-                var g = Num(operands[1]);
-                var b = Num(operands[2]);
-                if (IsNonTrivialRgb(r, g, b))
-                    hasRgb = true;
-                else if (IsGrayRgb(r, g, b))
-                    hasGray = true;
+            case "rg": case "RG": case "g": case "G": case "k": case "K":
+                ClassifyDeviceColorOperator(operands, usage, op);
                 break;
-            }
-            case "RG" when operands.Count >= 3:
-            {
-                hasAnyColor = true;
-                var r = Num(operands[0]);
-                var g = Num(operands[1]);
-                var b = Num(operands[2]);
-                if (IsNonTrivialRgb(r, g, b))
-                    hasRgb = true;
-                else if (IsGrayRgb(r, g, b))
-                    hasGray = true;
+            case "sc": case "scn": case "SC": case "SCN": case "cs": case "CS":
+                ClassifySpaceColorOperator(operands, usage, op);
                 break;
-            }
-
-            // Gray fill/stroke
-            case "g" when operands.Count >= 1:
-            {
-                hasAnyColor = true;
-                var v = Num(operands[0]);
-                if (!IsBlackOrWhite(v))
-                    hasGray = true;
-                break;
-            }
-            case "G" when operands.Count >= 1:
-            {
-                hasAnyColor = true;
-                var v = Num(operands[0]);
-                if (!IsBlackOrWhite(v))
-                    hasGray = true;
-                break;
-            }
-
-            // CMYK fill/stroke
-            case "k" when operands.Count >= 4:
-            {
-                hasAnyColor = true;
-                var c = Num(operands[0]);
-                var m = Num(operands[1]);
-                var y = Num(operands[2]);
-                var kv = Num(operands[3]);
-                if (IsNonTrivialCmyk(c, m, y, kv))
-                    hasCmyk = true;
-                else if (IsCmykGray(c, m, y))
-                    hasGray = true;
-                break;
-            }
-            case "K" when operands.Count >= 4:
-            {
-                hasAnyColor = true;
-                var c = Num(operands[0]);
-                var m = Num(operands[1]);
-                var y = Num(operands[2]);
-                var kv = Num(operands[3]);
-                if (IsNonTrivialCmyk(c, m, y, kv))
-                    hasCmyk = true;
-                else if (IsCmykGray(c, m, y))
-                    hasGray = true;
-                break;
-            }
-
-            // Color space-based operators
-            case "sc" or "scn":
-            case "SC" or "SCN":
-            {
-                // These use the current color space; with 3+ numeric operands = RGB-like,
-                // 4+ = CMYK-like, 1 = gray-like
-                hasAnyColor = true;
-                if (operands.Count >= 4 && operands.All(o => o is PdfInteger or PdfReal))
-                    hasCmyk = true;
-                else if (operands.Count >= 3 && operands.Take(3).All(o => o is PdfInteger or PdfReal))
-                {
-                    var r = Num(operands[0]);
-                    var g = Num(operands[1]);
-                    var b = Num(operands[2]);
-                    if (IsNonTrivialRgb(r, g, b))
-                        hasRgb = true;
-                    else if (IsGrayRgb(r, g, b))
-                        hasGray = true;
-                }
-                else if (operands.Count >= 1 && operands[0] is PdfInteger or PdfReal)
-                {
-                    var v = Num(operands[0]);
-                    if (!IsBlackOrWhite(v))
-                        hasGray = true;
-                }
-                break;
-            }
-
-            // Color space selection — only flag RGB/CMYK; DeviceGray is the default
-            // and its actual gray level is determined by g/G operators, not the cs/CS selection.
-            case "cs" or "CS" when operands.Count >= 1 && operands[0] is PdfName csName:
-            {
-                hasAnyColor = true;
-                if (csName.Value is not "DeviceGray" and not "CalGray")
-                    ClassifyColorSpaceName(csName.Value, ref hasRgb, ref hasGray, ref hasCmyk);
-                break;
-            }
         }
     }
 
     private static void ClassifyColorSpaceName(string name,
-        ref bool hasRgb, ref bool hasGray, ref bool hasCmyk)
+        ColorUsage usage)
     {
         switch (name)
         {
             case "DeviceRGB" or "CalRGB":
-                hasRgb = true;
+                usage.hasRgb = true;
                 break;
             case "DeviceCMYK":
-                hasCmyk = true;
+                usage.hasCmyk = true;
                 break;
             case "DeviceGray" or "CalGray":
-                hasGray = true;
+                usage.hasGray = true;
                 break;
         }
     }
@@ -254,7 +162,7 @@ internal static class ColorDetectHelper
     [ThreadStatic] private static HashSet<PdfDictionary>? _visitedResources;
 
     private static void AnalyzeImageColorSpaces(PdfDictionary resources, PdfReader reader,
-        ref bool hasRgb, ref bool hasGray, ref bool hasCmyk, ref bool hasAnyColor)
+        ColorUsage usage)
     {
         // Cycle detection: prevent infinite recursion on self-referencing Form XObjects
         _visitedResources ??= new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
@@ -273,8 +181,8 @@ internal static class ColorDetectHelper
             var subtype = obj.Dict.GetName("Subtype");
             if (subtype == "Image")
             {
-                hasAnyColor = true;
-                ClassifyImageColorSpace(obj, reader, ref hasRgb, ref hasGray, ref hasCmyk);
+                usage.hasAnyColor = true;
+                ClassifyImageColorSpace(obj, reader, usage);
             }
             else if (subtype == "Form")
             {
@@ -282,11 +190,11 @@ internal static class ColorDetectHelper
                 var formResources = reader.ResolveDict(obj.Dict.Get("Resources"));
                 if (formResources is not null)
                 {
-                    AnalyzeImageColorSpaces(formResources, reader, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+                    AnalyzeImageColorSpaces(formResources, reader, usage);
                 }
                 // Also analyze the form's content stream
                 var formData = reader.DecodeStream(obj);
-                AnalyzeContentStream(formData, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+                AnalyzeContentStream(formData, usage);
             }
         }
 
@@ -298,7 +206,7 @@ internal static class ColorDetectHelper
     }
 
     private static void ClassifyImageColorSpace(PdfStream imageStream, PdfReader reader,
-        ref bool hasRgb, ref bool hasGray, ref bool hasCmyk)
+        ColorUsage usage)
     {
         var bpc = (int)imageStream.Dict.GetInt("BitsPerComponent", 8);
         var csObj = reader.Resolve(imageStream.Dict.Get("ColorSpace"));
@@ -311,12 +219,12 @@ internal static class ColorDetectHelper
             if (csName.Value is "DeviceGray" or "CalGray")
             {
                 if (!isOneBit && !IsImageEffectivelyBW(imageStream, reader))
-                    hasGray = true;
+                    usage.hasGray = true;
                 // else: 1-bit or all-0/255 pixels → black and white, don't set hasGray
             }
             else
             {
-                ClassifyColorSpaceName(csName.Value, ref hasRgb, ref hasGray, ref hasCmyk);
+                ClassifyColorSpaceName(csName.Value, usage);
             }
         }
         else if (csObj is PdfArray csArr && csArr.Count > 0)
@@ -332,10 +240,10 @@ internal static class ColorDetectHelper
                     {
                         case 1:
                             if (!isOneBit && !IsImageEffectivelyBW(imageStream, reader))
-                                hasGray = true;
+                                usage.hasGray = true;
                             break;
-                        case 3: hasRgb = true; break;
-                        case 4: hasCmyk = true; break;
+                        case 3: usage.hasRgb = true; break;
+                        case 4: usage.hasCmyk = true; break;
                     }
                 }
             }
@@ -358,19 +266,19 @@ internal static class ColorDetectHelper
                     }
                     else
                     {
-                        ClassifyColorSpaceName(baseColorSpaceName, ref hasRgb, ref hasGray, ref hasCmyk);
+                        ClassifyColorSpaceName(baseColorSpaceName, usage);
                     }
                 }
             }
             else if (baseName is not null)
             {
-                ClassifyColorSpaceName(baseName, ref hasRgb, ref hasGray, ref hasCmyk);
+                ClassifyColorSpaceName(baseName, usage);
             }
         }
     }
 
     private static void AnalyzeColorSpaceResources(PdfDictionary resources, PdfReader reader,
-        ref bool hasRgb, ref bool hasGray, ref bool hasCmyk)
+        ColorUsage usage)
     {
         var csDict = reader.ResolveDict(resources.Get("ColorSpace"));
         if (csDict is null) return;
@@ -393,8 +301,8 @@ internal static class ColorDetectHelper
                             // 1-bit (B&W) images. Only flag gray from actual color operations
                             // and image analysis (which checks BitsPerComponent).
                             case 1: break; // don't set hasGray from resource declarations alone
-                            case 3: hasRgb = true; break;
-                            case 4: hasCmyk = true; break;
+                            case 3: usage.hasRgb = true; break;
+                            case 4: usage.hasCmyk = true; break;
                         }
                     }
                 }
@@ -402,19 +310,19 @@ internal static class ColorDetectHelper
                 {
                     // Skip DeviceGray - it's detected via g/G operators and images
                     if (baseName is not "DeviceGray" and not "CalGray")
-                        ClassifyColorSpaceName(baseName, ref hasRgb, ref hasGray, ref hasCmyk);
+                        ClassifyColorSpaceName(baseName, usage);
                 }
             }
             else if (csObj is PdfName csName)
             {
                 if (csName.Value is not "DeviceGray" and not "CalGray")
-                    ClassifyColorSpaceName(csName.Value, ref hasRgb, ref hasGray, ref hasCmyk);
+                    ClassifyColorSpaceName(csName.Value, usage);
             }
         }
     }
 
     private static void AnalyzeInlineImage(PdfLexer lexer,
-        ref bool hasRgb, ref bool hasGray, ref bool hasCmyk, ref bool hasAnyColor)
+        ColorUsage usage)
     {
         // Parse inline image dict entries until ID keyword
         string? colorSpaceName = null;
@@ -452,8 +360,8 @@ internal static class ColorDetectHelper
 
         if (colorSpaceName is not null)
         {
-            hasAnyColor = true;
-            ClassifyColorSpaceName(colorSpaceName, ref hasRgb, ref hasGray, ref hasCmyk);
+            usage.hasAnyColor = true;
+            ClassifyColorSpaceName(colorSpaceName, usage);
         }
     }
 
@@ -555,7 +463,7 @@ internal static class ColorDetectHelper
     }
 
     private static void AnalyzeAnnotations(Page page, PdfReader reader,
-        ref bool hasRgb, ref bool hasGray, ref bool hasCmyk, ref bool hasAnyColor)
+        ColorUsage usage)
     {
         var annotsObj = reader.Resolve(page.Dict.Get("Annots")) as PdfArray;
         if (annotsObj is null) return;
@@ -568,10 +476,10 @@ internal static class ColorDetectHelper
             var subtype = annotDict.GetName("Subtype");
 
             // Analyze the /C (color) entry on the annotation itself.
-            AnalyzeAnnotationColorEntry(annotDict, reader, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+            AnalyzeAnnotationColorEntry(annotDict, reader, usage);
 
             // Also check the /IC (interior color) entry
-            AnalyzeAnnotationColorEntry(annotDict, reader, "IC", ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+            AnalyzeAnnotationColorEntry(annotDict, reader, "IC", usage);
 
             // For Widget annotations (form fields, buttons), analyze appearance streams
             // since widgets are not referenced from the page content stream as XObjects.
@@ -590,7 +498,7 @@ internal static class ColorDetectHelper
                     var resolved = reader.Resolve(apObj);
                     if (resolved is PdfStream apStream)
                     {
-                        AnalyzeAppearanceStream(apStream, reader, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+                        AnalyzeAppearanceStream(apStream, reader, usage);
                     }
                     else if (resolved is PdfDictionary stateDict)
                     {
@@ -598,7 +506,7 @@ internal static class ColorDetectHelper
                         {
                             var stateStream = reader.ResolveStream(stateDict.Get(stateKey));
                             if (stateStream is not null)
-                                AnalyzeAppearanceStream(stateStream, reader, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+                                AnalyzeAppearanceStream(stateStream, reader, usage);
                         }
                     }
                 }
@@ -607,17 +515,17 @@ internal static class ColorDetectHelper
     }
 
     private static void AnalyzeAppearanceStream(PdfStream apStream, PdfReader reader,
-        ref bool hasRgb, ref bool hasGray, ref bool hasCmyk, ref bool hasAnyColor)
+        ColorUsage usage)
     {
         var streamData = reader.DecodeStream(apStream);
-        AnalyzeContentStream(streamData, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+        AnalyzeContentStream(streamData, usage);
 
         // Also check appearance stream resources
         var apResources = reader.ResolveDict(apStream.Dict.Get("Resources"));
         if (apResources is not null)
         {
-            AnalyzeImageColorSpaces(apResources, reader, ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
-            AnalyzeColorSpaceResources(apResources, reader, ref hasRgb, ref hasGray, ref hasCmyk);
+            AnalyzeImageColorSpaces(apResources, reader, usage);
+            AnalyzeColorSpaceResources(apResources, reader, usage);
         }
     }
 
@@ -626,23 +534,23 @@ internal static class ColorDetectHelper
     /// /C with 1 component = DeviceGray, 3 = DeviceRGB, 4 = DeviceCMYK.
     /// </summary>
     private static void AnalyzeAnnotationColorEntry(PdfDictionary annotDict, PdfReader reader,
-        ref bool hasRgb, ref bool hasGray, ref bool hasCmyk, ref bool hasAnyColor)
+        ColorUsage usage)
     {
-        AnalyzeAnnotationColorEntry(annotDict, reader, "C", ref hasRgb, ref hasGray, ref hasCmyk, ref hasAnyColor);
+        AnalyzeAnnotationColorEntry(annotDict, reader, "C", usage);
     }
 
     private static void AnalyzeAnnotationColorEntry(PdfDictionary annotDict, PdfReader reader,
-        string key, ref bool hasRgb, ref bool hasGray, ref bool hasCmyk, ref bool hasAnyColor)
+        string key, ColorUsage usage)
     {
         var colorObj = reader.Resolve(annotDict.Get(key)) as PdfArray;
         if (colorObj is null || colorObj.Count == 0) return;
 
-        hasAnyColor = true;
+        usage.hasAnyColor = true;
         if (colorObj.Count == 1)
         {
             var v = Num(colorObj[0]);
             if (!IsBlackOrWhite(v))
-                hasGray = true;
+                usage.hasGray = true;
         }
         else if (colorObj.Count == 3)
         {
@@ -650,9 +558,9 @@ internal static class ColorDetectHelper
             var g = Num(colorObj[1]);
             var b = Num(colorObj[2]);
             if (IsNonTrivialRgb(r, g, b))
-                hasRgb = true;
+                usage.hasRgb = true;
             else if (IsGrayRgb(r, g, b))
-                hasGray = true;
+                usage.hasGray = true;
         }
         else if (colorObj.Count >= 4)
         {
@@ -661,9 +569,9 @@ internal static class ColorDetectHelper
             var y = Num(colorObj[2]);
             var kv = Num(colorObj[3]);
             if (IsNonTrivialCmyk(c, m, y, kv))
-                hasCmyk = true;
+                usage.hasCmyk = true;
             else if (IsCmykGray(c, m, y))
-                hasGray = true;
+                usage.hasGray = true;
         }
     }
 
@@ -689,6 +597,131 @@ internal static class ColorDetectHelper
             if (t.Kind == TokenKind.Eof) return;
             if (t.Kind == TokenKind.DictStart) depth++;
             if (t.Kind == TokenKind.DictEnd) depth--;
+        }
+    }
+
+    /// <summary>The device colour operators: an RGB, gray or CMYK component count is a direct classification.</summary>
+    private static void ClassifyDeviceColorOperator(List<PdfObject> operands, ColorUsage usage, string op)
+    {
+        switch (op)
+        {
+            // RGB fill/stroke
+            case "rg" when operands.Count >= 3:
+            {
+                usage.hasAnyColor = true;
+                var r = Num(operands[0]);
+                var g = Num(operands[1]);
+                var b = Num(operands[2]);
+                if (IsNonTrivialRgb(r, g, b))
+                    usage.hasRgb = true;
+                else if (IsGrayRgb(r, g, b))
+                    usage.hasGray = true;
+                break;
+            }
+            case "RG" when operands.Count >= 3:
+            {
+                usage.hasAnyColor = true;
+                var r = Num(operands[0]);
+                var g = Num(operands[1]);
+                var b = Num(operands[2]);
+                if (IsNonTrivialRgb(r, g, b))
+                    usage.hasRgb = true;
+                else if (IsGrayRgb(r, g, b))
+                    usage.hasGray = true;
+                break;
+            }
+
+            // Gray fill/stroke
+            case "g" when operands.Count >= 1:
+            {
+                usage.hasAnyColor = true;
+                var v = Num(operands[0]);
+                if (!IsBlackOrWhite(v))
+                    usage.hasGray = true;
+                break;
+            }
+            case "G" when operands.Count >= 1:
+            {
+                usage.hasAnyColor = true;
+                var v = Num(operands[0]);
+                if (!IsBlackOrWhite(v))
+                    usage.hasGray = true;
+                break;
+            }
+
+            // CMYK fill/stroke
+            case "k" when operands.Count >= 4:
+            {
+                usage.hasAnyColor = true;
+                var c = Num(operands[0]);
+                var m = Num(operands[1]);
+                var y = Num(operands[2]);
+                var kv = Num(operands[3]);
+                if (IsNonTrivialCmyk(c, m, y, kv))
+                    usage.hasCmyk = true;
+                else if (IsCmykGray(c, m, y))
+                    usage.hasGray = true;
+                break;
+            }
+            case "K" when operands.Count >= 4:
+            {
+                usage.hasAnyColor = true;
+                var c = Num(operands[0]);
+                var m = Num(operands[1]);
+                var y = Num(operands[2]);
+                var kv = Num(operands[3]);
+                if (IsNonTrivialCmyk(c, m, y, kv))
+                    usage.hasCmyk = true;
+                else if (IsCmykGray(c, m, y))
+                    usage.hasGray = true;
+                break;
+            }
+
+        }
+    }
+
+    /// <summary>The colour-space operators: the space named by cs/CS decides what sc/scn components mean.</summary>
+    private static void ClassifySpaceColorOperator(List<PdfObject> operands, ColorUsage usage, string op)
+    {
+        switch (op)
+        {
+            // Color space-based operators
+            case "sc" or "scn":
+            case "SC" or "SCN":
+            {
+                // These use the current color space; with 3+ numeric operands = RGB-like,
+                // 4+ = CMYK-like, 1 = gray-like
+                usage.hasAnyColor = true;
+                if (operands.Count >= 4 && operands.All(o => o is PdfInteger or PdfReal))
+                    usage.hasCmyk = true;
+                else if (operands.Count >= 3 && operands.Take(3).All(o => o is PdfInteger or PdfReal))
+                {
+                    var r = Num(operands[0]);
+                    var g = Num(operands[1]);
+                    var b = Num(operands[2]);
+                    if (IsNonTrivialRgb(r, g, b))
+                        usage.hasRgb = true;
+                    else if (IsGrayRgb(r, g, b))
+                        usage.hasGray = true;
+                }
+                else if (operands.Count >= 1 && operands[0] is PdfInteger or PdfReal)
+                {
+                    var v = Num(operands[0]);
+                    if (!IsBlackOrWhite(v))
+                        usage.hasGray = true;
+                }
+                break;
+            }
+
+            // Color space selection — only flag RGB/CMYK; DeviceGray is the default
+            // and its actual gray level is determined by g/G operators, not the cs/CS selection.
+            case "cs" or "CS" when operands.Count >= 1 && operands[0] is PdfName csName:
+            {
+                usage.hasAnyColor = true;
+                if (csName.Value is not "DeviceGray" and not "CalGray")
+                    ClassifyColorSpaceName(csName.Value, usage);
+                break;
+            }
         }
     }
 }

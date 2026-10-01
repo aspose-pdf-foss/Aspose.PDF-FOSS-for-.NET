@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
@@ -198,43 +198,46 @@ public sealed partial class TableAbsorber
 
     private static List<AbsorbedTable> DetectTablesInRegion(List<TextRun> runs, List<HEdge> hEdges, List<VEdge> vEdges)
     {
-        if (hEdges.Count < 2 || vEdges.Count < 2)
+        var dr = new RegionTableDetectState();
+        dr.runs = runs;
+        dr.hEdges = hEdges;
+        dr.vEdges = vEdges;
+        if (dr.hEdges.Count < 2 || dr.vEdges.Count < 2)
             return [];
 
 
-        // 1. Cluster edge positions into row/column boundary values
-        var rowBounds = ClusterValues(hEdges.Select(e => e.Y).ToList());
-        rowBounds.Sort();
-        var colBounds = ClusterValues(vEdges.Select(e => e.X).ToList());
-        colBounds.Sort();
+        dr.rowBounds = ClusterValues(dr.hEdges.Select(e => e.Y).ToList());
+        dr.rowBounds.Sort();
+        dr.colBounds = ClusterValues(dr.vEdges.Select(e => e.X).ToList());
+        dr.colBounds.Sort();
 
         // An OPEN side - rules of one direction running past the last rule of the
         // other - closes one point beyond the rules' end: a grid whose row rules
         // reach x 300 with no right-hand column rule reports its last column ending
         // at 301 (probed; the same for an open top, left and bottom).
         const double OpenSideClosure = 1.0;
-        var rulesRight = hEdges.Max(e => e.X2);
-        var rulesLeft = hEdges.Min(e => e.X1);
-        if (rulesRight > colBounds[^1] + EdgeTol) colBounds.Add(rulesRight + OpenSideClosure);
-        if (rulesLeft < colBounds[0] - EdgeTol) colBounds.Insert(0, rulesLeft - OpenSideClosure);
-        var rulesTop = vEdges.Max(e => e.Y2);
-        var rulesBottom = vEdges.Min(e => e.Y1);
-        if (rulesTop > rowBounds[^1] + EdgeTol) rowBounds.Add(rulesTop + OpenSideClosure);
-        if (rulesBottom < rowBounds[0] - EdgeTol) rowBounds.Insert(0, rulesBottom - OpenSideClosure);
+        dr.rulesRight = dr.hEdges.Max(e => e.X2);
+        dr.rulesLeft = dr.hEdges.Min(e => e.X1);
+        if (dr.rulesRight > dr.colBounds[^1] + EdgeTol) dr.colBounds.Add(dr.rulesRight + OpenSideClosure);
+        if (dr.rulesLeft < dr.colBounds[0] - EdgeTol) dr.colBounds.Insert(0, dr.rulesLeft - OpenSideClosure);
+        dr.rulesTop = dr.vEdges.Max(e => e.Y2);
+        dr.rulesBottom = dr.vEdges.Min(e => e.Y1);
+        if (dr.rulesTop > dr.rowBounds[^1] + EdgeTol) dr.rowBounds.Add(dr.rulesTop + OpenSideClosure);
+        if (dr.rulesBottom < dr.rowBounds[0] - EdgeTol) dr.rowBounds.Insert(0, dr.rulesBottom - OpenSideClosure);
 
         // A row boundary needs meaningful rule coverage: an H rule spanning a
         // sliver of the region (a small box ruled INSIDE one cell) must not
         // slice every column's rows.
-        if (rowBounds.Count > 2)
+        if (dr.rowBounds.Count > 2)
         {
-            var regW = Math.Max(1, vEdges.Max(e => e.X) - vEdges.Min(e => e.X));
-            rowBounds.RemoveAll(y =>
+            var regW = Math.Max(1, dr.vEdges.Max(e => e.X) - dr.vEdges.Min(e => e.X));
+            dr.rowBounds.RemoveAll(y =>
             {
-                var cover = hEdges.Where(e => Math.Abs(e.Y - y) <= EdgeTol)
+                var cover = dr.hEdges.Where(e => Math.Abs(e.Y - y) <= EdgeTol)
                     .Sum(e => e.X2 - e.X1);
                 return cover < regW * 0.2;
             });
-            if (rowBounds.Count < 2) return [];
+            if (dr.rowBounds.Count < 2) return [];
         }
 
         // Merge nearby column boundaries that form thin "double-border" gaps.
@@ -242,120 +245,47 @@ public sealed partial class TableAbsorber
         // ~20-30pt apart, creating phantom thin columns with no content — but a
         // narrow column that HOLDS text (a score/checkmark column) is real and
         // must survive, so only content-free gaps are collapsed.
-        MergeNearbyBoundaries(colBounds, MinCellW * 3, runs);
-        MergeNearbyBoundaries(rowBounds, MinCellH * 1.5);
+        MergeNearbyBoundaries(dr.colBounds, MinCellW * 3, dr.runs);
+        MergeNearbyBoundaries(dr.rowBounds, MinCellH * 1.5);
 
-        // The EDGE-derived boundaries, before any text-cluster inference below.
-        // Cell-side validation snaps to these: a text-inferred boundary has no
-        // border of its own, so a sub-cell it creates borrows the sides of the
-        // enclosing REAL cell instead of failing the side count and severing
-        // the flood-fill at a borderless column.
-        var realColBounds = colBounds.ToList();
-        var realRowBounds = rowBounds.ToList();
+        dr.realColBounds = dr.colBounds.ToList();
+        dr.realRowBounds = dr.rowBounds.ToList();
 
         
-        if (rowBounds.Count < 2 || colBounds.Count < 2) return [];
+        if (dr.rowBounds.Count < 2 || dr.colBounds.Count < 2) return [];
 
-        var nRows = rowBounds.Count - 1;
-        var nCols = colBounds.Count - 1;
+        dr.nRows = dr.rowBounds.Count - 1;
+        dr.nCols = dr.colBounds.Count - 1;
 
-        // 2. Mark each grid position as a valid cell if it has >= 3 bounding sides
-        var valid = new bool[nRows, nCols];
-        int validCount = 0;
-        for (var r = 0; r < nRows; r++)
-        {
-            var yBot = rowBounds[r];
-            var yTop = rowBounds[r + 1];
-            for (var c = 0; c < nCols; c++)
-            {
-                var xLeft = colBounds[c];
-                var xRight = colBounds[c + 1];
-                // Side-count against the enclosing REAL (edge-derived) cell so a
-                // text-inferred boundary does not orphan its sub-cells.
-                var sxL = realColBounds.Where(b => b <= xLeft + 0.01).DefaultIfEmpty(xLeft).Max();
-                var sxR = realColBounds.Where(b => b >= xRight - 0.01).DefaultIfEmpty(xRight).Min();
-                var syB = realRowBounds.Where(b => b <= yBot + 0.01).DefaultIfEmpty(yBot).Max();
-                var syT = realRowBounds.Where(b => b >= yTop - 0.01).DefaultIfEmpty(yTop).Min();
-                valid[r, c] =
-                    (xRight - xLeft) >= MinCellW &&
-                    (yTop - yBot) >= MinCellH &&
-                    CountSides(hEdges, vEdges, syB, syT, sxL, sxR) >= 3;
-                if (valid[r, c]) validCount++;
-            }
-        }
+        dr.valid = new bool[dr.nRows, dr.nCols];
+        dr.validCount = 0;
+        MarkValidGridCells(dr);
 
-        // Fallback: progressively lower the side threshold when less than half the
-        // grid cells are valid. Tables with full-width H-edges but segmented V-edges
-        // (interior columns having only top+bottom borders) need minSides=2.
-        int totalCells = nRows * nCols;
-        for (int minSides = 2; minSides >= 1 && validCount * 2 < totalCells; minSides--)
-        {
-            validCount = 0;
-            for (var r = 0; r < nRows; r++)
-            {
-                var yBot = rowBounds[r];
-                var yTop = rowBounds[r + 1];
-                for (var c = 0; c < nCols; c++)
-                {
-                    var xLeft = colBounds[c];
-                    var xRight = colBounds[c + 1];
-                    var sxL = realColBounds.Where(b => b <= xLeft + 0.01).DefaultIfEmpty(xLeft).Max();
-                    var sxR = realColBounds.Where(b => b >= xRight - 0.01).DefaultIfEmpty(xRight).Min();
-                    var syB = realRowBounds.Where(b => b <= yBot + 0.01).DefaultIfEmpty(yBot).Max();
-                    var syT = realRowBounds.Where(b => b >= yTop - 0.01).DefaultIfEmpty(yTop).Min();
-                    valid[r, c] =
-                        (xRight - xLeft) >= MinCellW &&
-                        (yTop - yBot) >= MinCellH &&
-                        (minSides == 0 || CountSides(hEdges, vEdges, syB, syT, sxL, sxR) >= minSides);
-                    if (valid[r, c]) validCount++;
-                }
-            }
-        }
+        dr.totalCells = dr.nRows * dr.nCols;
+        RelaxCellSideThreshold(dr);
 
 
-        // 3. Collect all valid cells, then use flood-fill to find connected components
-        var visited = new bool[nRows, nCols];
-        var tables = new List<AbsorbedTable>();
+        dr.visited = new bool[dr.nRows, dr.nCols];
+        dr.tables = new List<AbsorbedTable>();
 
-        for (var r = 0; r < nRows; r++)
-        {
-            for (var c = 0; c < nCols; c++)
-            {
-                if (!valid[r, c] || visited[r, c]) continue;
-                var component = FloodFill(valid, visited, r, c, nRows, nCols);
-                if (component.Count < MinCells) continue;
-                tables.AddRange(BuildTablesFromComponent(component, rowBounds, colBounds, runs, hEdges, vEdges));
-            }
-        }
+        FloodFillTableComponents(dr);
 
         // If flood-fill produced too many small tables (due to fragmented grids),
         // fall back to building one big table from all valid cells and splitting at separator rows
-        if (tables.Count > 6 || (tables.Count > 1 && tables.All(t => t.Rows.Count <= 2)))
-        {
-            var allValid = new List<(int r, int c)>();
-            for (var r = 0; r < nRows; r++)
-                for (var c = 0; c < nCols; c++)
-                    if (valid[r, c]) allValid.Add((r, c));
-            if (allValid.Count >= MinCells)
-            {
-                var bigTables = BuildTablesFromComponent(allValid, rowBounds, colBounds, runs, hEdges, vEdges);
-                if (bigTables.Count > 0 && bigTables.Sum(t => t.Rows.Sum(rw => rw.Cells.Count)) > tables.Sum(t => t.Rows.Sum(rw => rw.Cells.Count)) / 2)
-                    tables = bigTables;
-            }
-        }
+        CollapseFragmentedTables(dr);
 
         // Merge heavily fragmented tables (>6 fragments with same column structure)
-        if (tables.Count > 6)
-            tables = MergeVerticallyAdjacentTables(tables);
+        if (dr.tables.Count > 6)
+            dr.tables = MergeVerticallyAdjacentTables(dr.tables);
 
         // Merge single-row tables into adjacent multi-row tables when they share
         // the same X range — these are typically header rows separated by grid gaps.
-        tables = MergeSingleRowFragments(tables);
+        dr.tables = MergeSingleRowFragments(dr.tables);
 
         // Sort tables top-to-bottom (highest Y first), left-to-right on ties
-        SortTables(tables);
+        SortTables(dr.tables);
 
-        return tables;
+        return dr.tables;
     }
 
     /// <summary>
@@ -423,7 +353,7 @@ public sealed partial class TableAbsorber
             result.Add(new AbsorbedTable
             {
                 Rows = allRows,
-                Rect = double.IsFinite(minX) ? new Rectangle(minX, minY, maxX, maxY) : null,
+                Rect = Compat.IsFinite(minX) ? new Rectangle(minX, minY, maxX, maxY) : null,
             });
         }
 
@@ -610,176 +540,33 @@ public sealed partial class TableAbsorber
 
     /// <summary>Build one or more AbsorbedTables from a connected component of valid grid cells.
     /// Splits at separator rows (rows where all cells are empty) to produce separate tables.</summary>
-    private static List<AbsorbedTable> BuildTablesFromComponent(
-        List<(int r, int c)> component, List<double> rowBounds, List<double> colBounds,
-        List<TextRun> runs, List<HEdge>? hEdges = null, List<VEdge>? vEdges = null)
+    private static List<AbsorbedTable> BuildTablesFromComponent(List<(int r, int c)> component, List<double> rowBounds, List<double> colBounds, List<TextRun> runs, List<HEdge>? hEdges = null, List<VEdge>? vEdges = null)
     {
-        var rowIndices = component.Select(p => p.r).Distinct().OrderBy(r => r).ToList();
+        var bt = new TableComponentBuildState();
+        bt.component = component;
+        bt.rowBounds = rowBounds;
+        bt.colBounds = colBounds;
+        bt.runs = runs;
+        bt.hEdges = hEdges;
+        bt.vEdges = vEdges;
+        bt.rowIndices = bt.component.Select(p => p.r).Distinct().OrderBy(r => r).ToList();
 
-        // Row-span support: a cell extends DOWN through the next grid row when the
-        // boundary between them carries no border across this cell's column span
-        // (cells are built from the drawn rules - an uncovered interior
-        // boundary means one tall cell, not stacked cells with an invented rule).
-        var compSet = new HashSet<(int r, int c)>(component);
-        bool BoundaryCovered(double y, double xL, double xR)
+        bt.compSet = new HashSet<(int r, int c)>(bt.component);
+        bt.consumed = new HashSet<(int r, int c)>();
+
+        bt.allRows = new List<AbsorbedRow>();
+        foreach (var r in bt.rowIndices.AsEnumerable().Reverse())
         {
-            if (hEdges is null) return true;
-            var need = Math.Min((xR - xL) * 0.5, (xR - xL) - 2 * EdgeTol);
-            foreach (var he in hEdges)
-            {
-                if (Math.Abs(he.Y - y) > EdgeTol) continue;
-                var overlap = Math.Min(he.X2, xR) - Math.Max(he.X1, xL);
-                if (overlap >= need) return true;
-            }
-            return false;
-        }
-        var consumed = new HashSet<(int r, int c)>();
-
-        // Build rows top-to-bottom: in PDF coords, larger y = higher on page,
-        // so reverse row index order to get visual top-to-bottom.
-        var allRows = new List<AbsorbedRow>();
-        foreach (var r in rowIndices.AsEnumerable().Reverse())
-        {
-            var yBot = rowBounds[r];
-            var yTop = rowBounds[r + 1];
-            var colsInRow = component.Where(p => p.r == r).Select(p => p.c).OrderBy(c => c).ToList();
-            if (colsInRow.Count == 0) continue;
-
-            // A colspan row (an HTML caption/summary row spanning the whole grid) registers
-            // only its two OUTERMOST grid cells as valid: the interior positions have just
-            // top+bottom edges (no interior verticals cross the band). Left as-is, its text
-            // (which starts near the row's left edge and runs across the interior) would
-            // match neither narrow outer cell by centre-X, the row would read as empty, and
-            // the separator-row split would drop it — shifting every row index below it.
-            // Rebuild exactly that signature — the leftmost and rightmost columns of the
-            // component's grid, nothing in between — as the ONE spanning cell it visually
-            // is. Rows that are merely sparse (some interior cells valid, or not anchored
-            // to both grid edges) keep their per-cell layout.
-            var gridMinCol = int.MaxValue; var gridMaxCol = int.MinValue;
-            foreach (var p in component)
-            {
-                if (p.c < gridMinCol) gridMinCol = p.c;
-                if (p.c > gridMaxCol) gridMaxCol = p.c;
-            }
-            var spanning = colsInRow.Count == 2
-                && colsInRow[0] == gridMinCol && colsInRow[1] == gridMaxCol
-                && gridMaxCol - gridMinCol >= 2
-                // ...and no interior vertical rule CROSSES the band: crossing
-                // verticals mean the sparse row is the pass-through interior of
-                // row-span cells, not a caption spanning the grid.
-                && (vEdges is null || !vEdges.Any(ve =>
-                    ve.X > colBounds[gridMinCol] + EdgeTol
-                    && ve.X < colBounds[gridMaxCol + 1] - EdgeTol
-                    && Math.Min(ve.Y2, yTop) - Math.Max(ve.Y1, yBot) >= (yTop - yBot) * 0.5));
-            var cellSpans = spanning
-                ? new List<(int cFrom, int cTo)> { (colsInRow[0], colsInRow[^1]) }
-                : colsInRow.Select(c => (cFrom: c, cTo: c)).ToList();
-
-            var cells = new List<AbsorbedCell>();
-            foreach (var (cFrom, cTo) in cellSpans)
-            {
-                if (consumed.Contains((r, cFrom))) continue;
-                var xLeft = colBounds[cFrom];
-                var xRight = colBounds[cTo + 1];
-                if ((xRight - xLeft) < MinCellW || (yTop - yBot) < MinCellH) continue;
-
-                // Extend a single-column cell down across uncovered boundaries
-                // (row-span); the swallowed grid positions emit no cell of their own.
-                var cellBot = yBot;
-                if (cFrom == cTo)
-                {
-                    var minRowIdx = rowIndices[0];
-                    var rCur = r;
-                    // Walk down through grid rows regardless of their own side
-                    // validation - an interior position under an uncovered
-                    // boundary is the INSIDE of this tall cell.
-                    while (rCur - 1 >= minRowIdx
-                        && !consumed.Contains((rCur - 1, cFrom))
-                        && !BoundaryCovered(rowBounds[rCur], xLeft, xRight))
-                    {
-                        rCur--;
-                        consumed.Add((rCur, cFrom));
-                        cellBot = rowBounds[rCur];
-                    }
-                }
-
-                // Snap the cell's X sides from the CLUSTERED boundary (an average
-                // over nearby parallel rules) to the ACTUAL rule bounding this
-                // cell — the drawn vertical overlapping this row band nearest the
-                // boundary. Reported cell geometry follows the ink, not the
-                // cluster average.
-                var xLeftSnap = SnapToVEdge(xLeft, cellBot, yTop, vEdges) ?? xLeft;
-                var xRightSnap = SnapToVEdge(xRight, cellBot, yTop, vEdges) ?? xRight;
-                if (xRightSnap - xLeftSnap < MinCellW) { xLeftSnap = xLeft; xRightSnap = xRight; }
-
-                var cellRect = new Rectangle(xLeftSnap, cellBot, xRightSnap, yTop);
-                // Match text runs whose CENTER X falls within cell, and Y is within cell
-                var cellRuns = runs.Where(run =>
-                {
-                    var runCenterX = run.X + run.W / 2;
-                    return runCenterX >= cellRect.LLX - 2 && runCenterX <= cellRect.URX + 2 &&
-                           run.Y >= cellRect.LLY - 2 && run.Y <= cellRect.URY + 2;
-                }).ToList();
-                // Merge adjacent same-line text runs into single fragments.
-                // CID fonts often produce one run per character; merge them into words.
-                var mergedRuns = MergeCellRuns(cellRuns);
-                var cellText = string.Join(" ", mergedRuns.Select(run => run.Text)).Trim();
-                var frags = new List<TextFragment>();
-                frags.AddRange(mergedRuns.Select(run =>
-                {
-                    var frag = new TextFragment(run.Text) { Position = new Position(run.X, run.Y) };
-                    // The fragment and its single segment carry the RUN's page box —
-                    // the fragment's right border and its last segment's right
-                    // border are the same drawn edge.
-                    var runRect = new Rectangle(run.X, run.Y, run.X + run.W, run.Y + run.H);
-                    frag.Rectangle = runRect;
-                    frag.Segments[1].Rectangle = runRect;
-                    return frag;
-                }));
-                cells.Add(new AbsorbedCell { Text = cellText, Rect = cellRect, TextFragments = AbsorbedCell.ToCollection(frags) });
-            }
-            if (cells.Count == 0) continue;
-            allRows.Add(new AbsorbedRow { Cells = cells });
+            if (!BuildComponentRow(bt, r)) break;
         }
 
-        if (allRows.Count == 0) return [];
+        if (bt.allRows.Count == 0) return [];
 
-        // A ruled grid is one table: its blank rows are rows (a five-row grid
-        // whose middle three rows hold only a space reports all five), and
-        // a row of fewer cells is a spanning row, not a separator.
-        var sections = new List<List<AbsorbedRow>> { allRows };
+        bt.sections = new List<List<AbsorbedRow>> { bt.allRows };
 
-        var result = new List<AbsorbedTable>();
-        foreach (var section in sections)
-        {
-            if (section.Count < 1) continue;
-            // Drop always-empty sandwiched columns
-            var cleaned = DropEmptyColumns(section);
-            // Single-column bordered grids are real tables
-            // (stacked label/value panels, report frames) - requiring >= 2 cells
-            // per row would erase them.
-            if (cleaned.Count == 0) continue;
-            // ...but a lone bordered box holding no text at all is page
-            // decoration (a title frame, a signature box), not a table.
-            if (cleaned.Count == 1 && cleaned[0].Cells.Count == 1
-                && string.IsNullOrWhiteSpace(cleaned[0].Cells[0].Text))
-                continue;
-
-            // Compute bounding rect
-            double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
-            foreach (var row in cleaned)
-                foreach (var cell in row.Cells)
-                {
-                    if (cell.Rect is null) continue;
-                    if (cell.Rect.LLX < minX) minX = cell.Rect.LLX;
-                    if (cell.Rect.LLY < minY) minY = cell.Rect.LLY;
-                    if (cell.Rect.URX > maxX) maxX = cell.Rect.URX;
-                    if (cell.Rect.URY > maxY) maxY = cell.Rect.URY;
-                }
-            var rect = double.IsFinite(minX) ? new Rectangle(minX, minY, maxX, maxY) : null;
-            result.Add(new AbsorbedTable { Rows = cleaned, Rect = rect });
-        }
-        return result;
+        bt.result = new List<AbsorbedTable>();
+        AssembleTableSections(bt);
+        return bt.result;
     }
 
     /// <summary>The drawn vertical rule nearest <paramref name="x"/> (within

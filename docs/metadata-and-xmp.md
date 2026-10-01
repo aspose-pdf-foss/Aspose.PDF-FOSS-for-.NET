@@ -43,7 +43,8 @@ round-trips unchanged.
 > yourself. `Producer` is stamped with the library's own identity on every
 > save unless you assign it explicitly (through `Info.Producer` or the XMP
 > `pdf:Producer` property); `Creator` is defaulted the same way only when it is
-> empty.
+> empty. A PDF 2.0 save stamps both in the XMP packet instead (see
+> [Info vs XMP](#info-vs-xmp)).
 
 ### Custom info properties
 
@@ -88,12 +89,16 @@ An array value (or a structured `XmpValue`) is stored as nested RDF and comes
 back as the same shape; scalars are stored as text and surface typed
 (`IsInteger`, `IsDouble`, `IsDateTime`) on read.
 
-Read safely (the indexer throws `KeyNotFoundException` for an absent key, so
-probe first):
+A key the packet does not carry reads as `null` through the indexer. The key
+is the property's literal name: `"xmp:Title"` answers only an `xmp:Title`
+property, never `dc:title` or the `/Info` entry. `TryGetValue` reports presence
+explicitly:
 
 ```csharp
 if (doc.Metadata.TryGetValue("dc:title", out var title))
     Console.WriteLine(title);
+
+XmpValue? rights = doc.Metadata["dc:rights"];   // null when absent
 ```
 
 `Metadata` implements `IDictionary<string, XmpValue>` (`Keys`, `Values`,
@@ -114,6 +119,8 @@ doc.Metadata["contoso:project"] = new XmpValue("Phoenix");
 The common prefixes are registered out of the box: `rdf`, `xmp`, `dc`, `pdf`,
 `xmpMM`, `xmpRights`, `pdfaid`, `pdfuaid` and `pdfe`.
 `GetNamespaceUriByPrefix` / `GetPrefixByNamespaceUri` query the registry.
+A loaded packet keeps the prefixes its author wrote, including the early
+`xap` / `xapMM` / `xapRights` spellings of the `xmp` namespaces.
 
 ## Info vs XMP
 
@@ -130,13 +137,15 @@ requires. The library keeps the two in step on save as follows:
   `xmp:ModifyDate`, it follows the freshly stamped `/ModDate`; a packet that was
   not touched is left byte-identical.
 - **PDF 2.0 saves.** When the file is written as PDF 2.0 (a document created
-  with `new Document(PdfVersion.v_2_0)`, or converted with
-  `PdfFormat.v_2_0`), every documentary entry — `Title`, `Author`, `Subject`,
-  `Keywords`, `Producer`, `Creator`, `CreationDate`, `ModDate` — is mirrored
-  into the packet under the `xmp:` prefix, and the four descriptive text
-  entries (`Title`, `Author`, `Subject`, `Keywords`) are then removed from
-  `/Info`, as ISO 32000-2 deprecates them there. Dates and the producing
-  application stay in `/Info`.
+  with `new Document(PdfVersion.v_2_0)`, given `doc.SetVersion("2.0")`,
+  converted with `PdfFormat.v_2_0`, or opened from a 2.0 file), every `/Info`
+  entry — the standard ones and custom keys alike — moves into the packet as
+  `xmp:<key>` (`xmp:Title`, `xmp:Author`, `xmp:Producer`, …), as ISO 32000-2
+  deprecates the documentary `/Info`. Only `CreationDate` and `ModDate` stay
+  in `/Info` (and are mirrored into the packet too). The library's producer
+  and default creator are stamped as `xmp:Producer` / `xmp:Creator`; the
+  packet's own `dc:` / `pdf:` properties are left as they are, and the XMP →
+  Info fill above does not run.
 
 For any other value you want in both places (custom keys, `dc:` properties on
 a 1.x file), set it in each store.

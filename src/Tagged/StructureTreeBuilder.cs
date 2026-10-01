@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Tagged;
@@ -11,12 +11,29 @@ namespace Aspose.Pdf.Tagged;
 /// references during serialization (child→parent→child loops).
 /// Call <see cref="BuildParentTree"/> before saving to finalize the tree.
 /// </summary>
-public sealed class StructureTreeBuilder
+public sealed partial class StructureTreeBuilder
 {
     private readonly Document _document;
     private readonly List<StructureElementBuilder> _rootElements = [];
     private readonly Dictionary<string, string> _roleMappings = new(StringComparer.Ordinal);
-    private int _nextMcid;
+
+    /// <summary>
+    /// The next marked-content id for each page, and the page's own key in the
+    /// number tree.
+    ///
+    /// ⚠⚠ Marked-content ids are PER PAGE, not per document (PDF 32000-1
+    /// §14.7.4.2): a reader finds the element that owns a piece of content by
+    /// looking the page's /StructParents up in /ParentTree and then indexing
+    /// that entry's array BY the id. A document-wide counter makes both of
+    /// those wrong the moment a second page is tagged.
+    /// </summary>
+    private readonly Dictionary<Page, PageMarks> _marks = [];
+
+    private sealed class PageMarks
+    {
+        public int Key;
+        public int Next;
+    }
 
     public StructureTreeBuilder(Document document)
     {
@@ -51,8 +68,8 @@ public sealed class StructureTreeBuilder
     /// </summary>
     public void AddRoleMapping(string customRole, string standardRole)
     {
-        ArgumentNullException.ThrowIfNull(customRole);
-        ArgumentNullException.ThrowIfNull(standardRole);
+        Compat.ThrowIfNull(customRole);
+        Compat.ThrowIfNull(standardRole);
         _roleMappings[customRole] = standardRole;
     }
 
@@ -64,7 +81,26 @@ public sealed class StructureTreeBuilder
         return new Dictionary<string, string>(_roleMappings, StringComparer.Ordinal);
     }
 
-    internal int AllocateMcid() => _nextMcid++;
+    /// <summary>Which object the page is, so a structure element can point at
+    /// it. Null for a page the document cannot place.</summary>
+    internal int? PageNumber(Page page)
+    {
+        var found = _document.FindObjectNumber(page.Dict);
+        return found > 0 ? found : null;
+    }
+
+    /// <summary>The next id on this page, and the page's number-tree key,
+    /// assigning both the first time the page is marked.</summary>
+    internal (int Mcid, int Key) AllocateMcid(Page page)
+    {
+        if (!_marks.TryGetValue(page, out var marks))
+        {
+            _marks[page] = marks = new PageMarks { Key = _marks.Count };
+            page.Dict.Set("StructParents", new PdfInteger(marks.Key));
+        }
+
+        return (marks.Next++, marks.Key);
+    }
 
     /// <summary>
     /// Finalize the structure tree and write it to the document catalog.
@@ -118,22 +154,33 @@ public sealed class StructureTreeBuilder
             structTreeRoot.Set("RoleMap", roleMap);
         }
 
-        // Build /ParentTree (number tree: MCID → parent struct elem indirect ref)
-        var parentTreeNums = new PdfArray();
+        // ⭐⭐ /ParentTree is keyed by the PAGE — its /StructParents number — and
+        // each entry is an ARRAY indexed by the marked-content id on that page
+        // (PDF 32000-1 §14.7.4.4). It is not a flat list of id/element pairs:
+        // read that way the ids of a second page overwrite the first page's,
+        // and every reference on it resolves to the wrong element.
+        var owners = new SortedDictionary<int, Dictionary<int, int>>();
         foreach (var elem in allElements)
         {
-            foreach (var mcid in elem.Mcids)
+            foreach (var mark in elem.Marked)
             {
-                parentTreeNums.Add(new PdfInteger(mcid));
-                parentTreeNums.Add(new PdfIndirectRef(elem.ObjectNumber, 0));
+                if (!owners.TryGetValue(mark.Key, out var byMcid))
+                    owners[mark.Key] = byMcid = [];
+
+                byMcid[mark.Mcid] = elem.ObjectNumber;
             }
         }
+
+        var parentTreeNums = new PdfArray();
+        var nextKey = 0;
+        nextKey = WireMcidOwners(owners, parentTreeNums, nextKey);
 
         if (parentTreeNums.Count > 0)
         {
             var parentTree = new PdfDictionary();
             parentTree.Set("Nums", parentTreeNums);
             structTreeRoot.Set("ParentTree", parentTree);
+            structTreeRoot.Set("ParentTreeNextKey", new PdfInteger(nextKey));
         }
 
         // Register StructTreeRoot as a new object
@@ -157,8 +204,16 @@ public sealed class StructureElementBuilder
     private readonly StructureTreeBuilder _tree;
     private readonly string _structureType;
     private readonly List<StructureElementBuilder> _children = [];
-    private readonly List<int> _mcids = [];
+    private readonly List<Mark> _marked = [];
     private StructureElementBuilder? _parent;
+
+    /// <summary>One piece of page content this element owns.</summary>
+    internal sealed class Mark
+    {
+        public int Mcid;
+        public int Key;
+        public Page Page = null!;
+    }
 
     private string? _title;
     private string? _language;
@@ -166,7 +221,7 @@ public sealed class StructureElementBuilder
     private string? _actualText;
 
     internal int ObjectNumber { get; set; }
-    internal IReadOnlyList<int> Mcids => _mcids;
+    internal IReadOnlyList<Mark> Marked => _marked;
 
     internal StructureElementBuilder(StructureTreeBuilder tree, string structureType)
     {
@@ -204,11 +259,8 @@ public sealed class StructureElementBuilder
     /// </summary>
     public MarkedContentInfo AddMarkedContent(Page page)
     {
-        var mcid = _tree.AllocateMcid();
-        _mcids.Add(mcid);
-
-        if (!page.Dict.ContainsKey("StructParents"))
-            page.Dict.Set("StructParents", new PdfInteger(0));
+        var (mcid, key) = _tree.AllocateMcid(page);
+        _marked.Add(new Mark { Mcid = mcid, Key = key, Page = page });
 
         return new MarkedContentInfo(mcid, _structureType);
     }
@@ -236,13 +288,28 @@ public sealed class StructureElementBuilder
         else
             dict.Set("P", new PdfIndirectRef(structTreeRootObjNum, 0));
 
-        // /K — kids: child element refs + MCID refs
+        // ⭐ /Pg — the page this element's content is on. Without it a
+        // marked-content reference cannot be resolved at all: a reader has no
+        // way to know which page's stream to look in, and the tree describes
+        // nothing. Named on the element when every piece it owns is on one
+        // page, and on each reference separately when they are not.
+        var pages = new List<Page>();
+        foreach (var mark in _marked)
+            if (!pages.Contains(mark.Page)) pages.Add(mark.Page);
+
+        var onePage = pages.Count == 1 ? pages[0] : null;
+        if (onePage is not null && _tree.PageNumber(onePage) is { } only)
+            dict.Set("Pg", new PdfIndirectRef(only, 0));
+
+        // /K — kids: child element refs + marked-content refs
         var kids = new PdfArray();
-        foreach (var mcid in _mcids)
+        foreach (var mark in _marked)
         {
             var mcidDict = new PdfDictionary();
             mcidDict.Set("Type", new PdfName("MCR"));
-            mcidDict.Set("MCID", new PdfInteger(mcid));
+            mcidDict.Set("MCID", new PdfInteger(mark.Mcid));
+            if (onePage is null && _tree.PageNumber(mark.Page) is { } spread)
+                mcidDict.Set("Pg", new PdfIndirectRef(spread, 0));
             kids.Add(mcidDict);
         }
         foreach (var child in _children)
@@ -256,13 +323,13 @@ public sealed class StructureElementBuilder
 
         // Optional properties
         if (_title is not null)
-            dict.Set("T", new PdfString(Encoding.Latin1.GetBytes(_title)));
+            dict.Set("T", new PdfString(Compat.Latin1.GetBytes(_title)));
         if (_language is not null)
-            dict.Set("Lang", new PdfString(Encoding.Latin1.GetBytes(_language)));
+            dict.Set("Lang", new PdfString(Compat.Latin1.GetBytes(_language)));
         if (_altText is not null)
-            dict.Set("Alt", new PdfString(Encoding.Latin1.GetBytes(_altText)));
+            dict.Set("Alt", new PdfString(Compat.Latin1.GetBytes(_altText)));
         if (_actualText is not null)
-            dict.Set("ActualText", new PdfString(Encoding.Latin1.GetBytes(_actualText)));
+            dict.Set("ActualText", new PdfString(Compat.Latin1.GetBytes(_actualText)));
 
         return dict;
     }

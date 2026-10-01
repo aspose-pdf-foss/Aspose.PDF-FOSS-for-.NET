@@ -6,7 +6,7 @@ namespace Aspose.Pdf;
 
 /// <summary>
 /// Converts a vector image source (SVG) into raster bytes so it can be embedded
-/// through <see cref="Page.AddImage(byte[], Rectangle)"/>, which only accepts
+/// through <c>Page.AddImage</c>, which only accepts
 /// raster formats. The SVG is converted to a one-page <see cref="Document"/>
 /// sized to the SVG viewport, then that page is rendered to a PNG.
 /// </summary>
@@ -16,7 +16,46 @@ internal static class ImageRasterizer
     private const int RasterDpi = 144;
 
     /// <summary>Rasterise SVG bytes to a PNG, or null if conversion fails.</summary>
-    public static byte[]? RasterizeSvg(byte[] svgData) => RasterizeSvg(svgData, out _, out _);
+    public static byte[]? RasterizeSvg(byte[] svgData) => RasterizeSvgWithSize(svgData).png;
+
+    /// <summary>The size the SVG root declares, in points: a unitless or px length is one
+    /// point per unit, the absolute CSS units convert; null when either dimension is
+    /// missing, relative (%) or unreadable.</summary>
+    public static (double w, double h)? SvgRootSizePt(byte[] svgData)
+    {
+        try
+        {
+            var head = System.Text.Encoding.UTF8.GetString(svgData, 0, System.Math.Min(4096, svgData.Length));
+            var root = System.Text.RegularExpressions.Regex.Match(head, "<svg\\b[^>]*>");
+            if (!root.Success) return null;
+            var w = SvgLengthPt(root.Value, "width");
+            var h = SvgLengthPt(root.Value, "height");
+            return w is > 0 && h is > 0 ? (w.Value, h.Value) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static double? SvgLengthPt(string rootTag, string attribute)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(rootTag,
+            "\\s" + attribute + "\\s*=\\s*[\"']\\s*([0-9.]+)\\s*([a-z%]*)\\s*[\"']",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!m.Success) return null;
+        if (!double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var value)) return null;
+        return m.Groups[2].Value.ToLowerInvariant() switch
+        {
+            "" or "px" or "pt" => value,
+            "in" => value * 72,
+            "cm" => value * 72 / 2.54,
+            "mm" => value * 72 / 25.4,
+            "pc" => value * 12,
+            _ => null,
+        };
+    }
 
     /// <summary>Rasterise a sizeless SVG the way a page-filling cell placement needs it:
     /// the artwork is aspect-fit to a portrait A4-proportion canvas (width-fit for
@@ -28,7 +67,7 @@ internal static class ImageRasterizer
     /// Falls back to the plain raster off-Windows or on failure.</summary>
     public static byte[]? RasterizeSvgOnPageCanvas(byte[] svgData)
     {
-        var probe = RasterizeSvg(svgData, out var natW, out var natH);
+        var (probe, natW, natH) = RasterizeSvgWithSize(svgData);
         if (probe is null || natW <= 0 || natH <= 0) return probe;
         const double pageW = 595.3, pageH = 841.9;
         var fit = System.Math.Min(pageW / natW, pageH / natH);
@@ -79,7 +118,7 @@ internal static class ImageRasterizer
     {
         if (boxWpt <= 0 || boxHpt <= 0)
             return RasterizeSvg(svgData);
-        var art = RasterizeSvg(svgData, out var natW, out var natH);
+        var (art, natW, natH) = RasterizeSvgWithSize(svgData);
         if (art is null || natW <= 0 || natH <= 0) return art;
         try
         {
@@ -158,14 +197,22 @@ internal static class ImageRasterizer
     /// <summary>Rasterise SVG bytes to a PNG and report the SVG viewport size in
     /// points, or null if conversion fails. The natural point size lets layout code
     /// size the vector image by its authored dimensions instead of raster pixels.</summary>
-    public static byte[]? RasterizeSvg(byte[] svgData, out double naturalWidthPt, out double naturalHeightPt)
+    public static (byte[]? png, double naturalWidthPt, double naturalHeightPt) RasterizeSvgWithSize(byte[] svgData)
     {
-        naturalWidthPt = 0;
-        naturalHeightPt = 0;
+        var (png, w, h, _) = RasterizeSvgWithDocument(svgData);
+        return (png, w, h);
+    }
+
+    /// <summary>Rasterise SVG bytes as <see cref="RasterizeSvgWithSize"/> does, and hand back the
+    /// converted SVG document too, so a caller can draw the artwork's own vector content (its
+    /// single page) instead of the raster where the reference draws it that way.</summary>
+    public static (byte[]? png, double naturalWidthPt, double naturalHeightPt, Document? vector) RasterizeSvgWithDocument(byte[] svgData)
+    {
+        double naturalWidthPt = 0, naturalHeightPt = 0;
         try
         {
             var doc = SvgToPdfConverter.ConvertForImage(svgData);
-            if (doc.Pages.Count == 0) return null;
+            if (doc.Pages.Count == 0) return (null, naturalWidthPt, naturalHeightPt, null);
             var page = doc.Pages[1];
             naturalWidthPt = page.Width;
             naturalHeightPt = page.Height;
@@ -173,11 +220,11 @@ internal static class ImageRasterizer
             var device = new PngDevice(new Resolution(RasterDpi));
             device.Process(page, ms);
             var bytes = ms.ToArray();
-            return bytes.Length > 0 ? bytes : null;
+            return (bytes.Length > 0 ? bytes : null, naturalWidthPt, naturalHeightPt, doc);
         }
         catch
         {
-            return null;
+            return (null, naturalWidthPt, naturalHeightPt, null);
         }
     }
 }

@@ -109,7 +109,7 @@ public abstract class ImageDevice
     /// portable software renderer, since GDI+ drawing is unavailable off Windows.
     /// </summary>
     private static IPageRenderer DefaultRenderer() =>
-        OperatingSystem.IsWindows() && !ForceSoftwareRenderer
+        Compat.IsWindows() && !ForceSoftwareRenderer
             ? new GdiPlusPageRenderer()
             : new SoftwarePageRenderer();
 
@@ -207,8 +207,19 @@ public abstract class ImageDevice
     /// <c>PngDevice(int, int, Resolution)</c> contract: resolution controls render quality,
     /// the size pair pins the final pixel dimensions).
     /// </summary>
-    protected RgbaBuffer RenderPage(Page page)
+    /// <summary>The page rendered at this device's resolution, as the RGBA rows the renderer answers.</summary>
+    internal RgbaBuffer Render(Page page) => RenderPage(page, transparentBackground: false);
+
+    protected RgbaBuffer RenderPage(Page page) => RenderPage(page, transparentBackground: false);
+
+    /// <summary>Like <see cref="RenderPage(Page)"/>; with <paramref name="transparentBackground"/>
+    /// the bare paper stays transparent instead of being flattened onto white.</summary>
+    protected RgbaBuffer RenderPage(Page page, bool transparentBackground)
     {
+        if (Compat.IsWindows() && _renderer is GdiPlusPageRenderer gdiPaper)
+            gdiPaper.TransparentBackground = transparentBackground;
+        else if (_renderer is SoftwarePageRenderer swPaper)
+            swPaper.TransparentBackground = transparentBackground;
         // When the caller pinned both pixel dimensions AND the target aspect matches
         // the page aspect, render straight at that size instead of
         // render-at-DPI-then-resample. Drawing straight on the final grid (e.g.
@@ -220,7 +231,7 @@ public abstract class ImageDevice
         // so the content stretches to fill the target canvas.
         // Propagate the caller's default-font substitution name so runs whose own font
         // program can't be resolved render with it instead of vanishing.
-        if (OperatingSystem.IsWindows() && _renderer is GdiPlusPageRenderer gdiOpt)
+        if (Compat.IsWindows() && _renderer is GdiPlusPageRenderer gdiOpt)
         {
             gdiOpt.DefaultFontName = RenderingOptions?.DefaultFontName;
             gdiOpt.AliasedVectorFills = RenderingOptions?.BarcodeOptimization ?? false;
@@ -239,7 +250,7 @@ public abstract class ImageDevice
             {
                 if (_renderer is SoftwarePageRenderer swDirect)
                     return swDirect.RenderPageAtPixelSize(page, TargetWidth, TargetHeight);
-                if (OperatingSystem.IsWindows() && _renderer is GdiPlusPageRenderer gdiDirect)
+                if (Compat.IsWindows() && _renderer is GdiPlusPageRenderer gdiDirect)
                     return gdiDirect.RenderPageAtPixelSize(page, TargetWidth, TargetHeight);
             }
         }
@@ -267,7 +278,7 @@ public abstract class ImageDevice
         RgbaBuffer rendered;
         if (_renderer is SoftwarePageRenderer sw)
             rendered = sw.RenderPage(page, dpiX, dpiY);
-        else if (OperatingSystem.IsWindows() && _renderer is GdiPlusPageRenderer gdi)
+        else if (Compat.IsWindows() && _renderer is GdiPlusPageRenderer gdi)
             rendered = gdi.RenderPage(page, dpiX, dpiY);
         else
             rendered = _renderer.RenderPage(page.Reader.RawData, page.Number, dpiX);

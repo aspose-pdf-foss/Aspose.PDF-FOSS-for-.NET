@@ -10,142 +10,54 @@ namespace Aspose.Pdf.Devices;
 
 public sealed partial class SoftwarePageRenderer
 {
-    private static void DrawFormXObject(RenderContext ctx, PdfStream formStream, GraphicsState state,
-        Dictionary<string, PdfDictionary>? extGStates)
+    private static void DrawFormXObject(RenderContext ctx, PdfStream formStream, GraphicsState state, Dictionary<string, PdfDictionary>? extGStates)
     {
+        var fo = new FormXObjectDrawState();
+        fo.ctx = ctx;
+        fo.formStream = formStream;
+        fo.state = state;
+        fo.extGStates = extGStates;
         // A form hidden by the default optional-content configuration renders as
         // if absent (e.g. a print-only /Background layer wrapping the page scan).
-        if (IsOcHidden(formStream.Dict.Get("OC"), ctx.Reader, ctx.OcgHidden)) return;
+        if (IsOcHidden(fo.formStream.Dict.Get("OC"), fo.ctx.Reader, fo.ctx.OcgHidden)) return;
         if (_formDepth > 64) return;
         _formDepth++;
         try
         {
-        byte[] formContent;
-        try { formContent = ctx.Reader.DecodeStream(formStream); }
+        try { fo.formContent = fo.ctx.Reader.DecodeStream(fo.formStream); }
         catch { return; }
 
-        // Resolve Form XObject's own resources
-        var formResources = ctx.Reader.ResolveDict(formStream.Dict.Get("Resources"));
-        var formFontDicts = ResolveFontDicts(formResources, ctx.Reader);
-        var formExtGStates = ResolveExtGStates(formResources, ctx.Reader);
-        var formXObjects = ResolveAllXObjects(formResources, ctx.Reader);
+        fo.formResources = fo.ctx.Reader.ResolveDict(fo.formStream.Dict.Get("Resources"));
+        fo.formFontDicts = ResolveFontDicts(fo.formResources, fo.ctx.Reader);
+        fo.formExtGStates = ResolveExtGStates(fo.formResources, fo.ctx.Reader);
+        fo.formXObjects = ResolveAllXObjects(fo.formResources, fo.ctx.Reader);
 
         // Merge parent resources for fallback
-        if (ctx.FontDicts is not null)
-            foreach (var kv in ctx.FontDicts)
-                formFontDicts.TryAdd(kv.Key, kv.Value);
-        if (ctx.AllXObjects is not null)
-            foreach (var kv in ctx.AllXObjects)
-                formXObjects.TryAdd(kv.Key, kv.Value);
+        if (fo.ctx.FontDicts is not null)
+            foreach (var kv in fo.ctx.FontDicts)
+                fo.formFontDicts.TryAdd(kv.Key, kv.Value);
+        if (fo.ctx.AllXObjects is not null)
+            foreach (var kv in fo.ctx.AllXObjects)
+                fo.formXObjects.TryAdd(kv.Key, kv.Value);
 
-        // PDF 32000 §8.10: `Do` on a Form XObject concatenates the form's /Matrix to
-        // the caller's CTM, clips to the form's /BBox, and is bracketed by an implicit
-        // q…Q. Propagating the caller CTM × form.Matrix places the form at the
-        // caller's user-space position; the BBox clip keeps strokes inside a form
-        // from leaking onto surrounding page content.
-        var formMatrix = ExtractFormMatrix(formStream.Dict);
-        var effectiveCtm = formMatrix is not null
-            ? GraphicsState.MultiplyMatrices(formMatrix, state.Ctm)
-            : (double[])state.Ctm.Clone();
+        fo.formMatrix = ExtractFormMatrix(fo.formStream.Dict);
+        fo.effectiveCtm = fo.formMatrix is not null
+            ? GraphicsState.MultiplyMatrices(fo.formMatrix, fo.state.Ctm)
+            : (double[])fo.state.Ctm.Clone();
 
-        var formClipMask = BuildFormBBoxClip(ctx, formStream.Dict, effectiveCtm, ctx.ClipMask);
+        fo.formClipMask = BuildFormBBoxClip(fo.ctx, fo.formStream.Dict, fo.effectiveCtm, fo.ctx.ClipMask);
 
-        // PDF 32000 §11.6.6 Transparency Group: when the form has /Group /S /Transparency,
-        // its contents render onto a transparent backdrop in a separate buffer; the buffer
-        // is then composited back to the parent using the BlendMode / fill-alpha that were
-        // active at the `Do` call. Without this, blend modes like Multiply applied AROUND
-        // a form Do (via gs) get reset by the form's own internal `/GS0 gs` (BM=Normal) on
-        // each path, producing flat overlays instead of multiplied overlap colours
-        // (e.g. blue-on-yellow should compose to green under Multiply).
-        var groupDict = ctx.Reader.ResolveDict(formStream.Dict.Get("Group"));
-        var isTransparencyGroup = groupDict is not null
-            && groupDict.GetName("S") == "Transparency";
+        fo.groupDict = fo.ctx.Reader.ResolveDict(fo.formStream.Dict.Get("Group"));
+        fo.isTransparencyGroup = fo.groupDict is not null
+            && fo.groupDict.GetName("S") == "Transparency";
 
-        if (isTransparencyGroup)
+        if (fo.isTransparencyGroup)
         {
-            // /K true makes the group a knockout group: each draw inside sees only the
-            // group's original (transparent) backdrop, not prior accumulated draws —
-            // overlapping elements show only the topmost. We emulate that at the
-            // pixel-write level via scratchCtx.IsKnockoutGroup; see RenderContext.
-            // ⚠ The knockout shortcut below (and in SetPixel) rests on the group's INITIAL
-            // BACKDROP being transparent, so that "there is nothing for the blend mode to act
-            // on". PDF 32000 §11.4.5.2: that is only true of an ISOLATED group. A group with
-            // /I false inherits the parent's backdrop as its initial one, so its members must
-            // still BLEND against what is underneath — treating them as knockout dropped the
-            // blend entirely and a Multiply/Screen/Overlay swatch sheet rendered flat opaque.
-            var isKnockout = groupDict!.Get("K") is PdfBoolean kn && kn.Value
-                             && groupDict.Get("I") is PdfBoolean iso && iso.Value;
-
-            // PDF 32000 §11.4.5.2: an ISOLATED group starts on a transparent backdrop; a
-            // group with /I false inherits the PARENT's content as its initial backdrop, so
-            // a blend mode inside it composes against what is already on the page. Seeding
-            // the scratch with the parent's pixels is what makes that true - a bare `sh`
-            // vignette multiplied over a photo had nothing to multiply against and painted
-            // an opaque gradient straight over it instead.
-            // §11.4.6 removes that backdrop again before the group is composited, which is
-            // a no-op over an OPAQUE backdrop composited Normally at full alpha: there the
-            // group's result IS the scratch. Only that case is seeded, so the partial-alpha
-            // and blended composites keep the behaviour they were measured with.
-            var seedBackdrop = !isKnockout
-                               && groupDict!.Get("I") is not PdfBoolean { Value: true }
-                               && state.BlendMode == "Normal" && state.FillAlpha >= 1.0
-                               && state.SoftMask is null;
-
-            // Allocate a scratch RGBA buffer same size as the parent, RGBA=(0,0,0,0).
-            var scratch = new byte[ctx.Pixels.Length];
-            if (seedBackdrop) Array.Copy(ctx.Pixels, scratch, ctx.Pixels.Length);
-            var scratchCtx = new RenderContext(scratch, ctx.PixelW, ctx.PixelH, ctx.Scale, ctx.MediaBox, ctx.Reader)
-            {
-                AllXObjects = formXObjects,
-                FontDicts = formFontDicts,
-                ConvertFontsToUnicodeTtf = ctx.ConvertFontsToUnicodeTtf,
-            PdfXOverprintSim = ctx.PdfXOverprintSim,
-            PageCtm = ctx.PageCtm,
-                Patterns = ctx.Reader.ResolveDict(formResources?.Get("Pattern")) ?? ctx.Patterns,
-                Shadings = ctx.Reader.ResolveDict(formResources?.Get("Shading")) ?? ctx.Shadings,
-                ColorSpaces = ctx.Reader.ResolveDict(formResources?.Get("ColorSpace")) ?? ctx.ColorSpaces,
-                ClipMask = formClipMask,
-                CurrentBlendMode = "Normal",
-                IsKnockoutGroup = isKnockout,
-            };
-            RenderContent(formContent, scratchCtx, formExtGStates, effectiveCtm, formClipMask);
-
-            // PDF 32000 §11.6.6: when /CS is a 1-component (gray) space, the group's
-            // contents are blended in grayscale and any final composite collapses to
-            // luminance. We render in RGB and then post-convert to gray rather than
-            // running a CS-aware rendering pipeline — strictly equivalent for Normal
-            // blend mode, an approximation for the separable formulas (RGB-then-Y vs
-            // Y-then-blend differ only on non-grey sources). /DeviceCMYK groups would
-            // need a full CMYK pipeline and stay rendered in RGB for now.
-            ConvertScratchForGroupCS(scratch, groupDict, ctx.Reader);
-
-            // Composite scratch back into parent at this Do call's blend mode + alpha,
-            // through the soft mask that was active at the Do.
-            CompositeGroupBuffer(ctx, scratch, state.BlendMode, state.FillAlpha,
-                state.SoftMask is { } gsm ? ResolveSoftMaskAlpha(ctx, gsm) : null);
+            DrawTransparencyGroupForm(fo);
         }
         else
         {
-            var childCtx = new RenderContext(ctx.Pixels, ctx.PixelW, ctx.PixelH, ctx.Scale, ctx.MediaBox, ctx.Reader)
-            {
-                AllXObjects = formXObjects,
-                FontDicts = formFontDicts,
-                ConvertFontsToUnicodeTtf = ctx.ConvertFontsToUnicodeTtf,
-            PdfXOverprintSim = ctx.PdfXOverprintSim,
-            PageCtm = ctx.PageCtm,
-                // Pattern resources and the active clip mask inherit so that a pattern fill
-                // inside a Form XObject or an image Do inside a pattern tile stays bounded.
-                Patterns = ctx.Reader.ResolveDict(formResources?.Get("Pattern")) ?? ctx.Patterns,
-                Shadings = ctx.Reader.ResolveDict(formResources?.Get("Shading")) ?? ctx.Shadings,
-                ColorSpaces = ctx.Reader.ResolveDict(formResources?.Get("ColorSpace")) ?? ctx.ColorSpaces,
-                ClipMask = formClipMask,
-                // A form that is NOT itself a transparency group draws straight into the
-                // parent’s pixels, so if the parent is a knockout group its members are still
-                // knocking each other out and the flag has to travel with the context.
-                IsKnockoutGroup = ctx.IsKnockoutGroup,
-            };
-
-            RenderContent(formContent, childCtx, formExtGStates, effectiveCtm, formClipMask);
+            DrawFormXObjectDirect(fo);
         }
         }
         finally { _formDepth--; }
@@ -162,7 +74,7 @@ public sealed partial class SoftwarePageRenderer
     private static void CompositeGroupBuffer(RenderContext ctx, byte[] scratch, string blendMode, double groupAlpha,
         byte[]? groupSoftMask = null)
     {
-        var ga = (int)Math.Round(Math.Clamp(groupAlpha, 0.0, 1.0) * 255);
+        var ga = (int)Math.Round(Compat.Clamp(groupAlpha, 0.0, 1.0) * 255);
         var mode = BlendModes.Parse(blendMode);
         var dst = ctx.Pixels;
         // PDF 32000 §11.4.5: inside a knockout group every element composites with the
@@ -212,7 +124,7 @@ public sealed partial class SoftwarePageRenderer
             var da = dst[i + 3] / 255.0;
             if (mode != Rasterizer.BlendMode.Normal)
             {
-                BlendModes.Blend(mode, dr, dg, db, sr, sg, sb, out var br, out var bg, out var bb);
+                var (br, bg, bb) = BlendModes.Blend(mode, dr, dg, db, sr, sg, sb);
                 sr = (int)(sr + (br - sr) * da);
                 sg = (int)(sg + (bg - sg) * da);
                 sb = (int)(sb + (bb - sb) * da);
@@ -266,7 +178,7 @@ public sealed partial class SoftwarePageRenderer
         if (pooled)
         {
             scratchPixels = _softMaskScratch is { } s && s.Length == scratchLen ? s : new byte[scratchLen];
-            if (ReferenceEquals(scratchPixels, _softMaskScratch)) Array.Clear(scratchPixels);
+            if (ReferenceEquals(scratchPixels, _softMaskScratch)) Array.Clear(scratchPixels, 0, scratchPixels.Length);
             _softMaskScratch = scratchPixels;
             _softMaskScratchBusy = true;
         }
@@ -331,7 +243,7 @@ public sealed partial class SoftwarePageRenderer
     /// Function input/output are in [0,1]; we map through byte/255 ↔ value.
     /// /Identity (a PdfName) is a no-op. Anything that fails to parse or
     /// evaluate returns gracefully without touching the buffer.</summary>
-    private static void ApplyTransferFunction(byte[] alphaBuf, PdfObject? trObj, IO.PdfReader reader)
+    internal static void ApplyTransferFunction(byte[] alphaBuf, PdfObject? trObj, IO.PdfReader reader)
     {
         if (trObj is null) return;
         var resolved = reader.Resolve(trObj);

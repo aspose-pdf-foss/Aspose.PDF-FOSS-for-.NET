@@ -292,6 +292,8 @@ public sealed class FormattedText
         _lines.Add(new TextLine(text, 0));
     }
 
+    /// <summary>Creates a single line of text with the given text and background colors, standard font, embedding flag,
+    /// font size in points and line spacing in points. The encoding argument is not used.</summary>
     public FormattedText(string text, Color textColor, Color backColor,
         FontStyle textFont, EncodingType textEncoding, bool embedded, float textSize, float lineSpacing)
     {
@@ -303,6 +305,8 @@ public sealed class FormattedText
         _lines.Add(new TextLine(text, lineSpacing));
     }
 
+    /// <summary>Creates a single line of text with <c>System.Drawing.Color</c> text and background colors, standard font,
+    /// embedding flag, font size in points and line spacing in points. The encoding argument is not used.</summary>
     public FormattedText(string text, System.Drawing.Color textColor, System.Drawing.Color backColor,
         FontStyle textFont, EncodingType textEncoding, bool embedded, float textSize, float lineSpacing)
         : this(text, Color.FromRgb(textColor), Color.FromRgb(backColor),
@@ -310,6 +314,8 @@ public sealed class FormattedText
     {
     }
 
+    /// <summary>Creates a single line of text with <c>FontColor</c> text and background colors, standard font,
+    /// embedding flag, font size in points and line spacing in points. The encoding argument is not used.</summary>
     public FormattedText(string text, FontColor textColor, FontColor backColor,
         FontStyle textFont, EncodingType textEncoding, bool embedded, float textSize, float lineSpacing)
         : this(text, textColor.ToColor(), backColor.ToColor(),

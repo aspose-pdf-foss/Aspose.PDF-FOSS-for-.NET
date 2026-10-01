@@ -415,6 +415,7 @@ public sealed partial class Document : IDisposable
         }
     }
 
+    /// <summary>
     /// Render every &lt;img&gt; element whose source resolves to a readable local file
     /// (a <c>file://</c> URI or a plain path) as an image XObject in the flowing HTML
     /// content. Remote (http/https) sources are skipped — they are not fetched — leaving
@@ -451,18 +452,19 @@ public sealed partial class Document : IDisposable
             if (Converters.HtmlToPdfConverter.IsSvgBytes(bytes))
             {
                 rawSvg = bytes;
-                bytes = ImageRasterizer.RasterizeSvg(bytes, out var vw, out var vh);
+                var (svgRaster, vw, vh) = ImageRasterizer.RasterizeSvgWithSize(bytes);
+                bytes = svgRaster;
                 if (bytes is null) continue;
                 svgNatW = vw * 0.75; svgNatH = vh * 0.75;
             }
 
             double natW = 0, natH = 0;
             if (svgNatW > 0 && svgNatH > 0) { natW = svgNatW; natH = svgNatH; }
-            else if (TryGetImageNaturalSizePt(bytes, applyResolution: false, out natW, out natH))
+            else if (TryGetImageNaturalSizePt(bytes, applyResolution: false) is (var imgW, var imgH))
             {
                 // HTML sizes an unsized <img> in CSS pixels regardless of the file's
                 // embedded DPI: natural px × 0.75 pt.
-                natW *= SvgPxToPt; natH *= SvgPxToPt;
+                natW = imgW * SvgPxToPt; natH = imgH * SvgPxToPt;
             }
             var w = ParseHtmlImgDimension(tag, "width");
             var h = ParseHtmlImgDimension(tag, "height");
@@ -713,25 +715,21 @@ public sealed partial class Document : IDisposable
 
     /// <summary>
     /// Decode a raster image of any platform-supported format (TIFF, BMP, GIF, ...) into one
-    /// PNG per frame (a multi-page TIFF yields one PNG per page), preserving each frame's DPI
-    /// so its natural size is recovered. Returns <c>null</c> when the bytes cannot be decoded
-    /// or the platform image codec is unavailable.
+    /// frame per page: PNG bytes, or the frame's own baseline JPEG stream where the file
+    /// carries one (a JPEG-compressed TIFF page embeds as the DCT stream it already is),
+    /// preserving each frame's DPI so its natural size is recovered. Returns <c>null</c>
+    /// when the bytes cannot be decoded or the platform image codec is unavailable.
     /// </summary>
     private static System.Collections.Generic.List<byte[]>? TryDecodeImageFramesAsPng(byte[] data)
     {
         if (data is null || data.Length < 4) return null;
-        // DICOM (.dcm) decodes with the built-in managed decoder — the platform
-        // codec below has no DICOM support and would silently drop the image.
-        if (IO.DicomDecoder.IsDicom(data)
-            && IO.DicomDecoder.DecodeFramesAsPng(data) is { Count: > 0 } dicomFrames)
-            return dicomFrames;
         // TIFF decodes with the built-in managed decoder — platform-independent,
         // and resilient to damaged multi-frame files (corrupt frames are skipped,
         // the rest still paginate). The platform codec below remains the fallback
-        // for TIFF flavours the managed decoder declines (e.g. JPEG-in-TIFF) and
-        // for the other raster formats (BMP / GIF / ...).
+        // for TIFF flavours the managed decoder declines and for the other raster
+        // formats (BMP / GIF / ...).
         if (IO.TiffDecoder.IsTiff(data)
-            && IO.TiffDecoder.DecodeFramesAsPng(data) is { Count: > 0 } tiffFrames)
+            && IO.TiffDecoder.DecodeFrames(data, jpegPassthrough: true) is { Count: > 0 } tiffFrames)
             return tiffFrames;
 
         // BMP decodes with the built-in managed decoder too - an uncompressed bitmap needs
@@ -747,7 +745,7 @@ public sealed partial class Document : IDisposable
         // progressive JPEG silently vanished from a generated document off Windows. On
         // Windows the platform codec keeps the job - it is what the expected renders were
         // measured against, and the two decoders do not agree pixel for pixel.
-        if (!OperatingSystem.IsWindows())
+        if (!Compat.IsWindows())
             return JpegFrameAsPng(data) is { } managedPng
                 ? new System.Collections.Generic.List<byte[]> { managedPng }
                 : null;
@@ -793,19 +791,16 @@ public sealed partial class Document : IDisposable
 #pragma warning restore CA1416
     }
 
-    internal static bool TryGetImageNaturalSizePt(byte[] d, out double widthPt, out double heightPt)
-        => TryGetImageNaturalSizePt(d, applyResolution: true, out widthPt, out heightPt);
+    internal static (double widthPt, double heightPt)? TryGetImageNaturalSizePt(byte[] d)
+        => TryGetImageNaturalSizePt(d, applyResolution: true);
 
     /// <summary>Natural image size in points. When <paramref name="applyResolution"/>
     /// is false (the <see cref="Image.IsApplyResolution"/> default) the embedded DPI is
     /// ignored and one pixel maps to one point, matching how an unsized generator
     /// <see cref="Image"/> is laid out.</summary>
-    internal static bool TryGetImageNaturalSizePt(byte[] d, bool applyResolution, out double widthPt, out double heightPt)
+    internal static (double widthPt, double heightPt)? TryGetImageNaturalSizePt(byte[] d, bool applyResolution)
     {
-        widthPt = 0; heightPt = 0;
-        if (d is null || d.Length < 24) return false;
-        int BE16(int o) => (d[o] << 8) | d[o + 1];
-        int BE32(int o) => (d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3];
+        if (d is null || d.Length < 24) return null;
 
         // JPEG 2000 box file (.jp2/.jpx): dimensions live in the 'ihdr' box (height@0,
         // width@4 of its data). One pixel maps to one point (JP2 carries DPI only in the
@@ -817,19 +812,19 @@ public sealed partial class Document : IDisposable
             {
                 if (d[i] == 'i' && d[i + 1] == 'h' && d[i + 2] == 'd' && d[i + 3] == 'r')
                 {
-                    int ph = BE32(i + 4), pw = BE32(i + 8);
-                    if (pw > 0 && ph > 0) { widthPt = pw; heightPt = ph; return true; }
+                    int ph = BE32(d, i + 4), pw = BE32(d, i + 8);
+                    if (pw > 0 && ph > 0) return (pw, ph);
                     break;
                 }
             }
-            return false;
+            return null;
         }
         // Raw JPEG 2000 codestream: SOC (FF4F) then SIZ (FF51); Xsiz@8, Ysiz@12.
         if (d.Length >= 16 && d[0] == 0xFF && d[1] == 0x4F && d[2] == 0xFF && d[3] == 0x51)
         {
-            long xs = (uint)BE32(8), ys = (uint)BE32(12);
-            if (xs > 0 && ys > 0) { widthPt = xs; heightPt = ys; return true; }
-            return false;
+            long xs = (uint)BE32(d, 8), ys = (uint)BE32(d, 12);
+            if (xs > 0 && ys > 0) return (xs, ys);
+            return null;
         }
 
         // BMP: 'BM' signature; BITMAPINFOHEADER width@18, height@22 (both LE;
@@ -838,88 +833,28 @@ public sealed partial class Document : IDisposable
         {
             int LE32(int o) => d[o] | (d[o + 1] << 8) | (d[o + 2] << 16) | (d[o + 3] << 24);
             int bw = LE32(18), bh = Math.Abs(LE32(22));
-            if (bw <= 0 || bh <= 0) return false;
+            if (bw <= 0 || bh <= 0) return null;
             double bDpi = 72;
             if (applyResolution && d.Length >= 46)
             {
                 var ppm = LE32(38);
                 if (ppm > 0) bDpi = ppm * 0.0254;
             }
-            widthPt = bw * 72.0 / bDpi;
-            heightPt = bh * 72.0 / bDpi;
-            return true;
+            return (bw * 72.0 / bDpi, bh * 72.0 / bDpi);
         }
 
         // PNG: 8-byte signature, then IHDR (width@16, height@20). pHYs gives DPI.
         if (d[0] == 0x89 && d[1] == 0x50 && d[2] == 0x4E && d[3] == 0x47)
         {
-            int pw = BE32(16), ph = BE32(20);
-            if (pw <= 0 || ph <= 0) return false;
-            double dpiX = 72, dpiY = 72;
-            for (int i = 8; i + 12 <= d.Length;)
-            {
-                int len = BE32(i);
-                if (len < 0) break;
-                if (d[i + 4] == 'p' && d[i + 5] == 'H' && d[i + 6] == 'Y' && d[i + 7] == 's' && i + 8 + 9 <= d.Length)
-                {
-                    long ppuX = (uint)BE32(i + 8), ppuY = (uint)BE32(i + 12);
-                    if (d[i + 16] == 1 && ppuX > 0 && ppuY > 0) // unit = metre
-                    {
-                        dpiX = ppuX * 0.0254;
-                        dpiY = ppuY * 0.0254;
-                    }
-                    break;
-                }
-                if (d[i + 4] == 'I' && d[i + 5] == 'D' && d[i + 6] == 'A' && d[i + 7] == 'T') break;
-                i += 12 + len; // length + type + data + CRC
-            }
-            if (dpiX <= 0 || !applyResolution) dpiX = 72;
-            if (dpiY <= 0 || !applyResolution) dpiY = 72;
-            widthPt = pw * 72.0 / dpiX;
-            heightPt = ph * 72.0 / dpiY;
-            return true;
+            if (TryReadPngNaturalSize(d, applyResolution) is (var pngW, var pngH)) return (pngW, pngH);
         }
 
         // JPEG: scan markers for a Start-Of-Frame (dimensions) and JFIF APP0 (density).
         if (d[0] == 0xFF && d[1] == 0xD8)
         {
-            double dpiX = 72, dpiY = 72; int pw = 0, ph = 0;
-            int p = 2;
-            while (p + 4 < d.Length)
-            {
-                if (d[p] != 0xFF) { p++; continue; }
-                int marker = d[p + 1];
-                if (marker == 0xD8 || marker == 0xD9 || (marker >= 0xD0 && marker <= 0xD7)) { p += 2; continue; }
-                int seg = BE16(p + 2);
-                if (seg < 2) break;
-                if (marker == 0xE0 && p + 4 + 14 <= d.Length
-                    && d[p + 4] == (byte)'J' && d[p + 5] == (byte)'F' && d[p + 6] == (byte)'I' && d[p + 7] == (byte)'F')
-                {
-                    int units = d[p + 11];
-                    int dx = BE16(p + 12), dy = BE16(p + 14);
-                    if (dx > 0 && dy > 0)
-                    {
-                        if (units == 1) { dpiX = dx; dpiY = dy; }            // dots per inch
-                        else if (units == 2) { dpiX = dx * 2.54; dpiY = dy * 2.54; } // dots per cm
-                    }
-                }
-                else if ((marker >= 0xC0 && marker <= 0xCF)
-                         && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
-                         && p + 9 <= d.Length)
-                {
-                    ph = BE16(p + 5);
-                    pw = BE16(p + 7);
-                }
-                p += 2 + seg;
-            }
-            if (pw <= 0 || ph <= 0) return false;
-            if (dpiX <= 0 || !applyResolution) dpiX = 72;
-            if (dpiY <= 0 || !applyResolution) dpiY = 72;
-            widthPt = pw * 72.0 / dpiX;
-            heightPt = ph * 72.0 / dpiY;
-            return true;
+            if (TryReadJpegNaturalSize(d, applyResolution) is (var jpegW, var jpegH)) return (jpegW, jpegH);
         }
 
-        return false;
+        return null;
     }
 }

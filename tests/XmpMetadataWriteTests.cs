@@ -193,4 +193,68 @@ public class XmpMetadataWriteTests
         Assert.Equal("3", xmp2.PdfAidPart);
         Assert.Equal("A", xmp2.PdfAidConformance);
     }
+
+    /// <summary>A document whose XMP packet states xap:CreatorTool (the early prefix of the
+    /// xmp namespace).</summary>
+    private static byte[] BuildWithLegacyXmp()
+    {
+        const string packet =
+            "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?><x:xmpmeta xmlns:x=\"adobe:ns:meta/\">" +
+            "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">" +
+            "<rdf:Description rdf:about=\"\" xmlns:xap=\"http://ns.adobe.com/xap/1.0/\">" +
+            "<xap:CreatorTool>Legacy Tool</xap:CreatorTool></rdf:Description></rdf:RDF></x:xmpmeta>" +
+            "<?xpacket end=\"w\"?>";
+        var objects = new[]
+        {
+            "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+            $"<< /Type /Metadata /Subtype /XML /Length {packet.Length} >>\nstream\n{packet}\nendstream",
+        };
+        using var ms = new System.IO.MemoryStream();
+        void Write(string s) => ms.Write(Compat.Latin1.GetBytes(s));
+        Write("%PDF-1.7\n");
+        var offsets = new long[objects.Length];
+        for (var i = 0; i < objects.Length; i++)
+        {
+            offsets[i] = ms.Position;
+            Write($"{i + 1} 0 obj\n{objects[i]}\nendobj\n");
+        }
+        var xref = ms.Position;
+        Write($"xref\n0 {objects.Length + 1}\n0000000000 65535 f \n");
+        foreach (var o in offsets) Write($"{o:D10} 00000 n \n");
+        Write($"trailer\n<< /Size {objects.Length + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void LegacyPrefix_IsKeptAsTheAuthorWroteIt()
+    {
+        using var doc = new Document(new System.IO.MemoryStream(BuildWithLegacyXmp()));
+        var xml = doc.GetOrCreateMetadata().ToXml();
+        Assert.Contains("<xap:CreatorTool>Legacy Tool</xap:CreatorTool>", xml);
+    }
+
+    [Fact]
+    public void LegacyPrefix_SetAgainUnderTheCurrentName_KeepsBoth_ByDefault()
+    {
+        using var doc = new Document(new System.IO.MemoryStream(BuildWithLegacyXmp()));
+        var xmp = doc.GetOrCreateMetadata();
+        xmp.Set("xmp:CreatorTool", "New Tool");
+        var xml = xmp.ToXml();
+        Assert.Contains("<xmp:CreatorTool>New Tool</xmp:CreatorTool>", xml);
+        Assert.Contains("<xap:CreatorTool>Legacy Tool</xap:CreatorTool>", xml);
+    }
+
+    [Fact]
+    public void LegacyPrefix_SetAgainUnderTheCurrentName_IsWrittenOnce_WhenAConversionAsks()
+    {
+        using var doc = new Document(new System.IO.MemoryStream(BuildWithLegacyXmp()));
+        var xmp = doc.GetOrCreateMetadata();
+        xmp.KeepOnePropertyPerName = true;
+        xmp.Set("xmp:CreatorTool", "New Tool");
+        var xml = xmp.ToXml();
+        Assert.Contains("<xmp:CreatorTool>New Tool</xmp:CreatorTool>", xml);
+        Assert.DoesNotContain("xap:CreatorTool", xml);
+    }
 }

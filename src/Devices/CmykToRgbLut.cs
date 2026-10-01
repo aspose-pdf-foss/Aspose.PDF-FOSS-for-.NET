@@ -106,8 +106,8 @@ internal static class CmykToRgbLut
             b += lut[p + 2] * w;
         }
 
-        return ((byte)Math.Clamp(r + 0.5, 0, 255),
-                (byte)Math.Clamp(g + 0.5, 0, 255),
-                (byte)Math.Clamp(b + 0.5, 0, 255));
+        return ((byte)Compat.Clamp(r + 0.5, 0, 255),
+                (byte)Compat.Clamp(g + 0.5, 0, 255),
+                (byte)Compat.Clamp(b + 0.5, 0, 255));
     }
 }

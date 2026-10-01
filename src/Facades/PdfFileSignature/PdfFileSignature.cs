@@ -41,12 +41,24 @@ public sealed partial class PdfFileSignature : IDisposable
 
     /// <summary>Open bound PDF bytes, re-authenticating with the captured
     /// password when the document is encrypted.</summary>
+    /// <summary>The bound document, opened from its bytes - for the compromise detector.</summary>
+    internal Document OpenBound() => OpenDoc(RequireBound());
+
     private Document OpenDoc(byte[] data)
         => _password is not null ? Document.Open(data, _password) : Document.Open(data);
 
+    /// <summary>The bytes the facade is bound to.</summary>
+    internal byte[] BoundBytes => RequireBound();
+
+    /// <summary>A document over <paramref name="data"/> - the bound bytes or a prefix of
+    /// them - opened with the captured password when there is one.</summary>
+    internal Document OpenBound(byte[] data) => OpenDoc(data);
+
     public void Dispose() { _document?.Dispose(); _document = null; _boundPdf = null; }
+    /// <summary>Releases the bound document and its data; same as <c>Dispose</c>.</summary>
     public void Close() => Dispose();
 
+    /// <summary>Creates a signature facade with no document bound; call <c>BindPdf</c> before use.</summary>
     public PdfFileSignature() { }
 
     // The live document a Document-bound facade wraps (never owned, never
@@ -55,6 +67,7 @@ public sealed partial class PdfFileSignature : IDisposable
     // the facade, then Save/Convert the same document as unsigned.
     private Document? _sourceDocument;
 
+    /// <summary>Creates a signature facade bound to the given document. Signatures removed through the facade are also removed from that document.</summary>
     public PdfFileSignature(Document document)
     {
         // A DOM-level Sign may already have produced signed revisions for this
@@ -64,33 +77,39 @@ public sealed partial class PdfFileSignature : IDisposable
         _sourceDocument = document;
     }
 
+    /// <summary>Creates a signature facade bound to the given document that <c>Save()</c> writes to <c>outputFile</c>.</summary>
     public PdfFileSignature(Document document, string outputFile)
         : this(document)
     {
         _outputFile = outputFile;
     }
 
+    /// <summary>Creates a signature facade bound to the PDF file at the given path.</summary>
     public PdfFileSignature(string inputFile)
     {
         _boundPdf = File.ReadAllBytes(inputFile);
     }
 
+    /// <summary>Creates a signature facade bound to the PDF file at <c>inputFile</c> that <c>Save()</c> writes to <c>outputFile</c>.</summary>
     public PdfFileSignature(string inputFile, string outputFile)
         : this(inputFile)
     {
         _outputFile = outputFile;
     }
 
+    /// <summary>Binds the PDF file at the given path.</summary>
     public void BindPdf(string inputFile)
     {
         _boundPdf = File.ReadAllBytes(inputFile);
     }
 
+    /// <summary>Binds the PDF held in the given byte array.</summary>
     public void BindPdf(byte[] input)
     {
         _boundPdf = input;
     }
 
+    /// <summary>Reads the whole stream (from the start when it is seekable) and binds that PDF. Throws when the stream is null.</summary>
     public void BindPdf(Stream inputStream)
     {
         if (inputStream is null) throw new ArgumentNullException(nameof(inputStream));
@@ -100,6 +119,7 @@ public sealed partial class PdfFileSignature : IDisposable
         _boundPdf = ms.ToArray();
     }
 
+    /// <summary>Binds the given document, using its original file bytes so existing signatures stay valid. Signatures removed through the facade are also removed from that document.</summary>
     public void BindPdf(Document document)
     {
         if (document is null) throw new ArgumentNullException(nameof(document));
@@ -113,6 +133,7 @@ public sealed partial class PdfFileSignature : IDisposable
         _sourceDocument = document;
     }
 
+    /// <summary>Returns the field names of all signatures in the bound document.</summary>
     public IList<string> GetSignNames()
     {
         var input = RequireBound();
@@ -219,11 +240,13 @@ public sealed partial class PdfFileSignature : IDisposable
     public bool CoversWholeDocument(SignatureName signName)
         => signName is not null && IsCoversWholeDocument(signName.FullName);
 
+    /// <summary>Removes the value of the named signature, leaving an empty signature field. Does nothing when the name is null.</summary>
     public void RemoveSignature(SignatureName signName)
     {
         if (signName is not null) RemoveSignature(signName.FullName);
     }
 
+    /// <summary>Removes the named signature: the whole signature field when <c>removeField</c> is true, otherwise only its value. Does nothing when the name is null.</summary>
     public void RemoveSignature(SignatureName signName, bool removeField)
     {
         if (signName is not null) RemoveSignature(signName.FullName, removeField);
@@ -289,6 +312,7 @@ public sealed partial class PdfFileSignature : IDisposable
         return br[0] == 0 && coveredEnd == input.Length;
     }
 
+    /// <summary>Removes the value of the named signature, leaving an empty signature field. Throws when the signature certifies the document.</summary>
     public void RemoveSignature(string signName)
     {
         GuardCertificationRemoval(signName);
@@ -394,6 +418,7 @@ public sealed partial class PdfFileSignature : IDisposable
         }
     }
 
+    /// <summary>Returns true when the bound document contains at least one signature.</summary>
     public bool ContainsSignature() => IsContainSignature();
 
     /// <summary>A signing error that <see cref="Sign(int, string, string, string, bool, System.Drawing.Rectangle, Forms.Signature)"/>
@@ -401,6 +426,7 @@ public sealed partial class PdfFileSignature : IDisposable
     /// incompatible-algorithm check surfaces when the document is written.</summary>
     private Exception? _deferredSignException;
 
+    /// <summary>Writes the bound document, including any signatures added or removed, to the given file.</summary>
     public void Save(string outputFile)
     {
         if (_deferredSignException is not null) throw _deferredSignException;
@@ -408,6 +434,7 @@ public sealed partial class PdfFileSignature : IDisposable
         File.WriteAllBytes(outputFile, input);
     }
 
+    /// <summary>Writes the bound document, including any signatures added or removed, to the stream and rewinds the stream when it is seekable.</summary>
     public void Save(Stream outputStream)
     {
         if (_deferredSignException is not null) throw _deferredSignException;

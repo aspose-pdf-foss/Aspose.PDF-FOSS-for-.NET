@@ -1,5 +1,24 @@
 # Security and Encryption
 
+Besides encryption and signatures, `HiddenDataSanitizer`
+(`Aspose.Pdf.Security.HiddenDataSanitization`) strips hidden data from a
+document in place: `Sanitize(doc)` applies the `HiddenDataSanitizationOptions`
+flags (`RemoveAnnotations`, `RemoveJavaScriptsAndActions`, `RemoveAttachments`,
+`RemoveMetadata`, `RemoveSearchIndexAndPrivateInfo`, `FlattenForms`,
+`FlattenLayers`; `HiddenDataSanitizationOptions.All()` sets them all), and
+`ConvertPagesToImages` / `SanitizeAllToImages(doc, dpi)` replace every page with
+a rendered image. A sanitized document is always saved whole, so the removed
+data does not survive in an earlier revision.
+
+```csharp
+using Aspose.Pdf;
+using Aspose.Pdf.Security.HiddenDataSanitization;
+
+using var doc = new Document("input.pdf");
+new HiddenDataSanitizer(HiddenDataSanitizationOptions.All()).Sanitize(doc);
+doc.Save("sanitized.pdf");
+```
+
 ## Encryption algorithms
 
 `CryptoAlgorithm`:
@@ -12,9 +31,10 @@
 | `AESx256`  | 256-bit  | PDF 2.0     | Strongest available         |
 | `Custom`   | —        | —           | Reported for a non-standard security handler (`ICustomSecurityHandler`) |
 
-The ciphers and digests (AES, RC4, SHA-2, SHA-3, MD5, HMAC) ship in pure
-managed C#; the only call into the platform crypto provider is the
-random-number generator used for salts, file keys and file IDs.
+The ciphers and digests the security handlers use (AES, RC4, SHA-2, SHA-3, MD5,
+HMAC) ship in pure managed C#; on the encryption path the only call into the
+platform crypto provider is the random-number generator used for salts, file keys and file IDs (a runtime
+without one falls back to GUID-derived random bytes).
 
 ### PDF 2.0 deprecation gates
 
@@ -56,8 +76,14 @@ doc.Save("encrypted.pdf");
 `permissions` defaults to all-allowed and `algorithm` to `AESx128`; an overload
 takes the `Permissions` flags enum instead of `DocumentPrivilege`. A document
 carrying a **certification (DocMDP) signature** refuses encryption with
-`InvalidOperationException`, because encrypting would break the certification;
+`PdfException`, because encrypting would break the certification;
 ordinary approval signatures are not affected.
+
+`Document.EncryptMetadata` (default `true`) decides whether the XMP metadata
+packet is encrypted with the rest of the file. Set it to `false` before the
+save to leave the packet readable in the clear, so that indexers and
+viewers can read the title, author and keywords without the password; the
+`/EncryptMetadata` entry is written and honoured on the next open.
 
 Two further handlers are available: `Encrypt(user, owner, privileges,
 ICustomSecurityHandler)` installs your own `/Filter` implementation, and
@@ -222,9 +248,30 @@ Signing is an incremental update, so existing signatures stay valid. Further
 (`DigestHashAlgorithm`, `Auto` picks by key type), `SigningDate`,
 `SignerName`, `DocMdpPermissions` (a certification signature), `UseLtv`,
 `TimestampUrl` / `TimestampBasicAuth` / `TimestampDigest` (RFC 3161
-timestamp), `CustomSignHash` (sign the digest with your own key material) and
-`Password` (for an encrypted input). `PdfSigner.SignDocumentTimestamp` adds a
-document-level timestamp signature.
+timestamp), `CustomSignHash` and `Password` (for an encrypted input).
+`PdfSigner.SignDocumentTimestamp` adds a document-level timestamp signature.
+
+`CustomSignHash` takes a `SignHash` delegate — `byte[] SignHash(byte[] hash,
+DigestHashAlgorithm digestHashAlgorithm)` — for keys that never enter the
+process (an HSM, a smartcard, a remote signing service): the signer passes it
+the digest of the signed byte ranges, the delegate returns the raw signature
+value, and the library wraps it in the CMS envelope around the certificate it
+was given. On the `SignatureField` / `PdfFileSignature` path the same delegate is
+set on `Signature.CustomSignHash`, and `ExternalSignature` (in
+`Aspose.Pdf.Forms`) signs with an `X509Certificate2` from the OS store or a
+device — or with a base64 public certificate (`ExternalSignature(base64, detached)`)
+whose key is reached only through the delegate.
+
+```csharp
+using Aspose.Pdf.Forms;
+using Aspose.Pdf.Security;
+
+var signed = PdfSigner.Sign(input, cert, new SignatureOptions
+{
+    FieldName      = "Signature1",
+    CustomSignHash = (hash, digest) => hsm.SignDigest(hash, digest),   // your signer
+});
+```
 
 The `/Contents` placeholder is `ContentsSize` bytes (default 8192). A signature
 that does not fit throws `InvalidOperationException`, or
@@ -299,7 +346,55 @@ bool fieldValid = PdfSigner.Verify(signedPdf, "Signature1");
 
 Both overloads accept an optional `password` for an encrypted file. These
 checks are cryptographic: byte range, digest and signature against the
-embedded signer certificate.
+embedded signer certificate. RSA, DSA and ECDSA signatures are verified; an
+ECDSA signature on a NIST prime curve is checked in managed code, so it verifies
+on runtimes without platform crypto too.
+
+For a verdict without exceptions, `PdfFileSignature.TryVerifySignature(SignatureName,
+out VerificationResult)` and `Signature.TryVerify(out VerificationResult)` report a
+`VerificationState` (`Valid`, `Invalid` or `Undefined`), a `Message`, the captured
+`VerificationException`, and `IsCompromised` when the signature's structure is a
+recognised forgery.
+
+**Compromise detection.** `SignaturesCompromiseDetector` (namespace `Aspose.Pdf`)
+checks every signature of a document for the known structural attacks — a
+universal signature forgery (an empty, hollow or fabricated `/Contents` or
+`/ByteRange`) and a signature wrapping attack (unsigned bytes hidden in the
+`/Contents` gap) — and measures whether the sound signatures cover the whole file.
+`Check` returns `true` only when every signature is sound and together they cover
+the document; the `CompromiseCheckResult` lists the `CompromisedSignatures` and
+gives the `SignaturesCoverage` (`EntirelySigned`, `PartiallySigned` when content
+was appended after the last signature, `Undefined` when there is nothing to
+measure). `UnsignedContentAbsorber` (`Aspose.Pdf.Security`) then shows what that
+appended content is: the pages, form widgets, other annotations and form
+XObjects added or changed after signing.
+
+```csharp
+using Aspose.Pdf;
+using Aspose.Pdf.Facades;
+using Aspose.Pdf.Security;
+using Aspose.Pdf.Signatures;
+
+using var doc = new Document("signed.pdf");
+
+if (!new SignaturesCompromiseDetector(doc).Check(out CompromiseCheckResult check))
+{
+    foreach (var forged in check.CompromisedSignatures)
+        Console.WriteLine($"Forged: {forged.FullName}");
+
+    if (check.SignaturesCoverage == SignaturesCoverage.PartiallySigned)
+    {
+        var unsigned = new UnsignedContentAbsorber(new PdfFileSignature(doc)).TryGetContent();
+        Console.WriteLine($"Pages changed after signing: {unsigned.UnsignedContent.Pages.Count}");
+    }
+}
+```
+
+`PdfFileSignature.GetSignaturesInfo()` describes each signature's algorithm as a
+`SignatureAlgorithmInfo` (`AlgorithmType`, `CryptographicStandard`,
+`DigestHashAlgorithm`); a document timestamp comes back as a
+`TimestampAlgorithmInfo` whose `ContentHashAlgorithm` is the digest of the
+timestamp's message imprint.
 
 Certificate **trust** is evaluated by the facade's
 `VerifySignature(name, ValidationOptions, out ValidationResult)` when

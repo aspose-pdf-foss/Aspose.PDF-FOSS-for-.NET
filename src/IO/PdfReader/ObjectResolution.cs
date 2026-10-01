@@ -68,6 +68,13 @@ internal sealed partial class PdfReader
 
         if (result is not null)
             _cache[key] = result;
+        if (result is PdfStream stream)
+        {
+            // The number a loaded stream lives under: an edit registers the stream for
+            // the incremental save by it, and the signature-coverage walk keys on it.
+            stream.ObjectNumber = objectNumber;
+            stream.Generation = generation;
+        }
         return result;
     }
 
@@ -112,6 +119,12 @@ internal sealed partial class PdfReader
                 }
             }
 
+            // Still another object: the entry is wrong (a hybrid file's update section can
+            // mark objects of an earlier object stream as in use at offset 0). The object is
+            // looked for elsewhere, never taken from what happens to sit at that offset.
+            if (indirect.ObjectNumber != objectNumber)
+                return FindObjectAnywhere(objectNumber, generation) ?? FindInObjectStreams(objectNumber);
+
             return indirect.Value;
         }
         catch (Exception ex)
@@ -129,6 +142,38 @@ internal sealed partial class PdfReader
             throw new InvalidOperationException(
                 $"Failed to parse object {objectNumber} {generation} at offset {entry.Offset}: {ex.Message}", ex);
         }
+    }
+
+    // Every object held in an object stream anywhere in the file, found by scanning (built once).
+    private Dictionary<int, (int Stream, int Index)>? _objectStreamIndex;
+
+    /// <summary>An object found in any object stream of the file, whatever the xref says — for
+    /// an xref entry that points at the wrong object. Null when no object stream holds it.</summary>
+    private PdfObject? FindInObjectStreams(int objectNumber)
+    {
+        if (_objectStreamIndex is null)
+        {
+            _objectStreamIndex = new Dictionary<int, (int, int)>();
+            try
+            {
+                // Every uncompressed object of the file, then the object streams among them.
+                var scanned = RecoverXref(_data);
+                foreach (var kvp in scanned.Entries)
+                    if (kvp.Value.IsCompressed && !_objectStreamIndex.ContainsKey(kvp.Key))
+                        _objectStreamIndex[kvp.Key] = (kvp.Value.StreamObjectNumber, kvp.Value.IndexInStream);
+            }
+            catch { /* a file too broken to scan: nothing more to find */ }
+        }
+        if (!_objectStreamIndex.TryGetValue(objectNumber, out var at)) return null;
+        try
+        {
+            return ResolveCompressedObject(new XRefEntry
+            {
+                ObjectNumber = objectNumber, InUse = true, IsCompressed = true,
+                StreamObjectNumber = at.Stream, IndexInStream = at.Index,
+            }, objectNumber);
+        }
+        catch { return null; }
     }
 
     /// <summary>

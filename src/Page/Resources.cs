@@ -4,7 +4,6 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Operators;
 using Aspose.Pdf.Shading;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -53,7 +52,13 @@ public sealed partial class Page
     /// <summary>
     /// Add an ExtGState dictionary to this page's resources and return the resource name.
     /// </summary>
-    public string AddExtGState(Content.ExtGState extGState)
+    public string AddExtGState(Content.ExtGState extGState) =>
+        AddExtGStateDict(extGState.ToPdfDictionary());
+
+    /// <summary>Put a graphics state dictionary under a fresh <c>GS<i>n</i></c>
+    /// name in this page's /Resources/ExtGState, for a state the
+    /// <see cref="Content.ExtGState"/> model has no room for.</summary>
+    internal string AddExtGStateDict(PdfDictionary state)
     {
         // Resolve indirect /Resources and /ExtGState references rather than a
         // bare `as PdfDictionary` cast (which yields null for an indirect ref
@@ -81,7 +86,7 @@ public sealed partial class Page
         while (gsDict.ContainsKey(name))
             name = $"GS{++counter}";
 
-        gsDict.Set(name, extGState.ToPdfDictionary());
+        gsDict.Set(name, state);
         return name;
     }
 
@@ -142,6 +147,146 @@ public sealed partial class Page
         shDict.Set(name, shadingDict);
         return name;
     }
+
+    /// <summary>
+    /// Register an axial gradient in this page's /Resources/Shading and return the
+    /// resource name, for a caller writing its own content stream: clip to the
+    /// shape the gradient is to fill and paint it with <c>/Name sh</c>.
+    ///
+    /// The gradient's endpoints are in the coordinate space the <c>sh</c> is
+    /// painted in, so a caller that concatenates a matrix first states them in
+    /// that space.
+    /// </summary>
+    public string AddShading(Aspose.Pdf.Drawing.GradientAxialShading gradient)
+    {
+        if (gradient is null) throw new System.ArgumentNullException(nameof(gradient));
+        return AddShading(Aspose.Pdf.Drawing.Shape.BuildAxialShadingDict(gradient));
+    }
+
+    /// <summary>
+    /// Register an axial gradient as a shading PATTERN in this page's
+    /// /Resources/Pattern and return the resource name, for a caller filling a
+    /// shape with it: <c>/Pattern cs /Name scn</c>, then paint the shape.
+    ///
+    /// This is the alternative to <see cref="AddShading(Aspose.Pdf.Drawing.GradientAxialShading)"/>,
+    /// and the difference matters at a shape's EDGE: a clip-and-paint covers
+    /// whole pixels, while a fill is antialiased against what is behind it.
+    ///
+    /// ⚠ Pattern space is the page's DEFAULT space, so a pattern is not moved by
+    /// a matrix already in force when the shape is painted. A caller drawing
+    /// under its own <c>cm</c> passes that same matrix here.
+    /// </summary>
+    public string AddPattern(Aspose.Pdf.Drawing.GradientAxialShading gradient,
+                             Aspose.Pdf.Matrix? matrix = null)
+    {
+        if (gradient is null) throw new System.ArgumentNullException(nameof(gradient));
+
+        var pattern = new PdfDictionary();
+        pattern.Set("Type", new PdfName("Pattern"));
+        pattern.Set("PatternType", new PdfInteger(ShadingPatternType));
+        pattern.Set("Shading", Aspose.Pdf.Drawing.Shape.BuildAxialShadingDict(gradient));
+
+        if (matrix is not null)
+        {
+            var entries = new PdfArray();
+            foreach (var value in matrix.Data) entries.Add(new PdfReal(value));
+            pattern.Set("Matrix", entries);
+        }
+
+        return AddPattern(pattern);
+    }
+
+    /// <summary>
+    /// Register a LUMINOSITY soft mask that ramps along an axis, and return the
+    /// /ExtGState resource name that puts it in force: paint <c>/Name gs</c>,
+    /// and every mark that follows is laid down at the opacity the ramp gives
+    /// its place on the page.
+    ///
+    /// A PDF axial shading carries no alpha at all, so a gradient that FADES is
+    /// painted through a mask instead: a transparency group holding the same
+    /// ramp in grey, whose luminosity -- black none, white full -- is read as
+    /// the opacity (PDF 32000 &#167;11.6.5.2). The ramp handed here is therefore
+    /// a ramp of GREYS, one per stop of the colour ramp it masks, on the axis
+    /// that colour ramp runs along.
+    ///
+    /// &#9888; The group is rendered under the matrix in force when the
+    /// <c>gs</c> runs, not the one in force when the paint happens, so the axis
+    /// and the box are stated in the space the CALLER is drawing in. This is
+    /// the opposite of a PATTERN, which is placed in the page's default space
+    /// and carries a matrix of its own.
+    /// </summary>
+    public string AddLuminositySoftMask(Aspose.Pdf.Drawing.GradientAxialShading ramp,
+                                        Aspose.Pdf.Rectangle box)
+    {
+        if (ramp is null) throw new System.ArgumentNullException(nameof(ramp));
+        if (box is null) throw new System.ArgumentNullException(nameof(box));
+
+        var mask = new PdfDictionary();
+        mask.Set("Type", new PdfName("Mask"));
+        mask.Set("S", new PdfName("Luminosity"));
+        mask.Set("G", MaskGroup(ramp, box));
+        mask.Set("BC", Grey(MaskedOutLuminosity));
+
+        var state = new PdfDictionary();
+        state.Set("Type", new PdfName("ExtGState"));
+        state.Set("SMask", mask);
+        return AddExtGStateDict(state);
+    }
+
+    /// <summary>The group a luminosity mask reads: the grey ramp, painted over
+    /// the box the mask covers and nowhere else.</summary>
+    private static PdfStream MaskGroup(Aspose.Pdf.Drawing.GradientAxialShading ramp,
+                                       Aspose.Pdf.Rectangle box)
+    {
+        var shadings = new PdfDictionary();
+        shadings.Set(MaskShadingName, Aspose.Pdf.Drawing.Shape.BuildAxialShadingDict(ramp));
+        var resources = new PdfDictionary();
+        resources.Set("Shading", shadings);
+
+        var group = new PdfDictionary();
+        group.Set("Type", new PdfName("Group"));
+        group.Set("S", new PdfName("Transparency"));
+        group.Set("CS", new PdfName("DeviceRGB"));
+
+        var bounds = new PdfArray();
+        foreach (var edge in new[] { box.LLX, box.LLY, box.URX, box.URY })
+            bounds.Add(new PdfReal(edge));
+
+        var content = Encoding.ASCII.GetBytes($"/{MaskShadingName} sh\n");
+
+        var form = new PdfDictionary();
+        form.Set("Type", new PdfName("XObject"));
+        form.Set("Subtype", new PdfName("Form"));
+        form.Set("FormType", new PdfInteger(FormXObjectType));
+        form.Set("BBox", bounds);
+        form.Set("Group", group);
+        form.Set("Resources", resources);
+        form.Set("Length", new PdfInteger(content.Length));
+        return new PdfStream(form, content);
+    }
+
+    /// <summary>A grey, written as the three equal components a DeviceRGB group
+    /// asks for.</summary>
+    private static PdfArray Grey(double level)
+    {
+        var components = new PdfArray();
+        for (var i = 0; i < RgbComponents; i++) components.Add(new PdfReal(level));
+        return components;
+    }
+
+    /// <summary>Black: what a luminosity mask reads outside its group's box,
+    /// which is nothing painted at all.</summary>
+    private const double MaskedOutLuminosity = 0;
+
+    private const int RgbComponents = 3;
+
+    /// <summary>The only form type there is.</summary>
+    private const int FormXObjectType = 1;
+
+    private const string MaskShadingName = "Sh0";
+
+    /// <summary>A pattern that paints a shading, rather than tiling a cell.</summary>
+    private const int ShadingPatternType = 2;
 
     /// <summary>
     /// Add a pattern dictionary to this page's /Resources/Pattern and return the

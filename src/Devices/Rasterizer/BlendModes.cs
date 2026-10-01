@@ -59,21 +59,11 @@ internal static class BlendModes
     /// <see cref="BlendTriple"/> for the four non-separable HSL modes. Normal mode
     /// is the identity (returns src unchanged). Inputs and outputs are 0..255 ints.
     /// </summary>
-    public static void Blend(BlendMode mode, int dr, int dg, int db, int sr, int sg, int sb,
-                             out int br, out int bg, out int bb)
+    public static (int r, int g, int b) Blend(BlendMode mode, int dr, int dg, int db, int sr, int sg, int sb)
     {
-        if (mode == BlendMode.Normal)
-        {
-            br = sr; bg = sg; bb = sb; return;
-        }
-        if (IsNonSeparable(mode))
-        {
-            BlendTriple(mode, dr, dg, db, sr, sg, sb, out br, out bg, out bb);
-            return;
-        }
-        br = BlendChannel(mode, dr, sr);
-        bg = BlendChannel(mode, dg, sg);
-        bb = BlendChannel(mode, db, sb);
+        if (mode == BlendMode.Normal) return (sr, sg, sb);
+        if (IsNonSeparable(mode)) return BlendTriple(mode, dr, dg, db, sr, sg, sb);
+        return (BlendChannel(mode, dr, sr), BlendChannel(mode, dg, sg), BlendChannel(mode, db, sb));
     }
 
     /// <summary>
@@ -141,8 +131,7 @@ internal static class BlendModes
     /// after SetLum are clipped via <see cref="ClipColor"/> with the spec's
     /// luminance-preserving formula. Mode must be one of the four HSL modes.
     /// </summary>
-    public static void BlendTriple(BlendMode mode, int dr, int dg, int db, int sr, int sg, int sb,
-                                   out int br, out int bg, out int bb)
+    public static (int r, int g, int b) BlendTriple(BlendMode mode, int dr, int dg, int db, int sr, int sg, int sb)
     {
         var cbR = dr / 255.0; var cbG = dg / 255.0; var cbB = db / 255.0;
         var csR = sr / 255.0; var csG = sg / 255.0; var csB = sb / 255.0;
@@ -151,29 +140,27 @@ internal static class BlendModes
         {
             case BlendMode.Hue:
                 // SetLum(SetSat(Cs, Sat(Cb)), Lum(Cb))
-                SetSat(csR, csG, csB, Sat(cbR, cbG, cbB), out var hR, out var hG, out var hB);
-                SetLum(hR, hG, hB, Lum(cbR, cbG, cbB), out rR, out rG, out rB);
+                var (hR, hG, hB) = SetSat(csR, csG, csB, Sat(cbR, cbG, cbB));
+                (rR, rG, rB) = SetLum(hR, hG, hB, Lum(cbR, cbG, cbB));
                 break;
             case BlendMode.Saturation:
                 // SetLum(SetSat(Cb, Sat(Cs)), Lum(Cb))
-                SetSat(cbR, cbG, cbB, Sat(csR, csG, csB), out var sR, out var sG, out var sB);
-                SetLum(sR, sG, sB, Lum(cbR, cbG, cbB), out rR, out rG, out rB);
+                var (sR, sG, sB) = SetSat(cbR, cbG, cbB, Sat(csR, csG, csB));
+                (rR, rG, rB) = SetLum(sR, sG, sB, Lum(cbR, cbG, cbB));
                 break;
             case BlendMode.Color:
                 // SetLum(Cs, Lum(Cb))
-                SetLum(csR, csG, csB, Lum(cbR, cbG, cbB), out rR, out rG, out rB);
+                (rR, rG, rB) = SetLum(csR, csG, csB, Lum(cbR, cbG, cbB));
                 break;
             case BlendMode.Luminosity:
                 // SetLum(Cb, Lum(Cs))
-                SetLum(cbR, cbG, cbB, Lum(csR, csG, csB), out rR, out rG, out rB);
+                (rR, rG, rB) = SetLum(cbR, cbG, cbB, Lum(csR, csG, csB));
                 break;
             default:
                 rR = csR; rG = csG; rB = csB;
                 break;
         }
-        br = QuantiseChannel(rR);
-        bg = QuantiseChannel(rG);
-        bb = QuantiseChannel(rB);
+        return (QuantiseChannel(rR), QuantiseChannel(rG), QuantiseChannel(rB));
     }
 
     private static int QuantiseChannel(double v)
@@ -199,7 +186,8 @@ internal static class BlendModes
     /// the colour's hue/saturation, instead of just hard-clamping each channel
     /// independently (which would shift the hue at extremes).
     /// </summary>
-    private static void ClipColor(ref double r, ref double g, ref double b)
+    /// <returns>The channels pulled back into [0, 1].</returns>
+    private static (double r, double g, double b) ClipColor(double r, double g, double b)
     {
         var l = Lum(r, g, b);
         var n = r < g ? (r < b ? r : b) : (g < b ? g : b);
@@ -224,14 +212,17 @@ internal static class BlendModes
                 b = l + (b - l) * (1.0 - l) / denom;
             }
         }
+        return (r, g, b);
     }
 
-    private static void SetLum(double r, double g, double b, double l,
-                               out double or, out double og, out double ob)
+    private static (double or, double og, double ob) SetLum(double r, double g, double b, double l)
     {
+        double or = default;
+        double og = default;
+        double ob = default;
         var d = l - Lum(r, g, b);
-        or = r + d; og = g + d; ob = b + d;
-        ClipColor(ref or, ref og, ref ob);
+        (or, og, ob) = ClipColor(r + d, g + d, b + d);
+        return (or, og, ob);
     }
 
     /// <summary>
@@ -242,9 +233,11 @@ internal static class BlendModes
     /// becomes 0. When all three are equal, saturation is undefined and the
     /// result is 0 across the board.
     /// </summary>
-    private static void SetSat(double r, double g, double b, double s,
-                               out double or, out double og, out double ob)
+    private static (double or, double og, double ob) SetSat(double r, double g, double b, double s)
     {
+        double or = default;
+        double og = default;
+        double ob = default;
         // Place each channel into max/mid/min slots by rank, scale the mid by s,
         // then write back to its original position. Avoids any heap allocation
         // — relevant because BlendTriple is on the per-pixel hot path.
@@ -255,7 +248,7 @@ internal static class BlendModes
             {
                 // r ≥ g ≥ b
                 range = r - b;
-                if (range <= 0.0) { or = og = ob = 0.0; return; }
+                if (range <= 0.0) { or = og = ob = 0.0; return (or, og, ob); }
                 newMid = (g - b) * s / range;
                 or = s; og = newMid; ob = 0.0;
             }
@@ -263,7 +256,7 @@ internal static class BlendModes
             {
                 // r ≥ b > g
                 range = r - g;
-                if (range <= 0.0) { or = og = ob = 0.0; return; }
+                if (range <= 0.0) { or = og = ob = 0.0; return (or, og, ob); }
                 newMid = (b - g) * s / range;
                 or = s; og = 0.0; ob = newMid;
             }
@@ -271,7 +264,7 @@ internal static class BlendModes
             {
                 // b > r ≥ g
                 range = b - g;
-                if (range <= 0.0) { or = og = ob = 0.0; return; }
+                if (range <= 0.0) { or = og = ob = 0.0; return (or, og, ob); }
                 newMid = (r - g) * s / range;
                 or = newMid; og = 0.0; ob = s;
             }
@@ -282,7 +275,7 @@ internal static class BlendModes
             {
                 // g > r ≥ b
                 range = g - b;
-                if (range <= 0.0) { or = og = ob = 0.0; return; }
+                if (range <= 0.0) { or = og = ob = 0.0; return (or, og, ob); }
                 newMid = (r - b) * s / range;
                 or = newMid; og = s; ob = 0.0;
             }
@@ -290,7 +283,7 @@ internal static class BlendModes
             {
                 // g ≥ b > r
                 range = g - r;
-                if (range <= 0.0) { or = og = ob = 0.0; return; }
+                if (range <= 0.0) { or = og = ob = 0.0; return (or, og, ob); }
                 newMid = (b - r) * s / range;
                 or = 0.0; og = s; ob = newMid;
             }
@@ -298,11 +291,12 @@ internal static class BlendModes
             {
                 // b > g > r
                 range = b - r;
-                if (range <= 0.0) { or = og = ob = 0.0; return; }
+                if (range <= 0.0) { or = og = ob = 0.0; return (or, og, ob); }
                 newMid = (g - r) * s / range;
                 or = 0.0; og = newMid; ob = s;
             }
         }
+        return (or, og, ob);
     }
 
     private static int SoftLightChannel(int dst, int src)

@@ -7,7 +7,7 @@ namespace Aspose.Pdf.Annotations;
 /// <summary>
 /// Collection of annotations on a page.
 /// </summary>
-public sealed class AnnotationCollection : IReadOnlyList<Annotation>
+public sealed partial class AnnotationCollection : IReadOnlyList<Annotation>
 {
     private readonly List<Annotation> _annotations;
     private readonly PdfDictionary _pageDict;
@@ -47,6 +47,7 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
         }
     }
 
+    /// <summary>Gets the number of annotations in the collection.</summary>
     public int Count => _annotations.Count;
     /// <summary>Get annotation by 1-based index.</summary>
     public Annotation this[int index] => _annotations[index - 1];
@@ -237,7 +238,9 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
         return AddDict(dict);
     }
 
-    /// <summary>Add a WatermarkAnnotation object.</summary>
+    /// <summary>Add a WatermarkAnnotation object, its appearance painted from the
+    /// text it has been given (a watermark added before it is given any text paints
+    /// itself when the text arrives - see <see cref="WatermarkAnnotation"/>).</summary>
     public Annotation Add(WatermarkAnnotation wa)
     {
         var dict = wa.Build();
@@ -472,7 +475,7 @@ public sealed class AnnotationCollection : IReadOnlyList<Annotation>
 
     /// <summary>
     /// Iterate annotations on a snapshot of the underlying list so callers can
-    /// remove annotations (via <see cref="Delete"/> / <see cref="RemoveAt"/>)
+    /// remove annotations (via <c>Delete</c> / <see cref="RemoveAt"/>)
     /// from inside a foreach without tripping the live-collection guard.
     /// </summary>
     public IEnumerator<Annotation> GetEnumerator() => _annotations.ToList().GetEnumerator();

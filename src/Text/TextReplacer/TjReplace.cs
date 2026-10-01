@@ -8,251 +8,96 @@ namespace Aspose.Pdf.Text;
 
 public sealed partial class TextReplacer
 {
-    private bool TryReplaceTJArray(PdfArray arr, string search, string replacement,
+    private PdfArray? TryReplaceTJArray(PdfArray arr, string search, string replacement,
         Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, PdfReader reader,
-        double fontSize, out PdfArray newArr)
+        double fontSize)
     {
-        // First, concatenate all string parts to see if search text spans them.
-        // Large negative kernings are treated as synthetic word-space, mirroring
-        // the TextFragmentAbsorber reader — but only when the next PdfString
-        // doesn't already begin with ' ', so we don't double-up the space.
-        var fullText = new StringBuilder();
-        var parts = new List<(int index, string text, bool isHex)>();
+        PdfArray? newArr = default;
+        var tj = new TjReplaceState();
+        tj.arr = arr;
+        tj.search = search;
+        tj.replacement = replacement;
+        tj.toUnicode = toUnicode;
+        tj.fontDict = fontDict;
+        tj.reader = reader;
+        tj.fontSize = fontSize;
+        var ok = TryReplaceTJArrayCore(tj);
+        newArr = tj.newArr;
+        return (ok) ? newArr : null;
+    }
 
-        var tjRule = TjBreakRuleOf(arr, toUnicode, fontDict, reader);
-        for (var i = 0; i < arr.Count; i++)
-        {
-            if (arr[i] is PdfString s)
-            {
-                var decoded = DecodeString(s.Value, toUnicode, fontDict, reader);
-                parts.Add((i, decoded, s.IsHex));
-                fullText.Append(decoded);
-            }
-            else if ((arr[i] is PdfInteger adj && tjRule.Breaks(adj.Value))
-                  || (arr[i] is PdfReal adjR && tjRule.Breaks(adjR.Value)))
-            {
-                if (fullText.Length > 0 && fullText[^1] != ' ')
-                    fullText.Append(' ');
-            }
-        }
+    /// <summary>The body of the TJ-array replacement, on its own state.</summary>
+    private bool TryReplaceTJArrayCore(TjReplaceState tj)
+    {
+        ConcatTjArrayText(tj);
 
-        var combinedText = fullText.ToString();
-        var normalizedCombined = NormalizeForSearch(combinedText);
-        var normalizedSearch = NormalizeForSearch(search);
-        if (!MatchesSearch(normalizedCombined, normalizedSearch))
+        tj.combinedText = tj.fullText.ToString();
+        tj.normalizedCombined = NormalizeForSearch(tj.combinedText);
+        tj.normalizedSearch = NormalizeForSearch(tj.search);
+        if (!MatchesSearch(tj.normalizedCombined, tj.normalizedSearch))
         {
-            newArr = arr;
+            tj.newArr = tj.arr;
             return false;
         }
 
-        // Locate the match span so we can rewrite only the matched region and
-        // keep everything after it intact. Preserving the suffix structure keeps
-        // downstream glyph positions aligned with the original layout instead of
-        // flattening the whole TJ (which shifts after-match glyphs when the
-        // replacement width differs from the matched region width).
-        int matchStart = _isRegex && _regexPattern is not null
-            ? _regexPattern.Match(normalizedCombined).Index
-            : normalizedCombined.IndexOf(normalizedSearch, StringComparison.Ordinal);
-        int matchLen = _isRegex && _regexPattern is not null
-            ? _regexPattern.Match(normalizedCombined).Length
-            : normalizedSearch.Length;
+        tj.matchStart = _isRegex && _regexPattern is not null
+            ? _regexPattern.Match(tj.normalizedCombined).Index
+            : tj.normalizedCombined.IndexOf(tj.normalizedSearch, StringComparison.Ordinal);
+        tj.matchLen = _isRegex && _regexPattern is not null
+            ? _regexPattern.Match(tj.normalizedCombined).Length
+            : tj.normalizedSearch.Length;
 
-        // Flat-string fallback (used when match position is unavailable or when
-        // match covers the whole TJ — splitting adds no value). The TJ caller
-        // owns the _replacementCount increment, so this path must NOT call
-        // ApplyReplace (which would double-count).
-        PdfArray FlatReplace()
+        if (tj.matchStart < 0 || tj.matchStart + tj.matchLen > tj.combinedText.Length)
         {
-            var replacedText = _isRegex && _regexPattern is not null
-                ? _regexPattern.Replace(normalizedCombined, replacement)
-                : normalizedCombined.Replace(normalizedSearch, replacement, StringComparison.Ordinal);
-            var replacedBytes = EncodeString(replacedText, toUnicode, fontDict);
-            var useHex = parts.Count > 0 && parts[0].isHex;
-            var flat = new PdfArray();
-            flat.Add(new PdfString(replacedBytes, useHex));
-            return flat;
-        }
-
-        if (matchStart < 0 || matchStart + matchLen > combinedText.Length)
-        {
-            newArr = FlatReplace();
+            tj.newArr = FlatReplace(tj);
             return true;
         }
 
-        // Replace-all across multiple occurrences: the structured single-match
-        // path below only rewrites the first match (keeping the suffix intact),
-        // so when every match must be replaced and more than one is present,
-        // fall back to a flat replacement that substitutes them all.
-        bool multipleMatches = _isRegex && _regexPattern is not null
-            ? _regexPattern.Matches(normalizedCombined).Count > 1
-            : CountOccurrences(normalizedCombined, normalizedSearch) > 1;
-        if (!ReplaceFirstOnly && multipleMatches)
+        tj.multipleMatches = _isRegex && _regexPattern is not null
+            ? _regexPattern.Matches(tj.normalizedCombined).Count > 1
+            : CountOccurrences(tj.normalizedCombined, tj.normalizedSearch) > 1;
+        if (!ReplaceFirstOnly && tj.multipleMatches)
         {
-            newArr = FlatReplace();
+            tj.newArr = FlatReplace(tj);
             return true;
         }
 
-        // Build a per-character map (combinedText char index → arr element index).
-        // Must use the SAME rule as the concatenation loop above — keep in sync.
-        var charMap = new List<int>(combinedText.Length);
-        var lastMapCh = '\0';
-        for (var i = 0; i < arr.Count; i++)
-        {
-            if (arr[i] is PdfString sm)
-            {
-                var decMap = DecodeString(sm.Value, toUnicode, fontDict, reader);
-                for (var k = 0; k < decMap.Length; k++) charMap.Add(i);
-                if (decMap.Length > 0) lastMapCh = decMap[^1];
-            }
-            else if ((arr[i] is PdfInteger ia && tjRule.Breaks(ia.Value))
-                  || (arr[i] is PdfReal ra && tjRule.Breaks(ra.Value)))
-            {
-                if (lastMapCh != '\0' && lastMapCh != ' ')
-                {
-                    charMap.Add(-1); // synthetic space
-                    lastMapCh = ' ';
-                }
-            }
-        }
+        tj.charMap = new List<int>(tj.combinedText.Length);
+        BuildTjCharMap(tj);
 
-        // Prefix/suffix text (unchanged portions on either side of the match).
-        var prefixText = combinedText.Substring(0, matchStart);
-        var suffixStart = matchStart + matchLen;
-        var suffixText = combinedText.Substring(suffixStart);
+        tj.prefixText = tj.combinedText.Substring(0, tj.matchStart);
+        tj.suffixStart = tj.matchStart + tj.matchLen;
+        tj.suffixText = tj.combinedText.Substring(tj.suffixStart);
 
         // If suffix is empty, flat-replace is equivalent (nothing to push back).
-        if (suffixText.Length == 0)
+        if (tj.suffixText.Length == 0)
         {
-            newArr = FlatReplace();
+            tj.newArr = FlatReplace(tj);
             return true;
         }
 
-        // Map match boundaries back to the TJ-array coordinates (arrIdx + byte
-        // offset inside that string) so the width-compensation helper can
-        // identify the matched slice of each PdfString.
-        int startArrIdx = charMap[matchStart];
-        int endArrIdx = charMap[matchStart + matchLen - 1];
-        // Offset-inside-string = count of prior chars mapped to the same arrIdx
-        // before the match boundary.
-        int CountCharsUpTo(int stop, int arrIdx)
-        {
-            var c = 0;
-            for (var k = 0; k < stop; k++)
-                if (charMap[k] == arrIdx) c++;
-            return c;
-        }
-        int startOffset = CountCharsUpTo(matchStart, startArrIdx);
-        int endOffset = CountCharsUpTo(matchStart + matchLen - 1, endArrIdx);
+        tj.startArrIdx = tj.charMap[tj.matchStart];
+        tj.endArrIdx = tj.charMap[tj.matchStart + tj.matchLen - 1];
+        tj.startOffset = CountCharsUpTo(tj, tj.matchStart, tj.startArrIdx);
+        tj.endOffset = CountCharsUpTo(tj, tj.matchStart + tj.matchLen - 1, tj.endArrIdx);
 
-        // Emit:  [ (prefix + replacement)  <compensation-kerning>  (suffix) ]
-        //
-        // Two sub-strings for the unchanged + replaced portion and the tail, with
-        // an optional integer kerning between them that compensates for the width
-        // change caused by the replacement. This keeps the post-match glyph row
-        // at its original X — the behaviour that tests using ReplaceAdjustment.None
-        // depend on.  When the replacement width matches the original matched
-        // region (including any within-match kerning) the compensation is zero
-        // and the kerning element is omitted.
-        var useHex2 = parts.Count > 0 && parts[0].isHex;
+        tj.useHex2 = tj.parts.Count > 0 && tj.parts[0].isHex;
 
-        // Compute the width change the replacement introduces, in PDF
-        // text-space (1/1000 em) units, so we can emit it as a TJ kerning.
-        int kernCompensation = ComputeTJReplaceKern(arr, startArrIdx, startOffset,
-            endArrIdx, endOffset, replacement,
-            toUnicode, fontDict, reader, fontSize);
+        tj.kernCompensation = ComputeTJReplaceKern(tj.arr, tj.startArrIdx, tj.startOffset,
+            tj.endArrIdx, tj.endOffset, tj.replacement,
+            tj.toUnicode, tj.fontDict, tj.reader, tj.fontSize);
 
-        newArr = new PdfArray();
+        EmitTjPrefixAndReplacement(tj);
 
-        // Emit the prefix by COPYING the original TJ-array elements before the
-        // match — this preserves the original inter-element kerns (including
-        // big-negative kerns that were synthesized into spaces in `combinedText`
-        // for matching purposes). Only the matched region itself is replaced.
-        // The string element containing the match start contributes its leading
-        // bytes (chars before startOffset) followed by the replacement bytes.
-        for (var i = 0; i < startArrIdx; i++)
-            newArr.Add(arr[i]);
-
-        // Build the prefix-and-replacement bytes from the matched string's
-        // leading slice + the replacement text.
-        byte[] preRepBytes;
-        if (arr[startArrIdx] is PdfString startStr && startOffset > 0)
-        {
-            // Decode just the prefix bytes (chars before startOffset) and
-            // re-encode together with the replacement.
-            var preBytes = new byte[startOffset];
-            Buffer.BlockCopy(startStr.Value, 0, preBytes, 0, startOffset);
-            var preStr = DecodeString(preBytes, toUnicode, fontDict, reader);
-            preRepBytes = EncodeString(preStr + replacement, toUnicode, fontDict);
-        }
-        else
-        {
-            preRepBytes = EncodeString(replacement, toUnicode, fontDict);
-        }
-        newArr.Add(new PdfString(preRepBytes, useHex2));
-
-        if (kernCompensation != 0)
-        {
-            // Split a single large compensation into several smaller kernings
-            // so none individually trips the reader's word-break heuristic
-            // (adj ≤ −130 becomes synthetic space). Using chunks of |adj| ≤ 120
-            // keeps each step below the threshold while still summing to the
-            // needed advance correction. Only negative (push-right) splitting
-            // matters here — positive kernings never trigger the heuristic.
-            const int SafeChunk = 120;
-            int remaining = kernCompensation;
-            if (remaining < 0)
-            {
-                while (remaining < -SafeChunk)
-                {
-                    newArr.Add(new PdfInteger(-SafeChunk));
-                    remaining += SafeChunk;
-                }
-                if (remaining != 0) newArr.Add(new PdfInteger(remaining));
-            }
-            else
-            {
-                // Positive kernings are already safe (advance shrink).
-                newArr.Add(new PdfInteger(remaining));
-            }
-        }
-
-        // Emit the suffix by COPYING the original TJ-array elements after the
-        // match end, rather than collapsing them into a single PdfString. This
-        // preserves the original kerning values (including big-negative kerns
-        // that were synthesized into spaces in `combinedText` for matching
-        // purposes) so subsequent text stays at its original X position. The
-        // first PdfString after the match needs its leading bytes trimmed
-        // when the match ended partway through it.
-        bool firstSuffixString = true;
-        for (var i = endArrIdx; i < arr.Count; i++)
-        {
-            var el = arr[i];
-            if (i == endArrIdx)
-            {
-                // For the string containing the match end, emit only the bytes
-                // AFTER the match.
-                if (el is not PdfString endStr) continue;
-                int trimStart = endOffset + 1;
-                if (trimStart >= endStr.Value.Length) continue;
-                var tail = new byte[endStr.Value.Length - trimStart];
-                Buffer.BlockCopy(endStr.Value, trimStart, tail, 0, tail.Length);
-                newArr.Add(new PdfString(tail, endStr.IsHex));
-                firstSuffixString = false;
-            }
-            else
-            {
-                newArr.Add(el);
-                if (el is PdfString) firstSuffixString = false;
-            }
-        }
+        EmitTjSuffixElements(tj);
 
         // If no suffix elements were emitted (match ended exactly at the last
         // string with no tail bytes), append an empty PdfString so the array
         // structure remains valid. Otherwise, if we emitted only kerns and no
         // PdfString (rare — match consumed the final string and only kerns
         // followed), append an empty string.
-        if (firstSuffixString)
-            newArr.Add(new PdfString(System.Array.Empty<byte>(), useHex2));
+        if (tj.firstSuffixString)
+            tj.newArr.Add(new PdfString(System.Array.Empty<byte>(), tj.useHex2));
         return true;
     }
 

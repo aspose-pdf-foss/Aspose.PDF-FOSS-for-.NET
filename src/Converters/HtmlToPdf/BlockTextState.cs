@@ -74,5 +74,13 @@ private sealed class BlockTextState
     public double marginTop;
     public double pageHeight;
     public double pageWidth;
+    // The emphasis-run writer's cursor: where the next run starts, the colour currently
+    // selected, and how far the run reaches once the face and colour runs have narrowed it.
+    public int fPos;
+    public Color? fCurCol;
+    public int fSegEnd;
+    /// <summary>A size-run block's per-line boxes (ascent side, descent side) and the plain line's ascent side.</summary>
+    public (double above, double below)[]? lineExtents;
+    public double plainAbove;
 }
 }

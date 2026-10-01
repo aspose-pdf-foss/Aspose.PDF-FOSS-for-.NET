@@ -246,13 +246,13 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         OwnerDocument?.RemoveFormField(fieldName);
     }
 
-    /// <summary>
-    /// Add a field to the form on the specified page.
     /// <summary>Add a field to the document's AcroForm and bind its widget
     /// to page 1 (the most common case). Use the (Field, int) overload to
     /// place the widget on a different page.</summary>
     public void Add(Field field) => Add(field, 1);
 
+    /// <summary>
+    /// Add a field to the form on the specified page.
     /// </summary>
     /// <param name="field">The field to add.</param>
     /// <param name="pageNumber">1-based page number.</param>
@@ -384,7 +384,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
                 {
                     if (e.isButton && e.name == baseName)
                     {
-                        e.dict.Set("T", new PdfString(Encoding.Latin1.GetBytes(baseName + "#0")));
+                        e.dict.Set("T", new PdfString(Compat.Latin1.GetBytes(baseName + "#0")));
                         var num = OwnerDocument?.FindObjectNumber(e.dict) ?? -1;
                         if (num > 0) OwnerDocument!.MarkDirty(num, e.dict);
                         didRename = true;
@@ -587,7 +587,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         var daStr = string.Format(System.Globalization.CultureInfo.InvariantCulture,
             "/{0} {1:G} Tf {2} {3} {4} rg",
             resName, da.FontSize, Cc(c.R / 255.0), Cc(c.G / 255.0), Cc(c.B / 255.0));
-        field.Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(daStr)));
+        field.Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(daStr)));
     }
 
     /// <summary>Build a composite (Type0/CIDFontType2, Identity-H) font dictionary
@@ -746,7 +746,6 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
 }
 
 /// <summary>
-/// <summary>
 /// Represents the type of a PDF form.
 /// </summary>
 public enum FormType
@@ -759,6 +758,7 @@ public enum FormType
     Dynamic,
 }
 
+/// <summary>
 /// Provides indexer access to XFA field values by path.
 /// </summary>
 public sealed class XfaAccessor

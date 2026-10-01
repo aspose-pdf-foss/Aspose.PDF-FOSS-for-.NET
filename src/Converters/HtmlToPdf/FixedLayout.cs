@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -61,18 +61,13 @@ internal static partial class HtmlToPdfConverter
                 }
                 else
                 {
-                    using var zs = new System.IO.Compression.ZLibStream(
-                        new System.IO.MemoryStream(woff, off, comp),
-                        System.IO.Compression.CompressionMode.Decompress);
-                    using var outMs = new System.IO.MemoryStream(orig);
-                    zs.CopyTo(outMs);
-                    data = outMs.ToArray();
+                    data = IO.Filters.ManagedInflater.InflateToEnd(woff, off, comp, zlibWrapper: true);
                 }
                 tables.Add((U32(woff, e), data));
             }
 
             var n = tables.Count;
-            var entrySel = n > 0 ? (int)Math.Floor(Math.Log2(n)) : 0;
+            var entrySel = n > 0 ? (int)Math.Floor(Compat.Log2(n)) : 0;
             var searchRange = (1 << entrySel) * 16;
             using var sf = new System.IO.MemoryStream();
             void W16(int v) { sf.WriteByte((byte)(v >> 8)); sf.WriteByte((byte)v); }
@@ -115,6 +110,10 @@ internal static partial class HtmlToPdfConverter
     private sealed class FixedSpan
     {
         public double Left, Top, FontSize, LetterSpacing, WordSpacing;
+
+        /// <summary>The line box this span sits in, and the baseline's drop from its top.
+        /// Zero leaves the original calibration (a 1.2 em box, the baseline an em down).</summary>
+        public double LineHeightPt, BaselineDropPt;
         public string Text = "";
         public string Face = "Times New Roman";
         public List<OwnFace>? Own;                       // the document's own @font-face programs
@@ -192,11 +191,20 @@ internal static partial class HtmlToPdfConverter
     {
         public double SrcW, SrcH;
         public byte[]? Background;      // full-page raster background, if any
+        // The background's own INTRINSIC box in points (0 = unknown, fall back to the container
+        // box). A raster page export's PNG is the page: it draws at its natural size and it is
+        // the widest laid-out element, so the sheet grows to hold it whole.
+        public double BackgroundW, BackgroundH;
         public bool HasObjectGraphic;   // <object> page SVG: contributes to the sheet width
         public double? ObjectInkRight;  // the SVG's drawn ink extent (pt); box fallback when null
         public string? ObjectUrl;       // the page SVG's URL, for vector replay
         public string? InlineSvgText;   // the page SVG's own markup (inline dialect)
         public List<FixedSpan> Spans = new();
+        /// <summary>Height of the container's IN-FLOW content: its explicit-height block
+        /// children (an absolutely positioned child counts nothing). Zero = none read. A
+        /// dialect with a widow rule moves the WHOLE container to the next sheet when this
+        /// does not fit the band that is left - see RenderFixedLayoutPages.</summary>
+        public double InFlowContentHeightPt;
     }
 
     /// <summary>Resolve a CSS font-family list to a face the PosFace cache can load.</summary>
@@ -300,11 +308,7 @@ internal static partial class HtmlToPdfConverter
                 byte[] data;
                 if (compLen < origLen)
                 {
-                    using var src = new System.IO.MemoryStream(w, off, compLen);
-                    using var z = new System.IO.Compression.ZLibStream(src, System.IO.Compression.CompressionMode.Decompress);
-                    using var dst = new System.IO.MemoryStream(origLen);
-                    z.CopyTo(dst);
-                    data = dst.ToArray();
+                    data = IO.Filters.ManagedInflater.InflateToEnd(w, off, compLen, zlibWrapper: true);
                 }
                 else
                 {
@@ -345,7 +349,7 @@ internal static partial class HtmlToPdfConverter
         catch { return null; }
     }
 
-    /// <summary>Measured advance of <paramref name="text"/> in <paramref name="run"/>'s
+    /// <summary>Measured advance of <c>text</c> in <c>run</c>'s
     /// face and size in the stl_ model (<see cref="MeasureStlExactText"/>):
     /// exact glyph advances at the floor-quantized size, letter-spacing (raw size)
     /// after every character including the nbsp sentinel, word-spacing (raw size)
@@ -417,512 +421,51 @@ internal static partial class HtmlToPdfConverter
         return result;
     }
 
+    private const double FixedMarginLeftPt = 96.0;      // content x shift on the sheet
+    private const double FixedContentTopPt = 78.0;      // content y shift on the first band's sheet (104px @96dpi)
+    private const double FixedContentBottomPt = 69.0;   // sheet content box bottom margin (92px @96dpi); the
+                                                        // band pitch solves to 694.89 on an A4 sheet
+                                                        // from cross-page seam anchors
+    private const double FixedRightPadPt = 89.76;       // sheet width − (96 + widest element)
+    /// <summary>A container whose in-flow content overshoots the band that is left by this
+    /// much (one CSS pixel) or more moves whole to the next sheet (probed: 0.74 fits, 0.75 moves).</summary>
+    private const double FixedPushTolerancePt = 0.75;
+
+    /// <summary>The sheet one fixed-layout dialect imports onto: where its content band
+    /// sits, how far the sheet grows past the widest element, and whether a line box that
+    /// crosses the band's bottom edge moves whole to the next sheet. The inline-style and
+    /// page_N dialects keep the original calibration; the em-class dialect measures its own.</summary>
+    private sealed class FixedSheetModel
+    {
+        public double ContentTopPt = FixedContentTopPt;
+        public double ContentBottomPt = FixedContentBottomPt;
+        public double RightPadPt = FixedRightPadPt;
+
+        /// <summary>Band pitch when the dialect measures its own; zero derives it from the sheet.</summary>
+        public double BandPitchPt;
+
+        /// <summary>Sheet y a line box may not cross. Zero = no widow rule: the band clip alone
+        /// decides what shows, and a straddling line draws on both sheets.</summary>
+        public double FitBottomPt;
+
+        /// <summary>Where a line moved off the previous band seats on the next one.</summary>
+        public double WidowTopPt;
+
+        /// <summary>True when the sheet ends one page margin past the last INKED column rather
+        /// than past the last text advance - see LastGlyphRightBearingPt in InchStyleFixed.cs.
+        /// The dialects calibrated against the advance keep it false.</summary>
+        public bool SheetOnInkExtent;
+    }
+
     private static Document? TryConvertPositionedFixedLayout(string html, HtmlLoadOptions? options)
     {
-        const double MarginLeft = 96.0;      // content x shift on the sheet
-        const double ContentTop = 78.0;      // content y shift on the first band's sheet (104px @96dpi)
-        const double ContentBottom = 69.0;   // sheet content box bottom margin (92px @96dpi); the
-                                             // band pitch solves to 694.89 on an A4 sheet
-                                             // from cross-page seam anchors
-        const double RightPad = 89.76;       // sheet width − (96 + widest element)
-        const double StlEmPt = 12.0;
 
-        var divs = new List<FixedPageDiv>();
-        // The em-compensation grid dialect (every letter-spacing on the 0.01 em
-        // grid): its width budget is exact and its raster background carries
-        // IMAGES ONLY, so the raster ink edge must not cap the text width.
-        var emGridMarkup = false;
-        var stl = IsStlPositionedHtml(html);
-        if (stl)
-        {
-            // The stl_ dialect keeps all appearance in the stylesheet — without it
-            // the bare markup flows (the caller's reflow path). Only CALLER
-            // context counts here: inline <style> blocks, or a linked stylesheet reached
-            // through an explicitly supplied BasePath. The auto base derived from the
-            // file's own directory resolves resources, but does not flip this route —
-            // a sidecar-styled page loaded without a base path reflows.
-            var css = GatherStlCss(html, options?.BasePathAutoDerived == true ? null : options);
-            if (string.IsNullOrWhiteSpace(css)) return null;
-            {
-                var sawLs = false; var onGrid = true;
-                foreach (Match lm in Regex.Matches(css, @"letter-spacing:\s*(-?[\d.]+)em"))
-                {
-                    var le = double.Parse(lm.Groups[1].Value,
-                        System.Globalization.CultureInfo.InvariantCulture);
-                    if (le == 0) continue;
-                    sawLs = true;
-                    var cents = le * 100.0;
-                    if (System.Math.Abs(cents - System.Math.Round(cents)) > 1e-6) { onGrid = false; break; }
-                }
-                emGridMarkup = sawLs && onGrid;
-            }
-
-            // Class → declarations we honor (font-size em, font-family, color,
-            // letter-spacing em on the root 12 pt em). Class names are arbitrary
-            // (CssClassNamesPrefix renames the stl_ scheme).
-            var clsFont = new Dictionary<string, (double? fs, string? fam, string? col, double? ls)>(StringComparer.Ordinal);
-            foreach (Match m in Regex.Matches(css, @"\.(?<cls>[\w-]+)\s*\{(?<body>[^}]*)\}", RegexOptions.Singleline))
-            {
-                var body = m.Groups["body"].Value;
-                double? fs = null, ls = null;
-                var fm = Regex.Match(body, @"font-size:\s*(?<v>[\d.]+)em");
-                if (fm.Success) fs = double.Parse(fm.Groups["v"].Value, System.Globalization.CultureInfo.InvariantCulture);
-                var lm = Regex.Match(body, @"letter-spacing:\s*(?<v>-?[\d.]+)em");
-                if (lm.Success) ls = double.Parse(lm.Groups["v"].Value, System.Globalization.CultureInfo.InvariantCulture);
-                var am = Regex.Match(body, @"font-family:\s*""?(?<v>[^;""}]+)");
-                var cm = Regex.Match(body, @"(?<!-)color:\s*(?<v>[^;}]+)");
-                var key = m.Groups["cls"].Value;
-                // Later rules override earlier ones per property, like a cascade.
-                clsFont.TryGetValue(key, out var prev);
-                clsFont[key] = (fs ?? prev.fs,
-                    am.Success ? am.Groups["v"].Value.Trim() : prev.fam,
-                    cm.Success ? cm.Groups["v"].Value.Trim() : prev.col,
-                    ls ?? prev.ls);
-            }
-
-            var ownFaces = ParseFontFaces(css, html, options);
-            var pageDivs = Regex.Matches(html, @"<div id=""page_\d+""[^>]*>");
-            if (pageDivs.Count == 0) return null;
-            for (var p = 0; p < pageDivs.Count; p++)
-            {
-                var segStart = pageDivs[p].Index;
-                var segEnd = p + 1 < pageDivs.Count ? pageDivs[p + 1].Index : html.Length;
-                var seg = html[segStart..segEnd];
-                var div = new FixedPageDiv { SrcW = 612.0, SrcH = 842.0 };
-
-                // Page box from the container's stylesheet class (width/height em).
-                var clsAttr = Regex.Match(pageDivs[p].Value, @"class=""(?<c>[^""]+)""");
-                var boxResolved = false;
-                if (clsAttr.Success)
-                {
-                    foreach (var cls in clsAttr.Groups["c"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var box = Regex.Match(css,
-                            @"\." + Regex.Escape(cls) + @"\s*\{[^}]*width:\s*(?<w>[\d.]+)em[^}]*height:\s*(?<h>[\d.]+)em",
-                            RegexOptions.Singleline);
-                        if (box.Success)
-                        {
-                            div.SrcW = double.Parse(box.Groups["w"].Value, System.Globalization.CultureInfo.InvariantCulture) * StlEmPt;
-                            div.SrcH = double.Parse(box.Groups["h"].Value, System.Globalization.CultureInfo.InvariantCulture) * StlEmPt;
-                            boxResolved = true;
-                            break;
-                        }
-                    }
-                }
-                if (!boxResolved) return null;   // container box not in the stylesheet → reflow
-
-                var bg = Regex.Match(seg, @"<img\s+(?=[^>]*class=""stl_04"")[^>]*src=""(?<src>[^""]*)""|<img\s+(?=[^>]*src=""(?<src2>[^""]*)"")[^>]*class=""stl_04""");
-                if (bg.Success)
-                {
-                    var src = bg.Groups["src"].Success ? bg.Groups["src"].Value : bg.Groups["src2"].Value;
-                    div.Background = LoadConverterImage(DecodeEntities(src), options);
-                }
-                var objM = Regex.Match(seg, @"<object\s[^>]*data=""(?<u>[^""]*)""");
-                if (objM.Success)
-                {
-                    div.HasObjectGraphic = true;
-                    div.ObjectUrl = DecodeEntities(objM.Groups["u"].Value);
-                    // A page SVG referenced as a SIDECAR contributes its BOX to the
-                    // sheet width, not its drawn ink: a page whose
-                    // only vector is a header rule ending mid-page widens all the way to
-                    // the page box. (On a rule ending at 546 pt of a 612 pt
-                    // box the correct sheet is 798 pt, which is the box;
-                    // 736.91 pt, which is the ink, renders 127 px too
-                    // narrow.) Only the INLINE dialect below, where the
-                    // markup we emit IS the page's whole vector art, measures its ink.
-                }
-                else
-                {
-                    // The self-contained dialect carries the page SVG as INLINE
-                    // markup instead of an <object> sidecar reference; the markup
-                    // itself is the replay source (its rasters are data: URIs).
-                    var inlineSvgM = Regex.Match(seg, @"<svg\b[\s\S]*?</svg\s*>");
-                    if (inlineSvgM.Success)
-                    {
-                        div.HasObjectGraphic = true;
-                        div.InlineSvgText = inlineSvgM.Value;
-                        try
-                        {
-                            var frac = TrySvgInkRightFraction(div.InlineSvgText);
-                            if (frac is { } fr) div.ObjectInkRight = Math.Min(1.0, Math.Max(0, fr)) * div.SrcW;
-                        }
-                        catch { /* unscannable SVG: box fallback */ }
-                    }
-                }
-
-                foreach (Match dm in Regex.Matches(seg,
-                    @"<div class=""[^""]*"" style=""left:(?<l>-?[\d.]+)em;\s*top:(?<t>-?[\d.]+)em;?[^""]*"">(?<body>.*?)</div>",
-                    RegexOptions.Singleline))
-                {
-                    double Num(string s) => double.Parse(s,
-                        System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture);
-                    // A line div holds ONE OR MORE spans (a pinned line is split into
-                    // a span per word-anchored segment, each with its own spacing
-                    // classes and optionally its own <a> wrapper). Segments flow one
-                    // after another from the div's left edge: each becomes its own
-                    // FixedSpan at the accumulated x, advanced by the segment's
-                    // measured width with its pinned letter/word-spacing applied.
-                    var x = Num(dm.Groups["l"].Value) * StlEmPt;
-                    var top = Num(dm.Groups["t"].Value) * StlEmPt;
-                    foreach (Match m in Regex.Matches(dm.Groups["body"].Value,
-                        @"<span class=""(?<cls>[^""]*)""(?:\s+style=""(?<sst>[^""]*)"")?[^>]*>(?<stext>.*?)</span>",
-                        RegexOptions.Singleline))
-                    {
-                        var text = DecodeEntities(Regex.Replace(m.Groups["stext"].Value, "<[^>]+>", ""));
-                        if (text.Length == 0) continue;
-                        double fsEm = 1.0, lsEm = 0.0;
-                        string fam = "sans-serif";
-                        string? col = null;
-                        foreach (var cls in m.Groups["cls"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                        {
-                            if (!clsFont.TryGetValue(cls, out var e)) continue;
-                            if (e.fs is not null && e.fam is not null) { fsEm = e.fs.Value; fam = e.fam; col ??= e.col; }
-                            else if (e.fs is not null) fsEm = e.fs.Value;
-                            if (e.ls is not null) lsEm = e.ls.Value;
-                            if (e.col is not null && e.fs is not null) col = e.col;
-                        }
-                        var wsM = Regex.Match(m.Groups["sst"].Value ?? "", @"word-spacing:\s*(-?[\d.]+)em");
-                        var wsEm = wsM.Success ? Num(wsM.Groups[1].Value) : 0.0;
-                        var famKey = fam.Split(',')[0].Trim().Trim('"', '\'');
-                        var span = new FixedSpan
-                        {
-                            Left = x,
-                            Top = top,
-                            FontSize = fsEm * StlEmPt,
-                            LetterSpacing = lsEm * StlEmPt,
-                            WordSpacing = wsEm * fsEm * StlEmPt,
-                            Text = text,
-                            Face = ResolveFixedFace(fam),
-                            Own = ownFaces.TryGetValue(famKey, out var ofl) ? ofl : null,
-                            AllOwn = ownFaces.Count > 0 ? ownFaces : null,
-                            Color = ParseCssColorRgb(col),
-                        };
-                        div.Spans.Add(span);
-                        // The next segment starts where this one's TEXT ends: a span's
-                        // FINAL space carries no word-spacing. The exporter solved each
-                        // segment's spacing to place its own glyphs, so charging the
-                        // trailing space again here would push every following segment
-                        // out by one word-spacing (a 0.2514em span left a 14 px word gap
-                        // where 7 px is correct).
-                        x += MeasureSpanLine(span, text)
-                             - (span.WordSpacing != 0 && text.EndsWith(' ') ? span.WordSpacing : 0);
-                    }
-                }
-                divs.Add(div);
-            }
-        }
-        else
-        {
-            // pdf-page dialect: self-contained (inline pt styles, data-URI background).
-            var pageDivs = Regex.Matches(html, @"<div class=""pdf-page""[^>]*style=""(?<st>[^""]*)""[^>]*>");
-            if (pageDivs.Count == 0) return null;
-            for (var p = 0; p < pageDivs.Count; p++)
-            {
-                var segStart = pageDivs[p].Index;
-                var segEnd = p + 1 < pageDivs.Count ? pageDivs[p + 1].Index : html.Length;
-                var seg = html[segStart..segEnd];
-                var div = new FixedPageDiv
-                {
-                    SrcW = StylePt(pageDivs[p].Groups["st"].Value, "width") ?? 612.0,
-                    SrcH = StylePt(pageDivs[p].Groups["st"].Value, "height") ?? 792.0,
-                };
-                var bg = Regex.Match(seg, @"<img\s+(?=[^>]*class=""pdf-page-bg"")[^>]*src=""(?<src>[^""]*)""");
-                if (bg.Success)
-                    div.Background = LoadConverterImage(bg.Groups["src"].Value, options);
-
-                foreach (Match m in Regex.Matches(seg,
-                    @"<span class=""pdf-text"" style=""(?<st>[^""]*)"">(?<body>.*?)</span>",
-                    RegexOptions.Singleline))
-                {
-                    var st = m.Groups["st"].Value;
-                    var text = DecodeEntities(Regex.Replace(m.Groups["body"].Value, "<[^>]+>", ""));
-                    if (text.Length == 0) continue;
-                    var famM = Regex.Match(st, @"font-family:\s*(?<v>[^;""]+)");
-                    var colM = Regex.Match(st, @"(?<!-)color:\s*(?<v>[^;]+)");
-                    div.Spans.Add(new FixedSpan
-                    {
-                        Left = StylePt(st, "left") ?? 0,
-                        Top = StylePt(st, "top") ?? 0,
-                        FontSize = StylePt(st, "font-size") ?? 12,
-                        Text = text,
-                        Face = ResolveFixedFace(famM.Success ? famM.Groups["v"].Value : "serif"),
-                        Color = ParseCssColorRgb(colM.Success ? colM.Groups["v"].Value : null),
-                    });
-                }
-                divs.Add(div);
-            }
-        }
+        if (ReadFixedLayoutDivs(html, options) is not (var divs, var emGridMarkup, var model)) return null;
         if (divs.Count == 0) return null;
 
-        var pageInfo = options?.PageInfo;
-        var pageH = pageInfo?.Height is > 0 ? pageInfo.Height : 841.89;
-        if (pageInfo?.LandscapeRequested == true && pageInfo.Width > pageH)
-            pageH = pageInfo.Width;
-        // The BAND pitch derives from exact A4 (841.89); PageInfo's rounded 842
-        // default gives a pitch 0.11pt long, which walks the content ~12pt
-        // off by sheet 95 of a long document. The sheet's PAGE BOX, however, is
-        // the rounded 842 — the rasterized page is 842pt tall while the bands
-        // step at the exact-A4 pitch.
-        var bandBaseH = Math.Abs(pageH - 841.89) < 0.5 ? 841.89 : pageH;
-        if (Math.Abs(pageH - 841.89) < 0.5) pageH = 842.0;
-        var bandH = bandBaseH - ContentTop - ContentBottom;
-        if (bandH <= 0) return null;
+        if (SolveFixedLayoutSheet(options, divs, emGridMarkup, model) is not (var pageH, var bandH, var pageW)) return null;
 
-        // Sheet width: 96 + the widest laid-out element + 89.76, over the whole document.
-        double maxRight = 0;
-        foreach (var div in divs)
-        {
-            if (div.HasObjectGraphic) maxRight = Math.Max(maxRight, div.ObjectInkRight ?? div.SrcW);
-
-            // Selection-layer spans (transparent text over a full-page raster) can carry
-            // synthetic padding and unshaped RTL runs whose naive advance far exceeds
-            // what any layout engine would produce for the visible line. The raster IS
-            // the visible content, so its rightmost inked column (plus up to an em of
-            // trailing whitespace) caps their contribution.
-            double? bgInkRight = null;
-            if (div.Background is not null)
-                try
-                {
-                    var (px, pw, ph, hasAlpha) = Facades.PdfFileMend.DecodePng(div.Background);
-                    var bpp = hasAlpha ? 4 : 3;
-                    var right = -1;
-                    for (var yy = 0; yy < ph; yy++)
-                    {
-                        var row = yy * pw;
-                        for (var xx = pw - 1; xx > right; xx--)
-                        {
-                            var o = (row + xx) * bpp;
-                            if (px[o] < 220 || px[o + 1] < 220 || px[o + 2] < 220) { right = xx; break; }
-                        }
-                    }
-                    if (right >= 0 && pw > 0) bgInkRight = (right + 1) / (double)pw * div.SrcW;
-                }
-                catch { /* not a PNG / undecodable — no cap */ }
-
-            // A bidi page's selection layer measures unreliably as a whole: RTL runs
-            // are stored unshaped (ligatures collapse in any real layout) and even its
-            // LTR fragments carry mirrored ordering with positioning spaces. Cap ALL
-            // of that div's transparent lines at the raster's ink edge plus up to an
-            // em of trailing whitespace; pure-LTR pages measure reliably and stay as-is.
-            var divHasRtl = false;
-            foreach (var s in div.Spans)
-                if (HasRtlChar(s.Text)) { divHasRtl = true; break; }
-
-            foreach (var s in div.Spans)
-                foreach (var line in s.Lines)
-                {
-                    var r = s.Left + MeasureSpanLine(s, line);
-                    if (Environment.GetEnvironmentVariable("STL_DEBUG_WIDTH2") is not null && r > 400)
-                    {
-                        var trimmed = line.TrimEnd();
-                        var spacesN = 0; foreach (var chW in line) if (chW == ' ') spacesN++;
-                        var trailAdvDbg = MeasureSpanLine(s, line[trimmed.Length..]);
-                        Console.Error.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                            $"WLINE r={r:F2} left={s.Left:F2} fs={s.FontSize:F4} ls={s.LetterSpacing:F4} ws={s.WordSpacing:F4} nsp={spacesN} nch={line.Length} trail={trailAdvDbg:F2} txt='{(trimmed.Length > 34 ? trimmed[^34..] : trimmed)}'"));
-                    }
-                    if (s.Color is null && bgInkRight is not null && !emGridMarkup)
-                    {
-                        var trailingWs = line[line.TrimEnd().Length..];
-                        var trailAdv = MeasureSpanLine(s, trailingWs);
-                        // RTL layers measure so unreliably that even their trailing-space
-                        // credit is clamped; LTR layers keep the real trailing advance
-                        // with a floor of a few ems (selection spans
-                        // run a little past the ink even on lines showing none).
-                        r = Math.Min(r, bgInkRight.Value
-                            + (divHasRtl ? Math.Min(trailAdv, s.FontSize)
-                                         : Math.Max(trailAdv, 2.5 * s.FontSize)));
-                    }
-                    // Text overflowing the fixed page container never widens the sheet:
-                    // the container's box is the layout surface (a 493 pt cover title
-                    // whose naive advance runs metres past an A4 box still yields
-                    // the 96+box+89.76 sheet).
-                    maxRight = Math.Max(maxRight, Math.Min(r, div.SrcW));
-                }
-        }
-        if (maxRight <= 0)
-            foreach (var div in divs) maxRight = Math.Max(maxRight, div.SrcW);
-        var pageW = MarginLeft + maxRight + RightPad;
-
-        var doc = Document.Create();
-        var docFontDict = new Core.PdfDictionary();
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-
-        // ALL source pages stack into one continuous flow that is sliced
-        // into sheet-height bands ACROSS page boundaries (a sheet can show
-        // the seam: one page's footer and the next page's heading mid-sheet). Sheets
-        // are created on demand in flow order; a page box shorter than the band
-        // shares its sheet with the next page's top.
-        var cum = 0.0;          // this div's top edge in continuous flow coordinates
-        var pagesMade = 0;
-        foreach (var div in divs)
-        {
-            var k0 = (int)Math.Floor((cum + 0.01) / bandH);
-            var k1 = Math.Max(k0, (int)Math.Floor((cum + div.SrcH - 0.01) / bandH));
-            for (var band = k0; band <= k1; band++)
-            {
-                while (pagesMade <= band)
-                {
-                    var np = doc.Pages.Add(pageW, pageH);
-                    EnsureFonts(np, docFontDict);
-                    pagesMade++;
-                }
-                var page = doc.Pages[band + 1];
-                var yOff = ContentTop - (band * bandH - cum);   // top-down source y → sheet y
-
-                // Clip everything on this sheet to the content band; the q stays open
-                // across the content streams below and is closed at the end.
-                page.AddContentStream(Encoding.ASCII.GetBytes(
-                    $"q 0 {ContentBottom.ToString("F2", inv)} {pageW.ToString("F2", inv)} {bandH.ToString("F2", inv)} re W n\n"));
-
-                if (div.Background is not null)
-                {
-                    try
-                    {
-                        page.AddImage(div.Background, new Aspose.Pdf.Rectangle(
-                            MarginLeft, pageH - yOff - div.SrcH, MarginLeft + div.SrcW, pageH - yOff));
-                    }
-                    catch { /* undecodable background — text still imports */ }
-                }
-
-                // The page SVG replays from its sidecar (ObjectUrl) or, in the
-                // self-contained dialect, from the inline markup itself.
-                string? replaySvgText = null;
-                var replaySvgDir = "";
-                if (div.ObjectUrl is not null)
-                {
-                    var svgBytes = LoadConverterImage(div.ObjectUrl, options);
-                    if (svgBytes is not null)
-                    {
-                        var slash = div.ObjectUrl.LastIndexOf('/');
-                        if (slash > 0) replaySvgDir = div.ObjectUrl[..(slash + 1)];
-                        replaySvgText = Encoding.UTF8.GetString(svgBytes);
-                    }
-                }
-                else if (div.InlineSvgText is not null)
-                {
-                    replaySvgText = div.InlineSvgText;
-                }
-                if (replaySvgText is not null)
-                {
-                    // Map the SVG's viewBox onto the page box: x right, y DOWN from
-                    // the sheet's content origin.
-                    var vb2 = Regex.Match(replaySvgText,
-                        @"viewBox=""(?<a>-?[\d.]+)\s+(?<b>-?[\d.]+)\s+(?<c>[\d.]+)\s+(?<d>[\d.]+)""");
-                    double vw = 0, vh = 0;
-                    if (vb2.Success)
-                    {
-                        vw = double.Parse(vb2.Groups["c"].Value, System.Globalization.CultureInfo.InvariantCulture);
-                        vh = double.Parse(vb2.Groups["d"].Value, System.Globalization.CultureInfo.InvariantCulture);
-                    }
-                    if (vw > 0 && vh > 0)
-                    {
-                        var placement = new[]
-                        {
-                            div.SrcW / vw, 0, 0, -div.SrcH / vh,
-                            MarginLeft, pageH - yOff,
-                        };
-                        try { ReplaySvgObject(page, replaySvgText, placement, replaySvgDir, options); }
-                        catch { /* a partial page graphic still beats none */ }
-                    }
-                }
-
-                var sb = new StringBuilder();
-                foreach (var s in div.Spans)
-                {
-                    if (s.Color is null) continue;   // selection-only text; the raster carries the pixels
-                    // Skip spans clearly outside this band (the clip still guards stragglers).
-                    // s.Top is div-local; bands live in continuous-flow coordinates.
-                    var spanTop = cum + s.Top;
-                    if (spanTop + s.FontSize * 1.4 < band * bandH || spanTop > (band + 1) * bandH)
-                        continue;
-                    var res = page.Dict.Get("Resources") as Core.PdfDictionary;
-                    var fontDict = res?.Get("Font") as Core.PdfDictionary ?? docFontDict;
-
-                    sb.Append("BT ");
-                    sb.Append($"{s.Color.Value.r.ToString("F3", inv)} {s.Color.Value.g.ToString("F3", inv)} {s.Color.Value.b.ToString("F3", inv)} rg ");
-                    if (s.LetterSpacing != 0)
-                        sb.Append($"{s.LetterSpacing.ToString("F3", inv)} Tc ");
-
-                    var spanLines = s.Lines;
-                    for (var li = 0; li < spanLines.Length; li++)
-                    {
-                        var lineText = spanLines[li];
-                        if (lineText.Trim().Length == 0) continue;
-                        var y = pageH - (yOff + s.Top + li * 1.2 * s.FontSize + s.FontSize);
-                        var runX = MarginLeft + s.Left;
-
-                        // Split into runs by resolved face: the document's own @font-face
-                        // program where it has the glyph, else the mapped system face,
-                        // else the script fallback — per codepoint.
-                        var i = 0;
-                        while (i < lineText.Length)
-                        {
-                            int cp0 = lineText[i];
-                            if (char.IsHighSurrogate(lineText[i]) && i + 1 < lineText.Length && char.IsLowSurrogate(lineText[i + 1]))
-                                cp0 = char.ConvertToUtf32(lineText[i], lineText[i + 1]);
-                            var (runOwn, runSys) = s.FaceFor(cp0);
-                            var runSb = new StringBuilder();
-                            double runW = 0;
-                            while (i < lineText.Length)
-                            {
-                                int cp = lineText[i];
-                                var cpLen = 1;
-                                if (char.IsHighSurrogate(lineText[i]) && i + 1 < lineText.Length && char.IsLowSurrogate(lineText[i + 1]))
-                                {
-                                    cp = char.ConvertToUtf32(lineText[i], lineText[i + 1]);
-                                    cpLen = 2;
-                                }
-                                var (own, sys) = s.FaceFor(cp);
-                                if ((!ReferenceEquals(own, runOwn)
-                                     || !sys.Equals(runSys, StringComparison.OrdinalIgnoreCase))
-                                    && lineText[i] != ' ') break;
-                                var piece = lineText.Substring(i, cpLen);
-                                runSb.Append(piece);
-                                runW += MeasureSpanLine(s, piece);
-                                i += cpLen;
-                                // Word-spacing cannot ride the content stream: Tw applies
-                                // only to single-byte code 32, and these runs are shown
-                                // through composite (Type0) fonts, so a space inside a run
-                                // advances by its bare glyph width however the span is
-                                // styled. The run therefore ENDS at the space, and the next
-                                // one is positioned at the accumulated x - which carries the
-                                // word-spacing, because runW is measured with it. Without
-                                // this the drawn line is wider than the measured one by the
-                                // whole word-spacing budget (a 24-space line at
-                                // -0.024em ran 5.7 pt long, and the sheet with it).
-                                if (s.WordSpacing != 0 && piece == " ") break;
-                            }
-                            var runText = runSb.ToString();
-                            var runTtf = runOwn?.Ttf ?? PosFace(runSys).ttf;
-                            var runBase = runOwn is not null ? "DocFace" + runOwn.Id : runSys;
-                            if (runTtf is not null)
-                            {
-                                var (rn, hex) = Text.Type0FontEmbedder.Embed(fontDict, runTtf,
-                                    runBase, runText, stripSpacesInBaseFont: true);
-                                sb.Append($"/{rn} {s.FontSize.ToString("F2", inv)} Tf ");
-                                sb.Append($"1 0 0 1 {runX.ToString("F2", inv)} {y.ToString("F2", inv)} Tm ");
-                                sb.Append('<').Append(System.Convert.ToHexString(hex)).Append("> Tj ");
-                            }
-                            else
-                            {
-                                sb.Append($"/F1 {s.FontSize.ToString("F2", inv)} Tf ");
-                                sb.Append($"1 0 0 1 {runX.ToString("F2", inv)} {y.ToString("F2", inv)} Tm ");
-                                sb.Append($"({EscapePdfString(runText)}) Tj ");
-                            }
-                            runX += runW;
-                        }
-                    }
-                    if (s.LetterSpacing != 0) sb.Append("0 Tc ");
-                    sb.AppendLine("ET");
-                }
-                if (sb.Length > 0)
-                    page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
-
-                // Close the band clip's q.
-                page.AddContentStream(Encoding.ASCII.GetBytes("Q\n"));
-            }
-            cum += div.SrcH;
-        }
+        var doc = RenderFixedLayoutPages(options, divs, pageH, bandH, pageW, model);
 
         PruneUnusedFonts(doc);
         return doc;

@@ -4,6 +4,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Annotations;
 
+/// <summary>An ink annotation: one or more freehand paths, each given as a list of points.</summary>
 public partial class InkAnnotation : MarkupAnnotation
 {
     internal InkAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -99,6 +100,8 @@ public partial class InkAnnotation : MarkupAnnotation
 
         var b = new Content.ContentStreamBuilder();
         b.SaveState();
+        // The annotation's own /CA is applied by whoever draws the appearance, so the
+        // strokes themselves are opaque (an alpha here would count the opacity twice).
         b.SetStrokeColor(Color);
         b.SetLineWidth(lw);
         if (CapStyle == CapStyle.Rounded) { b.SetLineCap(1); b.SetLineJoin(1); }

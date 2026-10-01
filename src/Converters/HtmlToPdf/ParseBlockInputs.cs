@@ -18,10 +18,36 @@ internal static partial class HtmlToPdfConverter
             : s;
     }
 
-    /// <summary>Build a Block describing an <input> control: its value and any CSS
+    /// <summary>The sheet's declarations for one control, weakest selector first so that a
+    /// later one overrides: the element name, then each of its classes, then its id. Returned
+    /// as a declaration string for the same reader that parses a style attribute.</summary>
+    private static string? SheetControlBox(
+        IReadOnlyDictionary<string, Dictionary<string, string>>? sheet,
+        string? tag, Dictionary<string, string>? attrs)
+    {
+        if (sheet is null || string.IsNullOrEmpty(tag)) return null;
+        var selectors = new List<string> { tag!.ToLowerInvariant() };
+        if (attrs is not null && attrs.TryGetValue("class", out var classes))
+            foreach (var c in classes.Split(new[] { ' ', '	' }, StringSplitOptions.RemoveEmptyEntries))
+                selectors.Add("." + c);
+        if (attrs is not null && attrs.TryGetValue("id", out var id) && id.Length > 0)
+            selectors.Add("#" + id);
+
+        var box = new StringBuilder();
+        foreach (var sel in selectors)
+        {
+            if (!sheet.TryGetValue(sel, out var rule)) continue;
+            foreach (var prop in new[] { "width", "height" })
+                if (rule.TryGetValue(prop, out var v)) box.Append(prop).Append(':').Append(v).Append(';');
+        }
+        return box.Length > 0 ? box.ToString() : null;
+    }
+
+    /// <summary>Build a Block describing an &lt;input> control: its value and any CSS
     /// width/height, so layout can emit a TextBoxField of the right size.</summary>
     private static Block BuildInputBlock(Dictionary<string, string>? attrs, BlockStyle style,
-        bool controlBoxes = false, bool multiline = false, string? innerText = null)
+        bool controlBoxes = false, bool multiline = false, string? innerText = null,
+        IReadOnlyDictionary<string, Dictionary<string, string>>? sheet = null, string? tag = null)
     {
         string? value = null, styleAttr = null, name = null, id = null;
         attrs?.TryGetValue("value", out value);
@@ -29,6 +55,15 @@ internal static partial class HtmlToPdfConverter
         attrs?.TryGetValue("name", out name);
         attrs?.TryGetValue("id", out id);
         var (w, h) = ParseInputSize(styleAttr);
+        // A control sized by the sheet rather than by a style attribute: `textarea { width:
+        // 950px }` is the only place many documents state the box, and it sizes the control
+        // exactly as the attribute would. The attribute still wins where both speak.
+        if (w <= 0 || h <= 0)
+        {
+            var (sheetW, sheetH) = ParseInputSize(SheetControlBox(sheet, tag, attrs));
+            if (w <= 0) w = sheetW;
+            if (h <= 0) h = sheetH;
+        }
         double advance = 0;
         if (controlBoxes)
         {
@@ -36,6 +71,16 @@ internal static partial class HtmlToPdfConverter
             if (w <= 0) w = iw;
             if (h <= 0) h = ih;
             advance = iadv;
+        }
+        // A textarea occupies its intrinsic box in EVERY flow, not only the control-box
+        // dialect: the reference draws a bare <textarea> as its rows x cols grid (two rows
+        // of 11.25 under a 15.75 first row = 27 pt, 21 columns = 123 pt) and a declared width
+        // replaces only the columns. Without this the plain flow gave it a one-line box.
+        else if (multiline)
+        {
+            var (iw, ih, _) = IntrinsicControlBox(attrs, multiline);
+            if (w <= 0) w = iw;
+            if (h <= 0) h = ih;
         }
         if (multiline && !string.IsNullOrEmpty(innerText)) value = innerText;
         // A disabled or readonly input maps to a ReadOnly AcroForm field.

@@ -49,7 +49,12 @@ public sealed partial class PdfFileEditor
 
     private static void ResizePage(Page page, ContentsResizeParameters parameters)
     {
-        var box = page.MediaBox;
+        // The visible page is the crop box, and that is the box the margins and the
+        // content share: a page cropped narrower than its media box scales by the crop
+        // box's width and height. The transform itself is applied in page space, so the
+        // margins land as bare offsets from the origin rather than from the crop box's
+        // corner, and the boxes themselves are left where they were.
+        var box = page.CropBox;
         double w = box.Width;
         double h = box.Height;
 
@@ -57,10 +62,8 @@ public sealed partial class PdfFileEditor
         // (their sum is the page width); top margin, content height and bottom
         // margin partition the page height. Any value left unspecified ("auto")
         // shares the space remaining after the fixed values equally.
-        Partition(parameters.LeftMargin, parameters.ContentsWidth, parameters.RightMargin,
-            w, out double left, out double contentW, out double right);
-        Partition(parameters.TopMargin, parameters.ContentsHeight, parameters.BottomMargin,
-            h, out double top, out double contentH, out double bottom);
+        var (left, contentW, right) = Partition(parameters.LeftMargin, parameters.ContentsWidth, parameters.RightMargin, w);
+        (double top, double contentH, double bottom) = Partition(parameters.TopMargin, parameters.ContentsHeight, parameters.BottomMargin, h);
 
         double sx = contentW / w;
         double sy = contentH / h;
@@ -92,10 +95,11 @@ public sealed partial class PdfFileEditor
     /// margin, content, trailing margin). Fixed (non-auto) slots resolve against
     /// <paramref name="total"/>; the remaining space is divided equally among the
     /// auto slots.</summary>
-    private static void Partition(
-        ContentsResizeValue? lead, ContentsResizeValue? content, ContentsResizeValue? trail,
-        double total, out double leadOut, out double contentOut, out double trailOut)
+    private static (double leadOut, double contentOut, double trailOut) Partition(ContentsResizeValue? lead, ContentsResizeValue? content, ContentsResizeValue? trail, double total)
     {
+        double leadOut = default;
+        double contentOut = default;
+        double trailOut = default;
         bool leadAuto    = lead    is null || lead.IsAutoInternal;
         bool contentAuto = content is null || content.IsAutoInternal;
         bool trailAuto   = trail   is null || trail.IsAutoInternal;
@@ -111,6 +115,7 @@ public sealed partial class PdfFileEditor
         leadOut    = leadAuto    ? autoShare : lead!.ResolveAgainst(total);
         contentOut = contentAuto ? autoShare : content!.ResolveAgainst(total);
         trailOut   = trailAuto   ? autoShare : trail!.ResolveAgainst(total);
+        return (leadOut, contentOut, trailOut);
     }
 
     /// <summary>
@@ -164,7 +169,7 @@ public sealed partial class PdfFileEditor
     }
 
     /// <summary>
-    /// Parameters for <see cref="ResizeContents"/> describing margins, content size,
+    /// Parameters for <c>ResizeContents</c> describing margins, content size,
     /// and whether the page media box should change to match.
     /// </summary>
     public sealed class ContentsResizeParameters

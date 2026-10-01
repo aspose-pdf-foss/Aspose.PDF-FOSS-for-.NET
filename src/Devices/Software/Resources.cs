@@ -119,6 +119,8 @@ public sealed partial class SoftwarePageRenderer
         // Per-font byte→GID map built from the PDF /Encoding /Differences glyph names
         // (resolved through the embedded font's name table). null = no usable map.
         public Dictionary<PdfDictionary, int[]?> EncodingGidMaps { get; } = new(ReferenceEqualityComparer.Instance);
+        // Per-font codes an explicit /Differences names /.notdef - they show nothing.
+        public Dictionary<PdfDictionary, bool[]?> UndefinedCodeMaps { get; } = new(ReferenceEqualityComparer.Instance);
 
         /// <summary>
         /// Page's /Resources/Pattern dict — looked up when resolving a <c>scn</c> pattern name.

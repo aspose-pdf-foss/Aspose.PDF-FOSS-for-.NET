@@ -4,19 +4,63 @@ using System.IO;
 
 namespace Aspose.Pdf
 {
+    /// <summary>An image paragraph: a picture loaded from a file, a URL or a stream and laid out in the page flow (or at a fixed rectangle) when the document is built.</summary>
     public class Image : BaseParagraph
     {
+        /// <summary>Creates an image paragraph with no source; set <c>File</c> or <c>ImageStream</c> before the page is built.</summary>
+        public Image() { }
+
         /// <summary>Outer margins. Auto-initialized so callers can set
         /// <c>img.Margin.Top = 10</c> on a freshly-constructed Image.</summary>
         public new MarginInfo Margin { get; set; } = new MarginInfo();
 
+        /// <summary>Gets or sets a stream holding the image data. When set, it is used instead of <c>File</c>; the stream is read from the start and its position is restored.</summary>
         public Stream ImageStream { get; set; }
+        /// <summary>Gets or sets the path of the image file, or an http(s) URL that is downloaded when the page is built.</summary>
         public string File { get; set; }
+        /// <summary>Gets or sets the drawn width in points. 0 (the default) uses the image's own width; when only one of <c>FixWidth</c> and <c>FixHeight</c> is set, the other axis keeps the image's own size.</summary>
         public double FixWidth { get; set; }
+        /// <summary>Gets or sets the drawn height in points. 0 (the default) uses the image's own height; when only one of <c>FixWidth</c> and <c>FixHeight</c> is set, the other axis keeps the image's own size.</summary>
         public double FixHeight { get; set; }
         public double ImageScale { get; set; }
         public bool IsBlackWhite { get; set; }
+        /// <summary>Gets or sets whether the image's embedded DPI sets its natural size. When <c>false</c> (the default) one pixel maps to one point; when <c>true</c> the DPI is honoured and an image wider than the content area is scaled down to fit, keeping its aspect ratio.</summary>
         public bool IsApplyResolution { get; set; }
+
+        /// <summary>A colour painted under the image's box before it is drawn --
+        /// the box being the image and its <see cref="Border"/> bands. Null (the
+        /// default) paints nothing. Flow only.</summary>
+        public Color BackgroundColor { get; set; }
+
+        /// <summary>Rules drawn around the image, outside it: each side's band
+        /// widens the box the image occupies, the way a bordered paragraph's do.
+        /// Null (the default) is none. Flow only.</summary>
+        public BorderInfo Border { get; set; }
+
+        /// <summary>Where the picture is drawn, in page space, when the CALLER places
+        /// it: the flow draws it there on the page it has reached when the image's
+        /// turn comes, and moves nothing -- the paragraph after it lands where it
+        /// would have without it. Null (the default) lets the flow place the picture.
+        /// The box's own size is the rectangle's; Fix sizes and scaling are not read.</summary>
+        public Rectangle FixedRectangle { get; set; }
+
+        /// <summary>Whether a Fix box is the picture's size whatever the content band:
+        /// one wider or taller than the band keeps it and runs off the page's edge
+        /// instead of being brought down to the band. Off (the default) squashes it
+        /// to the band on that axis. Flow only.</summary>
+        public bool FixBoxIsExact { get; set; }
+
+        /// <summary>Whether an image with no fixed size is scaled, its aspect kept,
+        /// to the WIDTH of the content band, whatever its height then is -- up as
+        /// well as down. Off (the default) draws it at its own size. Flow only.</summary>
+        public bool FitToBandWidth { get; set; }
+
+        /// <summary>Whether an image with no fixed size is scaled, its aspect kept,
+        /// to fill the width of the content band or the height still free on the
+        /// page below the cursor -- whichever binds first -- growing as well as
+        /// shrinking. Off (the default) draws it at its own size. Flow only.</summary>
+        public bool FitToRemainingArea { get; set; }
+        /// <summary>Gets or sets a caption for the image. It is stored only and is not drawn by this library.</summary>
         public Aspose.Pdf.Text.TextFragment Title { get; set; }
 
         /// <summary>Pixel dimensions of the source image as a rectangle
@@ -32,6 +76,7 @@ namespace Aspose.Pdf
             }
         }
 
+        /// <summary>Gets or sets the compression filter to use for the embedded image. It is stored only and has no effect in this library.</summary>
         public ImageFilterType ImageFilterType { get; set; }
 
         /// <summary>Optional in-memory pixel buffer (public-API compatibility).</summary>

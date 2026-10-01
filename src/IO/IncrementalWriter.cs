@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using Aspose.Pdf.Core;
 
@@ -114,8 +114,8 @@ internal sealed class IncrementalWriter
 
         // 4. Write new trailer
         var newTrailer = new PdfDictionary();
-        // Copy /Root, /Info, /Encrypt, /ID from original
-        foreach (var key in new[] { "Root", "Info", "Encrypt", "ID" })
+        // Copy /Root, /Info, /Encrypt, /ID (and a MAC's /AuthCode) from original
+        foreach (var key in new[] { "Root", "Info", "Encrypt", "ID", "AuthCode" })
         {
             var val = originalTrailer.Get(key);
             if (val is not null) newTrailer.Set(key, val);
@@ -159,102 +159,11 @@ internal sealed class IncrementalWriter
     {
         switch (obj)
         {
-            case PdfNull:
-                Write("null");
+            case PdfNull: case PdfBoolean: case PdfInteger: case PdfReal: case PdfString: case PdfName: case PdfIndirectRef:
+                WriteScalarObject(obj);
                 break;
-            case PdfBoolean b:
-                Write(b.Value ? "true" : "false");
-                break;
-            case PdfInteger i:
-                Write(i.Value.ToString(CultureInfo.InvariantCulture));
-                break;
-            case PdfReal r:
-                // Plain decimal only — PDF forbids exponential reals like
-                // "6.10352E-05" (PdfReal.ToString handles the expansion).
-                Write(r.ToString());
-                break;
-            case PdfString s:
-                // In-memory strings are plaintext (the reader decrypts at parse);
-                // under an encrypted trailer they must be re-encrypted with the
-                // owning object's key. Ciphertext is binary — hex form keeps it
-                // byte-exact (a literal string would normalise CR bytes).
-                var strBytes = s.Value;
-                var writeHex = s.IsHex;
-                if (_encryptor is not null && _curObjNum > 0)
-                {
-                    strBytes = _encryptor.EncryptString(strBytes, _curObjNum, _curGen);
-                    writeHex = true;
-                }
-                if (writeHex)
-                {
-                    Write($"<{Convert.ToHexString(strBytes)}>");
-                }
-                else
-                {
-                    Write("(");
-                    foreach (var c in strBytes)
-                    {
-                        if (c is (byte)'(' or (byte)')' or (byte)'\\')
-                            _output.WriteByte((byte)'\\');
-                        _output.WriteByte(c);
-                    }
-                    Write(")");
-                }
-                break;
-            case PdfName n:
-                Write($"/{n.Value}");
-                break;
-            case PdfArray arr:
-                // A DIRECT container cycle (self-referential graph without indirect refs)
-                // must not recurse forever: emit null for the back-edge.
-                if (!_inFlight.Add(arr)) { Write("null"); break; }
-                try
-                {
-                    Write("[");
-                    for (var i = 0; i < arr.Count; i++)
-                    {
-                        if (i > 0) Write(" ");
-                        if (arr[i] is PdfStream s) WriteObject(PromoteStream(s));
-                        else WriteObject(arr[i]);
-                    }
-                    Write("]");
-                }
-                finally { _inFlight.Remove(arr); }
-                break;
-            case PdfDictionary dict:
-                if (!_inFlight.Add(dict)) { Write("null"); break; }
-                try
-                {
-                    Write("<< ");
-                    foreach (var key in dict.Keys)
-                    {
-                        Write($"/{key} ");
-                        var v = dict.Get(key)!;
-                        if (v is PdfStream embedded) WriteObject(PromoteStream(embedded));
-                        else WriteObject(v);
-                        Write(" ");
-                    }
-                    Write(">>");
-                }
-                finally { _inFlight.Remove(dict); }
-                break;
-            case PdfStream stream:
-                // A NEW in-memory stream (ObjectNumber == 0, e.g. a regenerated
-                // appearance) holds plaintext and must be encrypted under the
-                // encrypted trailer; a source-loaded stream (ObjectNumber > 0)
-                // still holds its original ciphertext keyed to its own number
-                // and is copied verbatim.
-                var body = stream.RawData;
-                if (_encryptor is not null && _curObjNum > 0 && stream.ObjectNumber == 0)
-                    body = _encryptor.EncryptStream(body, _curObjNum, _curGen);
-                stream.Dict.Set("Length", new PdfInteger(body.Length));
-                WriteObject(stream.Dict);
-                Write("\nstream\n");
-                _output.Write(body);
-                Write("\nendstream");
-                break;
-            case PdfIndirectRef iref:
-                Write($"{iref.ObjectNumber} {iref.Generation} R");
+            case PdfArray: case PdfDictionary: case PdfStream:
+                WriteContainerObject(obj);
                 break;
         }
     }
@@ -307,5 +216,118 @@ internal sealed class IncrementalWriter
         }
         result.Add((start, count));
         return result;
+    }
+
+    /// <summary>The scalar objects: null, booleans, numbers, strings, names and indirect references.</summary>
+    private void WriteScalarObject(PdfObject obj)
+    {
+        switch (obj)
+        {
+            case PdfNull:
+                Write("null");
+                break;
+            case PdfBoolean b:
+                Write(b.Value ? "true" : "false");
+                break;
+            case PdfInteger i:
+                Write(i.Value.ToString(CultureInfo.InvariantCulture));
+                break;
+            case PdfReal r:
+                // Plain decimal only — PDF forbids exponential reals like
+                // "6.10352E-05" (PdfReal.ToString handles the expansion).
+                Write(r.ToString());
+                break;
+            case PdfString s:
+                // In-memory strings are plaintext (the reader decrypts at parse);
+                // under an encrypted trailer they must be re-encrypted with the
+                // owning object's key. Ciphertext is binary — hex form keeps it
+                // byte-exact (a literal string would normalise CR bytes).
+                var strBytes = s.Value;
+                var writeHex = s.IsHex;
+                if (_encryptor is not null && _curObjNum > 0)
+                {
+                    strBytes = _encryptor.EncryptString(strBytes, _curObjNum, _curGen);
+                    writeHex = true;
+                }
+                if (writeHex)
+                {
+                    Write($"<{Compat.ToHexString(strBytes)}>");
+                }
+                else
+                {
+                    Write("(");
+                    foreach (var c in strBytes)
+                    {
+                        if (c is (byte)'(' or (byte)')' or (byte)'\\')
+                            _output.WriteByte((byte)'\\');
+                        _output.WriteByte(c);
+                    }
+                    Write(")");
+                }
+                break;
+            case PdfName n:
+                Write($"/{n.Value}");
+                break;
+            case PdfIndirectRef iref:
+                Write($"{iref.ObjectNumber} {iref.Generation} R");
+                break;
+        }
+    }
+
+    /// <summary>The container objects: arrays, dictionaries and streams, each written with its members.</summary>
+    private void WriteContainerObject(PdfObject obj)
+    {
+        switch (obj)
+        {
+            case PdfArray arr:
+                // A DIRECT container cycle (self-referential graph without indirect refs)
+                // must not recurse forever: emit null for the back-edge.
+                if (!_inFlight.Add(arr)) { Write("null"); break; }
+                try
+                {
+                    Write("[");
+                    for (var i = 0; i < arr.Count; i++)
+                    {
+                        if (i > 0) Write(" ");
+                        if (arr[i] is PdfStream s) WriteObject(PromoteStream(s));
+                        else WriteObject(arr[i]);
+                    }
+                    Write("]");
+                }
+                finally { _inFlight.Remove(arr); }
+                break;
+            case PdfDictionary dict:
+                if (!_inFlight.Add(dict)) { Write("null"); break; }
+                try
+                {
+                    Write("<< ");
+                    foreach (var key in dict.Keys)
+                    {
+                        Write($"/{key} ");
+                        var v = dict.Get(key)!;
+                        if (v is PdfStream embedded) WriteObject(PromoteStream(embedded));
+                        else WriteObject(v);
+                        Write(" ");
+                    }
+                    Write(">>");
+                }
+                finally { _inFlight.Remove(dict); }
+                break;
+            case PdfStream stream:
+                // A NEW in-memory stream (ObjectNumber == 0, e.g. a regenerated
+                // appearance) holds plaintext and must be encrypted under the
+                // encrypted trailer; a source-loaded stream (ObjectNumber > 0)
+                // still holds its original ciphertext keyed to its own number
+                // and is copied verbatim.
+                var body = stream.RawData;
+                if (_encryptor is not null && _curObjNum > 0 && stream.ObjectNumber == 0)
+                    body = _encryptor.EncryptStream(body, _curObjNum, _curGen);
+                stream.Dict.Set("Length", new PdfInteger(body.Length));
+                WriteObject(stream.Dict);
+                Write("\nstream\n");
+                _output.Write(body);
+                Write("\nendstream");
+                break;
+        }
     }
 }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -9,7 +9,7 @@ namespace Aspose.Pdf.Annotations.JavascriptExtensions;
 /// Formats a date/time value string according to an Acrobat-style date format.
 /// Corresponds to the PDF JavaScript AF_Date_Format function.
 /// </summary>
-public static class FieldDateTimeFormatter
+public static partial class FieldDateTimeFormatter
 {
     private static readonly string[] MonthShort =
         { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
@@ -27,115 +27,81 @@ public static class FieldDateTimeFormatter
     /// <exception cref="FormatException">When the input cannot be parsed.</exception>
     public static string Format(string dateFormat, string dateValue)
     {
-        var allTokens = TokeniseFormat(dateFormat);
-        var components = new List<ComponentToken>();
-        foreach (var t in allTokens)
+        var df = new DateFormatState();
+        df.dateFormat = dateFormat;
+        df.dateValue = dateValue;
+        df.allTokens = TokeniseFormat(df.dateFormat);
+        df.components = new List<ComponentToken>();
+        foreach (var t in df.allTokens)
         {
             if (t is ComponentToken ct)
-                components.Add(ct);
+                df.components.Add(ct);
         }
 
-        var rawVals = ParseInputValues(dateValue, components);
+        df.rawVals = ParseInputValues(df.dateValue, df.components);
 
-        // Per-token final numeric values
-        var finalVals = new int?[rawVals.Length];
-        for (int i = 0; i < rawVals.Length; i++)
-            finalVals[i] = rawVals[i] == int.MinValue ? null : rawVals[i];
+        df.finalVals = new int?[df.rawVals.Length];
+        for (int i = 0; i < df.rawVals.Length; i++)
+            df.finalVals[i] = df.rawVals[i] == int.MinValue ? null : df.rawVals[i];
 
         // Expand 2-digit years where the token is yyyy
-        for (int i = 0; i < components.Count; i++)
+        for (int i = 0; i < df.components.Count; i++)
         {
-            var tok = components[i];
-            if (tok.Kind == TokenKind.Year && tok.FourDigit && finalVals[i] != null)
+            var tok = df.components[i];
+            if (tok.Kind == TokenKind.Year && tok.FourDigit && df.finalVals[i] != null)
             {
-                finalVals[i] = ExpandYear(finalVals[i]!.Value);
+                df.finalVals[i] = ExpandYear(df.finalVals[i]!.Value);
             }
         }
 
-        // Locate the first month and first day component indices
-        int monthIdx = -1, dayIdx = -1;
-        for (int i = 0; i < components.Count; i++)
+        df.monthIdx = -1;
+        df.dayIdx = -1;
+        for (int i = 0; i < df.components.Count; i++)
         {
-            if (components[i].Kind == TokenKind.Month && monthIdx < 0) monthIdx = i;
-            if (components[i].Kind == TokenKind.Day && dayIdx < 0) dayIdx = i;
+            if (df.components[i].Kind == TokenKind.Month && df.monthIdx < 0) df.monthIdx = i;
+            if (df.components[i].Kind == TokenKind.Day && df.dayIdx < 0) df.dayIdx = i;
         }
 
-        // Auto-correct: if first month > 12 and first day <= 12, swap
-        bool didSwap = false;
-        if (monthIdx >= 0 && dayIdx >= 0)
+        df.didSwap = false;
+        if (df.monthIdx >= 0 && df.dayIdx >= 0)
         {
-            int? m = finalVals[monthIdx];
-            int? d = finalVals[dayIdx];
+            int? m = df.finalVals[df.monthIdx];
+            int? d = df.finalVals[df.dayIdx];
             if (m != null && d != null && m > 12 && d <= 12)
             {
-                finalVals[monthIdx] = d;
-                finalVals[dayIdx] = m;
-                didSwap = true;
+                df.finalVals[df.monthIdx] = d;
+                df.finalVals[df.dayIdx] = m;
+                df.didSwap = true;
             }
         }
 
         // Validate first month and first day
-        if (monthIdx >= 0)
+        if (df.monthIdx >= 0)
         {
-            int? m = finalVals[monthIdx];
+            int? m = df.finalVals[df.monthIdx];
             if (m != null && (m < 1 || m > 12))
-                throw new ArgumentException($"Invalid month {m} in date value \"{dateValue}\"");
+                throw new ArgumentException($"Invalid month {m} in date value \"{df.dateValue}\"");
         }
-        if (dayIdx >= 0)
+        if (df.dayIdx >= 0)
         {
-            int? d = finalVals[dayIdx];
+            int? d = df.finalVals[df.dayIdx];
             if (d != null && (d < 1 || d > 31))
             {
                 // If we swapped and the day is still invalid, the input is unparseable
-                if (didSwap)
-                    throw new FormatException($"Cannot parse date value \"{dateValue}\" with format \"{dateFormat}\"");
-                throw new ArgumentException($"Invalid day {d} in date value \"{dateValue}\"");
+                if (df.didSwap)
+                    throw new FormatException($"Cannot parse date value \"{df.dateValue}\" with format \"{df.dateFormat}\"");
+                throw new ArgumentException($"Invalid day {d} in date value \"{df.dateValue}\"");
             }
         }
 
-        // Render output
-        var sb = new StringBuilder();
-        int compIdx = 0;
-        foreach (var tok in allTokens)
+        df.sb = new StringBuilder();
+        df.compIdx = 0;
+        foreach (var tok in df.allTokens)
         {
-            if (tok is LiteralToken lt)
-            {
-                sb.Append(lt.Text);
-                continue;
-            }
-
-            var ct2 = (ComponentToken)tok;
-            int? val = compIdx < finalVals.Length ? finalVals[compIdx] : null;
-            compIdx++;
-
-            if (val == null)
-            {
-                sb.Append('0');
-                continue;
-            }
-
-            if (ct2.Kind == TokenKind.Month && (ct2.Abbrev || ct2.FullName))
-            {
-                int idx = val.Value - 1;
-                if (idx >= 0 && idx < 12)
-                    sb.Append(ct2.FullName ? MonthLong[idx] : MonthShort[idx]);
-            }
-            else if (ct2.Kind == TokenKind.Year && ct2.FourDigit)
-            {
-                sb.Append(val.Value.ToString().PadLeft(4, '0'));
-            }
-            else if (ct2.PadWidth > 0)
-            {
-                int display = ct2.Kind == TokenKind.Year ? val.Value % 100 : val.Value;
-                sb.Append(display.ToString().PadLeft(ct2.PadWidth, '0'));
-            }
-            else
-            {
-                sb.Append(val.Value.ToString());
-            }
+            FormatDateToken(df, tok);
         }
 
-        return sb.ToString();
+        return df.sb.ToString();
     }
 
     #region Tokeniser

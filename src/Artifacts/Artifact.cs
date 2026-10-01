@@ -13,7 +13,7 @@ namespace Aspose.Pdf;
 /// (PDF 32000 §14.8.2.2). Artifacts carry non-content page elements such as
 /// headers, footers, watermarks, and page numbers.
 /// </summary>
-public class Artifact
+public class Artifact : System.IDisposable
 {
     /// <summary>Enumerates artifact types as defined by PDF 32000 §14.8.2.2.</summary>
     public enum ArtifactType

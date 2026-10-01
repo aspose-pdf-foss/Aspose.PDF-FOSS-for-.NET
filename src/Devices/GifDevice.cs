@@ -9,13 +9,21 @@ namespace Aspose.Pdf.Devices;
 /// </summary>
 public sealed class GifDevice : ImageDevice
 {
+    /// <summary>Creates a GifDevice that renders pages with the given <c>renderer</c> at the default resolution of 150 DPI.</summary>
     public GifDevice(IPageRenderer renderer) : base(renderer) { }
+    /// <summary>Creates a GifDevice that renders pages with the given <c>renderer</c> at the given resolution (150 DPI when <c>resolution</c> is null).</summary>
     public GifDevice(IPageRenderer renderer, Resolution resolution) : base(renderer, resolution) { }
+    /// <summary>Creates a GifDevice that renders pages with the built-in renderer at the default resolution of 150 DPI.</summary>
     public GifDevice() : base() { }
+    /// <summary>Creates a GifDevice that renders pages with the built-in renderer at the given resolution.</summary>
     public GifDevice(Resolution resolution) : base(resolution) { }
+    /// <summary>Creates a GifDevice whose output image is resampled to the given width and height in pixels; pages are rendered at 150 DPI.</summary>
     public GifDevice(int width, int height) : base(width, height) { }
+    /// <summary>Creates a GifDevice that renders pages at the given resolution and resamples the output image to the given width and height in pixels.</summary>
     public GifDevice(int width, int height, Resolution resolution) : base(width, height, resolution) { }
+    /// <summary>Creates a GifDevice whose output image has the pixel size of <c>pageSize</c> (in points) at 150 DPI.</summary>
     public GifDevice(Aspose.Pdf.PageSize pageSize) : base(pageSize) { }
+    /// <summary>Creates a GifDevice whose output image has the pixel size of <c>pageSize</c> (in points) at the given resolution.</summary>
     public GifDevice(Aspose.Pdf.PageSize pageSize, Resolution resolution) : base(pageSize, resolution) { }
 
     /// <inheritdoc />
@@ -26,11 +34,9 @@ public sealed class GifDevice : ImageDevice
         output.Write(gif, 0, gif.Length);
     }
 
-    private static byte[] EncodeGif(byte[] rgba, int width, int height)
+    internal static byte[] EncodeGif(byte[] rgba, int width, int height)
     {
-        // Composite onto white and reduce to ≤256 colours. The index map holds one
-        // palette index per pixel (row-major, top-to-bottom).
-        var indices = Quantize(rgba, width, height, out var palette, out var colorCount);
+        (var indices, var palette, var colorCount) = Quantize(rgba, width, height);
 
         // GIF colour table size must be a power of two (2..256); the LZW minimum
         // code size is its log2, never below 2.
@@ -99,9 +105,10 @@ public sealed class GifDevice : ImageDevice
 
     /// <summary>Composite RGBA over white, build the colour histogram, reduce to
     /// at most 256 colours and return one palette index per pixel.</summary>
-    private static byte[] Quantize(byte[] rgba, int width, int height,
-        out byte[] palette, out int colorCount)
+    private static (byte[] result, byte[] palette, int colorCount) Quantize(byte[] rgba, int width, int height)
     {
+        byte[]? palette = default;
+        int colorCount = default;
         int pixelCount = width * height;
         // Composite over white and pack RGB into an int key.
         var packed = new int[pixelCount];
@@ -175,7 +182,7 @@ public sealed class GifDevice : ImageDevice
             }
             indices[p] = idx;
         }
-        return indices;
+        return (indices, palette, colorCount);
     }
 
     private static byte Nearest(byte[] palette, int colorCount, int rgb)
@@ -203,7 +210,7 @@ public sealed class GifDevice : ImageDevice
             for (int i = 0; i < boxes.Count; i++)
             {
                 if (boxes[i].Count < 2) continue;
-                Extents(boxes[i], out var rr, out var gr, out var br);
+                var (rr, gr, br) = Extents(boxes[i]);
                 if (rr >= gr && rr >= br && rr > bestRange) { bestRange = rr; bestBox = i; bestAxis = 0; }
                 else if (gr >= rr && gr >= br && gr > bestRange) { bestRange = gr; bestBox = i; bestAxis = 1; }
                 else if (br > bestRange) { bestRange = br; bestBox = i; bestAxis = 2; }
@@ -228,8 +235,11 @@ public sealed class GifDevice : ImageDevice
         return boxes.ToArray();
     }
 
-    private static void Extents(List<(int rgb, int count)> box, out int rRange, out int gRange, out int bRange)
+    private static (int rRange, int gRange, int bRange) Extents(List<(int rgb, int count)> box)
     {
+        int rRange = default;
+        int gRange = default;
+        int bRange = default;
         int rMin = 255, rMax = 0, gMin = 255, gMax = 0, bMin = 255, bMax = 0;
         foreach (var (rgb, _) in box)
         {
@@ -239,6 +249,7 @@ public sealed class GifDevice : ImageDevice
             if (b < bMin) bMin = b; if (b > bMax) bMax = b;
         }
         rRange = rMax - rMin; gRange = gMax - gMin; bRange = bMax - bMin;
+        return (rRange, gRange, bRange);
     }
 
     // ── LZW (GIF variant: LSB-first, variable code width) ───────────────────

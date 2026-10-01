@@ -226,6 +226,9 @@ public class AnnotationActionCollection
     // /AA event key for each property (OnActivated is the direct /A, handled separately).
     private const string ActivatedKey = "A";
 
+    /// <summary>Creates an empty collection that is not attached to any annotation; its actions are kept in memory only.</summary>
+    public AnnotationActionCollection() { }
+
     /// <summary>Bind this collection to the owning annotation dict so setters
     /// write through to /A and /AA (reader may be null for freshly created annotations).</summary>
     internal void Bind(Aspose.Pdf.Core.PdfDictionary owner, Aspose.Pdf.IO.PdfReader? reader)
@@ -269,10 +272,13 @@ public class AnnotationActionCollection
         aa.Set(key, value.Dict);
     }
 
+    /// <summary>Gets or sets the action run when the annotation is activated (the /A entry), or null when none is set.</summary>
     public PdfAction? OnActivated { get => Get(ActivatedKey); set => Set(ActivatedKey, value); }
     public PdfAction? OnCalculate { get => Get("C"); set => Set("C", value); }
     public PdfAction? OnClosePage { get => Get("PC"); set => Set("PC", value); }
+    /// <summary>Gets or sets the action run when the mouse pointer enters the annotation area (/AA /E), or null when none is set.</summary>
     public PdfAction? OnEnter { get => Get("E"); set => Set("E", value); }
+    /// <summary>Gets or sets the action run when the mouse pointer leaves the annotation area (/AA /X), or null when none is set.</summary>
     public PdfAction? OnExit { get => Get("X"); set => Set("X", value); }
     public PdfAction? OnFormat { get => Get("F"); set => Set("F", value); }
     public PdfAction? OnHidePage { get => Get("PI"); set => Set("PI", value); }
@@ -293,6 +299,9 @@ public class PdfActionCollection : IEnumerable<PdfAction>
 {
     private readonly List<PdfAction> _actions = new();
     private Aspose.Pdf.Core.PdfDictionary? _owner;
+
+    /// <summary>Creates an empty collection that is not attached to any annotation; added actions are kept in memory only.</summary>
+    public PdfActionCollection() { }
 
     /// <summary>Number of actions in the collection.</summary>
     public int Count => _actions.Count;
@@ -359,6 +368,9 @@ public class AppearanceDictionary : IDictionary<string, XForm>
 {
     private readonly Dictionary<string, XForm> _entries = new(System.StringComparer.Ordinal);
 
+    /// <summary>Creates an empty appearance dictionary.</summary>
+    public AppearanceDictionary() { }
+
     /// <summary>Number of appearance states.</summary>
     public int Count => _entries.Count;
 
@@ -374,10 +386,10 @@ public class AppearanceDictionary : IDictionary<string, XForm>
     /// <summary>Sentinel object for ICollection.SyncRoot-style locking.</summary>
     public object SyncRoot { get; } = new();
 
-    /// <inheritdoc />
+    /// <summary>Gets the names of the stored appearance states.</summary>
     public ICollection<string> Keys => _entries.Keys;
 
-    /// <inheritdoc />
+    /// <summary>Gets the stored appearance forms.</summary>
     public ICollection<XForm> Values => _entries.Values;
 
     /// <summary>Appearance-state lookup. Returns null for an absent state (e.g.
@@ -389,7 +401,7 @@ public class AppearanceDictionary : IDictionary<string, XForm>
         set => _entries[key] = value;
     }
 
-    /// <inheritdoc />
+    /// <summary>Adds the appearance <c>value</c> under the state name <c>key</c>; throws if the name is already present.</summary>
     public void Add(string key, XForm value) => _entries.Add(key, value);
 
     /// <summary>Add via key/value pair (IDictionary contract).</summary>
@@ -404,7 +416,7 @@ public class AppearanceDictionary : IDictionary<string, XForm>
         _entries.Add(s, x);
     }
 
-    /// <inheritdoc />
+    /// <summary>Removes every appearance state.</summary>
     public void Clear() => _entries.Clear();
 
     /// <inheritdoc />
@@ -412,7 +424,7 @@ public class AppearanceDictionary : IDictionary<string, XForm>
         => _entries.TryGetValue(item.Key, out var v)
            && ReferenceEquals(v, item.Value);
 
-    /// <inheritdoc />
+    /// <summary>Returns true when an appearance is stored under the state name <c>key</c>.</summary>
     public bool ContainsKey(string key) => _entries.ContainsKey(key);
 
     /// <inheritdoc />
@@ -433,7 +445,7 @@ public class AppearanceDictionary : IDictionary<string, XForm>
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
-    /// <inheritdoc />
+    /// <summary>Removes the appearance stored under the state name <c>key</c>; returns true when one was removed.</summary>
     public bool Remove(string key) => _entries.Remove(key);
 
     /// <inheritdoc />

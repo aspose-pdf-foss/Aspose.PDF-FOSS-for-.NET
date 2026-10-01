@@ -216,11 +216,11 @@ public sealed partial class TextAbsorber
                         }
                     if (rtl > ltr && rtl > 0)
                     {
-                        MergeRtlRow(sl, gs, ref ge, lineOffs);
+                        ge = MergeRtlRow(sl, gs, ge, lineOffs);
                     }
                     else if (_pageCellWidth > 0 && !double.IsNaN(_pageMinX) && !_pageRotDominant && ge - gs > 1)
                     {
-                        MergeInterleavedRow(sl, gs, ref ge, lineOffs);
+                        MergeInterleavedRow(sl, gs, ge, lineOffs);
                     }
                 }
                 gs = ge;
@@ -440,7 +440,11 @@ public sealed partial class TextAbsorber
         }
 
         sl.indexed = new List<(double y, int idx, string line)>();
-        for (int i = 0; i < sl.lines.Length; i++)
+        // The break the page's first text move appends before any glyph is
+        // not a line: in stream order the page trim drops it, and a row sort
+        // must not seat it as a blank row wherever its y happens to fall.
+        var first = sl.lines.Length > 0 && sl.lines[0].TrimEnd('\r').Length == 0 && double.IsNaN(sl.lineEdgeX[0]) ? 1 : 0;
+        for (int i = first; i < sl.lines.Length; i++)
             sl.indexed.Add((sl.pageYs[i], i, sl.lines[i].TrimEnd('\r')));
 
         if (GridDebug)
@@ -473,7 +477,7 @@ public sealed partial class TextAbsorber
     }
 
     /// <summary>Two LTR lines of one row that overlap in x are interleaved on the page's cell grid into one line.</summary>
-    private void MergeInterleavedRow(SortLinesState sl, int gs, ref int ge, int[] lineOffs)
+    private void MergeInterleavedRow(SortLinesState sl, int gs, int ge, int[] lineOffs)
     {
         // LTR INTERLEAVING: when two LINES of this row overlap in
         // device X — a glyph of one falls inside the other's span
@@ -494,15 +498,16 @@ public sealed partial class TextAbsorber
     }
 
     /// <summary>An RTL row's member lines are exploded to glyph runs and re-read right to left as one line.</summary>
-    private void MergeRtlRow(SortLinesState sl, int gs, ref int ge, int[] lineOffs)
+    /// <returns>The row group's new end index: the merged row is one line, so the group closes right after it.</returns>
+    private int MergeRtlRow(SortLinesState sl, int gs, int ge, int[] lineOffs)
     {
         // Explode every member line's runs to (x, char, advance).
         var cells = new List<(double x, double adv, char c)>();
-        double tailPadX = double.MaxValue;
-        var tailPad = 0;
+        sl.rtlTailPadX = double.MaxValue;
+        sl.rtlTailPad = 0;
         for (int k = gs; k < ge; k++)
         {
-            if (!ExplodeRtlLineRuns(sl, k, lineOffs, cells, ref tailPad, ref tailPadX)) break;
+            if (!ExplodeRtlLineRuns(sl, k, lineOffs, cells)) break;
         }
         // Merge ascending X = the true visual row. One output space per
         // DISTINCT space glyph (co-located stacked duplicates collapse);
@@ -565,25 +570,25 @@ public sealed partial class TextAbsorber
         // with the plain spaces here — the RTL rebuild's pad handling
         // owns the row's edge whitespace, exactly as before masking.
         var logical = BidiReorderer.ReorderIfNeeded(vsb.ToString().Trim(' ', EolShowSpaceSentinel));
-        if (tailPad > 0 && tailPad <= 200) logical += new string(' ', tailPad);
+        if (sl.rtlTailPad > 0 && sl.rtlTailPad <= 200) logical += new string(' ', sl.rtlTailPad);
         sl.indexed[gs] = (sl.indexed[gs].y, sl.indexed[gs].idx, logical);
         sl.lineStartXs[sl.indexed[gs].idx] = double.NaN;
         sl.indexed.RemoveRange(gs + 1, ge - gs - 1);
-        ge = gs + 1;
+        return gs + 1;
     }
 
     /// <summary>Explodes one member line of an RTL row into positioned glyph runs, tracking the row's trailing pad.</summary>
-    private bool ExplodeRtlLineRuns(SortLinesState sl, int k, int[] lineOffs, List<(double x, double adv, char c)> cells, ref int tailPad, ref double tailPadX)
+    private bool ExplodeRtlLineRuns(SortLinesState sl, int k, int[] lineOffs, List<(double x, double adv, char c)> cells)
     {
         int idx = sl.indexed[k].idx;
         var lineText = sl.indexed[k].line;
         var lx = sl.lineStartXs[idx];
         var lead = 0;
         while (lead < lineText.Length && lineText[lead] == ' ') lead++;
-        if (lead < lineText.Length && !double.IsNaN(lx) && lx < tailPadX)
+        if (lead < lineText.Length && !double.IsNaN(lx) && lx < sl.rtlTailPadX)
         {
-            tailPadX = lx;   // leftmost non-blank member: its lead pad trails
-            tailPad = lead;
+            sl.rtlTailPadX = lx;   // leftmost non-blank member: its lead pad trails
+            sl.rtlTailPad = lead;
         }
         int lo = lineOffs[idx], hi = lo + sl.lines[idx].Length;
         var fallbackAdv = _pageCellWidth > 0 ? _pageCellWidth : 6.0;
@@ -765,18 +770,23 @@ public sealed partial class TextAbsorber
             else if (rowCw > 0 && !double.IsNaN(xa2) && !double.IsNaN(xb2))
                 target = firstPad + (int)Math.Round((xb2 - xa2) / rowCw);
             var curCol = _text.Length - rowStartLen;
+            var contiguous = ContinuesPreviousSegment(sl, group, gi, xb2);
             if (GridDebug)
-                Console.Error.WriteLine($"[merge] target={target} grid={gridTarget} cur={curCol} xa={xa2:R} xb={xb2:R} rowCw={rowCw:R} firstPad={firstPad} body='{(line.TrimStart().Length > 20 ? line.TrimStart().Substring(0, 20) : line.TrimStart())}'");
+                Console.Error.WriteLine($"[merge] target={target} grid={gridTarget} cur={curCol} xa={xa2:R} xb={xb2:R} rowCw={rowCw:R} firstPad={firstPad} contiguous={contiguous} body='{(line.TrimStart().Length > 20 ? line.TrimStart().Substring(0, 20) : line.TrimStart())}'");
             // Strip only the line's inserted grid pad; DRAWN leading
             // space glyphs stay with the segment (an indented note
             // keeps its indent from its line-start column when it
             // merges into a row).
-            string body;
-            if (BuildRowSegment(sl, group, gi, line, gridTarget, target, curCol, rowStartLen, out body, out var prevSegBlank)) return true;
+            var (segmentDone, body, prevSegBlank) = BuildRowSegment(sl, group, gi, line, gridTarget, target, curCol, rowStartLen, contiguous);
+            if (segmentDone) return true;
             if (body.Length == 0) return true;
             var bodyIsSpaceGlyph = IsSpaceGlyphSegment(body);
             var sepFloor = prevSegBlank || bodyIsSpaceGlyph ? 0 : gridTarget ? 1 : 6;
-            var spaces = Math.Min(5000, Math.Max(sepFloor, target - curCol));
+            // A segment that starts where the previous one ends is the same
+            // text continued in a new text object (a styled run, a word split
+            // by its decoration): it reads on without a space or a pad - the
+            // gap-to-space law, applied across the object boundary.
+            var spaces = contiguous ? 0 : Math.Min(5000, Math.Max(sepFloor, target - curCol));
             // A space glyph the row must PAD to reach is layout padding
             // (a field's trailing blank drawn columns away), not the
             // word space that seats right after the text: it loses the
@@ -793,9 +803,28 @@ public sealed partial class TextAbsorber
         return true;
     }
 
-    /// <summary>The text a row segment contributes: trimmed to its grid column, or overlapping text dropped.</summary>
-    private bool BuildRowSegment(SortLinesState sl, List<(double y, int idx, string line)> group, int gi, string line, bool gridTarget, int target, int curCol, int rowStartLen, out string body, out bool prevSegBlank)
+    /// <summary>Whether row member <paramref name="gi"/> starts within the gap-to-space
+    /// share of a font size from the end of the member before it: a contiguous
+    /// continuation of that segment's text.</summary>
+    private static bool ContinuesPreviousSegment(SortLinesState sl, List<(double y, int idx, string line)> group, int gi, double xb2)
     {
+        if (gi <= 0 || double.IsNaN(xb2) || xb2 <= -1e8) return false;
+        var prevEnd = sl.lineEdgeX[group[gi - 1].idx];
+        if (double.IsNaN(prevEnd) || string.IsNullOrWhiteSpace(group[gi - 1].line)) return false;
+        var fs = sl.pageFs[group[gi].idx];
+        if (double.IsNaN(fs) || fs <= 0) fs = 10.0;
+        return Math.Abs(xb2 - prevEnd) < ContiguousSegmentShare * fs;
+    }
+
+    /// <summary>A same-row segment starting within this share of its font size from the
+    /// previous segment's end continues it (the gap-to-space threshold).</summary>
+    private const double ContiguousSegmentShare = 0.15;
+
+    /// <summary>The text a row segment contributes: trimmed to its grid column, or overlapping text dropped.</summary>
+    private (bool done, string body, bool prevSegBlank) BuildRowSegment(SortLinesState sl, List<(double y, int idx, string line)> group, int gi, string line, bool gridTarget, int target, int curCol, int rowStartLen, bool contiguous)
+    {
+        var body = string.Empty;
+        var prevSegBlank = false;
         if (gridTarget)
         {
             var strip = 0;
@@ -818,7 +847,7 @@ public sealed partial class TextAbsorber
         prevSegBlank = IsSpaceGlyphSegment(group[gi - 1].line);
         // (A space-glyph body never overlays either — the overlay skips
         // spaces, which would drop the glyph; it appends as the word space.)
-        if (gridTarget && target < curCol && rowStartLen + target >= 0 && !prevSegBlank && !IsSpaceGlyphSegment(body))
+        if (gridTarget && !contiguous && target < curCol && rowStartLen + target >= 0 && !prevSegBlank && !IsSpaceGlyphSegment(body))
         {
             var abs = rowStartLen + target;
             var ok = true;
@@ -833,7 +862,7 @@ public sealed partial class TextAbsorber
                 while (_text.Length < abs + body.Length) _text.Append(' ');
                 for (var bi = 0; bi < body.Length; bi++)
                     if (body[bi] != ' ') _text[abs + bi] = body[bi];
-                return true;
+                return (true, body, prevSegBlank);
             }
         }
         // Column clamp mirrors the 5000-column grid bound
@@ -844,7 +873,7 @@ public sealed partial class TextAbsorber
         // A segment whose whole content was grid pad / trimmed blanks
         // has nothing to seat — appending a separator for it would
         // leave a dangling run of spaces ("8/30/18      ").
-        return false;
+        return (false, body, prevSegBlank);
     }
 
     /// <summary>Clamps each span's width to its neighbours and adds the line's glyphs to the row's cells at their measured x.</summary>

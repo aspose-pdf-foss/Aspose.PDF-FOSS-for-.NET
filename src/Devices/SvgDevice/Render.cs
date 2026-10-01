@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
@@ -12,442 +12,75 @@ public sealed partial class SvgDevice
         PdfReader reader, StringBuilder sb, int depth, GState gs, ISet<string> usedBlendModes,
         List<LinkRect>? links)
     {
-        var fonts = ResolveFonts(resources, reader);
-        var extGStates = ResolveExtGStates(resources, reader);
-        var lexer = new PdfLexer(streamBytes);
-        var operands = new List<PdfObject>();
-        // tm is the text matrix, tlm the text line matrix (PDF row-vector convention).
-        double[] tm = { 1, 0, 0, 1, 0, 0 };
-        double[] tlm = { 1, 0, 0, 1, 0, 0 };
-        var gsStack = new Stack<GState>();
-        var pathData = new StringBuilder();
-        // Path current point in USER coordinates (needed by the v operator).
-        double curX = 0, curY = 0;
+        var sv = new SvgRenderState();
+        sv.fonts = ResolveFonts(resources, reader);
+        sv.extGStates = ResolveExtGStates(resources, reader);
+        sv.lexer = new PdfLexer(streamBytes);
+        sv.operands = new List<PdfObject>();
+        sv.tm = new double[] { 1, 0, 0, 1, 0, 0 };
+        sv.tlm = new double[] { 1, 0, 0, 1, 0, 0 };
+        sv.gsStack = new Stack<GState>();
+        // The caller hands in the inherited graphics state; from here it lives on the
+        // render state, because `Q` replaces it wholesale from the stack above.
+        sv.gs = gs;
+        sv.pathData = new StringBuilder();
+        sv.curX = 0;
+        sv.curY = 0;
 
         while (true)
         {
-            var token = lexer.NextToken();
+            var token = sv.lexer.NextToken();
             if (token.Kind == TokenKind.Eof) break;
 
             switch (token.Kind)
             {
-                case TokenKind.Integer: operands.Add(new PdfInteger(token.IntValue)); break;
-                case TokenKind.Real: operands.Add(new PdfReal(token.RealValue)); break;
-                case TokenKind.LiteralString: operands.Add(new PdfString(token.BytesValue!)); break;
-                case TokenKind.HexString: operands.Add(new PdfString(token.BytesValue!, isHex: true)); break;
-                case TokenKind.Name: operands.Add(new PdfName(token.StringValue!)); break;
+                case TokenKind.Integer: sv.operands.Add(new PdfInteger(token.IntValue)); break;
+                case TokenKind.Real: sv.operands.Add(new PdfReal(token.RealValue)); break;
+                case TokenKind.LiteralString: sv.operands.Add(new PdfString(token.BytesValue!)); break;
+                case TokenKind.HexString: sv.operands.Add(new PdfString(token.BytesValue!, isHex: true)); break;
+                case TokenKind.Name: sv.operands.Add(new PdfName(token.StringValue!)); break;
                 case TokenKind.ArrayStart:
-                    operands.Add(ParseArray(lexer));
+                    sv.operands.Add(ParseArray(sv.lexer));
                     break;
                 case TokenKind.Keyword:
                 {
                     var op = token.StringValue!;
                     switch (op)
                     {
-                        // --- Graphics state stack ---
-                        case "q":
-                            gsStack.Push(gs.Clone());
+                        case "q": case "Q": case "cm": case "gs": case "w": case "J": case "j": case "d":
+                            if (RenderSvgStateOperator(sv, usedBlendModes, op)) return;
                             break;
-                        case "Q":
-                            if (gsStack.Count > 0)
-                                gs = gsStack.Pop();
+                        case "Tf": case "Tc": case "Tw": case "Tz": case "Ts": case "Tr": case "BT": case "Td": case "TD": case "Tm": case "TL": case "T*": case "'": case "Tj": case "TJ":
+                            if (RenderSvgTextOperator(sv, sb, reader, links, op)) return;
                             break;
-
-                        // --- CTM ---
-                        case "cm":
-                            if (operands.Count >= 6)
-                            {
-                                var m = new[]
-                                {
-                                    Num(operands[0]), Num(operands[1]), Num(operands[2]),
-                                    Num(operands[3]), Num(operands[4]), Num(operands[5]),
-                                };
-                                gs.Ctm = MulAffine(m, gs.Ctm);
-                            }
+                        case "rg": case "RG": case "g": case "G": case "k": case "K": case "cs": case "CS": case "sc": case "scn": case "SC": case "SCN":
+                            if (RenderSvgColorOperator(sv, resources, reader, op)) return;
                             break;
-
-                        // --- ExtGState ---
-                        case "gs":
-                            if (operands.Count >= 1 && operands[0] is PdfName gsName)
-                            {
-                                if (extGStates.TryGetValue(gsName.Value, out var gsDict))
-                                {
-                                    var caObj = gsDict.Get("ca");
-                                    if (caObj is PdfReal caR) gs.FillAlpha = caR.Value;
-                                    else if (caObj is PdfInteger caI) gs.FillAlpha = caI.Value;
-
-                                    var scaObj = gsDict.Get("CA");
-                                    if (scaObj is PdfReal scaR) gs.StrokeAlpha = scaR.Value;
-                                    else if (scaObj is PdfInteger scaI) gs.StrokeAlpha = scaI.Value;
-
-                                    var bmObj = gsDict.GetName("BM");
-                                    if (bmObj is not null)
-                                    {
-                                        gs.BlendMode = bmObj;
-                                        if (bmObj != "Normal") usedBlendModes.Add(bmObj);
-                                    }
-                                }
-                            }
-                            break;
-
-                        // --- Line width ---
-                        case "w":
-                            if (operands.Count >= 1)
-                                gs.LineWidth = Num(operands[0]);
-                            break;
-
-                        // --- Line cap ---
-                        case "J":
-                            if (operands.Count >= 1)
-                                gs.LineCap = (int)Num(operands[0]);
-                            break;
-
-                        // --- Line join ---
-                        case "j":
-                            if (operands.Count >= 1)
-                                gs.LineJoin = (int)Num(operands[0]);
-                            break;
-
-                        // --- Dash pattern ---
-                        case "d":
-                            if (operands.Count >= 2 && operands[0] is PdfArray dashArr)
-                            {
-                                gs.DashArray = new double[dashArr.Count];
-                                for (int i = 0; i < dashArr.Count; i++)
-                                    gs.DashArray[i] = Num(dashArr[i]);
-                                gs.DashPhase = Num(operands[1]);
-                            }
-                            break;
-
-                        // --- Font ---
-                        case "Tf":
-                            if (operands.Count >= 2)
-                            {
-                                if (operands[0] is PdfName fn)
-                                {
-                                    if (fonts.TryGetValue(fn.Value, out var fd))
-                                    {
-                                        gs.FontDict = fd;
-                                        gs.ToUnicode = Text.TextAbsorber.ParseToUnicodeFromDict(fd, reader);
-                                        var baseFont = fd.GetName("BaseFont") ?? "sans-serif";
-                                        gs.FontName = MapFontName(baseFont);
-                                        try { gs.Metrics = Text.FontMetrics.FromFontDict(fd, reader); }
-                                        catch { gs.Metrics = null; }
-                                    }
-                                    else
-                                    {
-                                        gs.FontDict = null;
-                                        gs.ToUnicode = null;
-                                        gs.Metrics = null;
-                                        gs.FontName = fn.Value;
-                                    }
-                                }
-                                gs.FontSize = Num(operands[1]);
-                            }
-                            break;
-
-                        // --- Text state ---
-                        case "Tc":
-                            if (operands.Count >= 1) gs.CharSpacing = Num(operands[0]);
-                            break;
-                        case "Tw":
-                            if (operands.Count >= 1) gs.WordSpacing = Num(operands[0]);
-                            break;
-                        case "Tz":
-                            if (operands.Count >= 1) gs.HorizScale = Num(operands[0]) / 100.0;
-                            break;
-                        case "Ts":
-                            if (operands.Count >= 1) gs.TextRise = Num(operands[0]);
-                            break;
-                        case "Tr":
-                            if (operands.Count >= 1) gs.RenderMode = (int)Num(operands[0]);
-                            break;
-
-                        // --- Text object begin: reset text + line matrices ---
-                        case "BT":
-                            Array.Copy(Identity, tm, 6);
-                            Array.Copy(Identity, tlm, 6);
-                            break;
-
-                        // --- Text positioning (operate on the text line matrix) ---
-                        case "Td":
-                            if (operands.Count >= 2)
-                            {
-                                tlm = MulAffine(new[] { 1.0, 0, 0, 1, Num(operands[0]), Num(operands[1]) }, tlm);
-                                Array.Copy(tlm, tm, 6);
-                            }
-                            break;
-                        case "TD":
-                            if (operands.Count >= 2)
-                            {
-                                gs.TextLeading = -Num(operands[1]);
-                                tlm = MulAffine(new[] { 1.0, 0, 0, 1, Num(operands[0]), Num(operands[1]) }, tlm);
-                                Array.Copy(tlm, tm, 6);
-                            }
-                            break;
-                        case "Tm":
-                            if (operands.Count >= 6)
-                            {
-                                var m = new[] { Num(operands[0]), Num(operands[1]), Num(operands[2]),
-                                    Num(operands[3]), Num(operands[4]), Num(operands[5]) };
-                                Array.Copy(m, tm, 6); Array.Copy(m, tlm, 6);
-                            }
-                            break;
-                        case "TL":
-                            if (operands.Count >= 1)
-                                gs.TextLeading = Num(operands[0]);
-                            break;
-                        case "T*":
-                            tlm = MulAffine(new[] { 1.0, 0, 0, 1, 0, -gs.TextLeading }, tlm);
-                            Array.Copy(tlm, tm, 6);
-                            break;
-
-                        // --- Fill color (RGB) ---
-                        case "rg":
-                            if (operands.Count >= 3)
-                            { gs.FillR = Num(operands[0]); gs.FillG = Num(operands[1]); gs.FillB = Num(operands[2]); }
-                            break;
-
-                        // --- Stroke color (RGB) ---
-                        case "RG":
-                            if (operands.Count >= 3)
-                            { gs.StrokeR = Num(operands[0]); gs.StrokeG = Num(operands[1]); gs.StrokeB = Num(operands[2]); }
-                            break;
-
-                        // --- Grayscale fill ---
-                        case "g":
-                            if (operands.Count >= 1)
-                            {
-                                var gray = Num(operands[0]);
-                                gs.FillR = gray; gs.FillG = gray; gs.FillB = gray;
-                            }
-                            break;
-
-                        // --- Grayscale stroke ---
-                        case "G":
-                            if (operands.Count >= 1)
-                            {
-                                var gray = Num(operands[0]);
-                                gs.StrokeR = gray; gs.StrokeG = gray; gs.StrokeB = gray;
-                            }
-                            break;
-
-                        // --- CMYK fill ---
-                        case "k":
-                            if (operands.Count >= 4)
-                            {
-                                CmykToRgb(Num(operands[0]), Num(operands[1]), Num(operands[2]), Num(operands[3]),
-                                    out gs.FillR, out gs.FillG, out gs.FillB);
-                            }
-                            break;
-
-                        // --- CMYK stroke ---
-                        case "K":
-                            if (operands.Count >= 4)
-                            {
-                                CmykToRgb(Num(operands[0]), Num(operands[1]), Num(operands[2]), Num(operands[3]),
-                                    out gs.StrokeR, out gs.StrokeG, out gs.StrokeB);
-                            }
-                            break;
-
-                        // --- Colorspace-relative fill/stroke colour (sc/scn, SC/SCN) ---
-                        // The colorspace is set via cs/CS to a named space; rather than
-                        // resolve it, infer from the numeric operand count (1=gray,
-                        // 3=rgb, 4=cmyk). Without this, sc-coloured content (e.g. white
-                        // 1 1 1 sc interiors) all defaulted to black.
-                        case "cs":
-                        case "CS":
-                            if (operands.Count >= 1 && operands[0] is PdfName csn)
-                            {
-                                var resolved = ResolveNamedColorSpace(csn.Value, resources, reader);
-                                if (op == "cs") gs.FillCs = resolved; else gs.StrokeCs = resolved;
-                            }
-                            break;
-                        case "sc":
-                        case "scn":
-                            if (!(gs.FillCs is { TintTransform: not null } fcs
-                                  && TintToRgb(fcs, operands, ref gs.FillR, ref gs.FillG, ref gs.FillB)))
-                                SetColorFromComponents(operands, ref gs.FillR, ref gs.FillG, ref gs.FillB);
-                            break;
-                        case "SC":
-                        case "SCN":
-                            if (!(gs.StrokeCs is { TintTransform: not null } scs
-                                  && TintToRgb(scs, operands, ref gs.StrokeR, ref gs.StrokeG, ref gs.StrokeB)))
-                                SetColorFromComponents(operands, ref gs.StrokeR, ref gs.StrokeG, ref gs.StrokeB);
-                            break;
-
-                        // --- Text show: ' (move to next line then show) ---
-                        case "'":
-                            tlm = MulAffine(new[] { 1.0, 0, 0, 1, 0, -gs.TextLeading }, tlm);
-                            Array.Copy(tlm, tm, 6);
-                            if (operands.Count >= 1 && operands[0] is PdfString qs)
-                                ShowText(sb, gs, tm, new PdfObject[] { qs }, reader, links);
-                            break;
-
                         // --- Text show: " (set word+char spacing, next line, show) ---
                         case "\"":
-                            if (operands.Count >= 3 && operands[2] is PdfString dqs)
+                            if (sv.operands.Count >= 3 && sv.operands[2] is PdfString dqs)
                             {
-                                gs.WordSpacing = Num(operands[0]);
-                                gs.CharSpacing = Num(operands[1]);
-                                tlm = MulAffine(new[] { 1.0, 0, 0, 1, 0, -gs.TextLeading }, tlm);
-                                Array.Copy(tlm, tm, 6);
-                                ShowText(sb, gs, tm, new PdfObject[] { dqs }, reader, links);
+                                sv.gs.WordSpacing = Num(sv.operands[0]);
+                                sv.gs.CharSpacing = Num(sv.operands[1]);
+                                sv.tlm = MulAffine(new[] { 1.0, 0, 0, 1, 0, -sv.gs.TextLeading }, sv.tlm);
+                                Array.Copy(sv.tlm, sv.tm, 6);
+                                ShowText(sb, sv.gs, sv.tm, new PdfObject[] { dqs }, reader, links);
                             }
                             break;
 
-                        // --- Text show ---
-                        case "Tj":
-                            if (operands.Count >= 1 && operands[0] is PdfString s)
-                                ShowText(sb, gs, tm, new PdfObject[] { s }, reader, links);
+                        case "m": case "l": case "c": case "v": case "y": case "h": case "re": case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n": case "Do":
+                            if (RenderSvgPathOperator(sv, sb, resources, reader, depth, usedBlendModes, links, op)) return;
                             break;
-                        case "TJ":
-                            if (operands.Count >= 1 && operands[0] is PdfArray tja)
-                                ShowText(sb, gs, tm, tja.ToArray(), reader, links);
-                            break;
-
-                        // --- Path construction (coordinates transformed by the CTM) ---
-                        case "m": // moveto
-                            if (operands.Count >= 2)
-                            {
-                                curX = Num(operands[0]); curY = Num(operands[1]);
-                                var (px, py) = Apply(gs.Ctm, curX, curY);
-                                pathData.Append($"M{F(px)} {F(py)} ");
-                            }
-                            break;
-                        case "l": // lineto
-                            if (operands.Count >= 2)
-                            {
-                                curX = Num(operands[0]); curY = Num(operands[1]);
-                                var (px, py) = Apply(gs.Ctm, curX, curY);
-                                // Polylines are emitted as edge
-                                // pairs, so every line vertex appears twice —
-                                // geometrically a no-op, kept so the path matches the expected output.
-                                pathData.Append($"L{F(px)} {F(py)} L{F(px)} {F(py)} ");
-                            }
-                            break;
-                        case "c": // curveto
-                            if (operands.Count >= 6)
-                            {
-                                var (x1, y1) = Apply(gs.Ctm, Num(operands[0]), Num(operands[1]));
-                                var (x2, y2) = Apply(gs.Ctm, Num(operands[2]), Num(operands[3]));
-                                curX = Num(operands[4]); curY = Num(operands[5]);
-                                var (x3, y3) = Apply(gs.Ctm, curX, curY);
-                                pathData.Append($"C{F(x1)} {F(y1)} {F(x2)} {F(y2)} {F(x3)} {F(y3)} ");
-                            }
-                            break;
-                        case "v": // curveto (initial point replicated)
-                            if (operands.Count >= 4)
-                            {
-                                var (x1, y1) = Apply(gs.Ctm, curX, curY);
-                                var (x2, y2) = Apply(gs.Ctm, Num(operands[0]), Num(operands[1]));
-                                curX = Num(operands[2]); curY = Num(operands[3]);
-                                var (x3, y3) = Apply(gs.Ctm, curX, curY);
-                                pathData.Append($"C{F(x1)} {F(y1)} {F(x2)} {F(y2)} {F(x3)} {F(y3)} ");
-                            }
-                            break;
-                        case "y": // curveto (final point replicated)
-                            if (operands.Count >= 4)
-                            {
-                                var (x1, y1) = Apply(gs.Ctm, Num(operands[0]), Num(operands[1]));
-                                curX = Num(operands[2]); curY = Num(operands[3]);
-                                var (x3, y3) = Apply(gs.Ctm, curX, curY);
-                                pathData.Append($"C{F(x1)} {F(y1)} {F(x3)} {F(y3)} {F(x3)} {F(y3)} ");
-                            }
-                            break;
-                        case "h": // closepath
-                            pathData.Append("Z ");
-                            break;
-                        case "re":
-                            if (operands.Count >= 4)
-                            {
-                                var rx = Num(operands[0]); var ry = Num(operands[1]);
-                                var rw = Num(operands[2]); var rh = Num(operands[3]);
-                                var (p1x, p1y) = Apply(gs.Ctm, rx, ry);
-                                var (p2x, p2y) = Apply(gs.Ctm, rx + rw, ry);
-                                var (p3x, p3y) = Apply(gs.Ctm, rx + rw, ry + rh);
-                                var (p4x, p4y) = Apply(gs.Ctm, rx, ry + rh);
-                                pathData.Append($"M{F(p1x)} {F(p1y)} L{F(p2x)} {F(p2y)} L{F(p2x)} {F(p2y)} " +
-                                    $"L{F(p3x)} {F(p3y)} L{F(p3x)} {F(p3y)} L{F(p4x)} {F(p4y)} L{F(p4x)} {F(p4y)} " +
-                                    $"L{F(p1x)} {F(p1y)} Z ");
-                                curX = rx; curY = ry;
-                            }
-                            break;
-
-                        // --- Path painting ---
-                        case "S": // stroke
-                            if (pathData.Length > 0)
-                            {
-                                EmitPath(sb, gs, pathData.ToString().Trim(), stroke: true, fill: false, evenOdd: false);
-                                pathData.Clear();
-                            }
-                            break;
-                        case "s": // close and stroke
-                            pathData.Append("Z ");
-                            goto case "S";
-                        case "f" or "F": // fill (nonzero)
-                            if (pathData.Length > 0)
-                            {
-                                EmitPath(sb, gs, pathData.ToString().Trim(), stroke: false, fill: true, evenOdd: false);
-                                pathData.Clear();
-                            }
-                            break;
-                        case "f*": // fill (even-odd)
-                            if (pathData.Length > 0)
-                            {
-                                EmitPath(sb, gs, pathData.ToString().Trim(), stroke: false, fill: true, evenOdd: true);
-                                pathData.Clear();
-                            }
-                            break;
-                        case "B": // fill and stroke (nonzero)
-                            if (pathData.Length > 0)
-                            {
-                                EmitPath(sb, gs, pathData.ToString().Trim(), stroke: true, fill: true, evenOdd: false);
-                                pathData.Clear();
-                            }
-                            break;
-                        case "B*": // fill and stroke (even-odd)
-                            if (pathData.Length > 0)
-                            {
-                                EmitPath(sb, gs, pathData.ToString().Trim(), stroke: true, fill: true, evenOdd: true);
-                                pathData.Clear();
-                            }
-                            break;
-                        case "b": // close, fill and stroke (nonzero)
-                            pathData.Append("Z ");
-                            if (pathData.Length > 0)
-                            {
-                                EmitPath(sb, gs, pathData.ToString().Trim(), stroke: true, fill: true, evenOdd: false);
-                                pathData.Clear();
-                            }
-                            break;
-                        case "b*": // close, fill and stroke (even-odd)
-                            pathData.Append("Z ");
-                            if (pathData.Length > 0)
-                            {
-                                EmitPath(sb, gs, pathData.ToString().Trim(), stroke: true, fill: true, evenOdd: true);
-                                pathData.Clear();
-                            }
-                            break;
-                        case "n": // end path (no fill, no stroke)
-                            pathData.Clear();
-                            break;
-                        // --- XObject invocation (Form recursion) ---
-                        case "Do":
-                            if (operands.Count >= 1 && operands[0] is PdfName xn)
-                                RenderXObject(xn.Value, resources, reader, sb, depth, gs, usedBlendModes, links);
-                            break;
-
                         case "BI":
-                            SkipInlineImage(lexer);
-                            operands.Clear();
+                            SkipInlineImage(sv.lexer);
+                            sv.operands.Clear();
                             continue;
                     }
-                    operands.Clear();
+                    sv.operands.Clear();
                     break;
                 }
                 default:
-                    operands.Clear();
+                    sv.operands.Clear();
                     break;
             }
         }
@@ -492,7 +125,7 @@ public sealed partial class SvgDevice
                 var seg = isCid ? new[] { bytes[i], bytes[i + 1] } : new[] { bytes[i] };
                 var glyph = gs.FontDict is not null
                     ? Text.TextAbsorber.DecodeStringPublic(seg, gs.ToUnicode, gs.FontDict, reader)
-                    : Encoding.Latin1.GetString(seg);
+                    : Compat.Latin1.GetString(seg);
                 // A glyph whose decode is empty or XML-invalid (unmapped codes often
                 // carry U+FFFF from a bfrange to FFFF) still occupies a slot on the
                 // line. Substitute the PUA char U+A880 — the "SVG space" — so the
@@ -533,9 +166,11 @@ public sealed partial class SvgDevice
     {
         var fs = gs.FontSize;
         var th = gs.HorizScale;
-        var fill = FormatHex(gs.FillR, gs.FillG, gs.FillB);
+        var fill = FormatHex(gs.FillR, gs.FillG, gs.FillB, gs.FillAlpha);
         var style = new StringBuilder();
         style.Append($"fill:{fill};font-family:{gs.FontName};");
+        // As on the path side, the companion declaration is written BESIDE the colour's own
+        // alpha - here in the style string rather than as an attribute.
         if (gs.FillAlpha < 1.0)
             style.Append($"fill-opacity:{F(gs.FillAlpha)};");
         if (gs.BlendMode != "Normal")
@@ -604,8 +239,11 @@ public sealed partial class SvgDevice
 
         if (fill)
         {
-            var fillColor = FormatHex(gs.FillR, gs.FillG, gs.FillB);
+            var fillColor = FormatHex(gs.FillR, gs.FillG, gs.FillB, gs.FillAlpha);
             attrs.Append($" fill=\"{fillColor}\"");
+            // The reference writes the companion attribute AS WELL as the colour's alpha byte
+            // (a corpus assertion counts 16 of `fill-opacity="0" pointer-events="none"`), so both are
+            // emitted even though SVG multiplies them - matching the reference is the contract.
             if (gs.FillAlpha < 1.0)
             {
                 attrs.Append($" fill-opacity=\"{F(gs.FillAlpha)}\"");
@@ -625,7 +263,7 @@ public sealed partial class SvgDevice
         if (stroke)
         {
             var scale = gs.CtmScale;
-            var strokeColor = FormatHex(gs.StrokeR, gs.StrokeG, gs.StrokeB);
+            var strokeColor = FormatHex(gs.StrokeR, gs.StrokeG, gs.StrokeB, gs.StrokeAlpha);
             attrs.Append($" stroke=\"{strokeColor}\"");
             if (gs.StrokeAlpha < 1.0)
                 attrs.Append($" stroke-opacity=\"{F(gs.StrokeAlpha)}\"");

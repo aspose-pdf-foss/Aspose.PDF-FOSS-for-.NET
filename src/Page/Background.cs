@@ -4,7 +4,6 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Operators;
 using Aspose.Pdf.Shading;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -126,7 +125,7 @@ public sealed partial class Page
     /// <summary>Scan a raw (form XObject) content stream for a full-page fill.</summary>
     private static Color? ScanBytesForBackground(byte[] bytes, Rectangle mb)
     {
-        var text = System.Text.Encoding.Latin1.GetString(bytes);
+        var text = Compat.Latin1.GetString(bytes);
         double r = 0, g = 0, b = 0;
         var colorSet = false;
         double reX = 0, reY = 0, reW = 0, reH = 0;
@@ -240,7 +239,7 @@ public sealed partial class Page
             // Finding the artifact needs no platform support; only turning it into a
             // System.Drawing.Image does. Say the watermark is THERE and let the image
             // itself report what this host cannot do.
-            if (!OperatingSystem.IsWindows()) return new Watermark(imageNeedsPlatform: true);
+            if (!Compat.IsWindows()) return new Watermark(imageNeedsPlatform: true);
             try
             {
                 return new Watermark(LoadWatermarkImage(xi));

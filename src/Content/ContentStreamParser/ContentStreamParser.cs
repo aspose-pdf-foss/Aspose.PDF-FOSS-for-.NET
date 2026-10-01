@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Content;
@@ -48,6 +48,27 @@ internal sealed partial class ContentStreamParser
     /// <summary>Fired for any operator (operator name, operand count, state).</summary>
     public event Action<string, int, GraphicsState>? OnOperator;
 
+    /// <summary>
+    /// Offered every instruction, with its operands, BEFORE this parser acts on
+    /// it -- and may take it over.
+    ///
+    /// ⚠ Not an event, and it could not be one: an event cannot answer. The
+    /// whole point is the answer, which says whether the parser should go on to
+    /// act on the instruction itself.
+    ///
+    /// Left null the parser behaves exactly as it always has.
+    /// </summary>
+    public IInstructionHandler? Handler { get; set; }
+
+    /// <summary>
+    /// Whether a number fused onto an operator is broken apart — see
+    /// <see cref="PdfLexer.Salvaging"/> for what that rescues and what it costs.
+    ///
+    /// On by default, which is the reading that recovers the most pages. A
+    /// caller reproducing another reader's answers turns it off.
+    /// </summary>
+    public bool Salvaging { get; set; } = true;
+
     /// <summary>Fired when marked content begins (BMC/BDC). Tag name and optional properties dict.</summary>
     public event Action<string, PdfDictionary?>? OnMarkedContentBegin;
 
@@ -79,6 +100,26 @@ internal sealed partial class ContentStreamParser
     /// to look the name up in its /Shading resource dictionary and rasterise accordingly.
     /// </summary>
     public event Action<string, GraphicsState>? OnShadingPainted;
+
+    /// <summary>Byte offset in the parsed stream just past the operator being processed: its
+    /// keyword, or the <c>EI</c> of an inline image. Valid while that operator's events fire,
+    /// so a caller can split the stream at operator boundaries.</summary>
+    internal long OperatorEnd { get; private set; }
+
+    /// <summary>Fired once an inline image (BI … ID … EI) has been consumed, with
+    /// <see cref="OperatorEnd"/> just past its EI.</summary>
+    internal event Action? OnInlineImageEnd;
+
+    /// <summary>Fired after each <see cref="OnTextShown"/> once the text position has
+    /// advanced past the shown string, so the state's pen is at the string's end.</summary>
+    internal event Action<GraphicsState>? OnTextShownEnd;
+
+    /// <summary>Fired for each shown string once its codes are measured and before the text
+    /// position advances: per code, the byte offset just past it in the string and the
+    /// displacement (text space, font size and scaling applied) from the string's start to
+    /// the code's end. A horizontal string's code ends at x = start + advance along the text
+    /// matrix; a vertical one's runs down.</summary>
+    internal event Action<IReadOnlyList<(int ByteEnd, double Advance)>, GraphicsState>? OnTextCodeAdvances;
 
     /// <summary>
     /// Parse a content stream, updating state and firing events.
@@ -156,65 +197,12 @@ internal sealed partial class ContentStreamParser
         _barePatternColorSpaces.Clear();
         _labEncColorSpaces.Clear();
         _labColorSpaces.Clear();
-        if (colorSpaces is not null)
-        {
-            foreach (var name in colorSpaces.Keys)
-            {
-                var resolved = _reader.Resolve(colorSpaces.Get(name));
-                // An UNCOLOURED pattern space — [/Pattern baseColourSpace] — is
-                // always pinned: the numeric scn operands supply the colour the
-                // renderer paints the tiling cell mask with, and FOSS renders these.
-                if (resolved is PdfArray parr && parr.Count >= 2 && (parr[0] as PdfName)?.Value == "Pattern")
-                { _patternColorSpaces.Add(name); continue; }
-                // A bare /Pattern name or [/Pattern] (a coloured pattern that carries
-                // its own colour operators) is recorded separately. A `scn` naming it
-                // is only routed to the renderer when the referenced pattern is a
-                // shading pattern (PatternType 2), which FOSS rasterises; coloured
-                // tiling cells (PatternType 1) stay on the legacy solid-fill path so
-                // they keep their last solid colour instead of rendering blank.
-                if ((resolved is PdfName pn && pn.Value == "Pattern")
-                    || (resolved is PdfArray bp && bp.Count >= 1 && (bp[0] as PdfName)?.Value == "Pattern"))
-                { _barePatternColorSpaces.Add(name); continue; }
-                if (resolved is not PdfArray arr) continue;
-                // A named [/ICCBased <stream>] space whose profile is a scanner-class
-                // (Lab-encoded) profile: producers like pdfDocs write RAW Lab-ish scn
-                // operands against it (e.g. "100 -1 -1 scn"); record it so scn can
-                // clamp + decode instead of misreading the components as display RGB.
-                if (arr.Count >= 2 && (arr[0] as PdfName)?.Value == "ICCBased"
-                    && IsLabEncodedIcc(arr[1]))
-                { _labEncColorSpaces.Add(name); continue; }
-                if (arr.Count >= 1 && (arr[0] as PdfName)?.Value == "Lab")
-                { _labColorSpaces.Add(name); continue; }
-                if (arr.Count < 4) continue;
-                var familyName = (arr[0] as PdfName)?.Value;
-                if (familyName != "Separation" && familyName != "DeviceN") continue;
-                var altSpace = ResolveAltSpaceName(arr[2]);
-                var tint = altSpace is null ? null : Functions.PdfFunction.Parse(arr[3], _reader);
-                // A scanner-class ICC alternate carries no marker for how the tint
-                // output is ENCODED — some producers emit Lab-encoded channels
-                // (L/100, (a|b+128)/255), others plain display RGB against the same
-                // profile class. The no-ink end disambiguates: tint(0) must be paper
-                // white, which is (1, ~0.5, ~0.5) in the Lab encoding but (1, 1, 1)
-                // in display RGB. Only keep the LabEnc decode when the function
-                // actually lands near the Lab-encoded white.
-                if (altSpace == "LabEnc" && tint is not null)
-                {
-                    var zero = tint.Evaluate(new double[] { 0 });
-                    bool labWhite = zero is { Length: >= 3 }
-                        && Math.Abs(zero[1] - 0.5) < 0.25 && Math.Abs(zero[2] - 0.5) < 0.25;
-                    if (!labWhite) altSpace = "DeviceRGB";
-                }
-                if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_CSDEBUG") == "1")
-                    Console.Error.WriteLine($"[cs] {name} family={familyName} alt={altSpace ?? "NULL"} tint={(tint is null ? "NULL" : tint.GetType().Name)}");
-                if (altSpace is null || tint is null) continue;
-                _tintColorSpaces[name] = (tint, altSpace);
-            }
-        }
+        RegisterColorSpaces(colorSpaces);
 
-        var lexer = new PdfLexer(streamBytes);
+        var lexer = new PdfLexer(streamBytes) { Salvaging = Salvaging };
         var operands = new List<PdfObject>();
-        string? currentFontKey = null;
-        Dictionary<int, string>? currentToUnicode = toUnicode;
+        _currentFontKey = null;
+        _currentToUnicode = toUnicode;
         int tokenCount = 0;
         // Safety guard against malformed streams (a lexer that stops advancing).
         // A well-formed token consumes at least one input byte, so the byte count
@@ -261,10 +249,21 @@ internal sealed partial class ContentStreamParser
                     {
                         // Inline image: parse dict entries until ID, then read binary data until EI
                         ParseInlineImage(lexer);
+                        OperatorEnd = lexer.Position;
+                        OnInlineImageEnd?.Invoke();
                         operands.Clear();
                         break;
                     }
-                    ProcessOperator(op, operands, fonts, extGStates, ref currentFontKey, ref currentToUnicode);
+                    OperatorEnd = lexer.Position;
+                    // ⚠ Offered BEFORE the parser acts, and the answer decides
+                    // whether it acts at all. Offering it afterwards would let a
+                    // handler see the instruction and never prevent it, which is
+                    // what OnOperator below does and why it is not enough on its
+                    // own. The instruction is passed apart from its operands;
+                    // a caller whose own convention puts it at the end of the
+                    // list appends it itself.
+                    if (Handler?.Handled(op, operands, _state) != true)
+                        ProcessOperator(op, operands, fonts, extGStates);
                     OnOperator?.Invoke(op, operands.Count, _state);
                     operands.Clear();
                     break;
@@ -285,6 +284,10 @@ internal sealed partial class ContentStreamParser
         "Tj", "TJ", "'", "\"", "Do",
     };
 
+    /// <summary>The font the text state currently shows in: its resource key, and the ToUnicode map
+    /// the shown strings decode through. Reset at the start of every parse.</summary>
+    private string? _currentFontKey;
+    private Dictionary<int, string>? _currentToUnicode;
     private Text.FontMetrics? _currentMetrics;
     private Text.CidFontInfo? _currentCidInfo;
 
@@ -343,5 +346,64 @@ internal sealed partial class ContentStreamParser
             dict.Set(keyToken.StringValue!, value);
         }
         return dict;
+    }
+
+    /// <summary>The named colour spaces of the resources sorted into the tint, pattern, bare-pattern and Lab tables the operators consult.</summary>
+    private void RegisterColorSpaces(PdfDictionary? colorSpaces)
+    {
+        if (colorSpaces is not null)
+        {
+            foreach (var name in colorSpaces.Keys)
+            {
+                var resolved = _reader.Resolve(colorSpaces.Get(name));
+                // An UNCOLOURED pattern space — [/Pattern baseColourSpace] — is
+                // always pinned: the numeric scn operands supply the colour the
+                // renderer paints the tiling cell mask with, and FOSS renders these.
+                if (resolved is PdfArray parr && parr.Count >= 2 && (parr[0] as PdfName)?.Value == "Pattern")
+                { _patternColorSpaces.Add(name); continue; }
+                // A bare /Pattern name or [/Pattern] (a coloured pattern that carries
+                // its own colour operators) is recorded separately. A `scn` naming it
+                // is only routed to the renderer when the referenced pattern is a
+                // shading pattern (PatternType 2), which FOSS rasterises; coloured
+                // tiling cells (PatternType 1) stay on the legacy solid-fill path so
+                // they keep their last solid colour instead of rendering blank.
+                if ((resolved is PdfName pn && pn.Value == "Pattern")
+                    || (resolved is PdfArray bp && bp.Count >= 1 && (bp[0] as PdfName)?.Value == "Pattern"))
+                { _barePatternColorSpaces.Add(name); continue; }
+                if (resolved is not PdfArray arr) continue;
+                // A named [/ICCBased <stream>] space whose profile is a scanner-class
+                // (Lab-encoded) profile: producers like pdfDocs write RAW Lab-ish scn
+                // operands against it (e.g. "100 -1 -1 scn"); record it so scn can
+                // clamp + decode instead of misreading the components as display RGB.
+                if (arr.Count >= 2 && (arr[0] as PdfName)?.Value == "ICCBased"
+                    && IsLabEncodedIcc(arr[1]))
+                { _labEncColorSpaces.Add(name); continue; }
+                if (arr.Count >= 1 && (arr[0] as PdfName)?.Value == "Lab")
+                { _labColorSpaces.Add(name); continue; }
+                if (arr.Count < 4) continue;
+                var familyName = (arr[0] as PdfName)?.Value;
+                if (familyName != "Separation" && familyName != "DeviceN") continue;
+                var altSpace = ResolveAltSpaceName(arr[2]);
+                var tint = altSpace is null ? null : Functions.PdfFunction.Parse(arr[3], _reader);
+                // A scanner-class ICC alternate carries no marker for how the tint
+                // output is ENCODED — some producers emit Lab-encoded channels
+                // (L/100, (a|b+128)/255), others plain display RGB against the same
+                // profile class. The no-ink end disambiguates: tint(0) must be paper
+                // white, which is (1, ~0.5, ~0.5) in the Lab encoding but (1, 1, 1)
+                // in display RGB. Only keep the LabEnc decode when the function
+                // actually lands near the Lab-encoded white.
+                if (altSpace == "LabEnc" && tint is not null)
+                {
+                    var zero = tint.Evaluate(new double[] { 0 });
+                    bool labWhite = zero is { Length: >= 3 }
+                        && Math.Abs(zero[1] - 0.5) < 0.25 && Math.Abs(zero[2] - 0.5) < 0.25;
+                    if (!labWhite) altSpace = "DeviceRGB";
+                }
+                if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_CSDEBUG") == "1")
+                    Console.Error.WriteLine($"[cs] {name} family={familyName} alt={altSpace ?? "NULL"} tint={(tint is null ? "NULL" : tint.GetType().Name)}");
+                if (altSpace is null || tint is null) continue;
+                _tintColorSpaces[name] = (tint, altSpace);
+            }
+        }
     }
 }

@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -145,112 +145,84 @@ internal static partial class SvgToPdfConverter
 
     private static void RenderShape(XmlElement elem, Ctx ctx, Dictionary<string, string> style, double[] ctm)
     {
-        var (pathData, bbox, vertices) = BuildShapePath(elem, ctx);
+        var sr = new ShapeRenderState();
+        sr.elem = elem;
+        sr.ctx = ctx;
+        sr.style = style;
+        sr.ctm = ctm;
+        var (pathData, bbox, vertices) = BuildShapePath(sr.elem, sr.ctx);
         if (pathData.Length == 0) return;
 
-        var sb = ctx.Surface.Sb;
-        sb.Append("q\n");
-        var newCtm = ApplyTransform(elem, sb, ctm);
-        ApplyClipPath(style, ctx, newCtm);
-        ApplyMask(style, ctx, newCtm);
+        sr.sb = sr.ctx.Surface.Sb;
+        sr.sb.Append("q\n");
+        sr.newCtm = ApplyTransform(sr.elem, sr.sb, sr.ctm);
+        ApplyClipPath(sr.style, sr.ctx, sr.newCtm);
+        ApplyMask(sr.style, sr.ctx, sr.newCtm);
 
-        var visible = Prop(style, "visibility") != "hidden";
+        sr.visible = Prop(sr.style, "visibility") != "hidden";
 
-        var fillVal = Prop(style, "fill");
-        var strokeVal = Prop(style, "stroke");
-        bool hasFill = visible && !IsNoPaint(fillVal);
-        // stroke-width:0 is NO stroke (a PDF `0 w` would still draw the
-        // thinnest device line — the list box strokes nothing).
-        bool hasStroke = visible && !IsNoPaint(strokeVal)
-            && ParseLength(Prop(style, "stroke-width")) > 0;
-        bool fillIsPattern = false;
+        sr.fillVal = Prop(sr.style, "fill");
+        sr.strokeVal = Prop(sr.style, "stroke");
+        sr.hasFill = sr.visible && !IsNoPaint(sr.fillVal);
+        // stroke-width:0 as a presentation ATTRIBUTE is no stroke (the list box strokes
+        // nothing), but `stroke-width: 0px` set by a STYLE still strokes: the reference writes
+        // `0 w` and draws the thinnest device line (probed 2026-09-17 on a dashboard chart's viewport
+        // rectangle, whose style declares 0px, and which the reference strokes as a hairline).
+        var strokeWidth = ParseLength(Prop(sr.style, "stroke-width"));
+        bool hasStroke = sr.visible && !IsNoPaint(sr.strokeVal)
+            && (strokeWidth > 0 || sr.style.ContainsKey(StrokeWidthFromStyle));
+        sr.fillIsPattern = false;
         // A gradient fill whose every stop is nearly transparent is a sheen
         // overlay — skip it rather than white out what it covers.
-        if (hasFill && ParseUrlRef(fillVal) is { } sheenUrl
-            && ctx.Defs.TryGetValue(sheenUrl, out var sheenEl) && IsGradient(sheenEl)
-            && MaxStopOpacity(sheenEl, ctx) <= 0.25)
-            hasFill = false;
+        if (sr.hasFill && ParseUrlRef(sr.fillVal) is { } sheenUrl
+            && sr.ctx.Defs.TryGetValue(sheenUrl, out var sheenEl) && IsGradient(sheenEl)
+            && MaxStopOpacity(sheenEl, sr.ctx) <= 0.25)
+            sr.hasFill = false;
 
-        // A <pattern> paint server becomes a PDF tiling pattern; a tile with
-        // no area disables the fill (SVG's none-rendering rule).
-        string? tilingName = null;
-        if (hasFill && ParseUrlRef(fillVal) is { } tileUrl
-            && ctx.Defs.TryGetValue(tileUrl, out var tileEl) && tileEl.LocalName == "pattern")
+        sr.tilingName = null;
+        if (sr.hasFill && ParseUrlRef(sr.fillVal) is { } tileUrl
+            && sr.ctx.Defs.TryGetValue(tileUrl, out var tileEl) && tileEl.LocalName == "pattern")
         {
-            tilingName = RegisterTilingPattern(tileEl, ctx, newCtm, bbox);
-            if (tilingName is null) hasFill = false;
+            sr.tilingName = RegisterTilingPattern(tileEl, sr.ctx, sr.newCtm, bbox);
+            if (sr.tilingName is null) sr.hasFill = false;
         }
 
-        var opacity = ParseOpacity(style.GetValueOrDefault("opacity"));
-        var fillOpacity = opacity * ParseOpacity(Prop(style, "fill-opacity"));
-        var strokeOpacity = opacity * ParseOpacity(Prop(style, "stroke-opacity"));
-        if (fillOpacity < 0.999 || strokeOpacity < 0.999)
-            sb.Append($"/{RegisterAlphaGs(ctx, fillOpacity, strokeOpacity)} gs\n");
+        // Each paint's opacity is a state of its own, allocated as AlphaGsFor says - the
+        // stroke's first, as the reference writes them. The element's own `opacity` still
+        // scales both: a synthetic probe (2026-09-17) found the reference ignoring it, but a
+        // real chart's `style="opacity: 0"` zoom rectangle is absent from the reference's own
+        // render, so the real document wins until a probe settles the style-declared case.
+        sr.opacity = ParseOpacity(sr.style.GetValueOrDefault("opacity"));
+        sr.fillOpacity = sr.opacity * ParseOpacity(Prop(sr.style, "fill-opacity"));
+        sr.strokeOpacity = sr.opacity * ParseOpacity(Prop(sr.style, "stroke-opacity"));
+        if (hasStroke && AlphaGsFor(sr.ctx, sr.strokeOpacity, stroke: true) is { } strokeGs)
+            sr.sb.Append($"/{strokeGs} gs\n");
+        if (sr.hasFill && AlphaGsFor(sr.ctx, sr.fillOpacity, stroke: false) is { } fillGs)
+            sr.sb.Append($"/{fillGs} gs\n");
 
-        if (hasFill)
+        if (sr.hasFill)
         {
-            var url = ParseUrlRef(fillVal);
-            if (tilingName is not null)
-            {
-                sb.Append($"/Pattern cs /{tilingName} scn\n");
-                fillIsPattern = true;
-            }
-            else if (url is not null && ctx.Defs.TryGetValue(url, out var gradEl) && IsGradient(gradEl))
-            {
-                var patName = RegisterGradientPattern(gradEl, ctx, newCtm, bbox);
-                if (patName is not null)
-                {
-                    sb.Append($"/Pattern cs /{patName} scn\n");
-                    fillIsPattern = true;
-                }
-                else
-                {
-                    var (r, g, b) = AverageGradientColor(gradEl, ctx);
-                    sb.Append($"{F(r)} {F(g)} {F(b)} rg\n");
-                }
-            }
-            else if (url is not null)
-            {
-                // Unresolvable paint server: paint black (matches historic behaviour that
-                // kept white artwork on url() backgrounds visible).
-                sb.Append("0 0 0 rg\n");
-            }
-            else
-            {
-                var (r, g, b) = ParseColor(fillVal);
-                sb.Append($"{F(r)} {F(g)} {F(b)} rg\n");
-            }
+            FillShape(sr, bbox);
         }
         if (hasStroke)
         {
-            var url = ParseUrlRef(strokeVal);
-            if (url is not null && ctx.Defs.TryGetValue(url, out var gradEl) && IsGradient(gradEl))
-            {
-                var (r, g, b) = AverageGradientColor(gradEl, ctx);
-                sb.Append($"{F(r)} {F(g)} {F(b)} RG\n");
-            }
-            else if (url is null)
-            {
-                var (r, g, b) = ParseColor(strokeVal);
-                sb.Append($"{F(r)} {F(g)} {F(b)} RG\n");
-            }
-            EmitStrokeState(style, sb, ctx);
+            StrokeShape(sr);
         }
 
-        sb.Append(pathData);
+        sr.sb.Append(pathData);
 
-        bool evenOdd = Prop(style, "fill-rule") == "evenodd";
-        if (hasFill && hasStroke) sb.Append(evenOdd ? "B*\n" : "B\n");
-        else if (hasStroke) sb.Append("S\n");
-        else if (hasFill) sb.Append(evenOdd ? "f*\n" : "f\n");
-        else sb.Append("n\n");
+        sr.evenOdd = Prop(sr.style, "fill-rule") == "evenodd";
+        if (sr.hasFill && hasStroke) sr.sb.Append(sr.evenOdd ? "B*\n" : "B\n");
+        else if (hasStroke) sr.sb.Append("S\n");
+        else if (sr.hasFill) sr.sb.Append(sr.evenOdd ? "f*\n" : "f\n");
+        else sr.sb.Append("n\n");
 
-        _ = fillIsPattern;
+        _ = sr.fillIsPattern;
 
-        if (visible && vertices.Count >= 2)
-            RenderMarkers(elem, ctx, style, newCtm, vertices);
+        if (sr.visible && vertices.Count >= 2)
+            RenderMarkers(sr.elem, sr.ctx, sr.style, sr.newCtm, vertices);
 
-        sb.Append("Q\n");
+        sr.sb.Append("Q\n");
     }
 
     private static void RenderMarkers(XmlElement elem, Ctx ctx,
@@ -400,9 +372,14 @@ internal static partial class SvgToPdfConverter
             return;
         var sb = ctx.Surface.Sb;
         var any = false;
+        var evenOdd = false;
         foreach (XmlNode child in clipEl.ChildNodes)
         {
             if (child is not XmlElement shape) continue;
+            // clip-rule, on the shape or inherited from the clipPath: evenodd clips with W*.
+            var rule = shape.GetAttribute("clip-rule");
+            if (rule.Length == 0) rule = clipEl.GetAttribute("clip-rule");
+            evenOdd |= rule.Trim() == "evenodd";
             var (pathData, _, _) = BuildShapePath(shape, ctx);
             if (pathData.Length == 0 && shape.LocalName == "use")
             {
@@ -418,7 +395,7 @@ internal static partial class SvgToPdfConverter
             sb.Append(pathData);
             any = true;
         }
-        if (any) sb.Append("W n\n");
+        if (any) sb.Append(evenOdd ? "W* n\n" : "W n\n");
     }
 
     private static void ApplyMask(Dictionary<string, string> style, Ctx ctx, double[] ctm)
@@ -456,7 +433,7 @@ internal static partial class SvgToPdfConverter
         formDict.Set("Group", group);
         if (maskSurface.Resources.Keys.Any())
             formDict.Set("Resources", maskSurface.Resources);
-        var contentBytes = Encoding.Latin1.GetBytes(maskSurface.Sb.ToString());
+        var contentBytes = Compat.Latin1.GetBytes(maskSurface.Sb.ToString());
         formDict.Set("Length", new PdfInteger(contentBytes.Length));
         var form = new PdfStream(formDict, contentBytes);
 

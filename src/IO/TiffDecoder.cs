@@ -19,7 +19,7 @@ namespace Aspose.Pdf.IO;
 /// decoder, which paginates only the decodable frames of a damaged
 /// multi-frame file. Reduced-resolution (thumbnail) subfiles are skipped too.
 /// </summary>
-internal static class TiffDecoder
+internal static partial class TiffDecoder
 {
     internal static bool IsTiff(byte[] d) =>
         d is { Length: >= 8 } &&
@@ -28,7 +28,14 @@ internal static class TiffDecoder
 
     /// <summary>Decode every decodable frame to PNG bytes. Returns null when the
     /// data is not TIFF or no frame could be decoded.</summary>
-    internal static List<byte[]>? DecodeFramesAsPng(byte[] d)
+    internal static List<byte[]>? DecodeFramesAsPng(byte[] d) => DecodeFrames(d, jpegPassthrough: false);
+
+    /// <summary>Every decodable frame as PNG bytes — or, with <paramref name="jpegPassthrough"/>,
+    /// a baseline JPEG-compressed frame as its own JPEG stream (tables spliced in for the
+    /// new-style flavour), so a consumer that embeds JPEG verbatim keeps the frame's
+    /// bytes instead of re-rasterising them. Returns null when the data is not TIFF or no
+    /// frame could be decoded.</summary>
+    internal static List<byte[]>? DecodeFrames(byte[] d, bool jpegPassthrough)
     {
         if (!IsTiff(d)) return null;
         var le = d[0] == 0x49;
@@ -43,8 +50,8 @@ internal static class TiffDecoder
             if (chainEnd + 4 > d.Length) break;
             try
             {
-                var png = DecodeIfd(d, le, (int)ifd, n);
-                if (png is not null) frames.Add(png);
+                var frame = DecodeIfd(d, le, (int)ifd, n, jpegPassthrough);
+                if (frame is not null) frames.Add(frame);
             }
             catch
             {
@@ -55,61 +62,23 @@ internal static class TiffDecoder
         return frames.Count > 0 ? frames : null;
     }
 
-    private static byte[]? DecodeIfd(byte[] d, bool le, int ifd, int entryCount)
+    private static byte[]? DecodeIfd(byte[] d, bool le, int ifd, int entryCount, bool jpegPassthrough)
     {
-        long width = 0, height = 0, compression = 1, photometric = -1, fillOrder = 1;
-        long samplesPerPixel = 1, rowsPerStrip = long.MaxValue, planarConfig = 1, predictor = 1;
-        long newSubfileType = 0, t4Options = 0, tileWidth = 0, tileLength = 0;
-        long jpegIfOffset = 0, jpegIfLength = 0;
-        byte[]? jpegTables = null;
-        long[] bitsPerSample = { 1 };
-        long[]? stripOffsets = null, stripCounts = null, tileOffsets = null, tileCounts = null;
-        long[]? colorMap = null, extraSamples = null;
+        var tf = new TiffIfdState();
+        ResetTiffIfd(tf);
 
-        for (var e = 0; e < entryCount; e++)
-        {
-            var eo = ifd + 2 + e * 12;
-            int tag = U16(d, eo, le);
-            int type = U16(d, eo + 2, le);
-            long count = U32(d, eo + 4, le);
-            switch (tag)
-            {
-                case 254: newSubfileType = ReadValues(d, le, eo, type, count)[0]; break;
-                case 256: width = ReadValues(d, le, eo, type, count)[0]; break;
-                case 257: height = ReadValues(d, le, eo, type, count)[0]; break;
-                case 258: bitsPerSample = ReadValues(d, le, eo, type, count); break;
-                case 259: compression = ReadValues(d, le, eo, type, count)[0]; break;
-                case 262: photometric = ReadValues(d, le, eo, type, count)[0]; break;
-                case 266: fillOrder = ReadValues(d, le, eo, type, count)[0]; break;
-                case 273: stripOffsets = ReadValues(d, le, eo, type, count); break;
-                case 277: samplesPerPixel = ReadValues(d, le, eo, type, count)[0]; break;
-                case 278: rowsPerStrip = ReadValues(d, le, eo, type, count)[0]; break;
-                case 279: stripCounts = ReadValues(d, le, eo, type, count); break;
-                case 284: planarConfig = ReadValues(d, le, eo, type, count)[0]; break;
-                case 292: t4Options = ReadValues(d, le, eo, type, count)[0]; break;
-                case 317: predictor = ReadValues(d, le, eo, type, count)[0]; break;
-                case 320: colorMap = ReadValues(d, le, eo, type, count); break;
-                case 322: tileWidth = ReadValues(d, le, eo, type, count)[0]; break;
-                case 323: tileLength = ReadValues(d, le, eo, type, count)[0]; break;
-                case 324: tileOffsets = ReadValues(d, le, eo, type, count); break;
-                case 325: tileCounts = ReadValues(d, le, eo, type, count); break;
-                case 338: extraSamples = ReadValues(d, le, eo, type, count); break;
-                case 347: jpegTables = RawBytes(d, le, eo, type, count); break;
-                case 513: jpegIfOffset = ReadValues(d, le, eo, type, count)[0]; break;
-                case 514: jpegIfLength = ReadValues(d, le, eo, type, count)[0]; break;
-            }
-        }
+        ReadTiffTags(tf, d, le, ifd, entryCount);
 
         // Reduced-resolution subfile (thumbnail) — not a page.
-        if ((newSubfileType & 1) != 0) return null;
-        if (width <= 0 || height <= 0 || width > 65500 || height > 65500) return null;
-        if (width * height > 268_435_456) return null;                 // 256M px sanity cap
-        var spp = (int)Math.Max(1, samplesPerPixel);
-        if (spp > 5) return null;
-        var bps = (int)bitsPerSample[0];
-        foreach (var b in bitsPerSample)
-            if (b != bps && photometric != 6) return null;             // heterogeneous depths unsupported
-        if (bps is not (1 or 2 or 4 or 8 or 16)) return null;
+        if ((tf.newSubfileType & 1) != 0) return null;
+        if (tf.width <= 0 || tf.height <= 0 || tf.width > 65500 || tf.height > 65500) return null;
+        if (tf.width * tf.height > 268_435_456) return null;                 // 256M px sanity cap
+        tf.spp = (int)Math.Max(1, tf.samplesPerPixel);
+        if (tf.spp > 5) return null;
+        tf.bps = (int)tf.bitsPerSample[0];
+        foreach (var b in tf.bitsPerSample)
+            if (b != tf.bps && tf.photometric != 6) return null;             // heterogeneous depths unsupported
+        if (tf.bps is not (1 or 2 or 4 or 8 or 16)) return null;
         // JPEG-in-TIFF. Both flavours in practice carry the frame as ONE complete
         // stream: old-style (6) points at a whole JFIF file through JPEGInterchangeFormat,
         // and new-style (7) puts an abbreviated stream in a single strip whose quantisation
@@ -117,153 +86,28 @@ internal static class TiffDecoder
         // it to the managed JPEG decoder rather than declining the frame - the decline used
         // to be covered by the platform codec, which does not exist off Windows, so these
         // files lost their picture entirely there.
-        if (compression is 6 or 7)
-            return JpegFrameAsPng(d, le, compression, stripOffsets, stripCounts,
-                jpegTables, jpegIfOffset, jpegIfLength);
-        if (photometric is not (0 or 1 or 2 or 3 or 5)) return null;
-        if (planarConfig == 2 && bps != 8) return null;
-
-        var w = (int)width;
-        var h = (int)height;
-
-        // Decode strip/tile payloads into full-resolution sample rows (still at
-        // the source bit depth, chunky order).
-        byte[] raster;                                                  // packed rows, rowBytes each
-        int rowBytes;
-        if (tileOffsets is not null && tileWidth > 0 && tileLength > 0)
+        if (tf.compression is 6 or 7)
         {
-            if (planarConfig == 2) return null;                        // planar tiles unsupported
-            var tw = (int)tileWidth;
-            var th = (int)tileLength;
-            var tilesAcross = (w + tw - 1) / tw;
-            var tilesDown = (h + th - 1) / th;
-            if (tileOffsets.Length < tilesAcross * tilesDown) return null;
-            var tileRowBytes = (tw * bps * spp + 7) / 8;
-            rowBytes = (w * bps * spp + 7) / 8;
-            raster = new byte[(long)rowBytes * h];
-            for (var ty = 0; ty < tilesDown; ty++)
-            for (var tx = 0; tx < tilesAcross; tx++)
-            {
-                var ti = ty * tilesAcross + tx;
-                var expected = tileRowBytes * th;
-                var tile = DecodeSegment(d, le, stripOffset: tileOffsets[ti],
-                    stripCount: tileCounts is not null && ti < tileCounts.Length ? tileCounts[ti] : -1,
-                    compression, tw, th, expected, t4Options, predictor, spp, bps, fillOrder);
-                // Blit the tile rows into the raster, clipping the right/bottom edges.
-                for (var r = 0; r < th && ty * th + r < h; r++)
-                {
-                    var dstRow = (long)(ty * th + r) * rowBytes;
-                    var srcRow = (long)r * tileRowBytes;
-                    // Whole-byte copy is exact when tx*tw*bps*spp is byte-aligned,
-                    // which holds because tile widths are multiples of 16 (spec).
-                    var dstBit = (long)tx * tw * bps * spp;
-                    var copyBits = Math.Min((long)tw, w - (long)tx * tw) * bps * spp;
-                    var copyBytes = (int)((copyBits + 7) / 8);
-                    Array.Copy(tile, srcRow, raster, dstRow + dstBit / 8, copyBytes);
-                }
-            }
+            var jpeg = AssembleJpegFrame(d, tf.compression, tf.stripOffsets, tf.stripCounts,
+                tf.jpegTables, tf.jpegIfOffset, tf.jpegIfLength);
+            if (jpeg is null) return null;
+            // A baseline frame is a JPEG file in its own right: handed through, it embeds
+            // as the DCT stream it already is — no decode, no re-encode (a nine-page
+            // 300 dpi scan went from 33 MB of Flate in 12 s to its 4 MB of JPEG).
+            return jpegPassthrough && IsBaselineJpeg(jpeg) ? jpeg : JpegFrameAsPng(jpeg);
         }
-        else
-        {
-            if (stripOffsets is null) return null;
-            var rps = rowsPerStrip == long.MaxValue || rowsPerStrip <= 0 ? h : (int)Math.Min(rowsPerStrip, h);
-            var stripsPerPlane = (h + rps - 1) / rps;
-            var planes = planarConfig == 2 ? spp : 1;
-            if (stripOffsets.Length < stripsPerPlane * planes) return null;
-            var samplesPerRow = planarConfig == 2 ? 1 : spp;
-            rowBytes = (w * bps * samplesPerRow + 7) / 8;
-            var planeBytes = (long)rowBytes * h;
-            var packed = new byte[planeBytes * planes];
-            for (var pl = 0; pl < planes; pl++)
-            {
-                long rowsDone = 0;
-                for (var s = 0; s < stripsPerPlane; s++)
-                {
-                    var stripRows = (int)Math.Min(rps, h - rowsDone);
-                    var expected = rowBytes * stripRows;
-                    var si = pl * stripsPerPlane + s;
-                    var strip = DecodeSegment(d, le, stripOffsets[si],
-                        stripCounts is not null && si < stripCounts.Length ? stripCounts[si] : -1,
-                        compression, w, stripRows, expected, t4Options, predictor, samplesPerRow, bps, fillOrder);
-                    Array.Copy(strip, 0, packed, pl * planeBytes + rowsDone * rowBytes, expected);
-                    rowsDone += stripRows;
-                }
-            }
-            if (planes > 1)
-            {
-                // Interleave planar samples into chunky order (8-bit only, checked above).
-                var chunkyRowBytes = w * spp;
-                var chunky = new byte[(long)chunkyRowBytes * h];
-                for (long px = 0; px < (long)w * h; px++)
-                    for (var c = 0; c < spp; c++)
-                        chunky[px * spp + c] = packed[c * planeBytes + px];
-                raster = chunky;
-                rowBytes = chunkyRowBytes;
-            }
-            else
-                raster = packed;
-        }
+        if (tf.photometric is not (0 or 1 or 2 or 3 or 5)) return null;
+        if (tf.planarConfig == 2 && tf.bps != 8) return null;
 
-        // Expand to 8-bit samples in chunky order.
-        var samples = ExpandTo8Bit(raster, w, h, rowBytes, bps, spp, le);
+        tf.w = (int)tf.width;
+        tf.h = (int)tf.height;
+
+        if (!ReadTiffRaster(tf, d, le)) return null;
+
+        tf.samples = ExpandTo8Bit(tf.raster, tf.w, tf.h, tf.rowBytes, tf.bps, tf.spp, le);
 
         // Map to PNG gray / RGB / RGBA.
-        switch (photometric)
-        {
-            case 0: // WhiteIsZero
-            case 1: // BlackIsZero
-            {
-                var gray = new byte[(long)w * h];
-                for (long i = 0, p = 0; i < gray.Length; i++, p += spp)
-                    gray[i] = photometric == 0 ? (byte)(255 - samples[p]) : samples[p];
-                return PngEncoder.Encode(gray, w, h, colorType: 0);
-            }
-            case 2: // RGB (+ optional alpha extra sample)
-            {
-                if (spp < 3) return null;
-                var hasAlpha = spp >= 4 && extraSamples is { Length: > 0 } && extraSamples[0] is 1 or 2;
-                var bpp = hasAlpha ? 4 : 3;
-                var px = new byte[(long)w * h * bpp];
-                for (long i = 0, p = 0; i < (long)w * h; i++, p += spp)
-                {
-                    px[i * bpp] = samples[p];
-                    px[i * bpp + 1] = samples[p + 1];
-                    px[i * bpp + 2] = samples[p + 2];
-                    if (hasAlpha) px[i * bpp + 3] = samples[p + 3];
-                }
-                return PngEncoder.Encode(px, w, h, colorType: hasAlpha ? 6 : 2);
-            }
-            case 3: // Palette
-            {
-                var mapLen = 1 << bps;
-                if (colorMap is null || colorMap.Length < mapLen * 3) return null;
-                var px = new byte[(long)w * h * 3];
-                for (long i = 0, p = 0; i < (long)w * h; i++, p += spp)
-                {
-                    // ColorMap entries are 16-bit; indexed samples were scaled to
-                    // 0..255 by ExpandTo8Bit, so recover the palette index first.
-                    var idx = bps == 8 ? samples[p] : samples[p] * (mapLen - 1) / 255;
-                    px[i * 3] = (byte)(colorMap[idx] >> 8);
-                    px[i * 3 + 1] = (byte)(colorMap[mapLen + idx] >> 8);
-                    px[i * 3 + 2] = (byte)(colorMap[2 * mapLen + idx] >> 8);
-                }
-                return PngEncoder.Encode(px, w, h, colorType: 2);
-            }
-            case 5: // CMYK
-            {
-                if (spp < 4) return null;
-                var px = new byte[(long)w * h * 3];
-                for (long i = 0, p = 0; i < (long)w * h; i++, p += spp)
-                {
-                    int c = samples[p], m = samples[p + 1], y = samples[p + 2], k = samples[p + 3];
-                    px[i * 3] = (byte)((255 - c) * (255 - k) / 255);
-                    px[i * 3 + 1] = (byte)((255 - m) * (255 - k) / 255);
-                    px[i * 3 + 2] = (byte)((255 - y) * (255 - k) / 255);
-                }
-                return PngEncoder.Encode(px, w, h, colorType: 2);
-            }
-        }
-        return null;
+        return EncodeTiffPhotometric(tf);
     }
 
     /// <summary>Decode one strip/tile to exactly <paramref name="expected"/> bytes of
@@ -271,7 +115,7 @@ internal static class TiffDecoder
     /// the caller skips the frame.</summary>
     private static byte[] DecodeSegment(byte[] d, bool le, long stripOffset, long stripCount,
         long compression, int widthPx, int rowCount, int expected, long t4Options,
-        long predictor, int sppChunky, int bps, long fillOrder)
+        long predictor, int sppChunky, int bps, long fillOrder, bool strictGroup4 = false)
     {
         if (stripOffset < 0 || stripOffset > d.Length)
             throw new InvalidOperationException("strip offset out of bounds");
@@ -302,7 +146,7 @@ internal static class TiffDecoder
                     k: (t4Options & 1) != 0 ? 4 : 0, encodedByteAlign: (t4Options & 4) != 0);
                 break;
             case 4: // G4
-                outBytes = CcittDecode(src, widthPx, rowCount, k: -1, encodedByteAlign: false);
+                outBytes = CcittDecode(src, widthPx, rowCount, k: -1, encodedByteAlign: false, columnShift: !strictGroup4);
                 break;
             case 5:
             {
@@ -356,7 +200,7 @@ internal static class TiffDecoder
         return outBytes;
     }
 
-    private static byte[] CcittDecode(byte[] src, int widthPx, int rowCount, int k, bool encodedByteAlign)
+    private static byte[] CcittDecode(byte[] src, int widthPx, int rowCount, int k, bool encodedByteAlign, bool columnShift = true)
     {
         var parms = new PdfDictionary();
         parms.Set("K", new PdfInteger(k));
@@ -367,7 +211,7 @@ internal static class TiffDecoder
         // PhotometricInterpretation 0 (WhiteIsZero), so bit 1 = black = max sample,
         // which the photometric-0 mapping then inverts to black.
         parms.Set("BlackIs1", PdfBoolean.True);
-        return CcittFaxDecodeFilter.Decode(src, parms);
+        return CcittFaxDecodeFilter.Decode(src, parms, columnShift);
     }
 
     private static byte[] PackBitsDecode(byte[] src, int expected)
@@ -456,14 +300,14 @@ internal static class TiffDecoder
     }
 
     /// <summary>
-    /// Rebuild a JPEG-compressed frame into one self-contained stream and decode it to
-    /// PNG. For new-style JPEG the shared JPEGTables prologue (everything up to its
-    /// terminating EOI) is spliced in front of the strip's own body (everything after
-    /// its leading SOI); for old-style the interchange block already IS a whole file.
-    /// Null for anything that is not one whole-frame stream - a multi-strip new-style
-    /// frame would need its scans stitched, which is not what these files carry.
+    /// Rebuild a JPEG-compressed frame into one self-contained stream. For new-style
+    /// JPEG the shared JPEGTables prologue (everything up to its terminating EOI) is
+    /// spliced in front of the strip's own body (everything after its leading SOI); for
+    /// old-style the interchange block already IS a whole file. Null for anything that is
+    /// not one whole-frame stream - a multi-strip new-style frame would need its scans
+    /// stitched, which is not what these files carry.
     /// </summary>
-    private static byte[]? JpegFrameAsPng(byte[] d, bool le, long compression,
+    private static byte[]? AssembleJpegFrame(byte[] d, long compression,
         long[]? stripOffsets, long[]? stripCounts, byte[]? jpegTables,
         long jpegIfOffset, long jpegIfLength)
     {
@@ -482,8 +326,35 @@ internal static class TiffDecoder
             System.Array.Copy(d, stripOffsets[0], body, 0, stripCounts[0]);
             stream = SpliceJpegTables(jpegTables, body);
         }
-        if (stream is null || stream.Length < 4) return null;
+        return stream is { Length: >= 4 } ? stream : null;
+    }
 
+    /// <summary>Whether a JPEG stream is a baseline or extended-sequential Huffman frame
+    /// (SOF0/SOF1) — the flavours a PDF DCTDecode consumer decodes as they are; a
+    /// progressive or lossless frame is not.</summary>
+    private static bool IsBaselineJpeg(byte[] s)
+    {
+        if (s.Length < 4 || s[0] != 0xFF || s[1] != 0xD8) return false;
+        var i = 2;
+        while (i + 4 <= s.Length)
+        {
+            if (s[i] != 0xFF) return false;
+            var marker = s[i + 1];
+            if (marker == 0xFF) { i++; continue; }              // fill byte
+            if (marker is 0xC0 or 0xC1) return true;
+            if (marker is >= 0xC2 and <= 0xCF and not 0xC4 and not 0xC8 and not 0xCC) return false;
+            if (marker == 0xDA || marker == 0xD9) return false;   // scan or end before any frame header
+            var length = (s[i + 2] << 8) | s[i + 3];
+            if (length < 2) return false;
+            i += 2 + length;
+        }
+        return false;
+    }
+
+    /// <summary>Decode one self-contained JPEG frame stream to PNG bytes; null when the
+    /// frame does not decode.</summary>
+    private static byte[]? JpegFrameAsPng(byte[] stream)
+    {
         try
         {
             var (pixels, pw, ph, components) = JpegDecoder.Decode(stream);

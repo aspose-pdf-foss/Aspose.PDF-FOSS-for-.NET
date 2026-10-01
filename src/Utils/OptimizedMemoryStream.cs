@@ -123,7 +123,7 @@ public sealed class OptimizedMemoryStream : Stream
         var result = new byte[_length];
         var saved = _position;
         _position = 0;
-        Read(result, 0, (int)_length);
+        this.ReadExactly(result);
         _position = saved;
         return result;
     }

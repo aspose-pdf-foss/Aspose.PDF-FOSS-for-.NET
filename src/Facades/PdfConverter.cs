@@ -20,7 +20,7 @@ public enum PdfConverterImageFormat
 /// Supports stateful iterator pattern (BindPdf → DoConvert → HasNextImage → GetNextImage)
 /// and stateless batch conversion helpers.
 /// </summary>
-public sealed class PdfConverter : IDisposable
+public sealed partial class PdfConverter : IDisposable
 {
     private readonly IPageRenderer _renderer;
     private Document? _document;
@@ -76,12 +76,14 @@ public sealed class PdfConverter : IDisposable
         Resolution = new Resolution(150);
     }
 
+    /// <summary>Creates a converter that draws pages with the given page renderer at the default resolution of 150 DPI. Throws when the renderer is null.</summary>
     public PdfConverter(IPageRenderer renderer)
     {
         _renderer = renderer ?? throw new ArgumentNullException(nameof(renderer));
         Resolution = new Resolution(150);
     }
 
+    /// <summary>Creates a converter that draws pages with the given page renderer at the given resolution (150 DPI when null). Throws when the renderer is null.</summary>
     public PdfConverter(IPageRenderer renderer, Resolution resolution)
     {
         _renderer = renderer ?? throw new ArgumentNullException(nameof(renderer));
@@ -231,7 +233,7 @@ public sealed class PdfConverter : IDisposable
     {
         if (IsEmf(format))
         {
-            if (!OperatingSystem.IsWindows()) throw EmfUnsupported();
+            if (!Compat.IsWindows()) throw EmfUnsupported();
             using var fs = new FileStream(outputFile, FileMode.Create, FileAccess.Write);
             GetNextImageAsEmf(fs, pageSize: null);
             return;
@@ -246,7 +248,7 @@ public sealed class PdfConverter : IDisposable
     {
         if (IsEmf(format))
         {
-            if (!OperatingSystem.IsWindows()) throw EmfUnsupported();
+            if (!Compat.IsWindows()) throw EmfUnsupported();
             GetNextImageAsEmf(outputStream, pageSize: null);
             return;
         }
@@ -315,7 +317,7 @@ public sealed class PdfConverter : IDisposable
     {
         if (IsEmf(format))
         {
-            if (!OperatingSystem.IsWindows()) throw EmfUnsupported();
+            if (!Compat.IsWindows()) throw EmfUnsupported();
             GetNextImageAsEmf(outputStream, pageSize);
             return;
         }
@@ -385,7 +387,7 @@ public sealed class PdfConverter : IDisposable
     {
         if (IsEmf(format))
         {
-            if (!OperatingSystem.IsWindows()) throw EmfUnsupported();
+            if (!Compat.IsWindows()) throw EmfUnsupported();
             GetNextImageAsEmf(outputStream, pageSize);
             return;
         }
@@ -420,7 +422,7 @@ public sealed class PdfConverter : IDisposable
     {
         if (IsEmf(format))
         {
-            if (!OperatingSystem.IsWindows()) throw EmfUnsupported();
+            if (!Compat.IsWindows()) throw EmfUnsupported();
             GetNextImageAsEmf(outputStream, imageWidth, imageHeight);
             return;
         }
@@ -550,8 +552,17 @@ public sealed class PdfConverter : IDisposable
         device.Process(_document, StartPage, EffectiveEndPage, outputStream);
     }
 
-    /// <summary>EndPage, defaulted to the last page when unset (0).</summary>
-    private int EffectiveEndPage => EndPage > 0 ? EndPage : (_document?.PageCount ?? 0);
+    /// <summary>EndPage, defaulted to the last page when unset (0) and clamped to it
+    /// otherwise: a range set past the end of the document (EndPage 20 on 16 pages)
+    /// stops at the last page rather than asking the device for a page that is not there.</summary>
+    private int EffectiveEndPage
+    {
+        get
+        {
+            var last = _document?.PageCount ?? 0;
+            return EndPage > 0 ? Math.Min(EndPage, last) : last;
+        }
+    }
 
     /// <summary>
     /// Save all bound pages as TIFF to a stream using the supplied settings.
@@ -706,9 +717,9 @@ public sealed class PdfConverter : IDisposable
     /// <paramref name="outputImageFormat"/>. The <paramref name="horizontal"/>
     /// and <paramref name="vertical"/> arguments are accepted for
     /// API-shape compatibility but currently only single-row / single-column
-    /// layouts (the common usage) are honoured.
+    /// layouts (the common usage) are honoured. Windows draws with GDI+; elsewhere the library's own decoders and
+    /// encoders do the same work (see MergeImagesManaged).
     /// </summary>
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public static Stream MergeImages(
         List<Stream> inputImagesStreams,
         Aspose.Pdf.Drawing.ImageFormat outputImageFormat,
@@ -716,11 +727,14 @@ public sealed class PdfConverter : IDisposable
         int? horizontal,
         int? vertical)
     {
-        ArgumentNullException.ThrowIfNull(inputImagesStreams);
+        Compat.ThrowIfNull(inputImagesStreams);
         _ = horizontal; _ = vertical;
         if (inputImagesStreams.Count == 0)
             throw new ArgumentException("At least one input image is required.", nameof(inputImagesStreams));
+        if (!Compat.IsWindows())
+            return MergeImagesManaged(inputImagesStreams, outputImageFormat, mergeMode);
 
+#pragma warning disable CA1416 // GDI+ from here on, reached on Windows only
         var inputs = new List<System.Drawing.Image>(inputImagesStreams.Count);
         try
         {
@@ -808,6 +822,7 @@ public sealed class PdfConverter : IDisposable
         {
             foreach (var i in inputs) i.Dispose();
         }
+#pragma warning restore CA1416
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -823,13 +838,15 @@ public sealed class PdfConverter : IDisposable
     /// stream — one frame per input. Output rewinds to position 0 before
     /// return so the caller can CopyTo a destination stream directly.
     /// </summary>
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public static Stream MergeImagesAsTiff(List<Stream> inputImagesStreams)
     {
-        ArgumentNullException.ThrowIfNull(inputImagesStreams);
+        Compat.ThrowIfNull(inputImagesStreams);
         if (inputImagesStreams.Count == 0)
             throw new ArgumentException("At least one input image is required.", nameof(inputImagesStreams));
+        if (!Compat.IsWindows())
+            return MergeImagesAsTiffManaged(inputImagesStreams);
 
+#pragma warning disable CA1416 // GDI+ from here on, reached on Windows only
         var inputs = new List<System.Drawing.Image>(inputImagesStreams.Count);
         try
         {
@@ -870,6 +887,7 @@ public sealed class PdfConverter : IDisposable
         {
             foreach (var i in inputs) i.Dispose();
         }
+#pragma warning restore CA1416
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]

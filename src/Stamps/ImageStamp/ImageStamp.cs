@@ -1,5 +1,4 @@
-﻿using System.IO.Compression;
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf;
 
@@ -64,7 +63,7 @@ public partial class ImageStamp : BaseParagraph
             seeded = FromPngData(sourceBytes);
         else if (IsSvg(sourceBytes) && ImageRasterizer.RasterizeSvg(sourceBytes) is { } svgPng)
             seeded = FromPngData(svgPng);
-        else if (OperatingSystem.IsWindows())
+        else if (Compat.IsWindows())
             seeded = TryFromGdiPlusDecoder(sourceBytes) ?? TryFromManagedDecoder(sourceBytes);
         else
             seeded = TryFromManagedDecoder(sourceBytes);
@@ -171,6 +170,10 @@ public partial class ImageStamp : BaseParagraph
     /// is drawn upright for the viewer — the AddImage path prepends the
     /// matching rotation-compensating cm. Stamps keep the raw page coordinate system.</summary>
     internal bool CompensatePageRotation;
+
+    /// <summary>The part of the page the image shows through, in page space: what
+    /// <see cref="Page.AddImage(System.IO.Stream, Rectangle, Rectangle)"/> crops the placed image to.</summary>
+    internal Aspose.Pdf.Rectangle? ClipBox { get; set; }
 
     /// <summary>SOF component count + Adobe APP14 presence, from the JPEG marker chain.</summary>
     private static (int components, bool hasAdobeMarker) ParseJpegColorInfo(byte[] data)

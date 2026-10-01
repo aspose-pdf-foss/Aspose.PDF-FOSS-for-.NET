@@ -70,9 +70,9 @@ internal sealed class Rc2Cipher
         var r3 = (ushort)(input[inOff + 6] | (input[inOff + 7] << 8));
 
         // Reverse of encryption: 5 de-mixing rounds, 1 de-mashing, 6 de-mixing, 1 de-mashing, 5 de-mixing
-        for (var j = 15; j >= 12; j--) DemixRound(ref r0, ref r1, ref r2, ref r3, j);
+        for (var j = 15; j >= 12; j--) (r0, r1, r2, r3) = DemixRound(r0, r1, r2, r3, j);
         // j=11 is also part of the first group of 5
-        DemixRound(ref r0, ref r1, ref r2, ref r3, 11);
+        (r0, r1, r2, r3) = DemixRound(r0, r1, r2, r3, 11);
 
         // De-mash
         r3 = (ushort)(r3 - _k[r2 & 63]);
@@ -80,8 +80,8 @@ internal sealed class Rc2Cipher
         r1 = (ushort)(r1 - _k[r0 & 63]);
         r0 = (ushort)(r0 - _k[r3 & 63]);
 
-        for (var j = 10; j >= 6; j--) DemixRound(ref r0, ref r1, ref r2, ref r3, j);
-        DemixRound(ref r0, ref r1, ref r2, ref r3, 5);
+        for (var j = 10; j >= 6; j--) (r0, r1, r2, r3) = DemixRound(r0, r1, r2, r3, j);
+        (r0, r1, r2, r3) = DemixRound(r0, r1, r2, r3, 5);
 
         // De-mash
         r3 = (ushort)(r3 - _k[r2 & 63]);
@@ -89,7 +89,7 @@ internal sealed class Rc2Cipher
         r1 = (ushort)(r1 - _k[r0 & 63]);
         r0 = (ushort)(r0 - _k[r3 & 63]);
 
-        for (var j = 4; j >= 0; j--) DemixRound(ref r0, ref r1, ref r2, ref r3, j);
+        for (var j = 4; j >= 0; j--) (r0, r1, r2, r3) = DemixRound(r0, r1, r2, r3, j);
 
         output[outOff] = (byte)r0; output[outOff + 1] = (byte)(r0 >> 8);
         output[outOff + 2] = (byte)r1; output[outOff + 3] = (byte)(r1 >> 8);
@@ -97,7 +97,7 @@ internal sealed class Rc2Cipher
         output[outOff + 6] = (byte)r3; output[outOff + 7] = (byte)(r3 >> 8);
     }
 
-    private void DemixRound(ref ushort r0, ref ushort r1, ref ushort r2, ref ushort r3, int j)
+    private (ushort r0, ushort r1, ushort r2, ushort r3) DemixRound(ushort r0, ushort r1, ushort r2, ushort r3, int j)
     {
         // Reverse of mix round j (RFC 2268 Section 4)
         // Encrypt step 4: R[3] = (R[3] + K[4j+3] + (R[2] & R[1]) + (~R[2] & R[0])) <<< 5
@@ -115,6 +115,7 @@ internal sealed class Rc2Cipher
         // Encrypt step 1: R[0] = (R[0] + K[4j] + (R[3] & R[2]) + (~R[3] & R[1])) <<< 1
         r0 = RotR(r0, 1);
         r0 = (ushort)(r0 - _k[4 * j] - (r3 & r2) - (~r3 & r1));
+        return (r0, r1, r2, r3);
     }
 
     private static ushort RotR(ushort val, int n)

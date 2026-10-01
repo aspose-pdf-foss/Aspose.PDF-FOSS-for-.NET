@@ -94,7 +94,7 @@ public sealed partial class Form
             var append = new System.IO.MemoryStream();
             var remaining = new PdfArray();
             int frm = NextFreeFrmIndex(page.Dict, reader);
-            var writer = new System.IO.StreamWriter(append, System.Text.Encoding.ASCII, leaveOpen: true);
+            var writer = Compat.LeaveOpenWriter(append, System.Text.Encoding.ASCII);
             bool changed = false;
             foreach (var annotRef in annots)
             {

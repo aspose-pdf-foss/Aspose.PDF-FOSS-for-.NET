@@ -2,7 +2,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf.Facades;
@@ -72,8 +71,8 @@ public sealed partial class PdfContentEditor
         annotDict.Set("Type", new PdfName("Annot"));
         annotDict.Set("Subtype", new PdfName("Text"));
         annotDict.Set("Rect", RectToPdfArray(rect));
-        annotDict.Set("T", new PdfString(System.Text.Encoding.Latin1.GetBytes(title)));
-        annotDict.Set("Contents", new PdfString(System.Text.Encoding.Latin1.GetBytes(contents)));
+        annotDict.Set("T", new PdfString(Compat.Latin1.GetBytes(title)));
+        annotDict.Set("Contents", new PdfString(Compat.Latin1.GetBytes(contents)));
         annotDict.Set("Open", PdfBoolean.False);
         AppendAnnotation(page, annotDict);
         return doc.ToArray();
@@ -152,7 +151,7 @@ public sealed partial class PdfContentEditor
 
         var actionDict = new PdfDictionary();
         actionDict.Set("S", new PdfName("URI"));
-        actionDict.Set("URI", new PdfString(System.Text.Encoding.Latin1.GetBytes(url)));
+        actionDict.Set("URI", new PdfString(Compat.Latin1.GetBytes(url)));
         annotDict.Set("A", actionDict);
         return annotDict;
     }
@@ -163,11 +162,11 @@ public sealed partial class PdfContentEditor
         annotDict.Set("Type", new PdfName("Annot"));
         annotDict.Set("Subtype", new PdfName("FreeText"));
         annotDict.Set("Rect", RectToPdfArray(rect));
-        annotDict.Set("Contents", new PdfString(System.Text.Encoding.Latin1.GetBytes(text)));
+        annotDict.Set("Contents", new PdfString(Compat.Latin1.GetBytes(text)));
         // Print flag (bit 3 = 4): created annotations must be printable.
         // Same default as AnnotationCollection.
         annotDict.Set("F", new PdfInteger(4));
-        annotDict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(
+        annotDict.Set("DA", new PdfString(Compat.Latin1.GetBytes(
             $"/{fontName} {fontSize.ToString("G", System.Globalization.CultureInfo.InvariantCulture)} Tf")));
         return annotDict;
     }
@@ -249,7 +248,7 @@ public sealed partial class PdfContentEditor
     }
 
     private static PdfString Latin1(string s)
-        => new(System.Text.Encoding.Latin1.GetBytes(s ?? ""));
+        => new(Compat.Latin1.GetBytes(s ?? ""));
 
     private Page GetPage1Based(int pageNumber)
     {
@@ -262,12 +261,14 @@ public sealed partial class PdfContentEditor
     private void AddAnnotation(int page, PdfDictionary annotDict)
         => AppendAnnotation(GetPage1Based(page), annotDict);
 
+    /// <summary>Adds a link on page <c>originalPage</c> that jumps to page <c>desPage</c>. The rectangle is in points from the page's lower-left corner.</summary>
     public void CreateLocalLink(System.Drawing.Rectangle rect, int desPage, int originalPage)
     {
         var dict = BuildLinkAnnotation(DrawingRectToPdfRect(rect), desPage);
         AddAnnotation(originalPage, dict);
     }
 
+    /// <summary>Adds a link with the given border color on page <c>originalPage</c> that jumps to page <c>desPage</c>. The rectangle is in points from the page's lower-left corner.</summary>
     public void CreateLocalLink(System.Drawing.Rectangle rect, int desPage, int originalPage, System.Drawing.Color clr)
     {
         var dict = BuildLinkAnnotation(DrawingRectToPdfRect(rect), desPage);
@@ -282,12 +283,14 @@ public sealed partial class PdfContentEditor
         CreateLocalLink(rect, desPage, originalPage, clr);
     }
 
+    /// <summary>Adds a link on page <c>originalPage</c> that opens the given URL. The rectangle is in points from the page's lower-left corner.</summary>
     public void CreateWebLink(System.Drawing.Rectangle rect, string url, int originalPage)
     {
         var dict = BuildUriAnnotation(DrawingRectToPdfRect(rect), url);
         AddAnnotation(originalPage, dict);
     }
 
+    /// <summary>Adds a link with the given border color on page <c>originalPage</c> that opens the given URL. The rectangle is in points from the page's lower-left corner.</summary>
     public void CreateWebLink(System.Drawing.Rectangle rect, string url, int originalPage, System.Drawing.Color clr)
     {
         var dict = BuildUriAnnotation(DrawingRectToPdfRect(rect), url);
@@ -336,6 +339,7 @@ public sealed partial class PdfContentEditor
         CreatePdfDocumentLink(rect, remotePdf, originalPage, destinationPage, clr);
     }
 
+    /// <summary>Adds a link with the given border color on page <c>originalPage</c> that runs the given JavaScript code when clicked.</summary>
     public void CreateJavaScriptLink(string code, System.Drawing.Rectangle rect, int originalPage, System.Drawing.Color color)
     {
         var dict = new PdfDictionary();
@@ -361,12 +365,14 @@ public sealed partial class PdfContentEditor
         AddAnnotation(originalPage, dict);
     }
 
+    /// <summary>Adds a free-text annotation showing the given text in 12-point Helvetica on the given page.</summary>
     public void CreateFreeText(System.Drawing.Rectangle rect, string contents, int page)
     {
         var dict = BuildFreeTextAnnotation(DrawingRectToPdfRect(rect), contents ?? "", "Helvetica", 12);
         AddAnnotation(page, dict);
     }
 
+    /// <summary>Adds a text (sticky note) annotation with the given title, contents, initial open state and icon name on the given page.</summary>
     public void CreateText(System.Drawing.Rectangle rect, string title, string contents, bool open, string icon, int page)
     {
         var dict = new PdfDictionary();
@@ -442,6 +448,7 @@ public sealed partial class PdfContentEditor
         AddAnnotation(page, dict);
     }
 
+    /// <summary>Adds a line annotation from (<c>x1</c>, <c>y1</c>) to (<c>x2</c>, <c>y2</c>) on the given page, with the given border width, color, border style, dash pattern and line-ending styles (the first two entries of <c>LEArray</c>).</summary>
     public void CreateLine(System.Drawing.Rectangle rect, string contents, float x1, float y1, float x2, float y2,
         int page, int border, System.Drawing.Color clr, string borderStyle, int[] dashArray, string[] LEArray)
     {
@@ -474,6 +481,7 @@ public sealed partial class PdfContentEditor
         AddAnnotation(page, dict);
     }
 
+    /// <summary>Adds a polygon annotation on the given page whose vertices, color, width and dash pattern come from <c>lineInfo</c>.</summary>
     public void CreatePolygon(LineInfo lineInfo, int page, System.Drawing.Rectangle annotRect, string annotContents)
         => CreatePolyShape(lineInfo, page, annotRect, annotContents, "Polygon");
 
@@ -536,7 +544,7 @@ public sealed partial class PdfContentEditor
                 sb.Append(verts[i].ToString(ci)).Append(' ').Append(verts[i + 1].ToString(ci)).Append(" l\n");
             if (subtype == "Polygon") sb.Append("h\n");
             sb.Append("S\n");
-            var content = System.Text.Encoding.Latin1.GetBytes(sb.ToString());
+            var content = Compat.Latin1.GetBytes(sb.ToString());
 
             var form = new PdfDictionary();
             form.Set("Type", new PdfName("XObject"));
@@ -683,6 +691,7 @@ public sealed partial class PdfContentEditor
         return fs;
     }
 
+    /// <summary>Adds a top-level bookmark with the given title, color and bold/italic style. When <c>file</c> is set, the bookmark runs an action of type <c>actionType</c> (Launch by default) on that file with the optional destination.</summary>
     public void CreateBookmarksAction(string title, System.Drawing.Color color, bool boldFlag, bool italicFlag,
         string file, string actionType, string destination)
     {

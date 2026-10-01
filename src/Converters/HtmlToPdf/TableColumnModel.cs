@@ -1,11 +1,11 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
-/// <summary>Per-call working state of <see cref="BuildTableFromHtml"/>: the column
+/// <summary>Per-call working state of <c>BuildTableFromHtml</c>: the column
 /// and width model the parse loop fills and the width solver consumes. One instance
 /// per invocation; never shared.</summary>
 private sealed class TableColumnModel
@@ -26,12 +26,21 @@ private sealed class TableColumnModel
     // declared-percent grid uses, so "B13-9876" can wrap to "B13-"/"9876" instead of
     // holding its column at the full unbroken token width.
     public List<double> colMinBrkW = new List<double>();
-    // UA-serif percent-grid floors: the same cells measured in the UA Times at
-    // the row-cascaded size with the attribute padding pair and no legacy
-    // slack - the true min-content for a percent-of-box table
-    // (probed on the two-table report). Kept as a SEPARATE set so every
-    // legacy consumer of colMinW stays byte-calibrated.
+    // The widest HARD content floor any cell of the grid holds - a nested grid and its host
+    // cell's pads - below which a declared box cannot cap the grid (it overflows instead).
+    public double hardMinPt;
+    // Per-column min-content with nested grids counted at THEIR min-content (a spanning cell's on its
+    // first column): summed, the floor a declared box cannot cap the grid below.
+    public List<double> colMinFloorW = new List<double>();
+    // UA-serif grid floors: the same cells measured in the UA Times at the
+    // row-cascaded size, content only - no padding and no legacy slack - the
+    // true min-content of a percent-of-box or undeclared table, whose chrome
+    // the sheet model adds per column edge (probed on the two-table report
+    // and the returns grid). Kept as a SEPARATE set so every legacy consumer
+    // of colMinW stays byte-calibrated.
     public List<double> colMinSerifW = new List<double>();
+    // …and whether that floor is a text control's box (its ink ends 3 before its advance).
+    public List<bool> colControlFloor = new List<bool>();
     public List<double>? colGroupPt = null;
     public List<double>? colWidthsPt = null;
     public int maxCols = 0;
@@ -42,6 +51,23 @@ private sealed class TableColumnModel
     // Column-spanning cells constrain the SUM of the columns they cross, not each one;
     // recorded here and resolved after all single-column widths are known.
     public List<(int start, int span, double min, double max, double hdr)> spanConstraints = new List<(int start, int span, double min, double max, double hdr)>();
+    // The widest whole line a column-spanning NOWRAP cell keeps, measured in the cell's own face:
+    // the grid can be no narrower than it whatever its columns declare (probed on the land-register
+    // order: a 102-character Courier New 8 disclaimer spanning 14 declared-px columns sizes the sheet
+    // 96 + 102 x 4.8007 + 90 = 675.67, and the columns then fit inside that box).
+    public double spanNoWrapMinW = 0;
+    // …and the column span that widest nowrap line covers (start, count): the line IS the grid's
+    // min-content only when it runs across every column that holds content.
+    public int spanNoWrapStart = 0;
+    public int spanNoWrapCols = 0;
+    // The per-cell slack the legacy model adds to every column minimum (a column at exactly that
+    // slack holds nothing).
+    public double cellExtraPt = 0;
+    // The sheet collapses this grid's borders: its box takes half of the outer cell rules.
+    public bool sheetCollapsed = false;
+    // The widest ROW's bare demand (its cells' minima side by side): the grid's true min-content,
+    // which the per-column maxima over-count when different rows floor different columns.
+    public double rowNoWrapMinW = 0;
 
     // True only when the markup/CSS actually DECLARES a table width — the frac
     // itself defaults to a full box, so it cannot stand in for "declared".
@@ -66,6 +92,9 @@ private sealed class TableColumnModel
     // such a grid emits PERCENT columns and never sizes the sheet, whichever
     // spelling declared it.
     public bool tableWidthPctOfBox = false;
+    /// <summary>The sheet reaches this grid through its ancestors (a chain rule on its cells or an
+    /// `X table` rule): the ancestor-styled dialect, whose declared box its auto columns fill.</summary>
+    public bool ancestorScopedGrid = false;
     public double tblCellSpacingPt = 0.0;
     public double tblHeightPx = 0;
     // The table's declared cellspacing, in points; 0 when it declares none.

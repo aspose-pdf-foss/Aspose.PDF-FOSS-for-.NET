@@ -1,70 +1,89 @@
 using System.Text;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 
 namespace Aspose.Pdf.Facades;
 
 public sealed partial class PdfFileStamp
 {
+    /// <summary>Adds the text as a header centered at the top of every page, <c>topMargin</c> points below the top edge, with left and right margins of 36 points.</summary>
     public void AddHeader(FormattedText formattedText, float topMargin) =>
         AddHeader(formattedText, topMargin, leftMargin: 36f, rightMargin: 36f);
 
+    /// <summary>Adds the text as a header on every page, <c>topMargin</c> points below the top edge and centered between the left and right margins (in points).</summary>
     public void AddHeader(FormattedText formattedText, float topMargin, float leftMargin, float rightMargin) =>
         ApplyTextBand(formattedText, top: true, primaryMargin: topMargin, leftMargin, rightMargin);
 
+    /// <summary>Adds the image read from the stream as a header centered at the top of every page, <c>topMargin</c> points below the top edge, with left and right margins of 36 points.</summary>
     public void AddHeader(Stream imageStream, float topMargin) =>
         AddHeader(imageStream, topMargin, leftMargin: 36f, rightMargin: 36f);
 
+    /// <summary>Adds the image read from the stream as a header on every page, <c>topMargin</c> points below the top edge and centered between the left and right margins (in points).</summary>
     public void AddHeader(Stream inputStream, float topMargin, float leftMargin, float rightMargin) =>
         ApplyImageBand(ReadAll(inputStream), top: true, primaryMargin: topMargin, leftMargin, rightMargin);
 
+    /// <summary>Adds the image file as a header centered at the top of every page, <c>topMargin</c> points below the top edge, with left and right margins of 36 points.</summary>
     public void AddHeader(string imageFile, float topMargin) =>
         AddHeader(imageFile, topMargin, leftMargin: 36f, rightMargin: 36f);
 
+    /// <summary>Adds the image file as a header on every page, <c>topMargin</c> points below the top edge and centered between the left and right margins (in points).</summary>
     public void AddHeader(string imageFile, float topMargin, float leftMargin, float rightMargin) =>
         ApplyImageBand(File.ReadAllBytes(imageFile), top: true, primaryMargin: topMargin, leftMargin, rightMargin);
 
+    /// <summary>Adds the text as a footer centered at the bottom of every page, <c>bottomMargin</c> points above the bottom edge, with left and right margins of 36 points.</summary>
     public void AddFooter(FormattedText formattedText, float bottomMargin) =>
         AddFooter(formattedText, bottomMargin, leftMargin: 36f, rightMargin: 36f);
 
+    /// <summary>Adds the text as a footer on every page, <c>bottomMargin</c> points above the bottom edge and centered between the left and right margins (in points).</summary>
     public void AddFooter(FormattedText formattedText, float bottomMargin, float leftMargin, float rightMargin) =>
         ApplyTextBand(formattedText, top: false, primaryMargin: bottomMargin, leftMargin, rightMargin);
 
+    /// <summary>Adds the image read from the stream as a footer centered at the bottom of every page, <c>bottomMargin</c> points above the bottom edge, with left and right margins of 36 points.</summary>
     public void AddFooter(Stream imageStream, float bottomMargin) =>
         AddFooter(imageStream, bottomMargin, leftMargin: 36f, rightMargin: 36f);
 
+    /// <summary>Adds the image read from the stream as a footer on every page, <c>bottomMargin</c> points above the bottom edge and centered between the left and right margins (in points).</summary>
     public void AddFooter(Stream imageStream, float bottomMargin, float leftMargin, float rightMargin) =>
         ApplyImageBand(ReadAll(imageStream), top: false, primaryMargin: bottomMargin, leftMargin, rightMargin);
 
+    /// <summary>Adds the image file as a footer centered at the bottom of every page, <c>bottomMargin</c> points above the bottom edge, with left and right margins of 36 points.</summary>
     public void AddFooter(string imageFile, float bottomMargin) =>
         AddFooter(imageFile, bottomMargin, leftMargin: 36f, rightMargin: 36f);
 
+    /// <summary>Adds the image file as a footer on every page, <c>bottomMargin</c> points above the bottom edge and centered between the left and right margins (in points).</summary>
     public void AddFooter(string imageFile, float bottomMargin, float leftMargin, float rightMargin) =>
         ApplyImageBand(File.ReadAllBytes(imageFile), top: false, primaryMargin: bottomMargin, leftMargin, rightMargin);
 
+    /// <summary>Adds a page number at the bottom middle of every page, using the text and formatting of <c>formattedText</c>; <c>{0}</c> in the text becomes the page number and <c>{1}</c> the page count.</summary>
     public void AddPageNumber(FormattedText formattedText) =>
         AddPageNumber(formattedText.Text, PosBottomMiddle, 36f, 36f, 36f, 36f, formattedText);
 
+    /// <summary>Adds a page number to every page at the given position (one of the <c>Pos*</c> constants), using the text and formatting of <c>formattedText</c>; <c>{0}</c> becomes the page number and <c>{1}</c> the page count.</summary>
     public void AddPageNumber(FormattedText formattedText, int position) =>
         AddPageNumber(formattedText.Text, position, 36f, 36f, 36f, 36f, formattedText);
 
+    /// <summary>Adds a page number to every page at the given position (one of the <c>Pos*</c> constants) with the given margins in points, using the text and formatting of <c>formattedText</c>; <c>{0}</c> becomes the page number and <c>{1}</c> the page count.</summary>
     public void AddPageNumber(FormattedText formattedText, int position,
         float leftMargin, float rightMargin, float topMargin, float bottomMargin) =>
         AddPageNumber(formattedText.Text, position, leftMargin, rightMargin, topMargin, bottomMargin, formattedText);
 
+    /// <summary>Adds a page number to every page at (<c>x</c>, <c>y</c>) in points, using the text and formatting of <c>formattedText</c>; <c>{0}</c> becomes the page number and <c>{1}</c> the page count.</summary>
     public void AddPageNumber(FormattedText formattedText, float x, float y) =>
         ApplyPageNumberAtXY(formattedText.Text, x, y, formattedText);
 
+    /// <summary>Adds a page number at the bottom middle of every page; <c>{0}</c> in the format string becomes the page number and <c>{1}</c> the page count.</summary>
     public void AddPageNumber(string formatString) =>
         AddPageNumber(formatString, PosBottomMiddle, 36f, 36f, 36f, 36f, sourceText: null);
 
+    /// <summary>Adds a page number to every page at the given position (one of the <c>Pos*</c> constants); <c>{0}</c> in the format string becomes the page number and <c>{1}</c> the page count.</summary>
     public void AddPageNumber(string formatString, int position) =>
         AddPageNumber(formatString, position, 36f, 36f, 36f, 36f, sourceText: null);
 
+    /// <summary>Adds a page number to every page at the given position (one of the <c>Pos*</c> constants) with the given margins in points; <c>{0}</c> in the format string becomes the page number and <c>{1}</c> the page count.</summary>
     public void AddPageNumber(string formatString, int position,
         float leftMargin, float rightMargin, float topMargin, float bottomMargin) =>
         AddPageNumber(formatString, position, leftMargin, rightMargin, topMargin, bottomMargin, sourceText: null);
 
+    /// <summary>Adds a page number to every page at (<c>x</c>, <c>y</c>) in points; <c>{0}</c> in the format string becomes the page number and <c>{1}</c> the page count.</summary>
     public void AddPageNumber(string formatString, float x, float y) =>
         ApplyPageNumberAtXY(formatString, x, y, sourceText: null);
 
@@ -163,7 +182,7 @@ public sealed partial class PdfFileStamp
             ImageStamp stamp;
             if (isJpeg) stamp = ImageStamp.FromJpeg(imageBytes);
             else if (isPng) stamp = ImageStamp.FromPngData(imageBytes);
-            else if (((OperatingSystem.IsWindows() ? ImageStamp.TryFromGdiPlusDecoder(imageBytes) : null)
+            else if (((Compat.IsWindows() ? ImageStamp.TryFromGdiPlusDecoder(imageBytes) : null)
                      ?? ImageStamp.TryFromManagedDecoder(imageBytes)) is { } gdiStamp)
                 stamp = gdiStamp;
             else stamp = ImageStamp.FromRgb(imageBytes, 100, 100);

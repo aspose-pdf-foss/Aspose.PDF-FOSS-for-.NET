@@ -2,8 +2,8 @@ namespace Aspose.Pdf;
 
 /// <summary>
 /// Outcome of serializing a single form field through
-/// <see cref="Aspose.Pdf.Forms.Form.ExportToJson"/> or
-/// <see cref="Aspose.Pdf.Forms.Form.ImportFromJson"/>.
+/// <c>Form.ExportToJson</c> or
+/// <c>Form.ImportFromJson</c>.
 /// </summary>
 public enum FieldSerializationStatus
 {

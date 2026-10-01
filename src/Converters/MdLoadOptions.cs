@@ -5,6 +5,9 @@ namespace Aspose.Pdf;
 /// </summary>
 public sealed class MdLoadOptions : LoadOptions
 {
+    /// <summary>Creates Markdown load options with the default page size and no custom CSS.</summary>
+    public MdLoadOptions() { }
+
     /// <summary>Page size info (width, height, margins).</summary>
     public PageSizeInfo PageInfo { get; set; } = new PageSizeInfo();
 
@@ -21,6 +24,9 @@ public sealed class MdLoadOptions : LoadOptions
 /// </summary>
 public sealed class PageSizeInfo
 {
+    /// <summary>Creates page size info for an ISO A4 page (595.276 x 841.89 points) with no margins set.</summary>
+    public PageSizeInfo() { }
+
     /// <summary>Page width in points. Defaults to ISO A4.</summary>
     public double Width { get; set; } = 595.276;
 

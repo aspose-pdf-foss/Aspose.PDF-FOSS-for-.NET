@@ -4,10 +4,12 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Annotations;
 
+/// <summary>A line annotation: a single straight line between two points on the page, with optional line-ending shapes.</summary>
 public partial class LineAnnotation : MarkupAnnotation
 {
     internal LineAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
+    /// <summary>Creates a line annotation on <c>page</c> inside <c>rect</c>, drawn from <c>start</c> to <c>end</c> (page coordinates in points).</summary>
     public LineAnnotation(Page page, Rectangle rect, Point start, Point end)
         : base(page, rect)
     {
@@ -342,6 +344,7 @@ public partial class LineAnnotation : MarkupAnnotation
         return new Rectangle(llx, lly, urx, ury);
     }
 
+    /// <summary>Gets or sets the purpose of the line (/IT): an arrow or a dimension line. Other values remove the entry.</summary>
     public LineIntent Intent
     {
         get => ParseLineIntent(Dict.GetName("IT"));
@@ -358,12 +361,14 @@ public partial class LineAnnotation : MarkupAnnotation
         }
     }
 
+    /// <summary>Gets or sets the shape drawn at the start point of the line (first /LE entry); <c>None</c> when not set.</summary>
     public LineEnding StartingStyle
     {
         get => GetLineEnding(0);
         set => SetLineEnding(0, value);
     }
 
+    /// <summary>Gets or sets the shape drawn at the end point of the line (second /LE entry); <c>None</c> when not set.</summary>
     public LineEnding EndingStyle
     {
         get => GetLineEnding(1);

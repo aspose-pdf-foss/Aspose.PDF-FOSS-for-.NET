@@ -74,7 +74,7 @@ public sealed partial class Document
 
     /// <summary>
     /// Rebuild the in-memory catalog /Pages tree (/Kids and /Count) so it matches
-    /// the current page order. <see cref="PageCollection.Insert"/> / Delete update
+    /// the current page order. <c>PageCollection.Insert</c> / Delete update
     /// only the Pages list, not the underlying /Kids, so any reader-tree walk before
     /// save — e.g. resolving a GoTo or bookmark destination's target page number —
     /// would otherwise see the stale pre-edit order (off-by-one after a page is

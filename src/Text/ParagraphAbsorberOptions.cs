@@ -10,6 +10,9 @@ public sealed class ParagraphAbsorberOptions
     private double _vOverride = double.NaN;
     private double _hOverride = double.NaN;
 
+    /// <summary>Creates options with no vertical or horizontal override (both <c>NaN</c>, so the default heuristics apply).</summary>
+    public ParagraphAbsorberOptions() { }
+
     /// <summary>
     /// Vertical distance override (as fraction of font size) below which lines are
     /// considered part of the same section. NaN means "use the default heuristic".

@@ -28,9 +28,21 @@ internal static partial class HtmlToPdfConverter
                 bt.marginLeft + bt.block.LeftIndent - mAdv - mGap);
             // The marker inherits the item's weight (an h1-nested list
             // draws bold bullets in the bold serif resource).
+            var mY = bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y;
+            // A body-pinned face draws the marker too (probed: an Arial 8 body's "1." is Arial).
+            if (bt.block.FontFamily is { Length: > 0 } mFam
+                && PosFace(mFam + (bt.block.FontRes == "F2" ? " Bold" : "")).ttf is { } mTtf
+                && bt.flow.page.Dict.Get("Resources") is Core.PdfDictionary mRes
+                && mRes.Get("Font") is Core.PdfDictionary mDict)
+            {
+                var (mRn, mHex) = Text.Type0FontEmbedder.Embed(mDict, mTtf,
+                    mFam.Replace(" ", "") + (bt.block.FontRes == "F2" ? "Bold" : ""), bt.block.Marker!, stripSpacesInBaseFont: true);
+                bt.flow.page.AddContentStream(System.Text.Encoding.ASCII.GetBytes(
+                    $"BT /{mRn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf 1 0 0 1 {uaX.ToString("F2", bt.invc)} {mY.ToString("F2", bt.invc)} Tm {KernedTj(mTtf, mHex)} ET\n"));
+                return;
+            }
             EmitPositionedRun(bt.flow.page, bt.block.FontRes == "F2" ? "F6" : "F5",
-                bt.metrics.blockFontSize, uaX,
-                bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y, bt.block.Marker!);
+                bt.metrics.blockFontSize, uaX, mY, bt.block.Marker!);
             return;
         }
         var markerW = bt.block.Marker!.Length * bt.metrics.blockFontSize * 0.52;

@@ -3,6 +3,7 @@
 /// <summary>A font source backed by an in-memory font byte buffer.</summary>
 public sealed class MemoryFontSource : FontSource, IDisposable
 {
+    /// <summary>Creates a font source over the given font file bytes (the array is kept, not copied); throws when <c>fontBytes</c> is <c>null</c>.</summary>
     public MemoryFontSource(byte[] fontBytes)
     {
         FontBytes = fontBytes ?? throw new ArgumentNullException(nameof(fontBytes));

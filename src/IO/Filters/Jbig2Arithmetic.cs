@@ -22,10 +22,9 @@ internal static partial class Jbig2Decoder
         }
 
         /// <summary>
-        /// Decode the next integer. Returns false when OOB; true otherwise with the value
-        /// in <paramref name="value"/>.
+        /// Decode the next integer. Returns null when OOB; the value otherwise.
         /// </summary>
-        public bool Decode(out int value)
+        public int? Decode()
         {
             var prev = 1;
 
@@ -50,9 +49,8 @@ internal static partial class Jbig2Decoder
                 v = (v << 1) | Read();
 
             v += offset;
-            if (s == 1 && v == 0) { value = 0; return false; } // OOB
-            value = s == 1 ? -v : v;
-            return true;
+            if (s == 1 && v == 0) return null; // OOB
+            return s == 1 ? -v : v;
         }
     }
 
@@ -91,7 +89,7 @@ internal static partial class Jbig2Decoder
         public bool DecodeBit(ArithmeticContext cx)
         {
             var idx = cx.Index;
-            var qe = QeTable[idx];
+            var qe = Jbig2QmStates.QeTable[idx];
             bool d;
 
             _a -= qe;
@@ -102,14 +100,14 @@ internal static partial class Jbig2Decoder
                 {
                     _a = qe;
                     d = cx.Mps;
-                    cx.Index = NmpsTable[idx];
+                    cx.Index = Jbig2QmStates.NmpsTable[idx];
                 }
                 else
                 {
                     _a = qe;
                     d = !cx.Mps;
-                    if (SwitchTable[idx] != 0) cx.Mps = !cx.Mps;
-                    cx.Index = NlpsTable[idx];
+                    if (Jbig2QmStates.SwitchTable[idx] != 0) cx.Mps = !cx.Mps;
+                    cx.Index = Jbig2QmStates.NlpsTable[idx];
                 }
             }
             else
@@ -122,13 +120,13 @@ internal static partial class Jbig2Decoder
                 if (_a < qe)
                 {
                     d = !cx.Mps;
-                    if (SwitchTable[idx] != 0) cx.Mps = !cx.Mps;
-                    cx.Index = NlpsTable[idx];
+                    if (Jbig2QmStates.SwitchTable[idx] != 0) cx.Mps = !cx.Mps;
+                    cx.Index = Jbig2QmStates.NlpsTable[idx];
                 }
                 else
                 {
                     d = cx.Mps;
-                    cx.Index = NmpsTable[idx];
+                    cx.Index = Jbig2QmStates.NmpsTable[idx];
                 }
             }
 
@@ -173,39 +171,5 @@ internal static partial class Jbig2Decoder
                 _clow &= 0xFFFF;
             }
         }
-
-        // T.88 Table E.1 — Qe value, NMPS, NLPS, SWITCH columns. 47 states.
-        private static readonly uint[] QeTable =
-        [
-            0x5601, 0x3401, 0x1801, 0x0AC1, 0x0521, 0x0221, 0x5601, 0x5401,
-            0x4801, 0x3801, 0x3001, 0x2401, 0x1C01, 0x1601, 0x5601, 0x5401,
-            0x5101, 0x4801, 0x3801, 0x3401, 0x3001, 0x2801, 0x2401, 0x2201,
-            0x1C01, 0x1801, 0x1601, 0x1401, 0x1201, 0x1101, 0x0AC1, 0x09C1,
-            0x08A1, 0x0521, 0x0441, 0x02A1, 0x0221, 0x0141, 0x0111, 0x0085,
-            0x0049, 0x0025, 0x0015, 0x0009, 0x0005, 0x0001, 0x5601,
-        ];
-
-        private static readonly int[] NmpsTable =
-        [
-             1,  2,  3,  4,  5, 38,  7,  8,  9, 10, 11, 12, 13, 29, 15, 16,
-            17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
-            33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 45, 46,
-        ];
-
-        private static readonly int[] NlpsTable =
-        [
-             1,  6,  9, 12, 29, 33,  6, 14, 14, 14, 17, 18, 20, 21, 14, 14,
-            15, 16, 17, 18, 19, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
-            30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 46,
-        ];
-
-        // SWITCH flag: 1 only at indices 0, 6, 14 (states where MPS may flip under
-        // conditional exchange). All others 0.
-        private static readonly int[] SwitchTable =
-        [
-            1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
     }
 }

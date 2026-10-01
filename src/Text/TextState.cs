@@ -1,4 +1,4 @@
-namespace Aspose.Pdf.Text;
+﻿namespace Aspose.Pdf.Text;
 
 /// <summary>
 /// Represents a position on a page.
@@ -12,65 +12,34 @@ public enum FontStyles
     Italic = 2,
 }
 
-public sealed class Position
-{
-    public Position(double xIndent, double yIndent)
-    {
-        // Assign the backing fields directly so construction does not set Touched —
-        // only a later property write counts as the caller "setting" the position.
-        _xIndent = xIndent;
-        _yIndent = yIndent;
-    }
-
-    private double _xIndent;
-    private double _yIndent;
-
-    /// <summary>True once <see cref="XIndent"/>/<see cref="YIndent"/> has been
-    /// written through a property setter (not via the constructor). Lets the owning
-    /// <see cref="TextFragment"/> distinguish a position the caller explicitly set —
-    /// e.g. <c>fragment.Position.XIndent = …</c> on a fresh fragment — from one that
-    /// was merely auto-created when the (never-null) Position getter was read.</summary>
-    internal bool Touched { get; private set; }
-
-    public double XIndent { get => _xIndent; set { _xIndent = value; Touched = true; } }
-    public double YIndent { get => _yIndent; set { _yIndent = value; Touched = true; } }
-
-    public override bool Equals(object? obj)
-        => obj is Position other
-           && Math.Abs(XIndent - other.XIndent) < 0.001
-           && Math.Abs(YIndent - other.YIndent) < 0.001;
-
-    public override int GetHashCode()
-        => HashCode.Combine(Math.Round(XIndent, 2), Math.Round(YIndent, 2));
-
-    // Format: "( x, y )" with shortest-round-trip doubles ("( 25.92,
-    // 661.138439991951 )") — tests log Position values and compare log LENGTHS.
-    public override string ToString() => string.Format(
-        System.Globalization.CultureInfo.InvariantCulture, "( {0}, {1} )", XIndent, YIndent);
-}
 
 /// <summary>
 /// Text formatting state.
 /// </summary>
-public class TextState
+public partial class TextState
 {
     /// <summary>Default tab-stop width in PDF points (56 pt ≈ 0.78 in,
     /// matches Adobe's default tab spacing). Declared as an instance
     /// field so reflection-based callers see a non-static field.</summary>
     public float TabstopDefaultValue = 56f;
 
+    /// <summary>Creates a text state with the default settings: Helvetica at 10 points.</summary>
     public TextState() { }
 
+    /// <summary>Creates a text state with the given font size, in points.</summary>
     public TextState(double fontSize) { FontSize = (float)fontSize; }
 
+    /// <summary>Creates a text state that uses the named font family.</summary>
     public TextState(string fontFamily) { FontName = fontFamily; }
 
+    /// <summary>Creates a text state that uses the named font family at the given size, in points.</summary>
     public TextState(string fontFamily, double fontSize)
     {
         FontName = fontFamily;
         FontSize = (float)fontSize;
     }
 
+    /// <summary>Creates a text state that uses the named font family with the given bold and italic flags; the styled face (e.g. Times-Bold) is resolved when the font is applied.</summary>
     public TextState(string fontFamily, bool bold, bool italic)
     {
         // Keep the family name clean and carry the requested style as flags. The styled
@@ -83,17 +52,53 @@ public class TextState
         IsItalic = italic;
     }
 
+    /// <summary>Creates a text state with the given text (foreground) colour.</summary>
     public TextState(System.Drawing.Color foregroundColor)
     {
         ForegroundColor = Color.FromRgb(foregroundColor);
     }
 
+    /// <summary>Creates a text state with the given text (foreground) colour and font size, in points.</summary>
     public TextState(System.Drawing.Color foregroundColor, double fontSize)
     {
         ForegroundColor = Color.FromRgb(foregroundColor);
         FontSize = (float)fontSize;
     }
 
+    /// <summary>Colours, style, face and size in one call. The style REPLACES the face's
+    /// own: a regular face with <see cref="FontStyles.Italic"/> resolves to the family's
+    /// italic sibling, and an italic face with <see cref="FontStyles.Bold"/> to the
+    /// family's bold (not bold-italic) — the face contributes its family, the caller the
+    /// style. A family without the styled sibling keeps the face it was given.</summary>
+    public TextState(System.Drawing.Color foregroundColor, System.Drawing.Color backgroundColor,
+        FontStyles fontStyle, Font font, double fontSize)
+    {
+        ForegroundColor = Color.FromRgb(foregroundColor);
+        BackgroundColor = Color.FromRgb(backgroundColor);
+        FontSize = (float)fontSize;
+        IsBold = (fontStyle & FontStyles.Bold) != 0;
+        IsItalic = (fontStyle & FontStyles.Italic) != 0;
+        if (font is null) return;
+        var family = FaceFamily(font);
+        Font = FontRepository.TryFindFont(family, fontStyle, ignoreCase: true) ?? font;
+    }
+
+    /// <summary>The family a face belongs to: its base name with the style suffix removed,
+    /// whether the face spells it "Times New Roman-Italic" (a suffix) or "Times New Roman
+    /// Italic" (a trailing word, the system face names' spelling).</summary>
+    private static string FaceFamily(Font font)
+    {
+        var family = FontRepository.FamilyOf(font.BaseFont ?? font.FontName);
+        foreach (var style in new[] { " Bold Italic", " Bold", " Italic", " Regular" })
+        {
+            if (family.Length > style.Length
+                && family.EndsWith(style, StringComparison.OrdinalIgnoreCase))
+                return family.Substring(0, family.Length - style.Length);
+        }
+        return family;
+    }
+
+    /// <summary>Gets or sets the name of the font family used for the text; <c>null</c> when not set.</summary>
     public string? FontName { get; set; }
 
     /// <summary>Emit a /FontDescriptor (line-box Ascent/Descent) on the Standard-14
@@ -138,6 +143,7 @@ public class TextState
 
     private double _fontSize = 10;
 
+    /// <summary>Gets or sets the font size, in points; the default is 10. Throws for NaN or infinity. On a fragment found on a page, a change rewrites the page content.</summary>
     public float FontSize
     {
         get => (float)_fontSize;
@@ -161,6 +167,49 @@ public class TextState
     /// <summary>True once the public FontSize setter ran — distinguishes an
     /// explicit caller size from the ctor's 10pt placeholder.</summary>
     internal bool FontSizeTouched { get; private set; }
+
+    // One flag per property a caller can set: a state starts with every property at its
+    // default, and a consumer that inherits values (a segment from its fragment, a
+    // fragment from its page) must tell a chosen value from a default one.
+    internal bool FontTouched { get; private set; }
+    /// <summary>True once the caller assigned a face to a run already on a page: the
+    /// replacement that follows re-encodes that run and carries the state with it.</summary>
+    internal bool FaceReassigned { get; private set; }
+    internal bool FontStyleTouched { get; private set; }
+    internal bool ForegroundColorTouched { get; private set; }
+    internal bool BackgroundColorTouched { get; private set; }
+    internal bool StrokingColorTouched { get; private set; }
+    internal bool CharacterSpacingTouched { get; private set; }
+    internal bool WordSpacingTouched { get; private set; }
+    internal bool HorizontalScalingTouched { get; private set; }
+    internal bool LineSpacingTouched { get; private set; }
+    internal bool UnderlineTouched { get; private set; }
+    internal bool StrikeOutTouched { get; private set; }
+
+    /// <summary>The font size the caller set, or null while it is still the default.</summary>
+    internal float? ExplicitFontSize => FontSizeTouched ? FontSize : null;
+    /// <summary>The font the caller set, or null while it is still the default.</summary>
+    internal Font? ExplicitFont => FontTouched ? Font : null;
+    /// <summary>The style the caller set, or null while it is still the default.</summary>
+    internal FontStyles? ExplicitFontStyle => FontStyleTouched ? FontStyle : null;
+    /// <summary>The fill colour the caller set, or null while it is still the default.</summary>
+    internal Color? ExplicitForegroundColor => ForegroundColorTouched ? ForegroundColor : null;
+    /// <summary>The background colour the caller set, or null while it is still the default.</summary>
+    internal Color? ExplicitBackgroundColor => BackgroundColorTouched ? BackgroundColor : null;
+    /// <summary>The stroking colour the caller set, or null while it is still the default.</summary>
+    internal Color? ExplicitStrokingColor => StrokingColorTouched ? StrokingColor : null;
+    /// <summary>The character spacing the caller set, or null while it is still the default.</summary>
+    internal float? ExplicitCharacterSpacing => CharacterSpacingTouched ? CharacterSpacing : null;
+    /// <summary>The word spacing the caller set, or null while it is still the default.</summary>
+    internal float? ExplicitWordSpacing => WordSpacingTouched ? WordSpacing : null;
+    /// <summary>The horizontal scaling the caller set, or null while it is still the default.</summary>
+    internal float? ExplicitHorizontalScaling => HorizontalScalingTouched ? HorizontalScaling : null;
+    /// <summary>The line spacing the caller set, or null while it is still the default.</summary>
+    internal float? ExplicitLineSpacing => LineSpacingTouched ? LineSpacing : null;
+    /// <summary>The underline choice the caller made, or null while it is still the default.</summary>
+    internal bool? ExplicitUnderline => UnderlineTouched ? Underline : null;
+    /// <summary>The strike-out choice the caller made, or null while it is still the default.</summary>
+    internal bool? ExplicitStrikeOut => StrikeOutTouched ? StrikeOut : null;
 
     /// <summary>True when LineSpacing was assigned by an internal layout path
     /// (e.g. the HTML block renderer's 1.2× pitch) rather than the caller. A
@@ -228,8 +277,27 @@ public class TextState
         // sub-run resize resizes its whole run). Fragment-level resize is
         // collateral-free: it only rewrites when the covering Tf runs are
         // wholly inside the fragment's text, else it leaves the stream alone.
+        // The owner's absorbed rectangle, page edge and face measure let a whole-show
+        // resize re-seat the rest of its line the way the reference does.
+        TextStateModifier.LineReseat? reseat = null;
+        Page livePage = page;
+        if (Font is { } face)
+            reseat = new TextStateModifier.LineReseat(livePage.Rect.URX,
+                (t, size) => face.MeasureString(t, size),
+                () =>
+                {
+                    var live = new TextFragmentAbsorber();
+                    livePage.Accept(live);
+                    var rects = new List<(double llx, double urx, double lly)>(live.TextFragments.Count);
+                    foreach (TextFragment f in live.TextFragments)
+                        rects.Add(f.Rectangle is { } r ? (r.LLX, r.URX, r.LLY) : (double.NaN, double.NaN, double.NaN));
+                    return rects;
+                });
+        // A face assigned by the caller is applied by the re-encode of the replacement that
+        // follows (the show it absorbed stays intact for it), so the size rides along there
+        // and a sub-run is not split here.
         modifier.ModifyFontSize(page, text, oldSize, newSize,
-            allowCollateral: OwnerSegment is not null);
+            allowCollateral: OwnerSegment is not null, reseat, splitSubRun: !FaceReassigned);
         // Keep the fragment's segment states in sync without re-triggering
         // a second content-stream rewrite per segment.
         if (OwnerSegment is null && OwnerFragment is not null)
@@ -243,12 +311,14 @@ public class TextState
     internal void SetFontSizeQuiet(double value) => _fontSize = value;
 
     private Color? _foregroundColor;
+    /// <summary>Gets or sets the text fill colour; <c>null</c> when not set. On a fragment found on a page, a change recolours that text in the page content.</summary>
     public Color? ForegroundColor
     {
         get => _foregroundColor;
         set
         {
             _foregroundColor = value;
+            ForegroundColorTouched = true;
             if (value is null) return;
             // Mirror the FontSize/BackgroundColor side-effects: when this
             // TextState belongs to a segment from a page, propagate the new
@@ -304,19 +374,26 @@ public class TextState
 
     /// <summary>Stroking (outline) color of the text. Used together with
     /// a non-zero <see cref="RenderingMode"/> (1 = stroke, 2 = fill+stroke).</summary>
-    public Color? StrokingColor { get; set; }
+    public Color? StrokingColor
+    {
+        get => _strokingColor;
+        set { _strokingColor = value; StrokingColorTouched = true; }
+    }
+    private Color? _strokingColor;
 
     /// <summary>Whether text positioning treats Y as the baseline or the descender.
     /// Default is <see cref="CoordinateOrigin.Descender"/>.</summary>
     public CoordinateOrigin CoordinateOrigin { get; set; } = CoordinateOrigin.Descender;
 
     private Color? _backgroundColor;
+    /// <summary>Gets or sets the colour of a rectangle painted behind the text; <c>null</c> (the default) paints none.</summary>
     public Color? BackgroundColor
     {
         get => _backgroundColor;
         set
         {
             _backgroundColor = value;
+            BackgroundColorTouched = true;
             // When BackgroundColor is set on a segment obtained via TextFragmentAbsorber,
             // register the owning fragment for rectangle injection during save.
             if (value is not null && !OwnerWrittenByBuilder)
@@ -354,6 +431,7 @@ public class TextState
         }
         set
         {
+            FontStyleTouched = true;
             var wasBold = IsBold;
             var wasItalic = IsItalic;
             IsBold = (value & FontStyles.Bold) != 0;
@@ -406,6 +484,7 @@ public class TextState
         {
             _isUnderline = value;
             _underlineRequested = value;
+            UnderlineTouched = true;
             // Register the owning fragment for underline-rect injection during save.
             // Try segment ownership first (segment-level TextState), then fragment ownership.
             var frag = OwnerSegment?.Owner ?? OwnerFragment;
@@ -471,7 +550,7 @@ public class TextState
     public bool StrikeOut
     {
         get => IsStrikeOut;
-        set => IsStrikeOut = value;
+        set { IsStrikeOut = value; StrikeOutTouched = true; }
     }
 
     /// <summary>Whether the text is superscript.</summary>
@@ -495,23 +574,77 @@ public class TextState
     }
 
     /// <summary>Character spacing in text space units.</summary>
-    public float CharacterSpacing { get; set; }
+    public float CharacterSpacing
+    {
+        get => _characterSpacing;
+        set { _characterSpacing = value; CharacterSpacingTouched = true; }
+    }
+    private float _characterSpacing;
 
     /// <summary>Word spacing in text space units.</summary>
-    public float WordSpacing { get; set; }
+    public float WordSpacing
+    {
+        get => _wordSpacing;
+        set { _wordSpacing = value; WordSpacingTouched = true; }
+    }
+    private float _wordSpacing;
 
     /// <summary>Horizontal scaling percentage (default 100).</summary>
-    public float HorizontalScaling { get; set; } = 100;
+    public float HorizontalScaling
+    {
+        get => _horizontalScaling;
+        set { _horizontalScaling = value; HorizontalScalingTouched = true; }
+    }
+    private float _horizontalScaling = 100;
 
     /// <summary>Line spacing (leading) in text space units.</summary>
-    public float LineSpacing { get; set; }
+    /// <summary>The line-box ascent this caller declares, in em (1 = the font
+    /// size), or null to use the face's own. Only read under
+    /// <see cref="TextFormattingOptions.LineSpacingMode.LineBox"/>.
+    ///
+    /// A face carries several defensible ascent/descent pairs (AFM, hhea, OS/2
+    /// typo, win, the bounding box) and a typographic system picks one -- some
+    /// scale the pair they pick. A caller that must match such a system declares
+    /// the pair here instead of distorting the leading to compensate, which would
+    /// move the pitch as well as the seat.</summary>
+    public double? LineBoxAscentEm { get; set; }
+
+    /// <summary>The line-box descent this caller declares, in em, as a POSITIVE
+    /// distance below the baseline. Null uses the face's own. See
+    /// <see cref="LineBoxAscentEm"/>.</summary>
+    public double? LineBoxDescentEm { get; set; }
+
+    /// <summary>Gets or sets the extra space, in points, added above each line of the text; the default is 0.</summary>
+    public float LineSpacing
+    {
+        get => _lineSpacing;
+        set { _lineSpacing = value; LineSpacingTouched = true; }
+    }
+    private float _lineSpacing;
 
     /// <summary>String token inserted into the rendered text in place of a
     /// tab character. Returns "\t" — the default tab-character placeholder.</summary>
     public string TabTag => "\t";
 
+    private HorizontalAlignment _horizontalAlignment = HorizontalAlignment.Left;
+
     /// <summary>Horizontal alignment of the text.</summary>
-    public HorizontalAlignment HorizontalAlignment { get; set; } = HorizontalAlignment.Left;
+    public HorizontalAlignment HorizontalAlignment
+    {
+        get => _horizontalAlignment;
+        set { _horizontalAlignment = value; HorizontalAlignmentTouched = true; }
+    }
+
+    /// <summary>True once <see cref="HorizontalAlignment"/> has been written through
+    /// its setter. The alignment defaults to Left, so without this flag a state the
+    /// caller never touched is indistinguishable from one they aligned Left on
+    /// purpose — and an explicit cell-level Left could not override a row-level
+    /// Center. Mirrors <see cref="FontSizeTouched"/>.</summary>
+    internal bool HorizontalAlignmentTouched { get; private set; }
+
+    /// <summary>Copy an alignment in without recording it as caller-set, so an
+    /// untouched source does not make the target look explicitly aligned.</summary>
+    internal void SetHorizontalAlignmentQuiet(HorizontalAlignment value) => _horizontalAlignment = value;
 
     /// <summary>Text rendering mode (Tr operator). Controls fill / stroke /
     /// clipping behaviour of glyph rendering.</summary>
@@ -560,6 +693,7 @@ public class TextState
     /// fs 15.96, an exact 1.10 × 15.96 = 17.556 pt drop).</summary>
     private const double OverflowRelayPitchEm = 1.10;
 
+    /// <summary>Gets or sets the font used for the text; the default is Helvetica. Setting it also sets <c>FontName</c>, and on a fragment found on a page a real font with a program is embedded and the text is rewritten with it.</summary>
     public Font? Font
     {
         get => _font;
@@ -567,6 +701,7 @@ public class TextState
         {
             var prevFont = _font;
             _font = value;
+            FontTouched = true;
             if (value is null) return;
             // Mirror the assigned font's name into FontName so downstream code that
             // keys on FontName (TextParagraph.RenderAbsolute → ensureFont(fontName))
@@ -592,6 +727,10 @@ public class TextState
             {
                 value.SetEmbeddedDefault(false);
                 value.SetSubsetDefault(false);
+                // A core face carries no program: the cached one belonged to the face this
+                // state had before, and a writer that re-emits the run from the state would
+                // otherwise keep drawing with it.
+                FontData = null;
             }
             else
             {
@@ -639,6 +778,7 @@ public class TextState
                         spaceW, OverflowRelayPitchEm * FontSize);
                 }
             }
+            FaceReassigned = true;
             try
             {
                 new TextStateModifier().ModifyFont(page, text!, value,
@@ -731,7 +871,7 @@ public class TextState
     internal int MarkedContentMcid { get; set; }
 
     /// <summary>
-    /// Copy every public formatting property from <paramref name="other"/> into
+    /// Copy every public formatting property from <c>other</c> into
     /// this state (leaving owner linkage intact).
     /// </summary>
     public void ApplyChangesFrom(TextState textState)
@@ -755,7 +895,8 @@ public class TextState
         WordSpacing = other.WordSpacing;
         HorizontalScaling = other.HorizontalScaling;
         LineSpacing = other.LineSpacing;
-        HorizontalAlignment = other.HorizontalAlignment;
+        if (other.HorizontalAlignmentTouched) HorizontalAlignment = other.HorizontalAlignment;
+        else SetHorizontalAlignmentQuiet(other.HorizontalAlignment);
         RenderingMode = other.RenderingMode;
         LineWidth = other.LineWidth;
         _occluded = other._occluded; // hidden-by-occlusion capture (field: no setter side effects)
@@ -772,76 +913,6 @@ public class TextState
     }
 }
 
-/// <summary>
-/// A 1-indexed collection of <see cref="TextFragment"/> objects, matching the public API.
-/// </summary>
-public sealed class TextFragmentCollection : System.Collections.Generic.IEnumerable<TextFragment>
-{
-    private readonly System.Collections.Generic.List<TextFragment> _list = new();
-
-    /// <summary>Number of fragments.</summary>
-    public int Count => _list.Count;
-
-    /// <summary>1-based indexer (index 1 returns the first fragment).</summary>
-    public TextFragment this[int index]
-    {
-        get
-        {
-            if (index < 1 || index > _list.Count)
-                throw new IndexOutOfRangeException($"Index {index} out of range [1, {_list.Count}].");
-            return _list[index - 1];
-        }
-    }
-
-    /// <summary>Backing list — internal so the absorber can reorder a
-    /// just-added range into reading order.</summary>
-    internal System.Collections.Generic.List<TextFragment> Inner => _list;
-
-    public bool IsReadOnly => false;
-    public bool IsSynchronized => false;
-    public object SyncRoot { get; } = new();
-
-    public void Add(TextFragment fragment)
-    {
-        if (fragment is null) throw new ArgumentNullException(nameof(fragment));
-        _list.Add(fragment);
-    }
-
-    /// <summary>Append every fragment from <paramref name="fragments"/> to this collection.</summary>
-    public void AddRange(System.Collections.Generic.IEnumerable<TextFragment> fragments)
-    {
-        if (fragments is null) throw new ArgumentNullException(nameof(fragments));
-        foreach (var fragment in fragments) Add(fragment);
-    }
-
-    public bool Contains(TextFragment item) => _list.Contains(item);
-
-    public void CopyTo(TextFragment[] array, int index) => _list.CopyTo(array, index);
-
-    public bool Remove(TextFragment item)
-    {
-        if (item is null) return false;
-        bool removed = _list.Remove(item);
-        // Deleting a fragment from an absorber's result collection deletes the
-        // corresponding text from the page content stream, so the next save no
-        // longer emits these glyphs.
-        if (removed)
-            item.DeleteFromContent();
-        return removed;
-    }
-
-    /// <summary>Clear all fragments from the collection.</summary>
-    public void Clear() => _list.Clear();
-
-    /// <summary>Remove the element at the given 0-based internal index.</summary>
-    internal void RemoveAt(int zeroBasedIndex) => _list.RemoveAt(zeroBasedIndex);
-
-    /// <summary>0-based internal access for use within the library.</summary>
-    internal TextFragment GetInternal(int zeroBasedIndex) => _list[zeroBasedIndex];
-
-    public System.Collections.Generic.IEnumerator<TextFragment> GetEnumerator() => _list.GetEnumerator();
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => _list.GetEnumerator();
-}
 
 // Note class moved to top-level Aspose.Pdf namespace (src/Note.cs)
 // where reflection-based callers expect to find it.

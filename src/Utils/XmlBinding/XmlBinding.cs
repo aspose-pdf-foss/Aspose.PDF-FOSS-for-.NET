@@ -290,54 +290,7 @@ internal static partial class XmlBinding
             {
                 // Build the page band: its TextFragments render on every page the
                 // flow produces ($p/$P placeholders resolve at draw time).
-                var band = new HeaderFooter();
-                foreach (XmlNode hf in child.ChildNodes)
-                {
-                    if (hf.NodeType != XmlNodeType.Element) continue;
-                    switch (hf.LocalName)
-                    {
-                        case "Margin":
-                            band.Margin = ParseMargin(hf);
-                            break;
-                        case "TextFragment":
-                        {
-                            var bandText = ExtractTextFromFragment(hf);
-                            {
-                                // The band fragment keeps its alignment attribute, its
-                                // inline flag and its font size (a right-aligned
-                                // 10 pt print date; a band sizes from a
-                                // TextState nested in the segment). An empty fragment
-                                // is a line of the band too (a page number sitting
-                                // under an empty centred paragraph).
-                                var bandFrag = new TextFragment(bandText ?? string.Empty);
-                                if (ParseHAlign(GetAttr(hf, "HorizontalAlignment")) is { } bandAlign)
-                                    bandFrag.HorizontalAlignment = bandAlign;
-                                if (string.Equals(GetAttr(hf, "IsInLineParagraph"), "true", StringComparison.OrdinalIgnoreCase))
-                                    bandFrag.IsInLineParagraph = true;
-                                foreach (XmlNode bandChild in hf.ChildNodes)
-                                {
-                                    if (bandChild.NodeType != XmlNodeType.Element) continue;
-                                    var bandState = bandChild.LocalName == "TextState" ? bandChild
-                                        : bandChild.LocalName == "TextSegment"
-                                            ? FirstElementChild(bandChild, "TextState")
-                                            : null;
-                                    if (bandState is not null && GetAttr(bandState, "FontSize") is not null
-                                        && bandFrag.TextState.FontSize == 10)
-                                        bandFrag.TextState.FontSize =
-                                            (float)GetAttrLength(bandState, "FontSize", 10);
-                                }
-                                band.Paragraphs.Add(bandFrag);
-                            }
-                            break;
-                        }
-                        case "Table":
-                            band.Paragraphs.Add(BuildTable(hf, ctx));
-                            break;
-                        case "Image":
-                            band.Paragraphs.Add(BuildImage(hf, ctx));
-                            break;
-                    }
-                }
+                var band = BuildPageBand(child, ctx);
                 if (child.LocalName == "Header") page.Header = band;
                 else page.Footer = band;
                 break;
@@ -369,6 +322,60 @@ internal static partial class XmlBinding
                 ProcessTextFragment(document, page, child, ctx.Defaults);
                 break;
         }
+    }
+
+    /// <summary>Build a page band (header or footer) from its element: margin, text
+    /// fragments, tables and images become the band's paragraphs.</summary>
+    private static HeaderFooter BuildPageBand(XmlNode child, BindContext ctx)
+    {
+        var band = new HeaderFooter();
+        foreach (XmlNode hf in child.ChildNodes)
+        {
+            if (hf.NodeType != XmlNodeType.Element) continue;
+            switch (hf.LocalName)
+            {
+                case "Margin":
+                    band.Margin = ParseMargin(hf);
+                    break;
+                case "TextFragment":
+                    band.Paragraphs.Add(BuildBandFragment(hf));
+                    break;
+                case "Table":
+                    band.Paragraphs.Add(BuildTable(hf, ctx));
+                    break;
+                case "Image":
+                    band.Paragraphs.Add(BuildImage(hf, ctx));
+                    break;
+            }
+        }
+        return band;
+    }
+
+    /// <summary>One TextFragment of a page band. It keeps its alignment attribute, its
+    /// inline flag and its font size (a right-aligned 10 pt print date; a band sizes from
+    /// a TextState nested in the segment). An empty fragment is a line of the band too (a
+    /// page number sitting under an empty centred paragraph).</summary>
+    private static TextFragment BuildBandFragment(XmlNode hf)
+    {
+        var bandText = ExtractTextFromFragment(hf);
+        var bandFrag = new TextFragment(bandText ?? string.Empty);
+        if (ParseHAlign(GetAttr(hf, "HorizontalAlignment")) is { } bandAlign)
+            bandFrag.HorizontalAlignment = bandAlign;
+        if (string.Equals(GetAttr(hf, "IsInLineParagraph"), "true", StringComparison.OrdinalIgnoreCase))
+            bandFrag.IsInLineParagraph = true;
+        foreach (XmlNode bandChild in hf.ChildNodes)
+        {
+            if (bandChild.NodeType != XmlNodeType.Element) continue;
+            var bandState = bandChild.LocalName == "TextState" ? bandChild
+                : bandChild.LocalName == "TextSegment"
+                    ? FirstElementChild(bandChild, "TextState")
+                    : null;
+            if (bandState is not null && GetAttr(bandState, "FontSize") is not null
+                && bandFrag.TextState.FontSize == 10)
+                bandFrag.TextState.FontSize =
+                    (float)GetAttrLength(bandState, "FontSize", 10);
+        }
+        return bandFrag;
     }
 
     // FloatingBox without explicit Left/Top gets inlined by the page's FlowLayout,

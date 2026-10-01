@@ -4,7 +4,6 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Operators;
 using Aspose.Pdf.Shading;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -174,6 +173,8 @@ public sealed partial class Page
         }
 
         if (indirect) MarkDirty();
+        // Operators held in Contents and not yet written keep this stream after them.
+        _contents?.NoteStreamAdded(newStream);
     }
 
     /// <summary>Insert a content stream at <paramref name="index"/> in /Contents —
@@ -187,7 +188,7 @@ public sealed partial class Page
         var resolved = _reader.Resolve(existing);
         if (resolved is PdfArray existingArray)
         {
-            existingArray.Insert(Math.Clamp(index, 0, existingArray.Count), newStream);
+            existingArray.Insert(Compat.Clamp(index, 0, existingArray.Count), newStream);
         }
         else if (resolved is PdfStream)
         {
@@ -239,7 +240,69 @@ public sealed partial class Page
     {
         _dict.Set("Contents", new PdfStream(new PdfDictionary(), contentBytes));
         _contents?.InvalidateCache();
+        // The page's content is replaced whole: operators held in Contents now stand for this.
+        _contents?.NoteContentReplaced();
     }
+
+    /// <summary>Replace the content streams in <paramref name="keepAddedSince"/> (the ones an
+    /// operator list was read from) with <paramref name="parts"/>: runs of operator bytes and,
+    /// between them, streams the page added while the list was held (text a TextBuilder wrote
+    /// after operators were added through <see cref="Contents"/>), each kept as the same object -
+    /// the text written into it is bound to it. Any other stream added since stays where it is.</summary>
+    internal void SetContentStream(List<(byte[]? Bytes, PdfStream? Stream)> parts, IReadOnlyCollection<PdfStream>? keepAddedSince)
+    {
+        var raw = _dict.Get("Contents");
+        var entries = _reader.Resolve(raw) switch
+        {
+            PdfArray arr => arr.ToList(),
+            PdfStream => new List<PdfObject> { raw! },
+            _ => new List<PdfObject>(),
+        };
+        PdfStream? StreamOf(PdfObject entry) => _reader.ResolveStream(entry);
+        bool Original(PdfObject entry) => keepAddedSince is not null && StreamOf(entry) is { } s && keepAddedSince.Any(k => ReferenceEquals(k, s));
+        var placed = parts.Where(p => p.Stream is not null).Select(p => p.Stream!).ToList();
+        bool Placed(PdfObject entry) => StreamOf(entry) is { } s && placed.Any(p => ReferenceEquals(p, s));
+        var others = entries.Where(e => !Original(e) && !Placed(e)).ToList();
+        if (placed.Count == 0 && others.Count == 0 && parts.Count == 1)
+        {
+            SetContentStream(parts[0].Bytes!);
+            return;
+        }
+
+        var contents = new PdfArray();
+        void EmitParts()
+        {
+            foreach (var (bytes, stream) in parts)
+            {
+                if (bytes is not null) contents.Add(new PdfStream(new PdfDictionary(), bytes));
+                else if (entries.FirstOrDefault(e => ReferenceEquals(StreamOf(e), stream)) is { } entry) contents.Add(entry);
+            }
+        }
+        // The new content stands where the list's streams stood (or, when the list was read
+        // from an empty page, where the first stream added since stands).
+        var emitted = false;
+        foreach (var entry in entries)
+        {
+            if (Original(entry) || Placed(entry))
+            {
+                if (!emitted) EmitParts();
+                emitted = true;
+                continue;
+            }
+            contents.Add(entry);
+        }
+        if (!emitted) EmitParts();
+        _dict.Set("Contents", contents);
+        _contents?.InvalidateCache();
+    }
+
+    /// <summary>The page's content streams, in /Contents order.</summary>
+    internal List<PdfStream> ContentStreamObjects() => _reader.Resolve(_dict.Get("Contents")) switch
+    {
+        PdfArray arr => arr.Select(e => _reader.ResolveStream(e)).OfType<PdfStream>().ToList(),
+        PdfStream single => [single],
+        _ => [],
+    };
 
     /// <summary>Drop the cached typed-operator view of the page content so the
     /// next <see cref="Contents"/> access re-materialises from the current raw
@@ -269,6 +332,7 @@ public sealed partial class Page
         if (existingData.Length > 0) combined[existingData.Length] = (byte)'\n';
         newBytes.CopyTo(combined, existingData.Length + (existingData.Length > 0 ? 1 : 0));
         _dict.Set("Contents", new PdfStream(new PdfDictionary(), combined));
+        _contents?.NoteContentReplaced();
     }
 
     /// <summary>Appends raw content bytes to the existing page content stream.</summary>

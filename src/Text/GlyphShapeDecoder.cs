@@ -7,8 +7,8 @@ namespace Aspose.Pdf.Text;
 /// <summary>
 /// Last-resort decoder for symbolic embedded TrueType fonts that carry NO
 /// Unicode semantics at all — no /Encoding, no /ToUnicode, a post table
-/// without glyph names and only a (1,0)/(3,0)-PUA cmap (Ghostscript-style
-/// subsets whose codes are sequential-by-first-use bytes). This decoder
+/// without glyph names and only a (1,0)/(3,0)-PUA cmap (the
+/// subsets some converters write, whose codes are sequential-by-first-use bytes). This decoder
 /// recognises each glyph by its OUTLINE SHAPE,
 /// matching the embedded outline against reference
 /// shapes rasterised from an installed sans-serif font.
@@ -137,14 +137,14 @@ internal static class GlyphShapeClassifier
         {
             lock (_initLock)
             {
-                refs = _refs ??= OperatingSystem.IsWindows()
+                refs = _refs ??= Compat.IsWindows()
                     ? BuildReferenceShapes()
                     : BuildReferenceShapesManaged();
             }
         }
         if (refs.Count == 0) return null;
 
-        var grid = RasterizeOutline(outline, out var emGrid, out var relH, out var relW, out var relBot, unitsPerEm);
+        (var grid, var emGrid, var relH, var relW, var relBot) = RasterizeOutline(outline, unitsPerEm);
         if (grid is null) return null;
 
         RefShape? best = null;
@@ -202,14 +202,17 @@ internal static class GlyphShapeClassifier
     /// <summary>Flatten the glyph's quadratic contours and scanline-fill them
     /// (even-odd) into the two comparison grids: an N×N grid stretched over the
     /// glyph bbox and an M×M em-anchored grid; row 0 = top in both.</summary>
-    private static bool[]? RasterizeOutline(GlyphOutline outline, out bool[] emGrid,
-        out double relH, out double relW, out double relBot, int unitsPerEm)
+    private static (bool[]? result, bool[] emGrid, double relH, double relW, double relBot) RasterizeOutline(GlyphOutline outline, int unitsPerEm)
     {
+        bool[]? emGrid = default;
+        double relH = default;
+        double relW = default;
+        double relBot = default;
         emGrid = System.Array.Empty<bool>();
         relH = relW = relBot = 0;
         var w = outline.XMax - outline.XMin;
         var h = outline.YMax - outline.YMin;
-        if (w <= 0 || h <= 0 || unitsPerEm <= 0) return null;
+        if (w <= 0 || h <= 0 || unitsPerEm <= 0) return (null, emGrid, relH, relW, relBot);
         relH = h / unitsPerEm;
         relW = w / unitsPerEm;
         relBot = -outline.YMin / unitsPerEm; // descent below the baseline (positive down)
@@ -220,7 +223,7 @@ internal static class GlyphShapeClassifier
             var pts = ExpandContour(contour);
             if (pts.Count >= 3) polys.Add(pts);
         }
-        if (polys.Count == 0) return null;
+        if (polys.Count == 0) return (null, emGrid, relH, relW, relBot);
 
         List<double> Crossings(double y)
         {
@@ -268,7 +271,7 @@ internal static class GlyphShapeClassifier
             var y = EmYTop * em - (row + 0.5) * (EmYTop + EmYBot) * em / M; // baseline-relative
             FillRow(emGrid, M, row, Crossings(y), ex0, exSpan);
         }
-        return grid;
+        return (grid, emGrid, relH, relW, relBot);
     }
 
     /// <summary>TrueType contour → polyline: consecutive off-curve points imply an
@@ -345,8 +348,7 @@ internal static class GlyphShapeClassifier
                 {
                     if (!parser.CMap.TryGetValue(shapeCh, out var gid)) continue;
                     if (parser.GetOutline(gid) is not { } outline) continue;
-                    var grid = RasterizeOutline(outline, out var emGrid,
-                        out var relH, out var relW, out var relBot, parser.UnitsPerEm);
+                    (var grid, var emGrid, var relH, var relW, var relBot) = RasterizeOutline(outline, parser.UnitsPerEm);
                     if (grid is null) continue;
                     refs.Add(new RefShape
                     {

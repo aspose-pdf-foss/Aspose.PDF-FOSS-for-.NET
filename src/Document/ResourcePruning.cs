@@ -14,8 +14,10 @@ namespace Aspose.Pdf;
 
 public sealed partial class Document
 {
+    /// <summary>Shrinks the document using the default settings: unused resources and objects are dropped, duplicate streams are linked and duplicate images are removed. The result takes effect when the document is saved.</summary>
     public void OptimizeResources() => OptimizeResources(Aspose.Pdf.Optimization.OptimizationOptions.Default);
 
+    /// <summary>Shrinks the document using the given settings (unused resources and objects, duplicate streams and images, image compression and downsampling, font subsetting or unembedding, metadata removal). The result takes effect when the document is saved; <c>null</c> uses the defaults.</summary>
     public void OptimizeResources(Aspose.Pdf.Optimization.OptimizationOptions strategy)
     {
         var options = strategy ?? Aspose.Pdf.Optimization.OptimizationOptions.Default;
@@ -178,6 +180,10 @@ public sealed partial class Document
             var resources = _reader.ResolveDict(page.Dict.Get("Resources"));
             if (resources is null) continue;
 
+            // Operators added through Page.Contents wait in memory until the page is
+            // saved or rendered; an image placed by such a pending /Do is a used resource,
+            // not an orphan, so the pending content joins the stream before it is read.
+            page.FlushPendingContents();
             var content = page.GetContentStreamBytes();
             // No analysable content => keep every resource on this dict rather than guess.
             if (content is null || content.Length == 0)
@@ -195,10 +201,17 @@ public sealed partial class Document
             CollectContentResourceNames(content, resources, used, visitedForms);
         }
 
+        // A colour space is reached by NAME from content and by OBJECT from an image
+        // XObject (or another colour space). An entry no operator names may still be
+        // live for an image on another page, so collect the objects the document
+        // references before pruning any dictionary.
+        var liveColorSpaces = CollectLiveColorSpaceObjects();
+
         foreach (var (resources, used) in usedByResources)
         {
             if (keepAll.Contains(resources)) continue;
             AddReferencedXObjectNames(resources, used);
+            AddLiveColorSpaceNames(resources, used, liveColorSpaces);
             PruneResourceCategories(resources, used);
         }
     }
@@ -219,119 +232,38 @@ public sealed partial class Document
     /// fonts to sequential F0, F1, … keys (a replacement font is
     /// named "F0"). Returns the rewritten content when a rename changed it,
     /// else null. Form XObject scopes are rewritten in place.</summary>
-    private byte[]? PruneFontsInScope(byte[]? content, PdfDictionary? resources,
-        HashSet<PdfDictionary> visitedForms)
+    private byte[]? PruneFontsInScope(byte[]? content, PdfDictionary? resources, HashSet<PdfDictionary> visitedForms)
     {
-        if (content is null || content.Length == 0 || resources is null) return null;
+        var fp = new FontPruneState();
+        fp.content = content;
+        fp.resources = resources;
+        fp.visitedForms = visitedForms;
+        if (fp.content is null || fp.content.Length == 0 || fp.resources is null) return null;
 
-        // Collect the fonts a `Tf` selects that actually SHOW text, and the form
-        // XObjects a `Do` invokes. A font selected only by an empty run (`/F Tf`
-        // followed by `[] TJ` with no glyphs, then another `Tf`) is not really used —
-        // counting it would keep an orphan font after a full RemoveUnusedFonts replace.
-        var usedFonts = new HashSet<string>(StringComparer.Ordinal);
-        var formNames = new List<string>();
-        var lexer = new IO.PdfLexer(content);
-        string? lastName = null;      // most recent /Name operand (font for Tf, form for Do)
-        string? currentFont = null;   // font selected by the last Tf
-        bool sawGlyphs = false;       // a non-empty string appeared since the last operator
+        fp.usedFonts = new HashSet<string>(StringComparer.Ordinal);
+        fp.formNames = new List<string>();
+        fp.lexer = new IO.PdfLexer(fp.content);
+        fp.lastName = null;      // most recent /Name operand (font for Tf, form for Do)
+        fp.currentFont = null;   // font selected by the last Tf
+        fp.sawGlyphs = false;       // a non-empty string appeared since the last operator
         while (true)
         {
-            var token = lexer.NextToken();
-            if (token.Kind == IO.TokenKind.Eof) break;
-            switch (token.Kind)
-            {
-                case IO.TokenKind.Name when token.StringValue is { } n:
-                    lastName = n;
-                    break;
-                case IO.TokenKind.LiteralString:
-                case IO.TokenKind.HexString:
-                    if (token.BytesValue is { Length: > 0 }) sawGlyphs = true;
-                    break;
-                case IO.TokenKind.Keyword:
-                    var kw = token.StringValue;
-                    if (kw == "BI") { SkipInlineImage(lexer, usedFonts); break; }
-                    if (kw == "Tf") currentFont = lastName;
-                    else if (kw == "Do" && lastName is not null) formNames.Add(lastName);
-                    else if ((kw == "Tj" || kw == "TJ" || kw == "'" || kw == "\"")
-                             && sawGlyphs && currentFont is not null)
-                        usedFonts.Add(currentFont);
-                    sawGlyphs = false; // operator boundary resets the operand scan
-                    break;
-            }
+            if (!ScanContentForFonts(fp)) break;
         }
 
-        byte[]? rewritten = null;
-        var fontDict = _reader.ResolveDict(resources.Get("Font"));
-        if (fontDict is not null)
+        fp.rewritten = null;
+        fp.fontDict = _reader.ResolveDict(fp.resources.Get("Font"));
+        if (fp.fontDict is not null)
         {
-            var pruned = new List<string>();
-            foreach (var key in fontDict.Keys.ToList())
-                if (!usedFonts.Contains(key))
-                {
-                    fontDict.Remove(key);
-                    pruned.Add(key);
-                }
-
-            // Rename the replacement fonts (registered under an "AsRp…" key) to F0, F1, …,
-            // avoiding collision with any surviving original font, and patch the content's
-            // Tf operands to match.
-            var survivors = fontDict.Keys.ToList();
-            var taken = new HashSet<string>(survivors.Where(k => !k.StartsWith("AsRp", StringComparison.Ordinal)),
-                StringComparer.Ordinal);
-            var renameMap = new Dictionary<string, string>(StringComparer.Ordinal);
-            var n = 0;
-            foreach (var rk in survivors.Where(k => k.StartsWith("AsRp", StringComparison.Ordinal)))
-            {
-                string fn;
-                do { fn = "F" + n++; } while (taken.Contains(fn));
-                taken.Add(fn);
-                renameMap[rk] = fn;
-            }
-            if (renameMap.Count > 0)
-            {
-                foreach (var (oldKey, newKey) in renameMap)
-                {
-                    var val = fontDict.Get(oldKey);
-                    fontDict.Remove(oldKey);
-                    if (val is not null) fontDict.Set(newKey, val);
-                }
-                // A pruned font is still SELECTED by the content: a `/F2 Tf` that shows
-                // no text before the next Tf keeps its operator even though its resource
-                // is gone, leaving a Tf pointing at nothing. Repoint those selections at
-                // the replacement font so every Tf in the rewritten content names a font
-                // that still exists.
-                var replacement = renameMap.Values.OrderBy(v => v, StringComparer.Ordinal).First();
-                foreach (var key in pruned)
-                    renameMap[key] = replacement;
-                rewritten = RepointTfNamesInContent(content, renameMap);
-            }
+            PruneFontDictionary(fp);
         }
 
-        var xobjects = _reader.ResolveDict(resources.Get("XObject"));
-        if (xobjects is not null)
+        fp.xobjects = _reader.ResolveDict(fp.resources.Get("XObject"));
+        if (fp.xobjects is not null)
         {
-            foreach (var name in formNames)
-            {
-                var xstream = _reader.ResolveStream(xobjects.Get(name));
-                if (xstream is null || xstream.Dict.GetName("Subtype") != "Form") continue;
-                if (!visitedForms.Add(xstream.Dict)) continue; // cycle / shared-form guard
-                var formRes = _reader.ResolveDict(xstream.Dict.Get("Resources"));
-                // Only prune a form's OWN /Font dict — a form inheriting the page's
-                // resources shares that dict, handled at the page scope.
-                if (formRes is not null && !ReferenceEquals(formRes, resources))
-                {
-                    var newForm = PruneFontsInScope(_reader.DecodeStream(xstream), formRes, visitedForms);
-                    if (newForm is not null)
-                    {
-                        xstream.Dict.Remove("Filter");
-                        xstream.Dict.Remove("DecodeParms");
-                        xstream.Dict.Set("Length", new PdfInteger(newForm.Length));
-                        xstream.ReplaceData(newForm);
-                    }
-                }
-            }
+            PruneNestedFormFonts(fp);
         }
-        return rewritten;
+        return fp.rewritten;
     }
 
     /// <summary>Rewrite a content stream, replacing the font operand of every <c>Tf</c>
@@ -407,6 +339,64 @@ public sealed partial class Document
                         changed = true;
             }
         }
+    }
+
+    /// <summary>The colour-space OBJECTS the document references from somewhere other
+    /// than a /Resources /ColorSpace dictionary - an image XObject's /ColorSpace, or the
+    /// base of an /Indexed space. Those entries stay even when no operator names them;
+    /// the resource dictionaries themselves do not count, or every entry would be live.</summary>
+    private HashSet<int> CollectLiveColorSpaceObjects()
+    {
+        var colorSpaceDicts = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        foreach (var page in Pages)
+        {
+            var resources = _reader.ResolveDict(page.Dict.Get("Resources"));
+            if (resources is not null && _reader.ResolveDict(resources.Get("ColorSpace")) is { } cs)
+                colorSpaceDicts.Add(cs);
+        }
+
+        var referenced = new HashSet<int>();
+        var seen = new HashSet<PdfObject>(ReferenceEqualityComparer.Instance);
+        foreach (var entry in _reader.XRefTable.Entries.Values)
+            CollectColorSpaceRefs(_reader.Resolve(new PdfIndirectRef(entry.ObjectNumber, entry.Generation)),
+                colorSpaceDicts, referenced, seen, 0);
+        return referenced;
+    }
+
+    /// <summary>Walk one object, recording every indirect reference it makes. A
+    /// /Resources /ColorSpace dictionary is skipped: its entries are the candidates.</summary>
+    private static void CollectColorSpaceRefs(PdfObject? obj, HashSet<PdfDictionary> colorSpaceDicts,
+        HashSet<int> referenced, HashSet<PdfObject> seen, int depth)
+    {
+        if (obj is null || depth > 8 || !seen.Add(obj)) return;
+        switch (obj)
+        {
+            case PdfIndirectRef iref:
+                referenced.Add(iref.ObjectNumber);
+                break;
+            case PdfArray arr:
+                for (var i = 0; i < arr.Count; i++)
+                    CollectColorSpaceRefs(arr[i], colorSpaceDicts, referenced, seen, depth + 1);
+                break;
+            case PdfStream stream:
+                CollectColorSpaceRefs(stream.Dict, colorSpaceDicts, referenced, seen, depth + 1);
+                break;
+            case PdfDictionary dict:
+                if (colorSpaceDicts.Contains(dict)) return;
+                foreach (var key in dict.Keys)
+                    CollectColorSpaceRefs(dict.Get(key), colorSpaceDicts, referenced, seen, depth + 1);
+                break;
+        }
+    }
+
+    /// <summary>Keep the /ColorSpace entries whose object the document still references.</summary>
+    private void AddLiveColorSpaceNames(PdfDictionary resources, HashSet<string> used, HashSet<int> live)
+    {
+        var colorSpaces = _reader.ResolveDict(resources.Get("ColorSpace"));
+        if (colorSpaces is null) return;
+        foreach (var key in colorSpaces.Keys)
+            if (colorSpaces.Get(key) is PdfIndirectRef iref && live.Contains(iref.ObjectNumber))
+                used.Add(key);
     }
 
     /// <summary>Add every /Name token in <paramref name="content"/> to
@@ -511,7 +501,7 @@ public sealed partial class Document
             }
 
             // Build a hash that includes stream properties (width/height/colorspace for images)
-            var hash = System.Convert.ToHexString(Security.ShaDigest.Sha256(decoded));
+            var hash = Compat.ToHexString(Security.ShaDigest.Sha256(decoded));
 
             // Append key properties to distinguish structurally different streams
             var width = stream.Dict.GetInt("Width");

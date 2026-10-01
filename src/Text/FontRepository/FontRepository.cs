@@ -8,6 +8,7 @@ public partial class FontRepository
 {
     private static FontSourceCollection _sources = new();
 
+    /// <summary>Creates a font repository instance; all of its members are static, so an instance is not needed to use them.</summary>
     public FontRepository() { }
 
     /// <summary>
@@ -17,8 +18,8 @@ public partial class FontRepository
     public static FontSourceCollection Sources => _sources;
 
     /// <summary>
-    /// User-supplied substitutions consulted by <see cref="FindFont"/> before
-    /// falling through to <see cref="Sources"/>.
+    /// User-supplied font substitutions. They are stored, but font lookup
+    /// (<c>FindFont</c>) does not currently consult them.
     /// </summary>
     public static FontSubstitutionCollection Substitutions { get; } = new();
 
@@ -286,6 +287,9 @@ public partial class FontRepository
 
     private static byte[]? _djvuDingbatsBytes;
 
+    /// <summary>The built-in "DjVu Dingbats" face's program, or null when the resource is missing.</summary>
+    internal static byte[]? DjVuDingbatsProgram => _djvuDingbatsBytes ??= LoadBuiltinFontResource("DjVuDingbats.ttf");
+
     private static byte[]? LoadBuiltinFontResource(string fileName)
     {
         try
@@ -306,13 +310,14 @@ public partial class FontRepository
     /// then extracts ascent/descent, style flags, and per-character glyph widths.
     /// All metric values are scaled to PDF's 1/1000 coordinate system.
     /// </summary>
-    /// <summary>The face's hhea ascender/descender in 1/1000 em, the descender
+    /// <summary>The face's hhea ascender/descender/lineGap in 1/1000 em, the descender
     /// returned POSITIVE as a depth below the baseline — the pair a PDF font
     /// descriptor reports (Arial: 905 / 212) and the vertical extent one line of
-    /// this face occupies. <see cref="ReadTtfMetrics"/> prefers the OS/2
-    /// TYPOGRAPHIC metrics instead, which for Arial say only 728 / 210 and so
-    /// under-measure a line box by a fifth. Null when the tables cannot be read.</summary>
-    internal static (int ascent, int descent)? ReadTtfHheaExtent(byte[] data)
+    /// this face occupies; with the line gap (Arial: 32) the pitch of stacked lines.
+    /// <see cref="ReadTtfMetrics"/> prefers the OS/2 TYPOGRAPHIC metrics instead,
+    /// which for Arial say only 728 / 210 and so under-measure a line box by a fifth.
+    /// Null when the tables cannot be read.</summary>
+    internal static (int ascent, int descent, int lineGap)? ReadTtfHheaExtent(byte[] data)
     {
         if (data is null || data.Length < 12) return null;
         // TrueType Collection ('ttcf'): rebase to the first embedded font's directory.
@@ -335,11 +340,12 @@ public partial class FontRepository
                 unitsPerEm = ReadUInt16BE(data, tOffset + 18);
             else if (tag == "hhea") hheaOffset = tOffset;
         }
-        if (unitsPerEm <= 0 || hheaOffset < 0 || hheaOffset + 8 > data.Length) return null;
+        if (unitsPerEm <= 0 || hheaOffset < 0 || hheaOffset + 10 > data.Length) return null;
         var scale = 1000.0 / unitsPerEm;
         var ascent = (int)(ReadInt16BE(data, hheaOffset + 4) * scale);
         var descent = (int)(-ReadInt16BE(data, hheaOffset + 6) * scale);
-        return ascent > 0 ? (ascent, descent) : null;
+        var lineGap = (int)(ReadInt16BE(data, hheaOffset + 8) * scale);
+        return ascent > 0 ? (ascent, descent, lineGap) : null;
     }
 
     internal static (int ascent, int descent, int flags, int[] widths) ReadTtfMetrics(byte[] data)

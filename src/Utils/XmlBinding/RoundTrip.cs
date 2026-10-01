@@ -36,19 +36,26 @@ internal static partial class XmlBinding
                 if (GetAttr(docMargin, "Bottom") is { Length: > 0 }) m.Bottom = GetAttrLength(docMargin, "Bottom");
             }
         }
+        // Binding MERGES onto the pages the document already has, in order: the xml's first
+        // page adds its bands and paragraphs to the document's first page, and only the pages
+        // past its end are added (probed on the reference: binding a one-page xml carrying a
+        // band onto a two-page document keeps two pages, with the bound body and its band on
+        // page one). A binding onto an empty document adds every page, as before.
+        var existing = document.PageCount;
+        var index = 0;
         foreach (XmlNode node in root.ChildNodes)
         {
             if (node.NodeType != XmlNodeType.Element || node.LocalName != "Page") continue;
-            BuildRoundTripPage(document, node, images);
+            BuildRoundTripPage(document, node, images, ++index <= existing ? document.Pages[index] : null);
         }
         if (document.PageCount == 0) document.Pages.Add();
         // Image File paths are validated at Save time, against their CURRENT values.
         if (images.Count > 0) document.PendingXmlImages = images;
     }
 
-    private static void BuildRoundTripPage(Document document, XmlNode pageNode, List<Image> images)
+    private static void BuildRoundTripPage(Document document, XmlNode pageNode, List<Image> images, Page? onto = null)
     {
-        var page = document.Pages.Add();
+        var page = onto ?? document.Pages.Add();
         foreach (XmlNode child in pageNode.ChildNodes)
         {
             if (child.NodeType != XmlNodeType.Element) continue;

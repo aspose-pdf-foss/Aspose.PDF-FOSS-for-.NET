@@ -41,7 +41,10 @@ itself a GoTo action dictionary, a `/A` GoTo action, and named destinations.
 Each item also exposes `Destination` (`IAppointment`), `Action`, `IsOpen`,
 `IsBold`, `IsItalic`, `Color`, `Children`, and `Delete()`; `OutlineCollection`
 offers `Count`, `First`, `Last`, an integer indexer, `Delete()` (all) and
-`Delete(string title)`.
+`Delete(string title)`. Both collections are also editable in place: `Add`,
+`Remove` and `Clear` on `OutlineCollection`, and `Add` / `Insert` / `Remove`
+on an `OutlineItemCollection` (a new item is `new OutlineItemCollection(doc.Outlines)`
+with its `Title` and `Destination` or `Action` set).
 
 ## Creating bookmarks
 

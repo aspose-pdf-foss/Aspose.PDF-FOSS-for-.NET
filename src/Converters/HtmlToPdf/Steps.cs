@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -20,12 +20,12 @@ internal static partial class HtmlToPdfConverter
     /// right margin. Each explicit-height row steps by its own CSS height; the
     /// remaining lines step on the band pitch. Only the line carrying
     /// <c>&lt;strong&gt;</c> is bold — emphasis stays per line, not per fragment.</summary>
-    internal static bool TryParseProcedureBandLines(string? html, out List<ProcBandLine> lines)
+    internal static List<ProcBandLine>? TryParseProcedureBandLines(string? html)
     {
-        lines = new List<ProcBandLine>();
+        List<ProcBandLine> lines = new List<ProcBandLine>();
         var s = html ?? "";
         if (s.IndexOf("global-header", StringComparison.OrdinalIgnoreCase) < 0
-            || s.IndexOf("header-right-dv", StringComparison.OrdinalIgnoreCase) < 0) return false;
+            || s.IndexOf("header-right-dv", StringComparison.OrdinalIgnoreCase) < 0) return null;
         foreach (Match m in Regex.Matches(s,
             @"<(?<t>div|p)\b[^>]*class\s*=\s*(?<q>['""])(?<c>[^'""]*(?:header-right-dv|sectionHeader)[^'""]*)\k<q>[^>]*>(?<inner>[\s\S]*?)</\k<t>\s*>",
             RegexOptions.IgnoreCase))
@@ -44,7 +44,7 @@ internal static partial class HtmlToPdfConverter
                     : 0,
             });
         }
-        return lines.Count > 1;
+        return (lines.Count > 1) ? lines : null;
     }
 
     /// <summary>One drawn piece of a procedure-step content line: a text run, an
@@ -232,14 +232,14 @@ internal static partial class HtmlToPdfConverter
     /// <c>column-count</c> together with its own width and height, holding only
     /// paragraphs. The declared width and height size the CONTENT box — padding
     /// adds to them, as the CSS box model has it.</summary>
-    internal static bool TryParseColumnArticle(string? html, out ColumnArticle art)
+    internal static ColumnArticle? TryParseColumnArticle(string? html)
     {
-        art = new ColumnArticle();
+        ColumnArticle art = new ColumnArticle();
         var s = html ?? "";
         var m = Regex.Match(s,
             @"<(?<t>article|div|section)\b[^>]*style\s*=\s*(?<q>['""])(?<st>[^'""]*column-count[^'""]*)\k<q>[^>]*>(?<inner>[\s\S]*?)</\k<t>\s*>",
             RegexOptions.IgnoreCase);
-        if (!m.Success) return false;
+        if (!m.Success) return null;
         var st = m.Groups["st"].Value;
 
         double Px(string prop)
@@ -265,7 +265,7 @@ internal static partial class HtmlToPdfConverter
                 DecodeEntities(HtmlFragment.StripHtmlTags(pm.Groups[1].Value)), @"\s+", " ").Trim();
             if (text.Length > 0) art.Paragraphs.Add(text);
         }
-        return art.Columns > 1 && art.WidthPx > 0 && art.HeightPx > 0 && art.Paragraphs.Count > 0;
+        return (art.Columns > 1 && art.WidthPx > 0 && art.HeightPx > 0 && art.Paragraphs.Count > 0) ? art : null;
     }
 
     /// <summary>One styled piece of a margin-flow paragraph.</summary>
@@ -484,112 +484,40 @@ internal static partial class HtmlToPdfConverter
     /// by a letterhead image. Every hard break holds a full-pitch blank line; the
     /// letter's paragraph wrappers carry their 1 em margins even where invalid
     /// nesting would make a browser hoist the blocks out.</summary>
-    internal static bool TryParseFilingLetter(string? html, out List<FilingItem> items)
+    internal static List<FilingItem>? TryParseFilingLetter(string? html)
     {
+        List<FilingItem>? items = default;
+        var fl = new FilingLetterState();
+        fl.html = html;
         items = new List<FilingItem>();
-        var s = html ?? "";
-        if (!Regex.IsMatch(s, @"line-height\s*:\s*4em", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(s, @"html\s*,\s*body\s*\{[^}]*text-align\s*:\s*center", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(s, @"font-family\s*:\s*'?Times", RegexOptions.IgnoreCase)
-            || s.IndexOf("<img", StringComparison.OrdinalIgnoreCase) < 0) return false;
+        fl.s = fl.html ?? "";
+        if (!Regex.IsMatch(fl.s, @"line-height\s*:\s*4em", RegexOptions.IgnoreCase)
+            || !Regex.IsMatch(fl.s, @"html\s*,\s*body\s*\{[^}]*text-align\s*:\s*center", RegexOptions.IgnoreCase)
+            || !Regex.IsMatch(fl.s, @"font-family\s*:\s*'?Times", RegexOptions.IgnoreCase)
+            || fl.s.IndexOf("<img", StringComparison.OrdinalIgnoreCase) < 0) return null;
 
-        var body = Regex.Match(s, @"<body[^>]*>([\s\S]*?)</body\s*>", RegexOptions.IgnoreCase) is { Success: true } bm
-            ? bm.Groups[1].Value : s;
-        body = Regex.Replace(body, @"<style\b[^>]*>[\s\S]*?</style\s*>", "", RegexOptions.IgnoreCase);
+        fl.body = Regex.Match(fl.s, @"<body[^>]*>([\s\S]*?)</body\s*>", RegexOptions.IgnoreCase) is { Success: true } bm
+            ? bm.Groups[1].Value : fl.s;
+        fl.body = Regex.Replace(fl.body, @"<style\b[^>]*>[\s\S]*?</style\s*>", "", RegexOptions.IgnoreCase);
 
-        var parsed = items;
-        var cur = "";
-        double gapNext = 0, indent = 0;
-        var leftDepth = 0;
-        var indentDepth = 0;
-        var depth = 0;
+        fl.parsed = items;
+        fl.cur = "";
+        fl.gapNext = 0;
+        fl.indent = 0;
+        fl.leftDepth = 0;
+        fl.indentDepth = 0;
+        fl.depth = 0;
 
-        void EndLine(bool blankIfEmpty)
+        fl.i = 0;
+        fl.n = fl.body.Length;
+        while (fl.i < fl.n)
         {
-            var t = cur.Trim();
-            cur = "";
-            if (t.Length > 0)
-            {
-                parsed.Add(new FilingItem
-                {
-                    Text = t, ExtraGap = gapNext, AlignLeft = leftDepth > 0, IndentPt = indent,
-                });
-                gapNext = 0;
-            }
-            else if (blankIfEmpty)
-            {
-                parsed.Add(new FilingItem { Blank = true, ExtraGap = gapNext });
-                gapNext = 0;
-            }
+            if (!ScanFilingLetterToken(fl)) break;
         }
-
-        var i = 0;
-        var n = body.Length;
-        while (i < n)
-        {
-            if (body[i] != '<')
-            {
-                var j = body.IndexOf('<', i);
-                if (j < 0) j = n;
-                var txt = Regex.Replace(DecodeEntities(body[i..j]).Replace('\u00A0', ' '), @"\s+", " ");
-                if (txt.Trim().Length > 0 || cur.Length > 0 && txt.Length > 0)
-                    cur += cur.Length == 0 ? txt.TrimStart() : txt;
-                i = j;
-                continue;
-            }
-            var end = body.IndexOf('>', i);
-            if (end < 0) break;
-            var tagStr = body[i..(end + 1)];
-            i = end + 1;
-            var nm = Regex.Match(tagStr, @"^</?\s*([A-Za-z][A-Za-z0-9]*)");
-            if (!nm.Success) continue;
-            var tag = nm.Groups[1].Value.ToLowerInvariant();
-            var isClose = tagStr[1] == '/';
-            var style = Regex.Match(tagStr, @"style\s*=\s*(['""])([^'""]*)\1", RegexOptions.IgnoreCase).Groups[2].Value;
-
-            if (tag == "br") { EndLine(blankIfEmpty: true); continue; }
-            if (tag == "img" && !isClose)
-            {
-                EndLine(blankIfEmpty: false);
-                var sm = Regex.Match(tagStr, @"\bsrc\s*=\s*['""]?([^'""\s>]+)", RegexOptions.IgnoreCase);
-                if (sm.Success)
-                {
-                    parsed.Add(new FilingItem { ImgSrc = sm.Groups[1].Value, ExtraGap = gapNext });
-                    gapNext = 0;
-                }
-                continue;
-            }
-            if (tag is "div" or "p" or "table" or "thead" or "tbody" or "tr")
-            {
-                EndLine(blankIfEmpty: false);
-                if (tag == "p" && !isClose
-                    && Regex.IsMatch(style, @"margin-left\s*:\s*1cm", RegexOptions.IgnoreCase))
-                    indentDepth = depth + 1;
-                if (tag == "div" || tag == "p")
-                {
-                    if (!isClose)
-                    {
-                        depth++;
-                        if (Regex.IsMatch(style, @"text-align\s*:\s*left", RegexOptions.IgnoreCase) && leftDepth == 0)
-                            leftDepth = depth;
-                    }
-                    else
-                    {
-                        if (leftDepth == depth) leftDepth = 0;
-                        if (indentDepth == depth) indentDepth = 0;
-                        depth--;
-                    }
-                }
-                indent = indentDepth > 0 ? 28.35 : 0;
-                continue;
-            }
-            if (tag is "td" or "th") { if (!isClose) cur += cur.Length > 0 ? "  " : ""; continue; }
-        }
-        EndLine(blankIfEmpty: false);
-        // the letter opens image-first and speaks in centered lines
-        var hasImg = false;
-        foreach (var it in parsed) { if (it.ImgSrc is not null) { hasImg = true; break; } }
-        return hasImg && parsed.Count > 6;
+        EndLine(fl, blankIfEmpty: false);
+        fl.hasImg = false;
+        foreach (var it in fl.parsed) { if (it.ImgSrc is not null) { fl.hasImg = true; break; } }
+        return (fl.hasImg && fl.parsed.Count > 6) ? items : null;
     }
 
     /// <summary>Heading metrics for the step dialect, read from the document's OWN

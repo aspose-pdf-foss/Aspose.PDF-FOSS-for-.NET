@@ -6,6 +6,9 @@ namespace Aspose.Pdf.Optimization;
 /// </summary>
 public class OptimizationOptions
 {
+    /// <summary>Creates optimization options with their default values.</summary>
+    public OptimizationOptions() { }
+
     /// <summary>Eliminate unreferenced document objects.</summary>
     public bool RemoveUnusedObjects { get; set; } = true;
 
@@ -18,6 +21,11 @@ public class OptimizationOptions
     /// <summary>Pack PDF objects into Object Streams (PDF 1.5+ /ObjStm) with compression.
     /// Stored only; the writer always emits xref + objects in the legacy format.</summary>
     public bool CompressObjects { get; set; }
+
+    /// <summary>Compress every content stream with Flate. Every stream the document writes without a filter is
+    /// Flate-compressed when it is saved (when that makes it smaller), so this is always in effect; it is stored
+    /// for source compatibility.</summary>
+    public bool CompressAllContentStreams { get; set; }
 
     /// <summary>Maximum image resolution; higher resolution images are scaled down.
     /// Note: the public API spells this 'MaxResoultion' (a typo retained

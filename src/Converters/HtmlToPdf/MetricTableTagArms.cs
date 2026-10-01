@@ -9,23 +9,38 @@ internal static partial class HtmlToPdfConverter
     /// arm-level continue/break became a return.</summary>
     private static void CollectMetricText(MetricTableState mt, Token tok)
     {
+        if (mt.mps.absCapture is { } abs) { abs.Text.Append(DecodeEntities(tok.Value)); return; }
+        if (mt.mps.legendCapture is { } legend) { legend.Append(DecodeEntities(tok.Value)); return; }
+        if (mt.mps.captionCapture is { } caption) { caption.Append(DecodeEntities(tok.Value)); return; }
         if (mt.mps.cell is not null && mt.mps.hiddenDepth == 0)
         {
             var ttext = DecodeEntities(tok.Value);
             if (mt.mps.curSeg is not null && mt.mps.whiteDepth == 0)
             {
                 var segInk = ttext.AsSpan().Trim().Length;
+                // Capture the segment's typography at its FIRST ink, whatever the
+                // dialect: an inline <font face>/<span> inside the div has opened by
+                // now but its close tag restores the cell face before the div closes,
+                // so reading the face at CloseSeg would see the flow default. (A
+                // `<div><span><font face="Calibri">` cell drew Times without this.)
+                if (segInk > 0 && !mt.mps.segInkSeen)
+                {
+                    mt.mps.segInkSeen = true;
+                    mt.mps.segFs = mt.mps.cell.FontSize; mt.mps.segFace = mt.mps.cell.Face;
+                    mt.mps.segFore = mt.mps.cell.Fore; mt.mps.segItalic = mt.mps.cell.Italic;
+                }
+                if (segInk > 0 && !mt.mps.segLineInkSeen)
+                {
+                    mt.mps.segLineInkSeen = true;
+                    mt.mps.segLineFs = mt.mps.cell.FontSize;
+                }
                 if (mt.reportCells && segInk > 0)
                 {
-                    if (!mt.mps.segInkSeen)
-                    {
-                        mt.mps.segInkSeen = true;
-                        mt.mps.segFs = mt.mps.cell.FontSize; mt.mps.segFace = mt.mps.cell.Face;
-                        mt.mps.segFore = mt.mps.cell.Fore;
-                    }
                     if (mt.mps.boldDepth > 0 || mt.mps.cell.Bold) mt.mps.segBoldChars += segInk;
                     else mt.mps.segPlainChars += segInk;
                 }
+                // (a UA cell's ink is marked with the style it draws in - see the run model)
+                if (mt.stdSerif && !mt.reportCells) MarkMetricRun(mt);
                 mt.mps.divText.Append(ttext);
                 return;
             }
@@ -37,6 +52,12 @@ internal static partial class HtmlToPdfConverter
             else
             {
                 var ink = ttext.AsSpan().Trim().Length;
+                if (ink > 0) { if (mt.floatDepth > 0) mt.mps.cell.InkInFloat = true; else mt.mps.cell.InkOutsideFloat = true; }
+                if (ink > 0 && mt.stdSerif && !mt.mps.firstInkSeen)
+                {
+                    mt.mps.firstInkSeen = true;
+                    mt.mps.firstInkFs = mt.mps.cell.FontSize; mt.mps.firstInkFace = mt.mps.cell.Face; mt.mps.firstInkFore = mt.mps.cell.Fore;
+                }
                 if (mt.reportCells && ink > 0)
                 {
                     mt.mps.cell.AltTextOnly = false;   // real ink joined the alt
@@ -50,6 +71,7 @@ internal static partial class HtmlToPdfConverter
                     if (mt.mps.boldDepth > 0 || mt.mps.cell.Bold) mt.mps.cellBoldChars += ink;
                     else mt.mps.cellPlainChars += ink;
                 }
+                if (mt.stdSerif && !mt.reportCells) MarkMetricRun(mt);
                 mt.text.Append(ttext);
                 if (mt.mps.sizedSegs.Count == 0 || mt.mps.sizedSegs[^1].Fs != mt.mps.cell.FontSize)
                     mt.mps.sizedSegs.Add((new StringBuilder(), mt.mps.cell.FontSize));
@@ -62,56 +84,80 @@ internal static partial class HtmlToPdfConverter
     /// arm-level continue/break became a return.</summary>
     private static void CloseMetricTag(MetricTableState mt, string tag)
     {
-        if (tag is "td" or "th") CloseCell(mt.mps, mt.text, mt.reportCells, mt.stdSerif);
+        if (tag is "caption")
+        {
+            if (mt.mps.captionCapture is { } caption) mt.captionText = CollapseWs(caption.ToString()).Trim();
+            mt.mps.captionCapture = null;
+        }
+        else if (tag is "legend")
+        {
+            if (mt.mps.legendCapture is { } legend && mt.mps.cell is not null)
+                mt.mps.cell.LegendText = CollapseWs(legend.ToString()).Trim();
+            mt.mps.legendCapture = null;
+        }
+        else if (tag is "td" or "th") CloseCell(mt.mps, mt.text, mt.reportCells, mt.stdSerif);
         else if (tag is "tr") { if (mt.mps.nestDepth == 0) CloseRow(mt.mps, mt.rows, mt.text, mt.reportCells, mt.stdSerif); }
         else if (tag is "table") { if (mt.mps.nestDepth > 0) mt.mps.nestDepth--; }
+        else if (tag is "font")
+        {
+            // (a UA cell: the closing font tag restores the typography it replaced - the text after
+            // it sets in the cell's own, and the cell keeps what its first ink saw)
+            if (mt.stdSerif && mt.mps.cell is not null && mt.mps.fontStack.Count > 0)
+            {
+                var (fs, face, fore) = mt.mps.fontStack.Pop();
+                mt.mps.cell.FontSize = fs; mt.mps.cell.Face = face; mt.mps.cell.Fore = fore;
+            }
+        }
         else if (tag is "b" or "strong")
         {
             mt.mps.boldDepth = Math.Max(0, mt.mps.boldDepth - 1);
-            if (mt.mps.cell is not null) mt.mps.cellBoldMarks.Add((mt.text.Length, mt.mps.boldDepth > 0));
+            if (mt.stdSerif && mt.mps.cell is not null && mt.mps.strongSaves.Count > 0) mt.mps.cell.Fore = mt.mps.strongSaves.Pop();
+            if (mt.mps.cell is not null) mt.mps.cellBoldMarks.Add((mt.text.Length - mt.mps.textMarkCount, mt.mps.boldDepth > 0));
         }
-        else if (tag is "div") { CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif); mt.mps.pendingAbsLeftFrac = -1.0; }
-        else if (tag is "p" && mt.wrapperStacks && !mt.mps.collapsedGrid && mt.mps.cell is not null)
+        else if (tag is "i" or "em") CloseMetricEmphasis(mt);
+        else if (tag is "div") CloseMetricDiv(mt);
+        else if (tag is "h1" or "h2" or "h3" or "h4" or "h5" or "h6" && mt.mps.uaHeadingBands > 0)
         {
-            // Report cells: the closing paragraph SEGMENT snapshots the
-            // typography its spans left active, and carries the UA
-            // 1.12 em block margins (collapsed between neighbours).
-            if (mt.reportCells && mt.mps.curSeg is not null)
-            {
-                mt.mps.curSeg.FontSize = mt.mps.segInkSeen ? mt.mps.segFs : mt.mps.cell.FontSize;
-                mt.mps.curSeg.Face = mt.mps.segInkSeen ? mt.mps.segFace : mt.mps.cell.Face;
-                // bold by MAJORITY of the paragraph's ink (its strong
-                // runs against its plain runs); style bold always wins
-                mt.mps.curSeg.Bold = mt.mps.cell.Bold || mt.mps.segBoldChars > mt.mps.segPlainChars;
-                mt.mps.curSeg.Fore = mt.mps.segInkSeen ? mt.mps.segFore : mt.mps.cell.Fore;
-                var pFs = mt.mps.cell.FontSize ?? mt.mps.fontSize;
-                if (!mt.mps.curSeg.MarginsExplicit)
-                {
-                    mt.mps.curSeg.MarginTopPt = UaBlockMarginEm * pFs;
-                    mt.mps.curSeg.MarginBottomPt = UaBlockMarginEm * pFs;
-                }
-                var pMarkers = string.Concat(
-                    from Match pm in Regex.Matches(mt.mps.divText.ToString(), "\u0002\\d+\u0003")
-                    select pm.Value);
-                if (pMarkers.Length > 0)
-                {
-                    var cleaned = Regex.Replace(mt.mps.divText.ToString(), "\u0002\\d+\u0003", " ");
-                    mt.mps.divText.Clear();
-                    mt.mps.divText.Append(cleaned);
-                    mt.text.Append(pMarkers);
-                }
-                CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif);
-            }
-            // other wrapper flows keep the calibrated blank-line gap
-            else if (mt.mps.curSeg is null && mt.text.Length > 0)
-                mt.text.Append('\u0001').Append('\u0001');
+            mt.mps.uaHeadingBands--;
+            CloseMetricDiv(mt);
         }
-        else if (tag is "span" && mt.whiteSpans.Count > 0)
+        else CloseMetricParagraphAndSpanTag(mt, tag);
+    }
+
+    /// <summary>A UA cell's paragraph that closed with nothing in it - the Words export's
+    /// `<p style="margin:0pt"></p>` after every nested grid - holds no line box (probed on the
+    /// Words letter: the block under a grid stands one nbsp row under it, not three lines).</summary>
+    private static bool EmptyUaParagraph(MetricTableState mt)
+        => mt.stdSerif && mt.mps.paraOpenTextLen == mt.text.Length
+            // (an empty paragraph with its UA margins still spaces its neighbours - the calibrated gap)
+            && (mt.mps.paraZeroMargin || (mt.text.Length > 0 && mt.text[^1] == '\u0003'));
+
+    /// <summary>A UA cell's emphasis ends where its tag closes; the other flows keep the whole-cell flag.</summary>
+    private static void CloseMetricEmphasis(MetricTableState mt)
+    {
+        mt.mps.italicDepth = Math.Max(0, mt.mps.italicDepth - 1);
+        if (mt.stdSerif && mt.mps.cell is not null && mt.mps.italicDepth == 0) mt.mps.cell.Italic = false;
+    }
+
+    /// <summary>A div closes: its segment, its own box, and the block style frame it opened - text
+    /// that follows it stays in the enclosing block's style.</summary>
+    private static void CloseMetricDiv(MetricTableState mt)
+    {
+        if (mt.mps.absCapture is not null) { CloseMetricAbsText(mt); return; }
+        CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif); mt.mps.pendingAbsLeftFrac = -1.0;
+        // (the div's own box closes with it)
+        if (mt.wrapperStacks && (!mt.mps.collapsedGrid || mt.elemCollapseGrid) && mt.mps.cell is not null
+            && mt.mps.divBoxStack.Count > 0)
         {
-            if (mt.whiteSpans.Pop()) mt.mps.whiteDepth = Math.Max(0, mt.mps.whiteDepth - 1);
-            // report cells: the span's typography ends here
-            if (mt.reportCells && mt.spanSaves.Count > 0 && mt.mps.cell is not null)
-                (mt.mps.cell.FontSize, mt.mps.cell.Face, mt.mps.cell.Bold, mt.mps.cell.Fore) = mt.spanSaves.Pop();
+            var hadBox = mt.mps.divBoxStack[^1];
+            mt.mps.divBoxStack.RemoveAt(mt.mps.divBoxStack.Count - 1);
+            if (hadBox) (mt.mps.cell.DivSegs ??= new List<MetricDivSeg>()).Add(new MetricDivSeg { BoxClose = true, EmptyBlock = true });
+        }
+        if (mt.stdSerif && mt.mps.divStyleStack.Count > 0)
+        {
+            mt.mps.divStyleStack.RemoveAt(mt.mps.divStyleStack.Count - 1);
+            if (mt.mps.divStyleStack.Count > 0 && mt.mps.cell is not null)
+                mt.mps.curSeg = InheritedUaBlockSeg(mt.mps.divStyleStack[^1]);
         }
     }
 
@@ -128,6 +174,7 @@ internal static partial class HtmlToPdfConverter
         {
             if (mt.mps.cell.ColSpan > 1) mt.mps.pendingNestSpan = mt.mps.cell.ColSpan;
             mt.mps.cell = null; mt.text.Clear(); mt.mps.cellBoldMarks.Clear(); mt.mps.sizedSegs.Clear();
+            mt.mps.runStyles.Clear(); mt.mps.pendingRunPadLeft = 0; mt.mps.textMarkCount = 0;
         }
         else CloseCell(mt.mps, mt.text, mt.reportCells, mt.stdSerif);
         mt.mps.nestDepth++;
@@ -143,6 +190,35 @@ internal static partial class HtmlToPdfConverter
         if (tok.Attributes is { } trba && trba.TryGetValue("bgcolor", out var trbg)
             && AttrColor(trbg) is { } trbgc)
             mt.mps.rowBg = trbgc;
+        // a row's align= attribute aligns every cell of the row, and its
+        // height= attribute (pixels) paces the row like a cell's would
+        if (tok.Attributes is { } trAttr)
+        {
+            if (trAttr.TryGetValue("align", out var trAl))
+                mt.mps.rowAlign = trAl.Trim().ToLowerInvariant() switch
+                {
+                    "right" => HorizontalAlignment.Right,
+                    "center" => HorizontalAlignment.Center,
+                    _ => HorizontalAlignment.Left,
+                };
+            // …and its valign= attribute seats them in the row band the way a class
+            // vertical-align does (measured: the report's `valign="top"` rows hold their
+            // nested grids at the band top, where centring dropped the titles 11.7).
+            if (mt.stdSerif && trAttr.TryGetValue("valign", out var trVa))
+            {
+                if (trVa.Trim().Equals("top", StringComparison.OrdinalIgnoreCase)) mt.mps.rowVTop = true;
+                else if (trVa.Trim().Equals("bottom", StringComparison.OrdinalIgnoreCase)) mt.mps.rowVBottom = true;
+            }
+            if (trAttr.TryGetValue("height", out var trH)
+                && double.TryParse(trH.Trim().TrimEnd('p', 'x'),
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var trHpx)
+                && trHpx * PxPt > mt.mps.pendingRowH)
+            {
+                mt.mps.pendingRowH = trHpx * PxPt;
+                mt.mps.pendingRowHAttr = true;
+            }
+        }
         // tr class skins: inheritable typography becomes the row
         // default, height paces the row, and `.cls td` descendant
         // bags queue for every cell of the row.
@@ -178,24 +254,7 @@ internal static partial class HtmlToPdfConverter
                 if (mt.css.TryGetValue("." + tc + " td", out var tdBag))
                     (mt.mps.rowTdBags ??= new List<Dictionary<string, string>>()).Add(tdBag);
             }
-        if (tok.Attributes is { } tra && tra.TryGetValue("style", out var trst))
-        {
-            // per-row inline styles (the official-letter dialect
-            // sizes and paces every row this way)
-            var fsm = Regex.Match(trst, @"font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
-            if (fsm.Success && TryParseCssFontSize(fsm.Groups[1].Value.Trim(), out var trfs))
-                mt.mps.rowFs = trfs;
-            var ham = Regex.Match(trst, @"text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase);
-            if (ham.Success)
-                mt.mps.rowAlign = ham.Groups[1].Value.ToLowerInvariant() switch
-                {
-                    "right" => HorizontalAlignment.Right,
-                    "center" => HorizontalAlignment.Center,
-                    _ => HorizontalAlignment.Left,
-                };
-            var hm2 = Regex.Match(trst, @"height\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
-            if (hm2.Success) mt.mps.pendingRowH = DtpNum(hm2.Groups[1].Value) * PxPt;
-        }
+        ApplyMetricRowStyleAttribute(mt, tok);
     }
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
@@ -207,17 +266,32 @@ internal static partial class HtmlToPdfConverter
         // attributes to contained children, self-closing form included).
         if (mt.mps.cell is not null && tok.Attributes is { } fa)
         {
+            // (a UA cell's font tag styles what it CONTAINS: its close restores what it replaced)
+            if (mt.stdSerif && !tok.IsSelfClosing)
+                mt.mps.fontStack.Push((mt.mps.cell.FontSize, mt.mps.cell.Face, mt.mps.cell.Fore));
+            // (the pt form's `<font class>` wears its class rule - the title band's
+            //  `.Form-table-title-text { Tahoma; 8pt; bold }` - probed: the band's text is 8 pt bold)
+            if (mt.stdSerif && mt.mps.ptFormCells && fa.TryGetValue("class", out var fClsV) && fClsV is not null)
+                foreach (var fc0 in fClsV.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                    if (mt.css.TryGetValue("." + fc0, out var fRule0) || mt.css.TryGetValue("font." + fc0, out fRule0))
+                        ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, fRule0, inlineBag: true);
             // A face the HTML engine does not resolve keeps the flow
             // default (David and friends draw the UA serif there).
             if (fa.TryGetValue("face", out var ffv)
                 && FirstFontFamily(ffv) is { Length: > 0 } ffam
                 && (!mt.stdSerif || SourceEngineFaces.Contains(ffam)))
+            {
                 mt.mps.cell.Face = ffam;
+                // (a segment the line break opened but no text has reached yet takes the face too:
+                // the safety data sheet's `<br></font><font face="Arial Narrow">` title line)
+                if (mt.stdSerif && mt.mps.curSeg is { } faceSeg && faceSeg.Text.Length == 0 && mt.mps.divText.Length == 0)
+                    faceSeg.Face = ffam;
+            }
             if (fa.TryGetValue("color", out var fcv)
                 && ParseCssColor(fcv.Trim()) is { } fcol)
                 mt.mps.cell.Fore = fcol;
             if (fa.TryGetValue("size", out var fsv)
-                && TryParseHtmlFontSize(fsv, out var fszPt))
+                && TryParseHtmlFontSize(fsv) is { } fszPt)
             {
                 mt.mps.cell.FontSize = fszPt;
                 mt.mps.cell.FontTagSized = true;
@@ -264,11 +338,52 @@ internal static partial class HtmlToPdfConverter
     {
     // The sheet's class rules style the span's cell (the
     // .firm { font-size: 400% } masthead on the 12 pt base).
+    // …and a span the report export lays out as the cell itself (`display: table-cell`)
+    // gives the cell its BOX too: paddings, side borders, fill and alignment (measured on
+    // the report: the 2 pt padded paragraph cells, the AliceBlue footer cells, the
+    // 1 pt rules over and under a section label).
+    var spStV = tok.Attributes is { } spSt0 && spSt0.TryGetValue("style", out var spSt1) ? spSt1 : null;
+    var spanIsCellBox = spStV is not null && Regex.IsMatch(spStV, @"display\s*:\s*table-cell", RegexOptions.IgnoreCase);
+    var spanFsBefore = mt.mps.cell?.FontSize;
+    var spanInkBefore = mt.mps.firstInkSeen;
+    // (the typography the span's close restores is the cell's BEFORE the span's class dressed
+    // it - measured on the lab report: a 14 pt `span.header` before a grid left the grid at 14;
+    // a span that IS the cell box keeps its class on the cell, as before)
+    var spanRestore = mt.mps.cell is null ? default : (mt.mps.cell.FontSize, mt.mps.cell.Face, mt.mps.cell.Bold, mt.mps.cell.Fore);
     if (mt.stdSerif && mt.mps.cell is not null && tok.Attributes is { } spCls0
         && spCls0.TryGetValue("class", out var spClsV) && spClsV is not null)
         foreach (var sc0 in spClsV.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            if (mt.css.TryGetValue("." + sc0, out var spRule0))
-                ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, spRule0);
+            // (…keyed `.cls` or `span.cls` - the lab report's `span.header { bold; 14pt }`)
+            if (mt.css.TryGetValue("." + sc0, out var spRule0) || mt.css.TryGetValue("span." + sc0, out spRule0))
+                ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, spRule0, inlineBag: !spanIsCellBox);
+    if ((mt.reportCells || mt.stdSerif) && !tok.IsSelfClosing && mt.mps.cell is not null)
+        mt.spanSaves.Push(spanIsCellBox ? (mt.mps.cell.FontSize, mt.mps.cell.Face, mt.mps.cell.Bold, mt.mps.cell.Fore) : spanRestore);
+    // …and its inline ABSOLUTE width when that is the LAST width declared, as the
+    // cascade reads it (the report footer's `width:100%; … width: 74.46mm` cells
+    // right-align their text in that box, not in their text's own extent; a bare
+    // `width:100%` table-cell span just fills its cell and sizes nothing).
+    if (mt.stdSerif && spanIsCellBox && mt.mps.cell is not null
+        && Regex.Matches(spStV!, @"(?<![-\w])width\s*:\s*[^;]+", RegexOptions.IgnoreCase) is { Count: > 0 } spWidths
+        && Regex.IsMatch(spWidths[^1].Value, @"[\d.]\s*(mm|cm|in|pt|px)\s*$", RegexOptions.IgnoreCase))
+        ApplyMetricCellStyleSize(mt.mps.cell, spWidths[^1].Value);
+    // The pt form's INLINE-BLOCK span with an absolute width holds its cell open at that width
+    // plus the span class's own padding (probed: a 65 px span in a padding-left 5px class floors
+    // its column at 48.75 + 3.75 before the cell's own pads).
+    if (mt.stdSerif && mt.mps.ptFormCells && mt.mps.cell is not null && spStV is not null
+        && Regex.IsMatch(spStV, @"display\s*:\s*inline-block", RegexOptions.IgnoreCase)
+        && Regex.Match(spStV, @"(?<![-\w])width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase) is { Success: true } ibW
+        && double.TryParse(ibW.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ibWpx))
+    {
+        var spanPad = 0.0;
+        if (tok.Attributes is { } ibAttrs && ibAttrs.TryGetValue("class", out var ibCls) && ibCls is not null)
+            foreach (var cn in ibCls.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                if (mt.css.TryGetValue("." + cn, out var ibRule))
+                {
+                    if (ibRule.TryGetValue("padding-left", out var pl) && TryParseLength(pl.Trim()) is { } plPt) spanPad += plPt;
+                    if (ibRule.TryGetValue("padding-right", out var pr) && TryParseLength(pr.Trim()) is { } prPt) spanPad += prPt;
+                }
+        mt.mps.cell.MinWidthPt = Math.Max(mt.mps.cell.MinWidthPt, ibWpx * PxPt + spanPad);
+    }
     var sWhite = false;
     if (tok.Attributes is { } sa0 && sa0.TryGetValue("style", out var sst0)
         && Regex.IsMatch(sst0, @"color\s*:\s*(white|#fff(?:fff)?)\b", RegexOptions.IgnoreCase))
@@ -286,55 +401,22 @@ internal static partial class HtmlToPdfConverter
         }
     }
     if (!tok.IsSelfClosing) mt.whiteSpans.Push(sWhite);
-    if (mt.reportCells && !tok.IsSelfClosing && mt.mps.cell is not null)
-        mt.spanSaves.Push((mt.mps.cell.FontSize, mt.mps.cell.Face, mt.mps.cell.Bold, mt.mps.cell.Fore));
-    if (mt.mps.cell is not null && tok.Attributes is { } sa
-        && sa.TryGetValue("style", out var sst))
-    {
-    // quote entities decode BEFORE the property scan — the ';'
-    // inside &quot; would otherwise truncate a value mid-entity
-    // (font-family: &quot;Arial&quot; parsed as the face '&quot')
-    if (sst.IndexOf('&') >= 0)
-        sst = sst.Replace("&quot;", "\"").Replace("&#34;", "\"")
-                 .Replace("&apos;", "'").Replace("&#39;", "'");
-    // WIDTH:Npx; DISPLAY:inline-table — the span fixes its column's
-    // content width and grows the line box.
-    var wm = Regex.Match(sst, @"width\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase);
-    if (wm.Success && Regex.IsMatch(sst, @"display\s*:\s*inline-table", RegexOptions.IgnoreCase))
-    {
-        mt.mps.cell.HasSpan = true;
-        mt.mps.cell.SpanW = Math.Max(mt.mps.cell.SpanW, double.Parse(wm.Groups[1].Value,
-            System.Globalization.CultureInfo.InvariantCulture) * PxPt);
-    }
-    // Inline span typography styles the rest of its cell — the
-    // legacy corpus wraps whole cell contents in one styled span.
-    var sfm = Regex.Match(sst, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
-    if (sfm.Success && FirstFontFamily(sfm.Groups[1].Value) is { Length: > 0 } sfam)
-        mt.mps.cell.Face = sfam;
-    var ssm = Regex.Match(sst, @"font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
-    // font-size: larger is RELATIVE — 1.2 x the cell's current
-    // size (13px title → 15.6px = 11.7 pt, measured), so it must
-    // beat the keyword table's fixed UA-base mapping.
-    if (ssm.Success && ssm.Groups[1].Value.Trim()
-            .Equals("larger", StringComparison.OrdinalIgnoreCase))
-        mt.mps.cell.FontSize = HtmlLargerStepPt(mt.mps.cell.FontSize ?? mt.mps.fontSize);
-    else if (ssm.Success && TryParseCssFontSize(ssm.Groups[1].Value.Trim(), out var sfs))
-        mt.mps.cell.FontSize = sfs;
-    if (Regex.IsMatch(sst, @"font-style\s*:\s*italic", RegexOptions.IgnoreCase))
-        mt.mps.cell.Italic = true;
-    if (Regex.IsMatch(sst, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase))
-        mt.mps.cell.Bold = true;
-    var scm = Regex.Match(sst, @"(?<![-\w])color\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
-    if (scm.Success && ParseCssColor(scm.Groups[1].Value.Trim()) is { } scol
-        && (scol.R != 255 || scol.G != 255 || scol.B != 255))
-        mt.mps.cell.Fore = scol;
-    }
+    ApplyMetricSpanStyleAttribute(mt, tok);
+    // (a span sizing the cell before its first ink stands round the cell's text like a sized
+    // font tag: the quirks line-height quirk pitches the row on that size alone - measured on
+    // the enterprise summary: `<td><span class=label>` Arial 9 rows pitch 10.5, no 13.5 strut)
+    if (mt.stdSerif && mt.mps.cell is not null && !spanInkBefore && mt.mps.cell.FontSize != spanFsBefore)
+        mt.mps.cell.InlineSizedLead = true;
     }
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
     private static void OpenMetricDiv(MetricTableState mt, Token tok)
     {
+        if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_CELL") == "1")
+            Console.Error.WriteLine($"[divopen] cell={(mt.mps.cell is not null)} curSeg={(mt.mps.curSeg is not null)} stacks={mt.wrapperStacks} collapsed={mt.mps.collapsedGrid} abs={(mt.mps.absCapture is not null)} style='{(tok.Attributes is { } da0 && da0.TryGetValue("style", out var ds0) ? ds0 : "")}'");
+        if (mt.mps.absCapture is not null) { mt.mps.absDepth++; return; }
+        if (mt.mps.uaFormCells && mt.mps.cell is not null && TryOpenMetricAbsText(mt, tok)) return;
         // Div-stacked cell content (the .t/.c ladders): each div is
         // one styled line; its classes resolve directly and through
         // the row's descendant rules ('.rc6 .t', '.rc6 div'). The
@@ -344,15 +426,20 @@ internal static partial class HtmlToPdfConverter
         if (mt.wrapperStacks && (!mt.mps.collapsedGrid || mt.elemCollapseGrid) && mt.mps.cell is not null)
         {
             if (tok.IsClose) { CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif); return; }
+            // (a UA cell's text before its first block is a band of its own, in source order)
+            if (mt.stdSerif && !mt.mps.uaBlockCells && mt.mps.curSeg is null) FlushUaCellText(mt.mps, mt.text, mt.reportCells);
             CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif);
-            var seg = new MetricDivSeg();
+            // (a nested block inherits the typography, alignment and side insets of the block it stands in)
+            var seg = mt.stdSerif && mt.mps.divStyleStack.Count > 0 ? InheritedUaBlockSeg(mt.mps.divStyleStack[^1]) : new MetricDivSeg();
             var segProbe = new MetricCell();
             if (mt.mps.rowClasses is not null)
                 foreach (var rcn in mt.mps.rowClasses)
                     if (mt.css.TryGetValue("." + rcn + " div", out var rdivBag))
                         ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, segProbe, rdivBag);
             if (tok.Attributes is { } da && da.TryGetValue("class", out var dcls))
-                foreach (var dcn in dcls.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                seg.Classes = dcls.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                foreach (var dcn in seg.Classes)
                 {
                     if (mt.css.TryGetValue("." + dcn, out var dBag))
                         ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, segProbe, dBag);
@@ -364,13 +451,44 @@ internal static partial class HtmlToPdfConverter
                         && dbb.ContainsKey("border-bottom"))
                         seg.BorderBottom = true;
                 }
-            seg.FontSize = segProbe.FontSize;
-            seg.Face = segProbe.Face;
-            seg.Bold = segProbe.Bold;
-            seg.Fore = segProbe.Fore;
+            }
+            seg.FontSize = segProbe.FontSize ?? seg.FontSize;
+            seg.Face = segProbe.Face ?? seg.Face;
+            seg.Bold |= segProbe.Bold;
+            seg.Fore = segProbe.Fore ?? seg.Fore;
             seg.LineBoxPt = segProbe.HeightPt;
-            seg.PadLeft = segProbe.PadLeft > 0 ? segProbe.PadLeft : 0;
+            seg.BorderBottomPt = segProbe.BorderBottomW;
+            seg.PadLeft += segProbe.PadLeft > 0 ? segProbe.PadLeft : 0;
             seg.Bg = segProbe.Bg;
+            // The div's own inline box (a UA block cell): its width plus horizontal paddings is
+            // the box, its vertical paddings are spent round the blocks it holds, its background
+            // fills it, its margins are a block's; it closes with the div.
+            var boxStated = false;
+            if (mt.mps.uaBlockCells && tok.Attributes is { } bxA && bxA.TryGetValue("style", out var bxSt) && bxSt is not null
+                && Regex.Match(bxSt, @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } bxW
+                && TryParseLength(bxW.Groups[1].Value.Trim()) is { } bxWPt && bxWPt > 0)
+            {
+                var bxEm = mt.mps.cell.FontSize ?? mt.mps.fontSize;
+                var (bpT, bpR, bpB, bpL) = CssPaddingSidesPt(bxSt, bxEm);
+                seg.BoxOpen = true;
+                seg.BoxWidthPt = bxWPt + bpL + bpR;
+                seg.BoxPadTopPt = bpT; seg.BoxPadRightPt = bpR; seg.BoxPadBottomPt = bpB; seg.BoxPadLeftPt = bpL;
+                if (Regex.Match(bxSt, @"(?<![-\w])background(?:-color)?\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } bxBg
+                    && ParseCssColor(bxBg.Groups[1].Value.Trim()) is { } bxBgC)
+                    seg.Bg = bxBgC;
+                ReadUaBlockStyle(seg, tok, bxEm);
+                seg.MarginTopPt = seg.MarginTopStatedPt ?? 0;
+                seg.MarginBottomPt = seg.MarginBottomStatedPt ?? 0;
+                seg.MarginsExplicit = true;
+                boxStated = true;
+            }
+            // A UA cell's block carries its own inline style - size, weight, style, alignment, side
+            // insets and margins (probed on the cheque: a `font-size: 11px` div sizes the divs it
+            // holds, `padding-left: 100px` insets them, `text-align: right; margin-right: 55px` seats
+            // them 41.25 in from the cell's right edge, `margin-top: -43px` pulls the block up).
+            if (mt.stdSerif && !boxStated) ReadUaCellBlockStyle(seg, tok, mt.mps.cell.FontSize ?? mt.mps.fontSize);
+            if (mt.stdSerif) mt.mps.divStyleStack.Add(seg);
+            mt.mps.divBoxStack.Add(boxStated);
             // An absolutely positioned div (left:N%) is OUT of the
             // band flow — its image draws at the offset instead.
             if (tok.Attributes is { } absDa
@@ -390,8 +508,38 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void OpenMetricHeading(MetricTableState mt, string tag)
+    private static void OpenMetricHeading(MetricTableState mt, Token tok, string tag)
     {
+        // UA block cells: the heading is a block segment of its own - bold, the UA size of its
+        // level unless its style states one, closed like a paragraph.
+        if (mt.mps.uaBlockCells && mt.reportCells && !mt.mps.collapsedGrid && mt.mps.cell is not null && !tok.IsClose)
+        {
+            CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif);
+            FlushUaBlockGridMarkers(mt.mps, mt.text);
+            mt.mps.curSeg = new MetricDivSeg
+            {
+                Bold = true,
+                FontSize = UaHeadingEm(tag).sizeEm * (mt.mps.cell.FontSize ?? mt.mps.fontSize),
+            };
+            ReadUaBlockStyle(mt.mps.curSeg, tok, mt.mps.cell.FontSize ?? mt.mps.fontSize);
+            return;
+        }
+        // A heading in a plain UA cell is a block of its own: a band at the UA size and weight of
+        // its level inside its UA margins, its inline style read as a div's (measured on the lab
+        // report: `<td><h1>` draws 24 pt bold with the first text 128.7 down; the case report's
+        // `<td><h2>` 18 pt).
+        // (a cell sizing its own text keeps the calibrated heading model - bold in the cell's size:
+        // the financial statement's `<td 11pt><h2><span 11pt>` heads draw 11 bold in their cell
+        // lines; the UA scale is the UNSIZED cell's)
+        // (…and a heading the SHEET sizes keeps the calibrated model below: the order ticket's
+        // `h1 { font-size: 120% }` draws 14.4 on the cell's own line)
+        if (mt.stdSerif && !mt.reportCells && !mt.mps.uaBlockCells && mt.wrapperStacks && !mt.mps.collapsedGrid
+            && mt.mps.cell is { FontSize: null } && !tok.IsClose && mt.mps.absCapture is null
+            && !(mt.css.TryGetValue(tag, out var sheetHead) && (sheetHead.ContainsKey("font-size") || sheetHead.ContainsKey("font"))))
+        {
+            OpenUaCellHeadingBand(mt, tok, tag);
+            return;
+        }
         // A heading inside a cell styles the rest of the cell: UA
         // bold plus the sheet's own element rule (the order ticket's
         // h1 { font-size: 120% } on the 12 pt base).
@@ -400,6 +548,11 @@ internal static partial class HtmlToPdfConverter
             mt.mps.cell.Bold = true;
             if (mt.css.TryGetValue(tag, out var cellHeadRule))
                 ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, cellHeadRule);
+            // (...and the sheet's descendant rules through the blocks open round the grid: the
+            //  e-mail cards' `.header_sub h2 { padding: 20px; font-size: 18px; color }` size, colour
+            //  and pad the collapsed grid's heading cells)
+            if (!tok.IsClose && AncestorClassRuleDecls(mt.css, mt.mps.divStyleStack, tag, mt.mps.hostBlockClasses) is { } cellAncDecls)
+                ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, cellAncDecls);
         }
     }
 }

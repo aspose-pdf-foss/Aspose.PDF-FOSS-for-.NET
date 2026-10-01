@@ -302,9 +302,6 @@ public sealed partial class Document
     }
 
     /// <summary>
-    /// Open an SVG file from bytes and convert it to a PDF document.
-    /// </summary>
-    /// <summary>
     /// Open an HTML file and convert it to a PDF document.
     /// </summary>
     public static Document Open(string path, HtmlLoadOptions options)
@@ -320,6 +317,9 @@ public sealed partial class Document
         return Converters.HtmlToPdfConverter.Convert(data, options);
     }
 
+    /// <summary>
+    /// Open an SVG file from bytes and convert it to a PDF document.
+    /// </summary>
     public static Document Open(byte[] data, SvgLoadOptions options)
     {
         return Converters.SvgToPdfConverter.Convert(data, options);

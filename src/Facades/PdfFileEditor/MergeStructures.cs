@@ -42,7 +42,7 @@ public sealed partial class PdfFileEditor
     /// Indirect references are assigned new output object numbers via
     /// <see cref="PdfWriter.AllocateObjectNumber"/> so allocations stay in sync with
     /// deferred stream promotions inside the writer; each source object is written exactly
-    /// once per input PDF (deduplicated via <paramref name="objRemap"/>).
+    /// once per input PDF (deduplicated via <c>objRemap</c>).
     /// Inline dicts/arrays/streams have their contents recursively remapped.
     /// </summary>
     /// <summary>Apply the unique-suffix template to a counter: replace the <c>%NUM%</c>
@@ -219,7 +219,7 @@ public sealed partial class PdfFileEditor
                 };
                 if (styleStr is not null) dict.Set("S", new PdfName(styleStr));
                 if (!string.IsNullOrEmpty(prefix))
-                    dict.Set("P", new PdfString(System.Text.Encoding.Latin1.GetBytes(prefix!)));
+                    dict.Set("P", new PdfString(Compat.Latin1.GetBytes(prefix!)));
                 if (st != 1) dict.Set("St", new PdfInteger(st));
                 nums.Add(dict);
             }
@@ -291,7 +291,7 @@ public sealed partial class PdfFileEditor
 
             // Parent tree: shift this input's keys into its slice and remap the values
             // (arrays of struct-element refs, or a single ref) through the same map.
-            foreach (var (key, value) in NumberTreeEntries(reader.ResolveDict(root.Get("ParentTree")), reader))
+            foreach (var (key, value) in NumberTree.Entries(reader.ResolveDict(root.Get("ParentTree")), reader))
                 mergedNums.Add((key + spBase, RemapObject(value, reader, remap, writer)));
 
             // Role map: structure-type aliases merge first-wins; entries are names only.
@@ -345,7 +345,7 @@ public sealed partial class PdfFileEditor
         if (reader.Resolve(structRoot.Get("ParentTreeNextKey")) is PdfInteger next && next.Value > 0)
             return (int)next.Value;
         var max = -1;
-        foreach (var (key, _) in NumberTreeEntries(reader.ResolveDict(structRoot.Get("ParentTree")), reader))
+        foreach (var (key, _) in NumberTree.Entries(reader.ResolveDict(structRoot.Get("ParentTree")), reader))
             if (key > max) max = key;
         return max + 1;
     }

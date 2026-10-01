@@ -1,4 +1,4 @@
-using System.Drawing;
+﻿using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.Versioning;
@@ -43,13 +43,13 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     // for A/B against output rasterised with GDI+ default alignment.
     private static readonly bool PomNone = Environment.GetEnvironmentVariable("Q_POM") == "none";
 
-    private PixelOffsetMode PagePom => _exactRender || PomNone ? PixelOffsetMode.None : PixelOffsetMode.HighQuality;
-
-    /// <summary>How many device pixels this render puts on each OUTPUT pixel. A caller
-    /// that renders large and averages down (the bilevel TIFF path supersamples 2×) sets
-    /// it, so rules stated about the output scale — which sample grid an image resamples
-    /// on — are judged at the scale the viewer actually sees, not the intermediate one.</summary>
-    internal int OutputSupersample { get; set; } = 1;
+    // A page drawn as drawing commands has no pixel grid of its own to offset against: the
+    // printer places the geometry, and the half-pixel shift would move every shape by half a
+    // canvas pixel on the sheet (measured on a printed page: HighQuality left ~30% more of it
+    // outside the reference's match window than None).
+    private PixelOffsetMode PagePom => _exactRender || PomNone || _vectorTarget || PrintedPageImage
+        ? PixelOffsetMode.None
+        : PixelOffsetMode.HighQuality;
 
     // Strokes composite in straight sRGB on every page: stroke AA blends
     // linearly in byte space — a K-black stroke edge over
@@ -148,6 +148,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
 
     private readonly Dictionary<PdfDictionary, int[]?> _encGidMaps = new(ReferenceEqualityComparer.Instance);
 
+    private readonly Dictionary<PdfDictionary, bool[]?> _undefinedCodes = new(ReferenceEqualityComparer.Instance);
+
     private double _scale;          // horizontal pixels per PDF point
 
     private double _scaleY;         // vertical pixels per PDF point (differs from _scale only when the caller pins a non-proportional target size)
@@ -160,6 +162,21 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     // baked into its initial CTM; annotations are authored in unrotated page space, so
     // during the annotation phase WorldMatrix composes it in (null the rest of the time).
     private double[]? _annotBaseCtm;
+
+    // A pattern's /Matrix maps pattern space to the page's DEFAULT space (PDF 32000
+    // §8.7.3.1), and on a /Rotate page that space already carries the rotation swing: the
+    // same initial CTM the page content starts from. Without it a pattern's cells tile
+    // along the unrotated axes - a gradient meant to run down a landscape page ran across
+    // it, so one column of the cell image coloured the whole band. Set for the page
+    // content phase only; the annotation phase composes the swing through _annotBaseCtm.
+    private double[]? _patternBaseCtm;
+
+    /// <summary>The pattern-space matrix of a pattern dictionary, in the page's default space.</summary>
+    private double[] PatternSpaceMatrix(PdfDictionary patternDict)
+    {
+        var own = ExtractFormMatrix(patternDict) ?? new double[] { 1, 0, 0, 1, 0, 0 };
+        return _patternBaseCtm is null ? own : GraphicsState.MultiplyMatrices(own, _patternBaseCtm);
+    }
 
     private Scope _scope = null!;   // current resource scope (swapped on form recursion)
 
@@ -189,12 +206,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     /// <summary>Render a page using its existing reader, avoiding a re-parse.</summary>
     internal RgbaBuffer RenderPage(Page page, int dpi) => RenderPage(page, dpi, dpi);
 
-    internal RgbaBuffer RenderPage(Page page, int xDpi, int yDpi) => RenderPage(page, xDpi, yDpi, 1);
-
-    /// <summary>Render the page's natural pixel grid for the given resolution.
-    /// <paramref name="superFactor"/> tells the renderer it is drawing an INTERMEDIATE
-    /// that the caller will average down by that factor.</summary>
-    internal RgbaBuffer RenderPage(Page page, int xDpi, int yDpi, int superFactor)
+    /// <summary>Render the page's natural pixel grid for the given resolution.</summary>
+    internal RgbaBuffer RenderPage(Page page, int xDpi, int yDpi)
     {
         // Size to the crop box (clipped to the media box), not the media box: the
         // rasterizer presents only the cropped region. Rotation swaps the
@@ -221,68 +234,66 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         // Hand the REQUESTED resolution down rather than letting the canvas imply it:
         // PagePixels truncates, so re-deriving the scale from the rounded canvas shrinks
         // the page by up to a pixel across its width. See the scale assignment below.
-        //
-        // ⚠ Only for a DIRECT render. A SUPERSAMPLED intermediate (superFactor > 1, the
-        // bilevel TIFF path) keeps the canvas-derived fit: that path area-averages the
-        // intermediate down and packs the result against the OUTPUT canvas, and its
-        // aliased-fill Y anchoring is already calibrated on the floored canvas cropping
-        // the page's partial pixel — handing it the true scale as well double-corrects,
-        // and a bilevel threshold turns that into flipped pixels along every edge
-        // (measured: it breaks two CCITT4 compares that the fit keeps exact).
-        return superFactor > 1
-            ? RenderPageAtPixelSize(page, pixelW, pixelH)
-            : RenderPageAtPixelSize(page, pixelW, pixelH, xDpi / 72.0, yDpi / 72.0);
+        return RenderPageAtPixelSize(page, pixelW, pixelH, xDpi / 72.0, yDpi / 72.0);
     }
 
-    internal RgbaBuffer RenderPageAtPixelSize(Page page, int pixelW, int pixelH,
-        double? xScale = null, double? yScale = null)
+    internal RgbaBuffer RenderPageAtPixelSize(Page page, int pixelW, int pixelH, double? xScale = null, double? yScale = null)
     {
-        if (pixelW <= 0) pixelW = 1;
-        if (pixelH <= 0) pixelH = 1;
+        var gp = new GdiPixelPageRenderState();
+        gp.page = page;
+        gp.pixelW = pixelW;
+        gp.pixelH = pixelH;
+        gp.xScale = xScale;
+        gp.yScale = yScale;
+        if (gp.pixelW <= 0) gp.pixelW = 1;
+        if (gp.pixelH <= 0) gp.pixelH = 1;
+        BeginGdiPageRender(gp);
 
+        using var bitmap = new Bitmap(gp.pixelW, gp.pixelH, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(bitmap))
+        {
+            // Start from transparent WHITE paper (RGB white, alpha 0). The alpha channel then
+            // records COVERAGE — a pixel still at alpha 0 is bare paper; any painted pixel
+            // (even a white fill) has alpha > 0. Transparency-group blend modes read that
+            // coverage as the backdrop alpha, so a blend over bare paper paints the group's
+            // own colour (PDF composites the page onto paper only at output) while a blend
+            // over painted content blends correctly. RGB stays white so a colour read of paper
+            // is white. Flattened onto opaque white at output (FlattenAlphaOntoWhite below).
+            g.Clear(GdiColor.FromArgb(0, 255, 255, 255));
+            RenderGdiPageContent(gp, bitmap, g);
+        }
+
+        _reader.ClearCacheExcept(gp.cachedBefore);
+        // Composite the coverage-carrying page (RGB with alpha = coverage) onto opaque white
+        // paper: bare-paper pixels (alpha 0) become white, partially-covered pixels blend over
+        // white, then every pixel is forced opaque. Straight (un-premultiplied) sRGB bytes,
+        // matching the manual composites elsewhere. A transparent-background render keeps
+        // the coverage as it is: bare paper stays (0, 0, 0, 0).
+        if (!TransparentBackground)
+            FlattenAlphaOntoWhite(bitmap, gp.pixelW, gp.pixelH);
+        gp.result = ToRgbaBuffer(bitmap, gp.pixelW, gp.pixelH);
+        EndGdiPageRender();
+        return gp.result;
+    }
+
+    /// <summary>Everything a page render sets up before it draws: the reader, the rotation fit,
+    /// the device scale and the per-page caches.</summary>
+    private void BeginGdiPageRender(GdiPixelPageRenderState gp)
+    {
         // Live-document render: unsaved Contents edits must be visible to the
         // stream read below, as a live document is expected to render them.
-        page.FlushPendingContents();
+        gp.page.FlushPendingContents();
 
-        _reader = page.Reader;
-        var rawMb = page.MediaBox;
-        // Visible region = crop box clipped to media box; content is sized and offset
-        // to it so anything outside the crop area is excluded.
-        var crop = SoftwarePageRenderer.EffectiveCropRect(page);
+        _reader = gp.page.Reader;
+        gp.cachedBefore = _reader.CachedObjects();
+        gp.rawMb = gp.page.MediaBox;
+        gp.crop = SoftwarePageRenderer.EffectiveCropRect(gp.page);
 
-        // /Rotate (PDF 32000 §14.8.2.7) composes into the initial CTM exactly as the
-        // software renderer does, so a 90°/270° page swaps its pixel dimensions and
-        // the content swings clockwise into the visible canvas.
-        var rot = ((page.RotateDegrees % 360) + 360) % 360;
-        Rectangle effectiveMb;
-        double[]? initialPageCtm = null;
-        if (rot is 90 or 180 or 270)
-        {
-            // The rotation swings the CROP rectangle (the visible region), not the
-            // media box — its dimensions AND lower-left offset anchor the swing
-            // (mirrors SoftwarePageRenderer; a media-box anchor shifted a
-            // 270°-rotated cropped page by the media/crop height difference).
-            var w = crop.Width;
-            var h = crop.Height;
-            effectiveMb = rot == 180
-                ? new Rectangle(0, 0, w, h)
-                : new Rectangle(0, 0, h, w);
-            initialPageCtm = rot switch
-            {
-                90 => new[] { 0.0, -1.0, 1.0, 0.0, -crop.LLY, w + crop.LLX },
-                180 => new[] { -1.0, 0.0, 0.0, -1.0, w + crop.LLX, h + crop.LLY },
-                270 => new[] { 0.0, 1.0, -1.0, 0.0, h + crop.LLY, -crop.LLX },
-                _ => null,
-            };
-        }
-        else
-        {
-            // Unrotated: the device box is the crop rectangle, so its lower-left maps
-            // to the bottom-left pixel and cropped content is positioned correctly.
-            effectiveMb = crop;
-        }
+        gp.rot = ((gp.page.RotateDegrees % 360) + 360) % 360;
+        gp.initialPageCtm = null;
+        FitGdiPageRotation(gp);
 
-        _mediaBox = effectiveMb;
+        _mediaBox = gp.effectiveMb;
         // X and Y are scaled independently so an explicitly pinned target size (e.g.
         // SaveAsTIFF(file, 1000, 2000, …)) stretches the page to fill it exactly — that
         // caller passes no scale and gets the canvas-derived fit.
@@ -297,9 +308,9 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         // render of a scanned page: a systematic −0.09 px x and +0.07 px y stem phase,
         // which is this and nothing else. Honouring the requested scale lets the page's
         // partial last pixel fall outside the canvas, which is what truncating it means.
-        _scale = xScale ?? pixelW / effectiveMb.Width;
-        _scaleY = yScale ?? pixelH / effectiveMb.Height;
-        _pixelH = pixelH;
+        _scale = gp.xScale ?? gp.pixelW / gp.effectiveMb.Width;
+        _scaleY = gp.yScale ?? gp.pixelH / gp.effectiveMb.Height;
+        _pixelH = gp.pixelH;
         _formDepth = 0;
         _glyphCache = new(ReferenceEqualityComparer.Instance);
         _cidCache = new(ReferenceEqualityComparer.Instance);
@@ -320,53 +331,17 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         // renders over the years, so the corner grid stays scoped to the XFA
         // family — the same per-content switching the transparency-group
         // exact-render path already does.
-        _exactRender = ExactOverride is null ? PageUsesTransparencyGroup(page.Dict) || DocumentHasXfa()
+        _exactRender = ExactOverride is null ? !PrintedPageImage && (PageUsesTransparencyGroup(gp.page.Dict) || DocumentHasXfa())
                                              : ExactOverride == "1";
+    }
 
-        using var bitmap = new Bitmap(pixelW, pixelH, PixelFormat.Format32bppArgb);
-        using (var g = Graphics.FromImage(bitmap))
-        {
-            // Start from transparent WHITE paper (RGB white, alpha 0). The alpha channel then
-            // records COVERAGE — a pixel still at alpha 0 is bare paper; any painted pixel
-            // (even a white fill) has alpha > 0. Transparency-group blend modes read that
-            // coverage as the backdrop alpha, so a blend over bare paper paints the group's
-            // own colour (PDF composites the page onto paper only at output) while a blend
-            // over painted content blends correctly. RGB stays white so a colour read of paper
-            // is white. Flattened onto opaque white at output (FlattenAlphaOntoWhite below).
-            g.Clear(GdiColor.FromArgb(0, 255, 255, 255));
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.PixelOffsetMode = PagePom;
-            g.CompositingQuality = CompositingQuality.HighQuality;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            _g = g;
-            _bitmap = bitmap;
-
-            var resources = SoftwarePageRenderer.ResolveInheritedPageResources(page.Dict, _reader);
-            _scope = BuildScope(resources);
-
-            var contentBytes = SoftwarePageRenderer.GetPageContent(page.Dict, _reader);
-            RenderContentStream(contentBytes, initialPageCtm, null);
-
-            // Annotations paint on top of page content (PDF 32000 §12.5).
-            _g.ResetClip();
-            _annotBaseCtm = initialPageCtm;
-            SafeDraw(() => DrawAnnotations(page.Dict));
-            _annotBaseCtm = null;
-        }
-
-        _reader.ClearCache();
-        // Composite the coverage-carrying page (RGB with alpha = coverage) onto opaque white
-        // paper: bare-paper pixels (alpha 0) become white, partially-covered pixels blend over
-        // white, then every pixel is forced opaque. Straight (un-premultiplied) sRGB bytes,
-        // matching the manual composites elsewhere.
-        FlattenAlphaOntoWhite(bitmap, pixelW, pixelH);
-        var result = ToRgbaBuffer(bitmap, pixelW, pixelH);
+    /// <summary>Releases what a page render held once it has drawn.</summary>
+    private void EndGdiPageRender()
+    {
         _blendScratch?.Dispose();
         _blendScratch = null;
         while (_layerPool.Count > 0) _layerPool.Pop().Dispose();
         _bitmap = null!;
-        return result;
     }
 
     /// <summary>Composite a coverage-carrying page bitmap (RGB with alpha = coverage) onto
@@ -584,6 +559,27 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     /// half-open device rect) instead of AA-feathered edges that blur module widths.
     /// Text, images, and strokes render exactly as without the flag.</summary>
     internal bool AliasedVectorFills { get; set; }
+
+    /// <summary>Keep bare paper transparent (0, 0, 0, 0) instead of flattening the page onto
+    /// white: the transparent-background PNG render.</summary>
+    internal bool TransparentBackground { get; set; }
+
+    /// <summary>Render the page as the reference renders a page it prints as an image.</summary>
+    /// <remarks>
+    /// The reference's printed page image is byte-identical to its own PNG render of the page
+    /// at the same resolution, and that render differs from this renderer's in four ways, each
+    /// measured against it on a Multiply-blended leaflet page and a Screen-blended, soft-masked
+    /// one (pixels 20 or more levels off, of 1.5 and 0.9 million): the pixel-corner sample grid
+    /// (a circle's stroke sat half a pixel up and left under the half-offset grid: 4,175 -> 0);
+    /// edges composited in straight sRGB, not gamma-corrected (a red logo's edge pixel 107 where
+    /// the reference's is 47, (107/213)^2.2 x 213: 9,282 -> 7,502 with the grid); transparency
+    /// groups composited like any other content, not through the exact-compositing path; and
+    /// CFF glyph curves handed to GDI+ as curves, not flattened in font units (every straight stem
+    /// already matched, every bowl's outer edge came out darker: 7,502 -> 205). A minified image is
+    /// resampled with plain bilinear rather than the soft kernel.
+    /// Scoped to print images: the corpus' raster templates were generated under other rules.
+    /// </remarks>
+    internal bool PrintedPageImage { get; set; }
 
     /// <summary>Draw charstring-outline embedded fonts (CFF /FontFile3, Adobe Type 1
     /// /FontFile) through a TrueType sfnt converted from the program, rather than

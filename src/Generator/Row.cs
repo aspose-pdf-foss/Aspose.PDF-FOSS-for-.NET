@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Content;
@@ -8,8 +8,15 @@ using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
 
+/// <summary>
+/// A row of a <c>Table</c>: holds the row's <c>Cells</c> and the height, border, background, padding and text
+/// defaults that apply to them.
+/// </summary>
 public sealed class Row
 {
+    /// <summary>Creates an empty row with no cells; usually obtained from <c>Table.Rows.Add()</c> instead.</summary>
+    public Row() { }
+
     /// <summary>The cells in this row.</summary>
     public Cells Cells { get; set; } = new();
 
@@ -29,9 +36,18 @@ public sealed class Row
     /// claims, so the cell's own padding rides on top of it — as opposed to the legacy
     /// <c>height="N"</c> floor, which is the whole row height.</summary>
     internal bool MinRowHeightIsContent { get; set; }
+    /// <summary>Set on a column-slice band row: its MinRowHeight is the source row's FULL height,
+    /// rules included, so the generator floor must not add them again.</summary>
+    internal bool MinRowHeightIncludesRules { get; set; }
 
     /// <summary>Row background color.</summary>
     public Color? BackgroundColor { get; set; }
+
+    /// <summary>The row's <see cref="BackgroundColor"/> paints the row as ONE band --
+    /// the whole row box, from the grid line above to the grid line below and across
+    /// every column, under the rules -- instead of one fill per cell inside the rules.
+    /// A table header styled as a block paints this way. Off by default.</summary>
+    public bool BackgroundIsBand { get; set; }
 
     /// <summary>Default text state for cells in this row. Auto-initialized so callers can
     /// mutate properties without null-checking.</summary>

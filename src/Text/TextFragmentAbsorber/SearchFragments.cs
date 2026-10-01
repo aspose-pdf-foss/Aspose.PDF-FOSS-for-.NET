@@ -23,190 +23,70 @@ public sealed partial class TextFragmentAbsorber
     /// </summary>
     private void BuildCrossPageSearchFragments(List<(Page page, List<RawTextRun> runs)> allPageRuns)
     {
-        // Concatenate text from all pages with \r\n between pages
-        var fullText = new StringBuilder();
-        // Track: for each char position, which page and which run within that page
-        var charMap = new List<(int pageIdx, int runIdx)>();
-        var pageRunStartChars = new List<List<int>>(); // per page, per run: start char index
+        var xp = new CrossPageSearchState();
+        xp.allPageRuns = allPageRuns;
+        xp.fullText = new StringBuilder();
+        xp.charMap = new List<(int pageIdx, int runIdx)>();
+        xp.pageRunStartChars = new List<List<int>>(); // per page, per run: start char index
 
-        for (int pi = 0; pi < allPageRuns.Count; pi++)
+        for (int pi = 0; pi < xp.allPageRuns.Count; pi++)
         {
-            var (page, runs) = allPageRuns[pi];
-            var runStarts = new List<int>();
-            pageRunStartChars.Add(runStarts);
-
-            // Insert page separator (except before first page)
-            if (pi > 0 && fullText.Length > 0)
-            {
-                fullText.Append("\r\n");
-                charMap.Add((-1, -1)); // \r
-                charMap.Add((-1, -1)); // \n
-            }
-
-            for (int ri = 0; ri < runs.Count; ri++)
-            {
-                // Space insertion between runs on the same line
-                if (ri > 0 && runs[ri].Text != "\r\n" && runs[ri - 1].Text != "\r\n")
-                {
-                    var prev = runs[ri - 1];
-                    var deltaY = Math.Abs(runs[ri].Y - prev.Y);
-                    if (deltaY < 2.0)
-                    {
-                        var prevEndX = prev.X + (prev.Width > 0 ? prev.Width * prev.HScaling : EstimateWidth(prev.Text, prev.FontSize));
-                        var gap = runs[ri].X - prevEndX;
-                        var fontSize = runs[ri].FontSize > 0 ? runs[ri].FontSize : 12.0;
-                        var spaceThreshold = fontSize * 0.2;
-                        var maxGap = fontSize * 3.0;
-                        var lastChar = fullText.Length > 0 ? fullText[^1] : '\0';
-                        var nextChar = runs[ri].Text.Length > 0 ? runs[ri].Text[0] : '\0';
-                        // Require a real gap and avoid spacing inside letter-spaced words,
-                        // where EVERY run is a single character. The earlier `both runs >= 2
-                        // chars` rule was too strict: it also dropped the space at a word↔
-                        // single-char-token boundary (e.g. "level" -> "1"), so a phrase search
-                        // for "Heading level 1" failed to match the extracted "Heading level1".
-                        // Suppress the space only when BOTH sides are single
-                        // characters (the genuine letter-spacing case).
-                        if (gap > spaceThreshold && gap <= maxGap && fullText.Length > 0
-                            && lastChar != ' ' && lastChar != '\n' && nextChar != ' '
-                            && (prev.Text.Length >= 2 || runs[ri].Text.Length >= 2))
-                        {
-                            charMap.Add((pi, ri - 1));
-                            fullText.Append(' ');
-                        }
-                    }
-                }
-
-                runStarts.Add(charMap.Count);
-                var text = runs[ri].Text;
-                // Keep newlines for regex
-                foreach (var _ in text)
-                    charMap.Add((pi, ri));
-                fullText.Append(text);
-            }
+            if (!CollectCrossPageRuns(xp, pi)) break;
         }
 
-        var concatenated = fullText.ToString();
-        // Normalize with map re-projection — see BuildConcatenatedText for why
-        // matching normalized text against the original maps is unsound.
-        concatenated = NormalizeArabicPresentationFormsWithMap(concatenated, out var xNewToOld);
+        xp.concatenated = xp.fullText.ToString();
+        (xp.concatenated, var xNewToOld) = NormalizeArabicPresentationFormsWithMap(xp.concatenated);
         if (xNewToOld is not null)
         {
             var expanded = new List<(int pageIdx, int runIdx)>(xNewToOld.Length);
-            foreach (var o in xNewToOld) expanded.Add(charMap[o]);
-            var oldToNew = new int[charMap.Count + 1];
+            foreach (var o in xNewToOld) expanded.Add(xp.charMap[o]);
+            var oldToNew = new int[xp.charMap.Count + 1];
             var jj = 0;
-            for (var o = 0; o <= charMap.Count; o++)
+            for (var o = 0; o <= xp.charMap.Count; o++)
             {
                 while (jj < xNewToOld.Length && xNewToOld[jj] < o) jj++;
                 oldToNew[o] = jj;
             }
-            foreach (var starts in pageRunStartChars)
+            foreach (var starts in xp.pageRunStartChars)
                 for (var r = 0; r < starts.Count; r++)
-                    starts[r] = oldToNew[Math.Min(starts[r], charMap.Count)];
-            charMap = expanded;
+                    starts[r] = oldToNew[Math.Min(starts[r], xp.charMap.Count)];
+            xp.charMap = expanded;
         }
 
-        var matches = BuildMatches(concatenated);
+        xp.matches = BuildMatches(xp.concatenated);
 
-        foreach (Match match in matches)
+        foreach (Match match in xp.matches)
         {
-            if (match.Length == 0) continue;
-
-            var startIdx = match.Index;
-            var endIdx = match.Index + match.Length - 1;
-            if (startIdx >= charMap.Count || endIdx >= charMap.Count) continue;
-
-            // Find the first valid page/run for the match start
-            var (startPageIdx, startRunIdx) = charMap[startIdx];
-            // Skip separators
-            while (startPageIdx < 0 && startIdx <= endIdx)
-            {
-                startIdx++;
-                if (startIdx < charMap.Count) (startPageIdx, startRunIdx) = charMap[startIdx];
-            }
-            if (startPageIdx < 0) continue;
-
-            var startPage = allPageRuns[startPageIdx].page;
-            var startRuns = allPageRuns[startPageIdx].runs;
-            if (startRunIdx < 0 || startRunIdx >= startRuns.Count) continue;
-            var firstRun = startRuns[startRunIdx];
-
-            // Position from first run
-            var (posX, posY) = ApplyCtm(firstRun.X, firstRun.Y, firstRun.Ctm);
-
-            // Effective font size
-            var upX_ = firstRun.TmC * firstRun.Ctm.A + firstRun.TmD * firstRun.Ctm.C;
-            var upY_ = firstRun.TmC * firstRun.Ctm.B + firstRun.TmD * firstRun.Ctm.D;
-            var tmScale = Math.Sqrt(upX_ * upX_ + upY_ * upY_);
-            var effectiveFs = tmScale > 0.001 && Math.Abs(tmScale - 1.0) > 0.001
-                ? firstRun.FontSize * tmScale : firstRun.FontSize;
-
-            var textState = new TextState
-            {
-                FontSize = (float)effectiveFs,
-                FontName = firstRun.FontName,
-                RenderingMode = (Aspose.Pdf.Text.TextRenderingMode)firstRun.RenderingMode,
-                LineWidth = firstRun.LineWidth,
-                IsBold = firstRun.IsBold,
-                IsItalic = firstRun.IsItalic,
-                Font = firstRun.FontInfoObj ?? FontInfo.DefaultHelvetica,
-                TextRise = firstRun.TextRise,
-                IsSuperscript = firstRun.TextRise > 0,
-                IsSubscript = firstRun.TextRise < 0,
-            };
-            textState.SetCapturedForegroundColor(ForegroundColorOf(firstRun));
-            textState.StrokingColor = firstRun.StrokingColor;
-
-            // Simple bounding rect from first run
-            var w = firstRun.Width > 0 ? firstRun.Width : EstimateWidth(firstRun.Text, firstRun.FontSize);
-            var h = firstRun.FontSize;
-            var (px2, py2) = ApplyCtm(firstRun.X + w, firstRun.Y + h, firstRun.Ctm);
-            var rect = new Rectangle(
-                Math.Min(posX, px2), Math.Min(posY, py2),
-                Math.Max(posX, px2), Math.Max(posY, py2));
-
-            // Only the ANISOTROPIC part of the matrix is a horizontal scale. A matrix
-            // that scales both axes alike carries the font size (a "1 Tf" run sized
-            // by "7 0 0 7 Tm"), and that size is already in TextState.FontSize.
-            textState.SourceTmScale = Math.Abs(firstRun.TmD) > 1e-9
-                ? firstRun.TmA / firstRun.TmD
-                : 1.0;
-            var fragment = new TextFragment(LogicalizeRtlPresentationForms(match.Value), rect, textState)
-            {
-                PageIndex = startPage.Index,
-                Position = new Position(Q(posX), Q(posY)),
-                SourcePage = startPage,
-                SourceXObjStream = firstRun.SourceXObj,
-                ExtractionCtm = new Aspose.Pdf.Matrix(firstRun.Ctm.A, firstRun.Ctm.B, firstRun.Ctm.C, firstRun.Ctm.D, firstRun.Ctm.E, firstRun.Ctm.F),
-                ExtractionTmTy = firstRun.TmBaseY,
-            };
-
-            _fragments.Add(fragment);
+            if (!EmitCrossPageMatch(xp, match)) break;
         }
     }
 
     private void BuildSearchFragments(List<RawTextRun> rawFragments, int pageIndex,
         Page? sourcePage = null, XForm? sourceForm = null, List<RawFillRect>? fillRects = null)
     {
-        SplitRunsAtCharGaps(rawFragments);
+        var sf = new SearchFragmentState();
+        sf.rawFragments = rawFragments;
+        sf.pageIndex = pageIndex;
+        sf.sourcePage = sourcePage;
+        sf.sourceForm = sourceForm;
+        sf.fillRects = fillRects;
+        SplitRunsAtCharGaps(sf.rawFragments);
         // Flatten formatting mode orders the SEARCH TEXT by reading position, not
         // stream order — a pattern spanning lines (a bracketed block whose closing
         // half is drawn earlier in the stream) only pairs up in reading order.
         if (ExtractionOptions?.FormattingMode == TextExtractionOptions.TextFormattingMode.Flatten)
-            rawFragments = ReorderRunsForFlatten(rawFragments);
-        var preCountAll = _fragments.Count;
+            sf.rawFragments = ReorderRunsForFlatten(sf.rawFragments);
+        sf.preCountAll = _fragments.Count;
         // Later-text occlusion + clipped-away detection (stacked duplicate draws,
         // strip-clipped multi-pass pages): search matches report Invisible when
         // every spanned run is hidden, same as full extraction.
-        var (laterInk, clippedAway, runBoxArea) = ComputeLaterInkOcclusion(rawFragments);
+        (sf.laterInk, sf.clippedAway, sf.runBoxArea) = ComputeLaterInkOcclusion(sf.rawFragments);
         // Phase 1: Build the concatenated text and character-to-run mapping
-        var (concatenated, charToRun, runStartChar, bidiPerm) = BuildConcatenatedText(rawFragments);
+        (sf.concatenated, sf.charToRun, sf.runStartChar, sf.bidiPerm) = BuildConcatenatedText(sf.rawFragments);
         if (SearchDebug)
-            Console.Error.WriteLine($"[searchtext:page{pageIndex}]<<<{concatenated}>>>");
+            Console.Error.WriteLine($"[searchtext:page{sf.pageIndex}]<<<{sf.concatenated}>>>");
 
-        // Index the fill rects once so the per-match decoration probes below query a
-        // baseline-local slice instead of rescanning the whole (possibly huge) list.
-        var fillIndex = fillRects is { Count: > 0 } ? new FillRectIndex(fillRects) : null;
+        sf.fillIndex = sf.fillRects is { Count: > 0 } ? new FillRectIndex(sf.fillRects) : null;
 
         // Phases 2+3 run once per search pattern. The Regex[] ctor shares the
         // extracted text across ALL its regexes (extraction is the expensive
@@ -220,323 +100,15 @@ public sealed partial class TextFragmentAbsorber
                 if (!RegexResults.TryGetValue(rx, out var bucket))
                     RegexResults[rx] = bucket = new TextFragmentCollection();
                 var rxPre = _fragments.Count;
-                EmitMatches(BuildMatchesFor(rx, concatenated), rxPre);
+                EmitMatches(sf, BuildMatchesFor(rx, sf.concatenated), rxPre);
                 for (var fi = rxPre; fi < _fragments.Count; fi++)
                     bucket.Add(_fragments.GetInternal(fi));
             }
             return;
         }
-        EmitMatches(BuildMatches(concatenated), preCountAll);
+        EmitMatches(sf, BuildMatches(sf.concatenated), sf.preCountAll);
         return;
 
-        // Phase 3: for each match build a TextFragment with position, rect and
-        // segments; ends with the same-phrase RTL reorder over [preCount..).
-        void EmitMatches(MatchCollection matches, int preCount)
-        {
-        foreach (Match match in matches)
-        {
-            if (match.Length == 0)
-            {
-                // A zero-length regex match (lookarounds, optional groups) is still a
-                // result: an empty fragment positioned at the match
-                // point.
-                var anchorIdx = bidiPerm is not null && match.Index < bidiPerm.Length
-                    ? bidiPerm[match.Index] : match.Index;
-                var empty = new TextFragment(string.Empty)
-                {
-                    PageIndex = pageIndex,
-                    SourcePage = sourcePage,
-                    Form = sourceForm,
-                };
-                if (anchorIdx < charToRun.Count)
-                {
-                    var runIdx = charToRun[anchorIdx];
-                    var (ex, ey) = ComputeMatchPosition(rawFragments[runIdx], anchorIdx - runStartChar[runIdx]);
-                    empty.Position = new Position(Q(ex), Q(ey));
-                }
-                _fragments.Add(empty);
-                continue;
-            }
-
-            // Map match indices back through bidi permutation if reordering was applied
-            var startCharIdx = bidiPerm is not null ? bidiPerm[match.Index] : match.Index;
-            var endCharIdx = bidiPerm is not null
-                ? bidiPerm[match.Index + match.Length - 1]
-                : match.Index + match.Length - 1;
-            if (startCharIdx > endCharIdx)
-                (startCharIdx, endCharIdx) = (endCharIdx, startCharIdx);
-
-            if (startCharIdx >= charToRun.Count || endCharIdx >= charToRun.Count)
-            {
-                _fragments.Add(new TextFragment(LogicalizeRtlPresentationForms(match.Value)) { PageIndex = pageIndex, SourcePage = sourcePage, Form = sourceForm });
-                continue;
-            }
-
-            var firstRunIdx = charToRun[startCharIdx];
-            var lastRunIdx = charToRun[endCharIdx];
-            // A back-jump PREPEND (see BuildConcatenatedText) makes run indexes
-            // non-monotonic in char space: the match can START in a later-drawn run
-            // and END in an earlier one. Segment/bounds builders walk an ordered
-            // range, so normalise to [min, max].
-            if (firstRunIdx > lastRunIdx)
-                (firstRunIdx, lastRunIdx) = (lastRunIdx, firstRunIdx);
-
-            // Compute bounding rectangle spanning all involved runs
-            var rect = ComputeMatchBounds(rawFragments, runStartChar,
-                firstRunIdx, lastRunIdx, startCharIdx, endCharIdx);
-
-            // Compute position, text state, and trailing Tc for the fragment
-            var (posX, posY) = ComputeMatchPosition(rawFragments[firstRunIdx],
-                startCharIdx - runStartChar[firstRunIdx]);
-            var firstRun = rawFragments[firstRunIdx];
-            var textState = BuildTextState(firstRun);
-            // A match is hidden when the HIDDEN AREA of its spanned runs — covered
-            // by later ink or clipped away — carries the majority of the glyph
-            // area. Area-weighted, not all-runs: a word straddling two clip
-            // strips is hidden in the pass that shows only its short tail, but
-            // visible in the pass that shows most of it.
-            double hiddenArea = 0, totalArea = 0;
-            for (var ri = firstRunIdx; ri <= lastRunIdx && ri < laterInk.Length; ri++)
-            {
-                if (rawFragments[ri].Text == "\r\n") continue;
-                var a = runBoxArea[ri];
-                totalArea += a;
-                if (laterInk[ri] || clippedAway[ri]) hiddenArea += a;
-            }
-            if (totalArea > 0 && hiddenArea > totalArea * 0.5)
-                textState.SetCapturedOccluded(true);
-            var trailingTc = ComputeTrailingTc(rawFragments, runStartChar, lastRunIdx, endCharIdx);
-
-            // Text direction in page space
-            var sTdx = firstRun.Ctm.A * firstRun.TmA + firstRun.Ctm.C * firstRun.TmB;
-            var sTdy = firstRun.Ctm.B * firstRun.TmA + firstRun.Ctm.D * firstRun.TmB;
-            var sRot = RotationFromDirection(sTdx, sTdy);
-            if (sRot.HasValue) textState.Rotation = sRot.Value;
-
-            // Only the ANISOTROPIC part of the matrix is a horizontal scale. A matrix
-            // that scales both axes alike carries the font size (a "1 Tf" run sized
-            // by "7 0 0 7 Tm"), and that size is already in TextState.FontSize.
-            textState.SourceTmScale = Math.Abs(firstRun.TmD) > 1e-9
-                ? firstRun.TmA / firstRun.TmD
-                : 1.0;
-            // The text a match REPORTS is in logical (reading) order. Which conversion
-            // gets it there depends on the frame `match.Value` came from: when the page
-            // carried RTL and the concatenation was bidi-reordered (bidiPerm non-null)
-            // the value is already logical; otherwise it is still in DRAWN order — the
-            // regex path deliberately searches drawn order — and the run reverses.
-            var absorbedText = bidiPerm is not null
-                ? match.Value
-                : LogicalizeRtlPresentationForms(match.Value);
-            var fragment = new TextFragment(absorbedText, rect, textState)
-            {
-                PageIndex = pageIndex,
-                Position = new Position(Q(posX), Q(posY)),
-                SourcePage = sourcePage,
-                Form = sourceForm,
-                SourceXObjStream = firstRun.SourceXObj,
-                TextDirX = sTdx, TextDirY = sTdy,
-                ExtractionCtm = new Aspose.Pdf.Matrix(firstRun.Ctm.A, firstRun.Ctm.B,
-                    firstRun.Ctm.C, firstRun.Ctm.D, firstRun.Ctm.E, firstRun.Ctm.F),
-                ExtractionTmTy = firstRun.TmBaseY,
-                TrailingTcPageSpace = trailingTc,
-                ReplaceOptions = TextReplaceOptions,
-            };
-
-            RawFillRect? capturedUl = null;
-            RawFillRect? capturedBg = null;
-            if (fillIndex is not null)
-            {
-                var (_, baselineY) = ApplyCtm(firstRun.X, firstRun.Y, firstRun.Ctm);
-                bool wantSourceDecorations = _textEditOptions?.ToAttemptGetUnderlineFromSource ?? false;
-                // Same default as the absorb-all path above: underline capture follows
-                // TextSearchOptions' own default (on) when no options were supplied.
-                bool wantUnderline = (_textSearchOptions?.SearchForTextRelatedGraphics ?? true)
-                    || wantSourceDecorations;
-                // Same rule as the absorb-all path: a fill rect containing the match's
-                // baseline midpoint supplies TextState.BackgroundColor (later draw
-                // order wins). The midpoint — not the start edge — probes: a source
-                // highlight is often drawn a hair inside the first glyph's origin.
-                if (_textSearchOptions?.SearchForTextRelatedGraphics ?? true)
-                {
-                    var midX = rect.LLX + rect.Width / 2;
-                    var bgHit = fillIndex.FindTopMatch(baselineY - FillRectIndex.Margin, baselineY + FillRectIndex.Margin,
-                        fr => midX >= fr.Llx && midX <= fr.Urx && baselineY >= fr.Lly && baselineY <= fr.Ury);
-                    // The fragment snapshot-copied the built TextState at construction —
-                    // the capture must land on the fragment's own state object.
-                    if (bgHit is { } bgh) fragment.TextState.SetCapturedBackgroundColor(bgh.FillColor);
-                }
-                if (wantUnderline)
-                {
-                    capturedUl = DetectUnderlineRect(rect, baselineY, textState.FontSize, fillIndex);
-                    // Like the background above: the fragment snapshot-copied the built
-                    // TextState, so the capture must land on the fragment's own state.
-                    if (capturedUl is not null) fragment.TextState.SetCapturedUnderline(true);
-                }
-                // Source-highlight capture: lets a later text replacement splice the old
-                // background rect out and re-draw it at the replacement's width. Gated with
-                // the RULE, not with ToAttemptGetUnderlineFromSource alone: text-related
-                // graphics already hand the caller the highlight's COLOUR, and a caller that
-                // then sets BackgroundColor is replacing that highlight - painting the new
-                // one while the old rect still stands leaves the old one on top.
-                if (wantUnderline)
-                    capturedBg = DetectBackgroundRect(rect, baselineY, textState.FontSize, fillIndex);
-                if (DetectStrikeoutRect(rect, baselineY, textState.FontSize, fillIndex) is not null)
-                    fragment.TextState.SetCapturedStrikeOut(true);
-            }
-
-            // Build per-run segments with position and rectangle
-            BuildFragmentSegments(fragment, rawFragments, runStartChar,
-                firstRunIdx, lastRunIdx, startCharIdx, endCharIdx, charToRun);
-
-            // ★ Segments are per-GLYPH-RUN, so they are necessarily in DRAWN order, and
-            // adding them re-joins the fragment's text from them — which for an RTL run
-            // silently hands back the reading order REVERSED. The segments keep drawn
-            // order (their positions describe where the glyphs sit); the fragment's Text
-            // is the reported reading order, so restore it.
-            if (BidiReorderer.ContainsRtl(absorbedText))
-                fragment.SetAbsorbedText(absorbedText);
-
-            // A regex match can span a line break: the matched text carries the
-            // \r\n sentinel, but segments cover only glyph runs, so the segment
-            // join (which each Segments.Add refreshed _text to) loses it. Keep
-            // the matched text — the break belongs in Text — but
-            // only for an INTERIOR break: a match that merely ends (or starts)
-            // on the sentinel (e.g. pattern "RTF\s[\r\n]") reads back without it.
-            var matchTrimmed = match.Value.Trim('\r', '\n');
-            if (matchTrimmed.IndexOf('\r') >= 0 || matchTrimmed.IndexOf('\n') >= 0)
-                fragment.SetAbsorbedText(LogicalizeRtlPresentationForms(matchTrimmed));
-            // INTERIOR junction spaces synthesised during line assembly (word gaps,
-            // back-jump splices) belong to no glyph run, so the segment join drops
-            // them. The full matched text is reported — restore it when the
-            // join lost characters. BOUNDARY spaces stay off (a match that merely
-            // starts/ends on a junction space reads back without it, same as the
-            // sentinel rule above).
-            else
-            {
-                // Only the SYNTHETIC boundary spaces come off. A space the match starts
-                // or ends on that a glyph run actually drew is part of the text and must
-                // survive — trimming every one of them silently shortened lines that
-                // open and close on real space glyphs the moment any interior junction
-                // space sent them down this path.
-                var matchInner = TrimSynthesizedEdges(matchTrimmed, fragment.Text);
-                if (fragment.Segments.Count > 0
-                    && matchInner.Length > fragment.Text.Length
-                    && string.Equals(fragment.Text.Replace(" ", ""),
-                           matchInner.Replace(" ", ""), StringComparison.Ordinal))
-                    fragment.SetAbsorbedText(LogicalizeRtlPresentationForms(matchInner));
-            }
-
-            if (capturedUl is { } ulr)
-            {
-                fragment.MarkCapturedUnderlineSource(ulr.RawX, ulr.RawY, ulr.RawW, ulr.RawH);
-                fragment.CapturedUnderlinePageRect = (ulr.Llx, ulr.Lly, ulr.Urx, ulr.Ury);
-                // What the source rule covers BEYOND the match: the tail of the last
-                // spanned run, and where that run ends. A replacement re-seats the tail
-                // at its own advance; switching the underline off leaves it underlined.
-                var tailRun = rawFragments[lastRunIdx];
-                var tailFrom = endCharIdx - runStartChar[lastRunIdx] + 1;
-                fragment.SourceUnderlineTrailingText = tailFrom >= 0 && tailFrom < tailRun.Text.Length
-                    ? tailRun.Text.Substring(tailFrom)
-                    : string.Empty;
-                // run.X/Width live in TEXT space; the rule's extent is page space.
-                var (tailEndX, _) = ApplyCtm(
-                    tailRun.X + tailRun.TmA * tailRun.Width * tailRun.HScaling,
-                    tailRun.Y + tailRun.TmB * tailRun.Width * tailRun.HScaling, tailRun.Ctm);
-                fragment.SourceUnderlineRunEndX = tailEndX;
-
-                // The rules the LINE carries besides this one. A replacement re-lays the
-                // line's decoration in the library's own band, so a rule under a
-                // neighbouring run has to come with it - left where the source put it, it
-                // sits a fraction off the band the re-laid rules share and keeps a thickness
-                // none of them has.
-                var (_, myBaseline) = ApplyCtm(firstRun.X, firstRun.Y, firstRun.Ctm);
-                for (var ri = 0; fillIndex is not null && ri < rawFragments.Count; ri++)
-                {
-                    if (ri >= firstRunIdx && ri <= lastRunIdx) continue;
-                    var compRun = rawFragments[ri];
-                    if (string.IsNullOrWhiteSpace(compRun.Text)) continue;
-                    var (_, compBaseline) = ApplyCtm(compRun.X, compRun.Y, compRun.Ctm);
-                    if (Math.Abs(compBaseline - myBaseline) > 0.5) continue;
-                    var compRect = ComputeMatchBounds(rawFragments, runStartChar, ri, ri,
-                        runStartChar[ri], runStartChar[ri] + compRun.Text.Length - 1);
-                    if (compRect.URX - compRect.LLX <= 0) continue;
-                    if (DetectUnderlineRect(compRect, compBaseline, textState.FontSize, fillIndex)
-                        is not { } compUl) continue;
-                    if (Math.Abs(compUl.RawX - ulr.RawX) < 0.01 && Math.Abs(compUl.RawY - ulr.RawY) < 0.01
-                        && Math.Abs(compUl.RawW - ulr.RawW) < 0.01) continue;
-                    if (fragment.CompanionRuleSources is { } seenComp
-                        && seenComp.Exists(t => Math.Abs(t.X - compUl.RawX) < 0.01
-                            && Math.Abs(t.Y - compUl.RawY) < 0.01
-                            && Math.Abs(t.W - compUl.RawW) < 0.01)) continue;
-                    fragment.MarkCompanionRule(compUl.RawX, compUl.RawY, compUl.RawW, compUl.RawH,
-                        compRect.LLX, compRect.URX - compRect.LLX, compUl.FillColor);
-                }
-            }
-            if (capturedBg is { } bgr)
-                fragment.MarkCapturedBackgroundSource(bgr.RawX, bgr.RawY, bgr.RawW, bgr.RawH, bgr.FillColor);
-            // A match spanning several lines can cover more than one source
-            // underline (short rules under phrases on different lines). The
-            // whole-fragment detection above sees only the first baseline, so
-            // re-detect per segment and capture every rule found — toggling
-            // Underline off must splice out all of them.
-            if ((_textEditOptions?.ToAttemptGetUnderlineFromSource ?? false)
-                && fillIndex is not null && fragment.Segments.Count > 1)
-            {
-                foreach (TextSegment seg in fragment.Segments)
-                {
-                    if (seg.Rectangle is not { } segRect || seg.Position is not { } segPos) continue;
-                    // The segment position anchors at the rect bottom (baseline − descent);
-                    // lift it back to the true baseline so a rule hugging the baseline
-                    // stays inside the detector's window.
-                    var segBaseline = Math.Max(segPos.YIndent, segRect.LLY + 0.22 * textState.FontSize);
-                    if (DetectUnderlineRect(segRect, segBaseline, textState.FontSize, fillIndex) is not { } segUl) continue;
-                    // Raw coords repeat across cm-translated blocks — the width is
-                    // part of the identity.
-                    if (fragment.CapturedUnderlineSources is { } have
-                        && have.Exists(t => Math.Abs(t.X - segUl.RawX) < 0.01 && Math.Abs(t.Y - segUl.RawY) < 0.01
-                            && Math.Abs(t.W - segUl.RawW) < 0.01))
-                        continue;
-                    fragment.MarkCapturedUnderlineSource(segUl.RawX, segUl.RawY, segUl.RawW, segUl.RawH);
-                }
-            }
-            _fragments.Add(fragment);
-        }
-
-        // Ordering: a page's matches are yielded in the order of its
-        // LINE-ORDERED concatenated search text. For almost every document that
-        // equals content order — an unconditional position sort misorders far
-        // more documents. Only when the page's stream order is majorly scrambled
-        // (a >200 pt upward jump between consecutive runs — the same cue the
-        // plain-text line sort keys on: rotated column layouts, bottom-up
-        // writers) do the matches get ordered top-to-bottom.
-        // Scope: only same-phrase match sets reorder (a repeated label found top
-        // and bottom); distinct-content matches keep content order — reported
-        // match positions and plain-text dumps both preserve it.
-        var newMatches = _fragments.Count - preCount;
-        var samePhrase = newMatches > 1;
-        var anyRtl = false;
-        for (var i = preCount; samePhrase && i < _fragments.Count; i++)
-        {
-            var t = _fragments.GetInternal(i).Text;
-            if (i > preCount && !string.Equals(t, _fragments.GetInternal(preCount).Text, StringComparison.Ordinal))
-                samePhrase = false;
-            foreach (var ch in t)
-                if (BidiReorderer.IsRtlChar(ch)) { anyRtl = true; break; }
-        }
-        if (newMatches > 1 && samePhrase && anyRtl && HasMajorUpwardJump(rawFragments))
-        {
-            var inner = _fragments.Inner;
-            var slice = inner.GetRange(preCount, inner.Count - preCount);
-            slice.Sort((a, b) =>
-            {
-                var ya = a.Position?.YIndent ?? 0;
-                var yb = b.Position?.YIndent ?? 0;
-                if (Math.Abs(ya - yb) > 0.5) return yb.CompareTo(ya); // top first
-                return (a.Position?.XIndent ?? 0).CompareTo(b.Position?.XIndent ?? 0);
-            });
-            for (var i = 0; i < slice.Count; i++) inner[preCount + i] = slice[i];
-        }
-        }
     }
 
     /// <summary>
@@ -673,8 +245,19 @@ public sealed partial class TextFragmentAbsorber
             if (matchEnd - 1 >= 0 && run.CharEndPositions is not null
                 && matchEnd - 1 < run.CharEndPositions.Length)
                 endW = run.CharEndPositions[matchEnd - 1];
+            else if (matchEnd < run.CharCumWidths.Length)
+            {
+                // The box ends where the last matched glyph's advance or the pen ends,
+                // whichever is further: a NEGATIVE character spacing pulls the pen back
+                // inside the glyph and the box keeps the glyph ("Solutions" at Tc -0.0333
+                // in an 11.25-scaled matrix measures 0.37 pt WIDER than its pen advance),
+                // a positive one moves the pen on and the box follows it (a phrase closing
+                // a Tc 5 run keeps that 5 in its width).
+                var trailing = run.CharSpacing + (run.Text[matchEnd - 1] == ' ' ? run.WordSpacing : 0);
+                endW = run.CharCumWidths[matchEnd] - Math.Min(0, trailing);
+            }
             else
-                endW = matchEnd < run.CharCumWidths.Length ? run.CharCumWidths[matchEnd] : totalRunW;
+                endW = totalRunW;
             return endW - startW;
         }
         // Proportional fallback — avoids MeasureString(string) encoding issues
@@ -750,7 +333,7 @@ public sealed partial class TextFragmentAbsorber
         // Apply the global RegexManager settings: NonBacktracking guarantees linear-time
         // matching, and MatchTimeout bounds runaway (catastrophic-backtracking) patterns.
         if (RegexManager.NonBacktracking)
-            options |= RegexOptions.NonBacktracking;
+            options |= Compat.NonBacktracking;
         return new Regex(pattern, options, RegexManager.MatchTimeout).Matches(text);
     }
 
@@ -781,38 +364,16 @@ public sealed partial class TextFragmentAbsorber
     /// Trims characters from left/right whose page-space X falls outside the rect.
     /// Uses CharCumWidths (which include Tc/Tw) for accurate character positions.
     /// </summary>
-    private static void ClipRunToRect(RawTextRun run, Rectangle searchRect,
-        ref string text, ref double startX, ref double width)
+    /// <returns>The run text that survives the rectangle, where it starts (both axes: the
+    /// surviving prefix advances along the text matrix, so a rotated run moves in Y) and how
+    /// wide it is - the inputs unchanged when nothing is clipped, an empty text when nothing
+    /// survives.</returns>
+    private static (string text, double startX, double startY, double width) ClipRunToRect(RawTextRun run,
+        Rectangle searchRect, string text, double startX, double startY, double width)
     {
-        if (text.Length == 0) return;
+        if (text.Length == 0) return (text, startX, startY, width);
 
-        // Build per-character page-space X positions using CharCumWidths (includes Tc/Tw).
-        // Fall back to glyph-only widths when CumWidths not available.
-        var charPageX = new double[text.Length + 1];
-        if (run.CharCumWidths is not null && run.CharCumWidths.Length > text.Length)
-        {
-            for (int i = 0; i <= text.Length; i++)
-            {
-                var cumW = run.CharCumWidths[i];
-                var (px, _) = ApplyCtm(run.X + run.TmA * cumW * run.HScaling,
-                    run.Y + run.TmB * cumW * run.HScaling, run.Ctm);
-                charPageX[i] = px;
-            }
-        }
-        else
-        {
-            // No per-char cumulative widths: distribute total run width proportionally.
-            // MeasureString(string) can return wrong widths for custom-encoded fonts,
-            // but run.Width (computed from MeasureString(bytes)) is accurate.
-            var totalW = run.Width > 0 ? run.Width : EstimateWidth(text, run.FontSize);
-            for (int i = 0; i <= text.Length; i++)
-            {
-                var cumW = totalW * i / text.Length;
-                var (px, _) = ApplyCtm(run.X + run.TmA * cumW * run.HScaling,
-                    run.Y + run.TmB * cumW * run.HScaling, run.Ctm);
-                charPageX[i] = px;
-            }
-        }
+        var (charPageX, charPageEnd) = RunCharPageSpans(run, text);
 
         // Use tight tolerance for left clip (include chars AT or after rect.LLX)
         // and loose tolerance for right clip.
@@ -824,7 +385,7 @@ public sealed partial class TextFragmentAbsorber
         int clipStart = 0;
         for (int i = 0; i < text.Length; i++)
         {
-            var charMid = (charPageX[i] + charPageX[i + 1]) * 0.5;
+            var charMid = (charPageX[i] + charPageEnd[i]) * 0.5;
             if (charMid >= searchRect.LLX)
             {
                 clipStart = i;
@@ -839,41 +400,74 @@ public sealed partial class TextFragmentAbsorber
         int clipEnd = clipStart;
         for (int i = text.Length - 1; i >= clipStart; i--)
         {
-            if (charPageX[i + 1] <= searchRect.URX + rightTol)
+            if (charPageEnd[i] <= searchRect.URX + rightTol)
             {
                 clipEnd = i + 1;
                 break;
             }
         }
 
-
-        if (clipStart >= clipEnd)
-        {
-            text = "";
-            return;
-        }
+        if (clipStart >= clipEnd) return ("", startX, startY, width);
         if (clipStart == 0 && clipEnd == text.Length)
-            return; // no clipping needed
+            return (text, startX, startY, width); // no clipping needed
 
-        // Use CumWidths for the prefix offset and clipped width
-        double prefAdv, clipAdv;
+        var (prefAdv, clipAdv) = ClippedAdvances(run, text, clipStart, clipEnd);
+        return (text[clipStart..clipEnd], run.X + run.TmA * prefAdv * run.HScaling,
+            run.Y + run.TmB * prefAdv * run.HScaling, clipAdv);
+    }
+
+    /// <summary>Page-space X where each character of a run starts (text.Length + 1 entries, the
+    /// last being the run's end) and where its INK ends. A TJ kern after a glyph pushes the
+    /// NEXT character's start far beyond this glyph's end (a token followed by a 20-em column
+    /// hop), so the next start cannot stand in for the end: the closing bracket of a token
+    /// would then look as if it ran to the next column and be clipped off, and the replace
+    /// that follows would rewrite the wrong span. Without per-character advances the run's
+    /// width is spread evenly.</summary>
+    private static (double[] starts, double[] ends) RunCharPageSpans(RawTextRun run, string text)
+    {
+        var charPageX = new double[text.Length + 1];
+        var charPageEnd = new double[text.Length];
+        double PageX(double advance)
+        {
+            var (px, _) = ApplyCtm(run.X + run.TmA * advance * run.HScaling,
+                run.Y + run.TmB * advance * run.HScaling, run.Ctm);
+            return px;
+        }
         if (run.CharCumWidths is not null && run.CharCumWidths.Length > text.Length)
         {
-            prefAdv = run.CharCumWidths[clipStart];
-            clipAdv = run.CharCumWidths[clipEnd] - run.CharCumWidths[clipStart];
+            for (int i = 0; i <= text.Length; i++) charPageX[i] = PageX(run.CharCumWidths[i]);
+            var ends = run.CharEndPositions is not null && run.CharEndPositions.Length >= text.Length
+                ? run.CharEndPositions : null;
+            for (int i = 0; i < text.Length; i++)
+                charPageEnd[i] = ends is null ? charPageX[i + 1] : PageX(ends[i]);
         }
         else
         {
-            // Proportional distribution from total run width.
-            // text is already clipped; run.Text has the original full text.
-            var totalW = run.Width > 0 ? run.Width : EstimateWidth(run.Text, run.FontSize);
-            prefAdv = totalW * clipStart / run.Text.Length;
-            clipAdv = totalW * text.Length / run.Text.Length;
+            // MeasureString(string) can return wrong widths for custom-encoded fonts,
+            // but run.Width (computed from MeasureString(bytes)) is accurate.
+            var totalW = run.Width > 0 ? run.Width : EstimateWidth(text, run.FontSize);
+            for (int i = 0; i <= text.Length; i++) charPageX[i] = PageX(totalW * i / text.Length);
+            for (int i = 0; i < text.Length; i++) charPageEnd[i] = charPageX[i + 1];
         }
+        return (charPageX, charPageEnd);
+    }
 
-        text = text[clipStart..clipEnd];
-        startX = run.X + run.TmA * prefAdv * run.HScaling;
-        width = clipAdv;
+    /// <summary>The advance before the first kept character and the width of the kept stretch.
+    /// The width ends at the last kept character's INK end, not at the next character's start:
+    /// a kern after the kept token would otherwise stretch the fragment over the column hop,
+    /// and the rectangle recorded for a later rectangle-scoped search would take in the
+    /// neighbouring token as well.</summary>
+    private static (double prefix, double width) ClippedAdvances(RawTextRun run, string text, int clipStart, int clipEnd)
+    {
+        if (run.CharCumWidths is not null && run.CharCumWidths.Length > text.Length)
+        {
+            var keptEnd = run.CharEndPositions is not null && run.CharEndPositions.Length >= clipEnd
+                ? run.CharEndPositions[clipEnd - 1] : run.CharCumWidths[clipEnd];
+            return (run.CharCumWidths[clipStart], keptEnd - run.CharCumWidths[clipStart]);
+        }
+        // Proportional distribution from total run width.
+        var totalW = run.Width > 0 ? run.Width : EstimateWidth(run.Text, run.FontSize);
+        return (totalW * clipStart / run.Text.Length, totalW * (clipEnd - clipStart) / run.Text.Length);
     }
 
     private static double EstimateWidth(string text, double fontSize)

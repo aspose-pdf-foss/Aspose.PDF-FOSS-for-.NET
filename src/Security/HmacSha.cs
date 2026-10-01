@@ -87,6 +87,31 @@ internal static class HmacSha
     /// <summary>SHA-1 hash (for legacy CMS signature verification).</summary>
     internal static byte[] Sha1Hash(byte[] data) => Sha1(data);
 
+    /// <summary>
+    /// HKDF with HMAC-SHA-256 (RFC 5869): the key extracted from the input keying material with the
+    /// salt (a block of zeros when none), then expanded with the info to the length asked for.
+    /// </summary>
+    public static byte[] HkdfSha256(byte[] inputKey, byte[]? salt, byte[]? info, int length)
+    {
+        const int hashLength = 32;
+        var prk = HmacSha256(salt is { Length: > 0 } ? salt : new byte[hashLength], inputKey);
+        info ??= [];
+        var result = new byte[length];
+        var previous = Array.Empty<byte>();
+        for (int done = 0, counter = 1; done < length; counter++)
+        {
+            var input = new byte[previous.Length + info.Length + 1];
+            previous.CopyTo(input, 0);
+            info.CopyTo(input, previous.Length);
+            input[^1] = (byte)counter;
+            previous = HmacSha256(prk, input);
+            var take = Math.Min(hashLength, length - done);
+            Array.Copy(previous, 0, result, done, take);
+            done += take;
+        }
+        return result;
+    }
+
     private static byte[] Sha1(byte[] data)
     {
         uint h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476, h4 = 0xC3D2E1F0;

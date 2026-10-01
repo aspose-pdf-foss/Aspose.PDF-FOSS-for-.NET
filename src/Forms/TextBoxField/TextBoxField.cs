@@ -5,6 +5,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Forms;
 
+/// <summary>A text form field that holds a single-line or multi-line text value.</summary>
 public partial class TextBoxField : Field
 {
     internal TextBoxField(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -206,7 +207,7 @@ public partial class TextBoxField : Field
         if (!_daIsCtorDefault) return;
         var da = Reader.Resolve(Dict.Get("DA")) is PdfString ps ? ps.ToText() : "";
         if (da != "/Helv 12 Tf 0 g") return;
-        Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes("/Helv 0 Tf 0 g")));
+        Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes("/Helv 0 Tf 0 g")));
         _daIsCtorDefault = false;
     }
 
@@ -217,7 +218,7 @@ public partial class TextBoxField : Field
         dict.Set("Subtype", new PdfName("Widget"));
         dict.Set("FT", new PdfName("Tx"));
         dict.Set("Rect", MakeRectArray(rect));
-        dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes("/Helv 12 Tf 0 g")));
+        dict.Set("DA", new PdfString(Compat.Latin1.GetBytes("/Helv 12 Tf 0 g")));
         return dict;
     }
 
@@ -258,6 +259,8 @@ public partial class TextBoxField : Field
         }
     }
 
+    /// <summary>Gets or sets the maximum number of characters the field holds (the /MaxLen entry); 0 means no limit.
+    /// A longer value is truncated when it is assigned.</summary>
     public int MaxLen
     {
         get => (int)Dict.GetInt("MaxLen");
@@ -357,7 +360,63 @@ public partial class TextBoxField : Field
     /// the string is stored verbatim so callers can round-trip the value.</summary>
     public void AddBarcode(string code) => SetValue(code);
 
-    /// <summary>Stub for image overlay support. Cross-platform — no GDI
-    /// rasterization happens.</summary>
-    public void AddImage(System.Drawing.Image image) { _ = image; }
+    /// <summary>Show <paramref name="image"/> in the field's box: the field becomes a push
+    /// button (/FT /Btn, /Ff pushbutton) whose normal appearance and /MK icon are the
+    /// picture scaled to the box (measured: the reference re-types the field to Btn with
+    /// Ff 65536 and the box shows the picture).</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public void AddImage(System.Drawing.Image image)
+    {
+        if (image is null) throw new ArgumentNullException(nameof(image));
+        using var ms = new System.IO.MemoryStream();
+        image.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+        AddImage(ms.ToArray(), image.Width, image.Height);
+    }
+
+    /// <summary>The pushbutton flag bit of /Ff (bit 17).</summary>
+    private const int PushButtonFlag = 1 << 16;
+
+    private void AddImage(byte[] pngBytes, double imageWidth, double imageHeight)
+    {
+        PdfStream imgXObject;
+        try { imgXObject = new ImageStamp(new System.IO.MemoryStream(pngBytes)).BuildImageXObject(); }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException) { return; }
+        var rect = Reader.Resolve(Dict.Get("Rect")) is PdfArray ra && ra.Count >= 4 ? Rectangle.FromPdfArray(ra) : null;
+        if (rect is null || rect.Width <= 0 || rect.Height <= 0 || imageWidth <= 0 || imageHeight <= 0) return;
+        // The picture keeps its aspect, fitted to the box and centred in it (measured: a
+        // square picture in a 300 x 100 box draws 100 x 100 in the middle).
+        var fit = Math.Min(rect.Width / imageWidth, rect.Height / imageHeight);
+        var drawW = imageWidth * fit;
+        var drawH = imageHeight * fit;
+        var drawX = (rect.Width - drawW) / 2;
+        var drawY = (rect.Height - drawH) / 2;
+
+        Dict.Set("FT", new PdfName("Btn"));
+        Dict.Set("Ff", new PdfInteger(PushButtonFlag));
+        Dict.Remove("V");
+        Dict.Remove("DV");
+        var mk = Reader.ResolveDict(Dict.Get("MK")) ?? new PdfDictionary();
+        mk.Set("I", imgXObject);
+        Dict.Set("MK", mk);
+
+        static string F(double v) => v.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
+        var content = System.Text.Encoding.ASCII.GetBytes($"q {F(drawW)} 0 0 {F(drawH)} {F(drawX)} {F(drawY)} cm /Im0 Do Q");
+        var form = new PdfDictionary();
+        form.Set("Type", new PdfName("XObject"));
+        form.Set("Subtype", new PdfName("Form"));
+        form.Set("FormType", new PdfInteger(1));
+        var bbox = new PdfArray();
+        bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(0));
+        bbox.Add(new PdfReal(rect.Width)); bbox.Add(new PdfReal(rect.Height));
+        form.Set("BBox", bbox);
+        var xobjects = new PdfDictionary();
+        xobjects.Set("Im0", imgXObject);
+        var resources = new PdfDictionary();
+        resources.Set("XObject", xobjects);
+        form.Set("Resources", resources);
+        form.Set("Length", new PdfInteger(content.Length));
+        var ap = new PdfDictionary();
+        ap.Set("N", new PdfStream(form, content));
+        Dict.Set("AP", ap);
+    }
 }

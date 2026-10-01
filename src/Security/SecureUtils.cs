@@ -9,6 +9,6 @@ internal static partial class SecureUtils
     {
         if (min > max) (min, max) = (max, min);
         if (min == max) return min;
-        return System.Security.Cryptography.RandomNumberGenerator.GetInt32(min, max == int.MaxValue ? max : max + 1);
+        return Compat.RandomInt32(min, max == int.MaxValue ? max : max + 1);
     }
 }

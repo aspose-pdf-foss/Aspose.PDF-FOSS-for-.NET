@@ -4,6 +4,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Annotations;
 
+/// <summary>A link annotation: a clickable area on the page that jumps to a destination or runs an action, such as opening a web address.</summary>
 public partial class LinkAnnotation : Annotation
 {
     internal LinkAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -86,7 +87,7 @@ public partial class LinkAnnotation : Annotation
             }
             else if (value is NamedDestination nd)
             {
-                Dict.Set("Dest", new PdfString(System.Text.Encoding.Latin1.GetBytes(nd.Name)));
+                Dict.Set("Dest", new PdfString(Compat.Latin1.GetBytes(nd.Name)));
                 Dict.Remove("A");
             }
             else if (value is null)
@@ -96,6 +97,7 @@ public partial class LinkAnnotation : Annotation
         }
     }
 
+    /// <summary>Gets the web address the link opens when its action is a URI action; null for any other action or when there is none.</summary>
     public string? Uri
     {
         get

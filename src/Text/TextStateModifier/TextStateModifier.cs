@@ -16,7 +16,7 @@ internal sealed partial class TextStateModifier
     /// way (Td chains, rotated matrices — those lines are never re-laid).</summary>
     private static (double x, double y)? FindSeatBefore(byte[] content, int showStart)
     {
-        var s = Encoding.Latin1.GetString(content, 0, System.Math.Min(showStart, content.Length));
+        var s = Compat.Latin1.GetString(content, 0, System.Math.Min(showStart, content.Length));
         System.Text.RegularExpressions.Match? last = null;
         foreach (System.Text.RegularExpressions.Match m in SimpleTm.Matches(s))
             last = m;

@@ -127,7 +127,7 @@ public class PdfDecryptionTests
         string userPassword, string ownerPassword, int permissions = -4)
     {
         var keyLength = keyBits / 8;
-        var fileId = RandomNumberGenerator.GetBytes(16);
+        var fileId = Compat.RandomBytes(16);
 
         // Compute O value
         var paddedOwner = PadPassword(ownerPassword);
@@ -150,7 +150,7 @@ public class PdfDecryptionTests
         string userPassword, string ownerPassword, string text, int permissions = -4)
     {
         var keyLength = keyBits / 8;
-        var fileId = RandomNumberGenerator.GetBytes(16);
+        var fileId = Compat.RandomBytes(16);
 
         var paddedOwner = PadPassword(ownerPassword);
         var paddedUser = PadPassword(userPassword);
@@ -175,7 +175,7 @@ public class PdfDecryptionTests
     private static byte[] BuildAes128EncryptedPdf(string userPassword, string ownerPassword, int permissions = -4)
     {
         var keyLength = 16;
-        var fileId = RandomNumberGenerator.GetBytes(16);
+        var fileId = Compat.RandomBytes(16);
 
         var paddedOwner = PadPassword(ownerPassword);
         var paddedUser = PadPassword(userPassword);
@@ -205,7 +205,7 @@ public class PdfDecryptionTests
 
         var encryptOffset = ms.Position;
         Write($"4 0 obj\n<< /Filter /Standard /V {v} /R {r} /Length {keyBits} " +
-              $"/P {permissions} /O <{Convert.ToHexString(oValue)}> /U <{Convert.ToHexString(uValue)}> >>\nendobj\n");
+              $"/P {permissions} /O <{Compat.ToHexString(oValue)}> /U <{Compat.ToHexString(uValue)}> >>\nendobj\n");
 
         var xrefOffset = ms.Position;
         Write("xref\n0 5\n");
@@ -216,7 +216,7 @@ public class PdfDecryptionTests
         Write($"{encryptOffset:D10} 00000 n \n");
 
         Write("trailer\n<< /Size 5 /Root 1 0 R /Encrypt 4 0 R " +
-              $"/ID [<{Convert.ToHexString(fileId)}> <{Convert.ToHexString(fileId)}>] >>\n");
+              $"/ID [<{Compat.ToHexString(fileId)}> <{Compat.ToHexString(fileId)}>] >>\n");
         Write($"startxref\n{xrefOffset}\n%%EOF\n");
 
         return ms.ToArray();
@@ -243,7 +243,7 @@ public class PdfDecryptionTests
 
         var encryptOffset = ms.Position;
         Write($"4 0 obj\n<< /Filter /Standard /V {v} /R {r} /Length {keyBits} " +
-              $"/P {permissions} /O <{Convert.ToHexString(oValue)}> /U <{Convert.ToHexString(uValue)}> >>\nendobj\n");
+              $"/P {permissions} /O <{Compat.ToHexString(oValue)}> /U <{Compat.ToHexString(uValue)}> >>\nendobj\n");
 
         var contentOffset = ms.Position;
         Write($"5 0 obj\n<< /Length {encryptedContent.Length} >>\nstream\n");
@@ -264,7 +264,7 @@ public class PdfDecryptionTests
         Write($"{fontOffset:D10} 00000 n \n");
 
         Write("trailer\n<< /Size 7 /Root 1 0 R /Encrypt 4 0 R " +
-              $"/ID [<{Convert.ToHexString(fileId)}> <{Convert.ToHexString(fileId)}>] >>\n");
+              $"/ID [<{Compat.ToHexString(fileId)}> <{Compat.ToHexString(fileId)}>] >>\n");
         Write($"startxref\n{xrefOffset}\n%%EOF\n");
 
         return ms.ToArray();
@@ -289,7 +289,7 @@ public class PdfDecryptionTests
         var encryptOffset = ms.Position;
         Write($"4 0 obj\n<< /Filter /Standard /V 4 /R 4 /Length 128 " +
               $"/P {permissions} " +
-              $"/O <{Convert.ToHexString(oValue)}> /U <{Convert.ToHexString(uValue)}> " +
+              $"/O <{Compat.ToHexString(oValue)}> /U <{Compat.ToHexString(uValue)}> " +
               "/StmF /StdCF /StrF /StdCF " +
               "/CF << /StdCF << /Type /CryptFilter /CFM /AESV2 /Length 16 >> >> >>\nendobj\n");
 
@@ -302,7 +302,7 @@ public class PdfDecryptionTests
         Write($"{encryptOffset:D10} 00000 n \n");
 
         Write("trailer\n<< /Size 5 /Root 1 0 R /Encrypt 4 0 R " +
-              $"/ID [<{Convert.ToHexString(fileId)}> <{Convert.ToHexString(fileId)}>] >>\n");
+              $"/ID [<{Compat.ToHexString(fileId)}> <{Compat.ToHexString(fileId)}>] >>\n");
         Write($"startxref\n{xrefOffset}\n%%EOF\n");
 
         return ms.ToArray();
@@ -315,7 +315,7 @@ public class PdfDecryptionTests
     private static byte[] PadPassword(string password)
     {
         var result = new byte[32];
-        var pwBytes = Encoding.Latin1.GetBytes(password);
+        var pwBytes = Compat.Latin1.GetBytes(password);
         var len = Math.Min(pwBytes.Length, 32);
         pwBytes.AsSpan(0, len).CopyTo(result);
         Padding.AsSpan(0, 32 - len).CopyTo(result.AsSpan(len));
@@ -324,11 +324,11 @@ public class PdfDecryptionTests
 
     private static byte[] ComputeOValue(byte[] paddedOwner, byte[] paddedUser, int keyLength, int r)
     {
-        var hash = MD5.HashData(paddedOwner);
+        var hash = Compat.Md5(paddedOwner);
         if (r >= 3)
         {
             for (var i = 0; i < 50; i++)
-                hash = MD5.HashData(hash[..keyLength]);
+                hash = Compat.Md5(hash[..keyLength]);
         }
         var key = hash[..keyLength];
 
@@ -367,7 +367,7 @@ public class PdfDecryptionTests
         if (r >= 3)
         {
             for (var i = 0; i < 50; i++)
-                hash = MD5.HashData(hash[..keyLength]);
+                hash = Compat.Md5(hash[..keyLength]);
         }
 
         return hash[..keyLength];

@@ -30,11 +30,11 @@ internal interface IGlyphOutlineSource
     /// requested code — e.g. a /Differences-mapped Polish/Czech glyph decoded
     /// to a Unicode code point above 255. Returns 0 for unknown glyph ids;
     /// callers should treat that as "use the existing fallback".</summary>
-    int GetAdvanceWidth(int glyphId) => 0;
+    int GetAdvanceWidth(int glyphId);
 
     /// <summary>Resolve a glyph id from a PostScript glyph name (e.g. a /Differences
     /// entry like "G42"). Returns 0 when the font exposes no name table or the name is
     /// unknown — callers treat 0 as "not found". Lets the renderer draw fonts whose PDF
     /// /Encoding maps codes to custom glyph names with no Unicode equivalent.</summary>
-    int GidForName(string name) => 0;
+    int GidForName(string name);
 }

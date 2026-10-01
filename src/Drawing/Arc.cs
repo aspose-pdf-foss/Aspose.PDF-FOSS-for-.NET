@@ -41,6 +41,7 @@ public sealed class Arc : Shape
         set => SweepAngle = value - StartAngle;
     }
 
+    /// <summary>Creates an elliptical arc with the given centre and radii, starting at <c>startAngle</c> degrees (0 = 3 o'clock) and sweeping <c>sweepAngle</c> degrees counter-clockwise; coordinates are in points relative to the graph.</summary>
     public Arc(double centerX, double centerY, double radiusX, double radiusY,
         double startAngle, double sweepAngle)
     {

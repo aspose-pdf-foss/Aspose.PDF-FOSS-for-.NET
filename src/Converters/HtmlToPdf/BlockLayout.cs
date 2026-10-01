@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Text;
 
@@ -12,129 +12,107 @@ internal static partial class HtmlToPdfConverter
     /// <remarks>Lifted verbatim out of the block-dispatch loop in
     /// <see cref="ConvertFromHtml"/>; every quantity in it stays an empirical fixed
     /// value, as it was inline.</remarks>
-    private static void LayoutPositionedCard(
-        PositionedCard pc, HtmlFlowCursor flow, double marginLeft)
+    /// <summary>CSS pixels to points for the positioned card's authored sizes.</summary>
+    private const double PosCardPxPt = 0.75;
+
+    private static void LayoutPositionedCard(PositionedCard pc, HtmlFlowCursor flow, double marginLeft)
     {
-            const double PxPt = 0.75;
-            var invC = System.Globalization.CultureInfo.InvariantCulture;
-            var cSerifR = PosFace("Times New Roman");
-            var cSerifB = PosFace("Times New Roman Bold");
-            var fontDictC = flow.page.Dict.Get("Resources") is Core.PdfDictionary cres
-                ? cres.Get("Font") as Core.PdfDictionary : null;
+        var pk = new PositionedCardLayoutState();
+        pk.pc = pc;
+        pk.flow = flow;
+        pk.marginLeft = marginLeft;
+        pk.invC = System.Globalization.CultureInfo.InvariantCulture;
+        pk.cSerifR = PosFace("Times New Roman");
+        pk.cSerifB = PosFace("Times New Roman Bold");
+        pk.fontDictC = pk.flow.page.Dict.Get("Resources") is Core.PdfDictionary cres
+            ? cres.Get("Font") as Core.PdfDictionary : null;
 
-            double CWidth(string s, bool bold, double pt)
-                => MeasureFixedText(bold ? "Times New Roman Bold" : "Times New Roman", s, pt, 0);
+        // the serif line's baseline seat inside its 13.5 box: half-leading
+        // + winAscent (the same drop the form-grid strut model measured)
+        pk.cx0 = pk.marginLeft;                          // 90 + the UA body pad = 96
+        pk.mediaTop = pk.flow.y - CardBodyPadPt;              // content top + body margin
+        pk.mediaBot = pk.mediaTop - pk.pc.MediaHPx * PosCardPxPt;
+        pk.cardRight = pk.cx0 + pk.pc.MediaWPx * PosCardPxPt;
 
-            void CDrawText(string s, bool bold, double x, double baseline, double pt, Color col)
+        // broken-image placeholder: white frame, 1px black border, the
+        // torn-flow.page glyph (grey-stroked inner rect, like the cell path's)
+        if (pk.pc.HasImg)
+        {
+            var ib = CardIconBoxPt;
+            var iy = pk.mediaTop - ib;
+            COps(pk, $"q 1 1 1 rg {pk.cx0.ToString("F2", pk.invC)} {iy.ToString("F2", pk.invC)} {ib.ToString("F2", pk.invC)} {ib.ToString("F2", pk.invC)} re f "
+                + $"0 0 0 RG 1 w {(pk.cx0 + 0.5).ToString("F2", pk.invC)} {(iy + 0.5).ToString("F2", pk.invC)} {(ib - 1).ToString("F2", pk.invC)} {(ib - 1).ToString("F2", pk.invC)} re S "
+                + $"0.5 0.5 0.5 RG 1 w {(pk.cx0 + 6.5).ToString("F2", pk.invC)} {(iy + ib / 2 - 8).ToString("F2", pk.invC)} 12 16 re S Q ");
+        }
+
+        // bottom-anchored caption bars
+        foreach (var bar in pk.pc.Bars)
+        {
+            var barH = bar.HPx * PosCardPxPt;
+            var barTop = pk.mediaBot + (bar.BottomPx + bar.HPx) * PosCardPxPt;
+            COps(pk, $"q {(bar.Fill.R / 255.0).ToString("0.###", pk.invC)} {(bar.Fill.G / 255.0).ToString("0.###", pk.invC)} {(bar.Fill.B / 255.0).ToString("0.###", pk.invC)} rg "
+                + $"{pk.cx0.ToString("F2", pk.invC)} {(barTop - barH).ToString("F2", pk.invC)} {(pk.cardRight - pk.cx0).ToString("F2", pk.invC)} {barH.ToString("F2", pk.invC)} re f Q ");
+            if (bar.Text.Length > 0)
+                CDrawText(pk, bar.Text, false, pk.cx0, barTop - CSerifDrop(12.0), 12.0, bar.TextColor);
+        }
+
+        // float:left prose column — greedy serif wrap in its box, clipped
+        // to the declared height (overflow:hidden drops whole lines)
+        {
+            var boxW = pk.pc.TextWPx * PosCardPxPt;
+            var proseLines = new List<string>();
+            var cur = "";
+            foreach (var w in pk.pc.ParaText.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {
-                var f = bold && cSerifB.ttf is not null ? cSerifB : cSerifR;
-                if (fontDictC is null || f.ttf is null || s.Length == 0) return;
-                var (rn, hex) = Text.Type0FontEmbedder.Embed(fontDictC, f.ttf,
-                    bold ? "TimesNewRomanBold" : "TimesNewRoman", s, stripSpacesInBaseFont: true);
-                var t = new StringBuilder();
-                t.Append("BT ").Append((col.R / 255.0).ToString("0.###", invC)).Append(' ')
-                    .Append((col.G / 255.0).ToString("0.###", invC)).Append(' ')
-                    .Append((col.B / 255.0).ToString("0.###", invC)).Append(" rg ");
-                t.Append($"/{rn} {pt.ToString("F1", invC)} Tf ");
-                t.Append($"1 0 0 1 {x.ToString("F3", invC)} {baseline.ToString("F3", invC)} Tm ");
-                t.Append('<').Append(System.Convert.ToHexString(hex)).Append("> Tj ET ");
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(t.ToString()));
+                var cand = cur.Length == 0 ? w : cur + " " + w;
+                if (cur.Length > 0 && CWidth(cand, false, 12.0) > boxW)
+                { proseLines.Add(cur); cur = w; }
+                else cur = cand;
             }
-
-            void COps(string ops) => flow.page.AddContentStream(Encoding.ASCII.GetBytes(ops));
-
-            // the serif line's baseline seat inside its 13.5 box: half-leading
-            // + winAscent (the same drop the form-grid strut model measured)
-            double CSerifDrop(double pt)
+            if (cur.Length > 0) proseLines.Add(cur);
+            var clipBot = pk.mediaBot - pk.pc.TextHPx * PosCardPxPt;
+            var proseBox = PxLinePt(12.0, SerifWinLineRatio);
+            for (var li = 0; li < proseLines.Count; li++)
             {
-                var box = PxLinePt(pt, SerifWinLineRatio);
-                return (box - pt * SerifWinLineRatio) / 2 + pt * SerifWinAscent;
+                var boxTop = pk.mediaBot - CardParaFirstPt - li * proseBox;
+                if (boxTop - 12.0 * SerifWinLineRatio < clipBot) break;
+                CDrawText(pk, proseLines[li], false, pk.cx0, boxTop - CSerifDrop(12.0), 12.0,
+                    Color.FromArgb(0, 0, 0));
             }
+        }
 
-            var cx0 = marginLeft;                          // 90 + the UA body pad = 96
-            var mediaTop = flow.y - CardBodyPadPt;              // content top + body margin
-            var mediaBot = mediaTop - pc.MediaHPx * PxPt;
-            var cardRight = cx0 + pc.MediaWPx * PxPt;
-
-            // broken-image placeholder: white frame, 1px black border, the
-            // torn-flow.page glyph (grey-stroked inner rect, like the cell path's)
-            if (pc.HasImg)
+        // float:right info panel — label column left-anchored, value
+        // column right-aligned on the card's right edge; both walk their
+        // paragraph slots on the measured pitch chain
+        {
+            var infoX = pk.cardRight - pk.pc.InfoWPx * PosCardPxPt;
+            var colTop = pk.mediaBot - pk.pc.InfoMtPx * PosCardPxPt - CardInfoStartPt;
+            void WalkColumn(List<(string Text, bool Bold, double MtPx, int Kind)> slots, bool rightAlign)
             {
-                var ib = CardIconBoxPt;
-                var iy = mediaTop - ib;
-                COps($"q 1 1 1 rg {cx0.ToString("F2", invC)} {iy.ToString("F2", invC)} {ib.ToString("F2", invC)} {ib.ToString("F2", invC)} re f "
-                    + $"0 0 0 RG 1 w {(cx0 + 0.5).ToString("F2", invC)} {(iy + 0.5).ToString("F2", invC)} {(ib - 1).ToString("F2", invC)} {(ib - 1).ToString("F2", invC)} re S "
-                    + $"0.5 0.5 0.5 RG 1 w {(cx0 + 6.5).ToString("F2", invC)} {(iy + ib / 2 - 8).ToString("F2", invC)} 12 16 re S Q ");
-            }
-
-            // bottom-anchored caption bars
-            foreach (var bar in pc.Bars)
-            {
-                var barH = bar.HPx * PxPt;
-                var barTop = mediaBot + (bar.BottomPx + bar.HPx) * PxPt;
-                COps($"q {(bar.Fill.R / 255.0).ToString("0.###", invC)} {(bar.Fill.G / 255.0).ToString("0.###", invC)} {(bar.Fill.B / 255.0).ToString("0.###", invC)} rg "
-                    + $"{cx0.ToString("F2", invC)} {(barTop - barH).ToString("F2", invC)} {(cardRight - cx0).ToString("F2", invC)} {barH.ToString("F2", invC)} re f Q ");
-                if (bar.Text.Length > 0)
-                    CDrawText(bar.Text, false, cx0, barTop - CSerifDrop(12.0), 12.0, bar.TextColor);
-            }
-
-            // float:left prose column — greedy serif wrap in its box, clipped
-            // to the declared height (overflow:hidden drops whole lines)
-            {
-                var boxW = pc.TextWPx * PxPt;
-                var proseLines = new List<string>();
-                var cur = "";
-                foreach (var w in pc.ParaText.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                var boxTop = colTop;
+                var first = true;
+                foreach (var slot in slots)
                 {
-                    var cand = cur.Length == 0 ? w : cur + " " + w;
-                    if (cur.Length > 0 && CWidth(cand, false, 12.0) > boxW)
-                    { proseLines.Add(cur); cur = w; }
-                    else cur = cand;
-                }
-                if (cur.Length > 0) proseLines.Add(cur);
-                var clipBot = mediaBot - pc.TextHPx * PxPt;
-                var proseBox = PxLinePt(12.0, SerifWinLineRatio);
-                for (var li = 0; li < proseLines.Count; li++)
-                {
-                    var boxTop = mediaBot - CardParaFirstPt - li * proseBox;
-                    if (boxTop - 12.0 * SerifWinLineRatio < clipBot) break;
-                    CDrawText(proseLines[li], false, cx0, boxTop - CSerifDrop(12.0), 12.0,
-                        Color.FromArgb(0, 0, 0));
+                    if (slot.Kind == 1) { boxTop -= CardInfoEmptyPt; continue; }
+                    if (slot.Kind == 2) { boxTop -= CardInfoEmptyFullPt; continue; }
+                    if (!first)
+                        boxTop -= slot.MtPx > 0
+                            ? slot.MtPx * PosCardPxPt + CardInfoLineBoxPt
+                            : CardInfoPitchPt;
+                    first = false;
+                    var tx = rightAlign
+                        ? pk.cardRight - CWidth(slot.Text, slot.Bold, 9.0)
+                        : infoX;
+                    CDrawText(pk, slot.Text, slot.Bold, tx,
+                        boxTop - 9.0 * SerifWinAscent, 9.0, Color.FromArgb(0, 0, 0));
                 }
             }
+            WalkColumn(pk.pc.Labels, rightAlign: false);
+            WalkColumn(pk.pc.Values, rightAlign: true);
+        }
 
-            // float:right info panel — label column left-anchored, value
-            // column right-aligned on the card's right edge; both walk their
-            // paragraph slots on the measured pitch chain
-            {
-                var infoX = cardRight - pc.InfoWPx * PxPt;
-                var colTop = mediaBot - pc.InfoMtPx * PxPt - CardInfoStartPt;
-                void WalkColumn(List<(string Text, bool Bold, double MtPx, int Kind)> slots, bool rightAlign)
-                {
-                    var boxTop = colTop;
-                    var first = true;
-                    foreach (var slot in slots)
-                    {
-                        if (slot.Kind == 1) { boxTop -= CardInfoEmptyPt; continue; }
-                        if (slot.Kind == 2) { boxTop -= CardInfoEmptyFullPt; continue; }
-                        if (!first)
-                            boxTop -= slot.MtPx > 0
-                                ? slot.MtPx * PxPt + CardInfoLineBoxPt
-                                : CardInfoPitchPt;
-                        first = false;
-                        var tx = rightAlign
-                            ? cardRight - CWidth(slot.Text, slot.Bold, 9.0)
-                            : infoX;
-                        CDrawText(slot.Text, slot.Bold, tx,
-                            boxTop - 9.0 * SerifWinAscent, 9.0, Color.FromArgb(0, 0, 0));
-                    }
-                }
-                WalkColumn(pc.Labels, rightAlign: false);
-                WalkColumn(pc.Values, rightAlign: true);
-            }
-
-            flow.y = mediaTop - (pc.ContainerHPx > 0 ? pc.ContainerHPx : pc.MediaHPx * 2) * PxPt;
-            flow.lastWasHardBreak = false;
+        pk.flow.y = pk.mediaTop - (pk.pc.ContainerHPx > 0 ? pk.pc.ContainerHPx : pk.pc.MediaHPx * 2) * PosCardPxPt;
+        pk.flow.lastWasHardBreak = false;
     }
 
     /// <summary>Lays out one positioned slide block and advances the flow cursor past it.</summary>
@@ -225,7 +203,7 @@ internal static partial class HtmlToPdfConverter
     // crop is needed (or off-Windows) — the caller keeps the original bytes.
     private static byte[]? CenterCropToBox(byte[] bytes, double boxWpx, double boxHpx)
     {
-        if (!OperatingSystem.IsWindows()) return null;
+        if (!Compat.IsWindows()) return null;
 #pragma warning disable CA1416 // guarded by the IsWindows check above
         try
         {
@@ -307,14 +285,14 @@ internal static partial class HtmlToPdfConverter
                 t.Append("BT 0 0 0 rg ");
                 t.Append($"/{rn} {pt.ToString("F1", invT)} Tf ");
                 t.Append($"1 0 0 1 {tx.ToString("F3", invT)} {baseline.ToString("F3", invT)} Tm ");
-                t.Append('<').Append(System.Convert.ToHexString(hex)).Append("> Tj ET ");
+                t.Append('<').Append(Compat.ToHexString(hex)).Append("> Tj ET ");
                 flow.page.AddContentStream(Encoding.ASCII.GetBytes(t.ToString()));
             }
 
             // Figure first (graphics only — contributes no text fragments).
             if (tp.SvgIdx >= 0 && tp.SvgIdx < inlineSvgs.Count)
             {
-                var figBytes = ImageRasterizer.RasterizeSvg(inlineSvgs[tp.SvgIdx], out _, out _);
+                var figBytes = ImageRasterizer.RasterizeSvg(inlineSvgs[tp.SvgIdx]);
                 if (figBytes is not null)
                 {
                     var figRight = marginLeft + flow.contentWidth;
@@ -344,402 +322,215 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Lays out one search-form block and advances the flow cursor past it.</summary>
     /// <remarks>Lifted verbatim out of the block-dispatch loop in
     /// <see cref="ConvertFromHtml"/>.</remarks>
-    private static void LayoutSearchForm(
-        SearchForm sf, HtmlFlowCursor flow, HtmlDocProfile profile, Document doc, Core.PdfDictionary docFontDict, double marginBottom, double marginLeft, double marginTop, double pageHeight, double pageWidth, HtmlLoadOptions? options, List<(Page page, Aspose.Pdf.Rectangle rect, string url, string? text)> pendingLinks)
+    private static void LayoutSearchForm(ConvertState cv, SearchForm sf, HtmlLoadOptions? options)
     {
-            const double PxPt = 0.75;
-            var invf = System.Globalization.CultureInfo.InvariantCulture;
-            var totalH = (sf.MarginTopPx + sf.InputHeightPx + sf.GapPx + sf.ButtonHeightPx + sf.MarginBottomPx) * PxPt;
-            if (flow.y - totalH < marginBottom)
+        var sm = new SearchFormLayoutState();
+        sm.cv = cv;
+        sm.sf = sf;
+        sm.options = options;
+        const double PxPt = 0.75;
+        sm.invf = System.Globalization.CultureInfo.InvariantCulture;
+        sm.totalH = (sm.sf.MarginTopPx + sm.sf.InputHeightPx + sm.sf.GapPx + sm.sf.ButtonHeightPx + sm.sf.MarginBottomPx) * PxPt;
+        if (sm.cv.flow.y - sm.totalH < sm.cv.marginBottom)
+        {
+            sm.cv.flow.page = sm.cv.doc.Pages.Add(sm.cv.pageWidth, sm.cv.pageHeight);
+            EnsureFonts(sm.cv.flow.page, sm.cv.docFontDict);
+            sm.cv.flow.y = sm.cv.pageHeight - sm.cv.marginTop; sm.cv.flow.pendingTopDrop = sm.cv.profile.hasZeroTopMargin;
+        }
+        sm.cv.flow.y -= sm.sf.MarginTopPx * PxPt;
+        sm.cellW = sm.sf.CellWidthPx * PxPt;
+        sm.cellX = sm.cv.marginLeft + (sm.cv.flow.contentWidth - sm.cellW) / 2;
+        sm.inputW = sm.sf.InputWidthPx * PxPt;
+        sm.inputH = sm.sf.InputHeightPx * PxPt;
+
+        sm.fld = new Forms.TextBoxField(sm.cv.flow.page, new Rectangle(sm.cellX, sm.cv.flow.y - sm.inputH, sm.cellX + sm.inputW, sm.cv.flow.y));
+        if (!string.IsNullOrEmpty(sm.sf.InputName)) sm.fld.PartialName = sm.sf.InputName;
+        sm.cv.doc.Form.Add(sm.fld, sm.cv.flow.page.Number);
+        DrawBox(sm.cv.flow.page, sm.cellX, sm.cv.flow.y - sm.inputH, sm.inputW, sm.inputH,
+            border: Color.FromArgb(0, 0, 0), borderWidth: 0.75, fill: null);
+
+        if (!string.IsNullOrEmpty(sm.sf.IconSrc))
+        {
+            var ib = LoadConverterImage(sm.sf.IconSrc, sm.options);
+            if (ib is not null)
             {
-                flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                EnsureFonts(flow.page, docFontDict);
-                flow.y = pageHeight - marginTop; flow.pendingTopDrop = profile.hasZeroTopMargin;
+                var iw = sm.sf.IconWPx * PxPt;
+                var ih2 = sm.sf.IconHPx * PxPt;
+                var ix = sm.cellX + sm.inputW - sm.sf.IconRightPx * PxPt - iw;
+                var iy = sm.cv.flow.y - sm.sf.IconTopPx * PxPt;
+                try { sm.cv.flow.page.AddImage(ib, new Rectangle(ix, iy - ih2, ix + iw, iy)); } catch { }
             }
-            flow.y -= sf.MarginTopPx * PxPt;
-            var cellW = sf.CellWidthPx * PxPt;
-            var cellX = marginLeft + (flow.contentWidth - cellW) / 2;
-            var inputW = sf.InputWidthPx * PxPt;
-            var inputH = sf.InputHeightPx * PxPt;
+        }
 
-            var fld = new Forms.TextBoxField(flow.page, new Rectangle(cellX, flow.y - inputH, cellX + inputW, flow.y));
-            if (!string.IsNullOrEmpty(sf.InputName)) fld.PartialName = sf.InputName;
-            doc.Form.Add(fld, flow.page.Number);
-            DrawBox(flow.page, cellX, flow.y - inputH, inputW, inputH,
-                border: Color.FromArgb(0, 0, 0), borderWidth: 0.75, fill: null);
+        sm.res0 = sm.cv.flow.page.Dict.Get("Resources") as Core.PdfDictionary;
+        sm.fdict = sm.res0?.Get("Font") as Core.PdfDictionary;
+        sm.arial = PosFace("Arial");
 
-            if (!string.IsNullOrEmpty(sf.IconSrc))
-            {
-                var ib = LoadConverterImage(sf.IconSrc, options);
-                if (ib is not null)
-                {
-                    var iw = sf.IconWPx * PxPt;
-                    var ih2 = sf.IconHPx * PxPt;
-                    var ix = cellX + inputW - sf.IconRightPx * PxPt - iw;
-                    var iy = flow.y - sf.IconTopPx * PxPt;
-                    try { flow.page.AddImage(ib, new Rectangle(ix, iy - ih2, ix + iw, iy)); } catch { }
-                }
-            }
+        if (!string.IsNullOrEmpty(sm.sf.LinkText) && sm.arial.ttf is not null && sm.fdict is not null)
+        {
+            LayoutSearchFormLink(sm);
+        }
 
-            var res0 = flow.page.Dict.Get("Resources") as Core.PdfDictionary;
-            var fdict = res0?.Get("Font") as Core.PdfDictionary;
-            var arial = PosFace("Arial");
+        sm.cv.flow.y -= sm.inputH + sm.sf.GapPx * PxPt;
 
-            if (!string.IsNullOrEmpty(sf.LinkText) && arial.ttf is not null && fdict is not null)
-            {
-                var lx = cellX + cellW + sf.LinkMarginLeftPx * PxPt;
-                var lf = sf.LinkFontPx * PxPt;
-                var lbase = flow.y - 5 * PxPt - 0.85 * lf;
-                var g0 = new StringBuilder();
-                // clip at the content box so an overlong side link ends at the margin
-                g0.Append("q ");
-                g0.Append($"{marginLeft.ToString("F2", invf)} {(flow.y - inputH - 30).ToString("F2", invf)} {flow.contentWidth.ToString("F2", invf)} {(inputH + 60).ToString("F2", invf)} re W n ");
-                var (rn, hex) = Text.Type0FontEmbedder.Embed(fdict, arial.ttf, "Arial", sf.LinkText!, stripSpacesInBaseFont: true);
-                g0.Append("BT ");
-                g0.Append($"{(sf.LinkColor.R / 255.0).ToString("F5", invf)} {(sf.LinkColor.G / 255.0).ToString("F5", invf)} {(sf.LinkColor.B / 255.0).ToString("F5", invf)} rg ");
-                g0.Append($"/{rn} {lf.ToString("F1", invf)} Tf 1 0 0 1 {lx.ToString("F2", invf)} {lbase.ToString("F2", invf)} Tm ");
-                g0.Append('<').Append(System.Convert.ToHexString(hex)).Append("> Tj ET Q ");
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(g0.ToString()));
-                if (!string.IsNullOrEmpty(sf.LinkUrl))
-                    pendingLinks.Add((flow.page, new Rectangle(lx, lbase - 3,
-                        Math.Min(lx + MeasureFaceText("Arial", sf.LinkText!, lf), marginLeft + flow.contentWidth),
-                        lbase + lf), sf.LinkUrl!, sf.LinkText));
-            }
+        if (sm.sf.Buttons.Count > 0 && sm.arial.ttf is not null && sm.fdict is not null)
+        {
+            LayoutSearchFormButtons(sm);
+        }
 
-            flow.y -= inputH + sf.GapPx * PxPt;
-
-            if (sf.Buttons.Count > 0 && arial.ttf is not null && fdict is not null)
-            {
-                var bfpt = sf.ButtonFontPx * PxPt;
-                var widths = new double[sf.Buttons.Count];
-                double btotal = 0;
-                for (var bi = 0; bi < sf.Buttons.Count; bi++)
-                {
-                    widths[bi] = MeasureFaceText("Arial", sf.Buttons[bi].Label, bfpt) + 2 * sf.ButtonPadPx * PxPt;
-                    btotal += widths[bi];
-                }
-                btotal += (sf.Buttons.Count - 1) * sf.ButtonGapPx * PxPt;
-                var bx = cellX + (sf.InputContentPx * PxPt - btotal) / 2;
-                var bh = sf.ButtonHeightPx * PxPt;
-                var g1 = new StringBuilder();
-                for (var bi = 0; bi < sf.Buttons.Count; bi++)
-                {
-                    var bw = widths[bi];
-                    g1.Append("q ");
-                    g1.Append($"{(sf.ButtonBg.R / 255.0).ToString("F5", invf)} {(sf.ButtonBg.G / 255.0).ToString("F5", invf)} {(sf.ButtonBg.B / 255.0).ToString("F5", invf)} rg ");
-                    g1.Append($"{bx.ToString("F2", invf)} {(flow.y - bh).ToString("F2", invf)} {bw.ToString("F2", invf)} {bh.ToString("F2", invf)} re f ");
-                    g1.Append("0 0 0 RG 0.75 w ");
-                    g1.Append($"{(bx + 0.375).ToString("F2", invf)} {(flow.y - bh + 0.375).ToString("F2", invf)} {(bw - 0.75).ToString("F2", invf)} {(bh - 0.75).ToString("F2", invf)} re S Q ");
-                    var label = sf.Buttons[bi].Label;
-                    var (rn2, hex2) = Text.Type0FontEmbedder.Embed(fdict, arial.ttf, "Arial", label, stripSpacesInBaseFont: true);
-                    var tw = MeasureFaceText("Arial", label, bfpt);
-                    var tx = bx + (bw - tw) / 2;
-                    var tbase = flow.y - (bh + 0.72 * bfpt) / 2;
-                    g1.Append("BT ");
-                    g1.Append($"{(sf.ButtonFg.R / 255.0).ToString("F5", invf)} {(sf.ButtonFg.G / 255.0).ToString("F5", invf)} {(sf.ButtonFg.B / 255.0).ToString("F5", invf)} rg ");
-                    g1.Append($"/{rn2} {bfpt.ToString("F1", invf)} Tf 1 0 0 1 {tx.ToString("F2", invf)} {tbase.ToString("F2", invf)} Tm ");
-                    g1.Append('<').Append(System.Convert.ToHexString(hex2)).Append("> Tj ET ");
-                    bx += bw + sf.ButtonGapPx * PxPt;
-                }
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(g1.ToString()));
-            }
-
-            flow.y -= (sf.ButtonHeightPx + sf.MarginBottomPx) * PxPt;
-            flow.lastWasHardBreak = false;
+        sm.cv.flow.y -= (sm.sf.ButtonHeightPx + sm.sf.MarginBottomPx) * PxPt;
+        sm.cv.flow.lastWasHardBreak = false;
     }
 
     /// <summary>Lays out one right-to-left SVG diagram table and advances the flow cursor past it.</summary>
     /// <remarks>Lifted verbatim out of the block-dispatch loop in
     /// <see cref="ConvertFromHtml"/>.</remarks>
-    private static void LayoutRtlSvgDiagram(
-        RtlSvgTable dg, HtmlFlowCursor flow, HtmlDocProfile profile, Document doc, Core.PdfDictionary docFontDict, double marginBottom, double marginLeft, double marginTop, double pageHeight, double pageWidth, List<byte[]> inlineSvgs)
+    private static void LayoutRtlSvgDiagram(ConvertState cv, RtlSvgTable dg, List<byte[]> inlineSvgs)
     {
-            // The arm's row constants (the 49.3 px title-baseline drop and its
-            // siblings) were measured at the LEGACY flow's section entry. The UA
-            // serif flow reaches this arm ~12.2 pt lower - it charges the full
-            // preceding h6 bottom margin the legacy flow did not - so the whole
-            // calibrated canvas would shift down by that much. Re-anchor the
-            // entry to the calibration's own convention (measured:
-            // title-label ink 103.11 with the lift, 115.35 without).
-            if (profile.uaStdSerif && !profile.deadExternalCss) flow.y += DgUaEntryLiftPt;
-            const double PxPt = 0.75;
-            var invd = System.Globalization.CultureInfo.InvariantCulture;
-            var canvasW = dg.WidthPx * PxPt;
-            var canvasRight = marginLeft + flow.contentWidth;
-            var canvasLeft = canvasRight - canvasW;
-            var arialD = PosFace("Arial");
-            var fontDictD = flow.page.Dict.Get("Resources") is Core.PdfDictionary dres
-                ? dres.Get("Font") as Core.PdfDictionary : null;
+        var rd = new RtlSvgDiagramState();
+        rd.cv = cv;
+        rd.dg = dg;
+        rd.inlineSvgs = inlineSvgs;
+        // The arm's row constants (the 49.3 px title-baseline drop and its
+        // siblings) were measured at the LEGACY cv.flow's section entry. The UA
+        // serif cv.flow reaches this arm ~12.2 pt lower - it charges the full
+        // preceding h6 bottom margin the legacy cv.flow did not - so the whole
+        // calibrated canvas would shift down by that much. Re-anchor the
+        // entry to the calibration's own convention (measured:
+        // title-label ink 103.11 with the lift, 115.35 without).
+        if (rd.cv.profile.uaStdSerif && !rd.cv.profile.deadExternalCss) rd.cv.flow.y += DgUaEntryLiftPt;
+        const double PxPt = 0.75;
+        rd.invd = System.Globalization.CultureInfo.InvariantCulture;
+        rd.canvasW = rd.dg.WidthPx * PxPt;
+        rd.canvasRight = rd.cv.marginLeft + rd.cv.flow.contentWidth;
+        rd.canvasLeft = rd.canvasRight - rd.canvasW;
+        rd.arialD = PosFace("Arial");
+        rd.fontDictD = rd.cv.flow.page.Dict.Get("Resources") is Core.PdfDictionary dres
+            ? dres.Get("Font") as Core.PdfDictionary : null;
 
-            void DrawRtlText(string text, double rightX, double baseline, double fontPt,
-                bool centerCanvas = false)
+        rd.titleRowH = (rd.dg.TitleText is null ? 0 : 81.3) * PxPt;
+        rd.figH = rd.dg.MainSvgHPx * PxPt;
+        rd.labelRowH = (rd.dg.MidLabels.Count > 0 ? 66.7 : 0.0) * PxPt;
+        rd.legendBoxH = rd.dg.LegendWFrac[0] * rd.canvasW; // widest legend svg's square
+        rd.legendLabelH = 22 * PxPt;
+        rd.totalH = rd.titleRowH + rd.figH + rd.labelRowH + rd.legendBoxH + rd.legendLabelH;
+        if (rd.cv.flow.y - rd.totalH < rd.cv.marginBottom && rd.cv.flow.y < rd.cv.pageHeight - rd.cv.marginTop - 1e-3)
+        {
+            rd.cv.flow.page = rd.cv.doc.Pages.Add(rd.cv.pageWidth, rd.cv.pageHeight);
+            EnsureFonts(rd.cv.flow.page, rd.cv.docFontDict);
+            rd.cv.flow.y = rd.cv.pageHeight - rd.cv.marginTop; rd.cv.flow.pendingTopDrop = rd.cv.profile.hasZeroTopMargin;
+            rd.fontDictD = rd.cv.flow.page.Dict.Get("Resources") is Core.PdfDictionary dres2
+                ? dres2.Get("Font") as Core.PdfDictionary : null;
+        }
+
+        if (rd.dg.TitleText is not null)
+            DrawRtlText(rd, rd.dg.TitleText, 0, rd.cv.flow.y - 49.3 * PxPt, rd.dg.TitleFontPx * PxPt, centerCanvas: true);
+        rd.cv.flow.y -= rd.titleRowH;
+
+        if (rd.dg.MainSvgIdx >= 0 && rd.dg.MainSvgIdx < rd.inlineSvgs.Count)
+        {
+            PlaceRtlSvgFigure(rd);
+        }
+        rd.cv.flow.y -= rd.figH;
+
+        if (rd.dg.MidLabels.Count > 0)
+            foreach (var (text, col) in rd.dg.MidLabels)
             {
-                if (fontDictD is null || arialD.ttf is null || text.Length == 0) return;
-                var visual = IsPureRtl(text) ? ToVisualRtl(text)
-                    : Text.BidiReorderer.ContainsRtl(text) ? VisualizeMixedRtl(text) : text;
-                var tw = MeasureFaceText("Arial", visual, fontPt);
-                var tx = centerCanvas ? (canvasLeft + canvasRight - tw) / 2 : rightX - tw;
-                var (rn, hex) = Text.Type0FontEmbedder.Embed(fontDictD, arialD.ttf, "Arial",
-                    visual, stripSpacesInBaseFont: true);
-                var t = new StringBuilder();
-                t.Append("BT 0 0 0 rg ");
-                t.Append($"/{rn} {fontPt.ToString("F1", invd)} Tf ");
-                t.Append($"1 0 0 1 {tx.ToString("F2", invd)} {baseline.ToString("F2", invd)} Tm ");
-                t.Append('<').Append(System.Convert.ToHexString(hex)).Append("> Tj ET ");
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(t.ToString()));
+                var k = Math.Min(col, rd.dg.MidLabelRightFrac.Length - 1);
+                DrawRtlText(rd, text, rd.canvasLeft + rd.dg.MidLabelRightFrac[k] * rd.canvasW,
+                    rd.cv.flow.y - 24 * PxPt, rd.dg.LabelFontPx * PxPt);
             }
+        rd.cv.flow.y -= rd.labelRowH;
 
-            var titleRowH = (dg.TitleText is null ? 0 : 81.3) * PxPt;
-            var figH = dg.MainSvgHPx * PxPt;
-            var labelRowH = (dg.MidLabels.Count > 0 ? 66.7 : 0.0) * PxPt;
-            var legendBoxH = dg.LegendWFrac[0] * canvasW; // widest legend svg's square
-            var legendLabelH = 22 * PxPt;
-            var totalH = titleRowH + figH + labelRowH + legendBoxH + legendLabelH;
-            if (flow.y - totalH < marginBottom && flow.y < pageHeight - marginTop - 1e-3)
-            {
-                flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                EnsureFonts(flow.page, docFontDict);
-                flow.y = pageHeight - marginTop; flow.pendingTopDrop = profile.hasZeroTopMargin;
-                fontDictD = flow.page.Dict.Get("Resources") is Core.PdfDictionary dres2
-                    ? dres2.Get("Font") as Core.PdfDictionary : null;
-            }
+        for (var k = 0; k < rd.dg.Legend.Count; k++)
+        {
+            DrawRtlSvgLegendEntry(rd, k);
+        }
+        rd.cv.flow.y -= rd.legendBoxH + rd.legendLabelH;
 
-            if (dg.TitleText is not null)
-                DrawRtlText(dg.TitleText, 0, flow.y - 49.3 * PxPt, dg.TitleFontPx * PxPt, centerCanvas: true);
-            flow.y -= titleRowH;
-
-            if (dg.MainSvgIdx >= 0 && dg.MainSvgIdx < inlineSvgs.Count)
-            {
-                // The figure keeps its viewBox aspect at the styled height and
-                // centers in the canvas (letterboxed, not stretched).
-                var figBytes = ImageRasterizer.RasterizeSvg(inlineSvgs[dg.MainSvgIdx],
-                    out var figNatW, out var figNatH);
-                if (figBytes is not null)
-                {
-                    var drawW = figNatW > 0 && figNatH > 0 ? figH * figNatW / figNatH : dg.MainSvgWPx * PxPt;
-                    var figX = canvasLeft + (canvasW - drawW) / 2 - 10.3 * PxPt;
-                    try
-                    {
-                        flow.page.AddImage(figBytes, new Rectangle(figX, flow.y - figH, figX + drawW, flow.y));
-                    }
-                    catch { }
-                }
-            }
-            flow.y -= figH;
-
-            if (dg.MidLabels.Count > 0)
-                foreach (var (text, col) in dg.MidLabels)
-                {
-                    var k = Math.Min(col, dg.MidLabelRightFrac.Length - 1);
-                    DrawRtlText(text, canvasLeft + dg.MidLabelRightFrac[k] * canvasW,
-                        flow.y - 24 * PxPt, dg.LabelFontPx * PxPt);
-                }
-            flow.y -= labelRowH;
-
-            for (var k = 0; k < dg.Legend.Count; k++)
-            {
-                var (svgIdx, label) = dg.Legend[k];
-                var boxLeft = canvasLeft + dg.LegendXFrac[k] * canvasW;
-                var boxW = dg.LegendWFrac[k] * canvasW;
-                if (svgIdx >= 0 && svgIdx < inlineSvgs.Count && boxLeft + boxW > 0)
-                {
-                    var sw = ImageRasterizer.RasterizeSvg(inlineSvgs[svgIdx], out _, out _);
-                    if (sw is not null)
-                        try
-                        {
-                            flow.page.AddImage(sw, new Rectangle(boxLeft, flow.y - legendBoxH,
-                                boxLeft + boxW, flow.y));
-                        }
-                        catch { }
-                }
-                if (label.Length > 0)
-                    DrawRtlText(label, canvasLeft + dg.LegendLabelRightFrac[k] * canvasW,
-                        flow.y - legendBoxH - 16 * PxPt, dg.LabelFontPx * PxPt);
-            }
-            flow.y -= legendBoxH + legendLabelH;
-
-            flow.lastWasHardBreak = false;
+        rd.cv.flow.lastWasHardBreak = false;
     }
 
     /// <summary>Lays out one flex-grid block and advances the flow cursor past it.</summary>
     /// <remarks>Lifted verbatim out of the block-dispatch loop in
     /// <see cref="ConvertFromHtml"/>.</remarks>
-    private static void LayoutFlexGrid(
-        FlexGrid fg, HtmlFlowCursor flow, Document doc, Core.PdfDictionary docFontDict, double marginBottom, double marginLeft, double marginRight, double marginTop, double pageHeight, double pageWidth)
-    {
-            var invF = System.Globalization.CultureInfo.InvariantCulture;
-            var fSerifB = PosFace("Times New Roman Bold");
-            var fontDictF = flow.page.Dict.Get("Resources") is Core.PdfDictionary fres
-                ? fres.Get("Font") as Core.PdfDictionary : null;
-            double FWidth(string s, double pt)
-                => MeasureFaceText("Times New Roman Bold", s, pt);
-            void FDraw(string s, double x, double glyphTopDown, double pt)
-            {
-                if (fontDictF is null || fSerifB.ttf is null || s.Length == 0) return;
-                var baseline = pageHeight - (glyphTopDown + SerifAscEm * pt);
-                var (rn, hex) = Text.Type0FontEmbedder.Embed(fontDictF, fSerifB.ttf,
-                    "Times New Roman Bold", s, stripSpacesInBaseFont: true);
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(string.Create(invF,
-                    $"BT 0 0 0 rg /{rn} {pt:F1} Tf 1 0 0 1 {x:F2} {baseline:F2} Tm <{System.Convert.ToHexString(hex)}> Tj ET\n")));
-            }
-            void FLine(double x0, double y0d, double x1, double y1d)
-                => flow.page.AddContentStream(Encoding.ASCII.GetBytes(string.Create(invF,
-                    $"q 0 0 0 RG 0.75 w {x0:F2} {pageHeight - y0d:F2} m {x1:F2} {pageHeight - y1d:F2} l S Q\n")));
+    /// <summary>The flex-grid columns' 12px class size.</summary>
+    private const double FlexCellFontPt = 9.0;
 
-            var contL = marginLeft + CardBodyPadPt;
-            // With a physical-width flow.page wrapper the container spans exactly
-            // that width; otherwise it fills to the body inset on the right.
-            var contR = fg.PageContentPt > 0
-                ? contL + fg.PageContentPt
-                : pageWidth - marginRight - CardBodyPadPt;
-            var contT = marginTop + CardBodyPadPt;
-            var contW = contR - contL;
-            // wrapper: the div flavour's 98%-wide 1%-padded inner div; the
-            // table flavour's <table width=100%> inset by the UA 2px
-            // border-spacing instead.
-            var wrapL = fg.TableFlavor
-                ? contL + 2.25
-                : contL + contW * 0.01 + FlexRowBorderPt;
-            var wrapW = fg.TableFlavor
-                ? contW - 4.5
-                : contW * 0.98 - 2 * FlexRowBorderPt;
-            if (fg.Title.Length > 0)
-                FDraw(fg.Title, wrapL + (wrapW - FWidth(fg.Title, FlexTitleFontPt)) / 2,
-                    contT + (fg.TableFlavor ? 1.34 : 0.96), FlexTitleFontPt);
-            // first row top: the table flavour's h1 band runs 3.4pt deeper
-            // (the table's own border-spacing above its first row).
-            var fy = contT + FlexTitleBandPt + (fg.TableFlavor ? 3.4 : 0.0);
-            const double CellFontPt = 9.0;      // the columns' 12px class size
-            // the UA border-spacing between table rows (2px).
-            var rowGap = fg.TableFlavor ? 1.5 : 0.0;
-            var labelDy = fg.TableFlavor ? 1.39 : 0.64;
-            var valueInset = fg.TableFlavor ? 2.62 : FlexValueInsetPt;
-            foreach (var frow in fg.Rows)
-            {
-                // Row height: the tallest cell's line bands + the border share.
-                double rowBands = 0;
-                var wraps = new List<string[]?>();
-                double cx0 = wrapL;
-                foreach (var fc in frow.Cells)
-                {
-                    var cw = fc.WFrac * wrapW;
-                    double bands;
-                    string[]? wl = null;
-                    if (fc.PlainWrap)
-                    {
-                        var availF = cw - fc.PadFrac * wrapW - 4;
-                        wl = MeasuredWordWrap(fc.Label, Math.Max(20, availF),
-                            "Times New Roman Bold", CellFontPt);
-                        // Table flavour: only a CENTRED wrapping cell grows its
-                        // row — a left-aligned prose cell OVERFLOWS it (both
-                        // measured on the table-flavoured waybill: the wrapped
-                        // header row is two bands tall, the certify row one).
-                        bands = (fg.TableFlavor && !fc.Center ? 1 : wl.Length)
-                                * FlexLineBandPt;
-                    }
-                    else if (fc.ValueWide)
-                        bands = 2 * FlexLineBandPt + 2 * fc.ValuePadPx * 0.75;
-                    else
-                        // An EMPTY dd collapses its line box; a filled one keeps it.
-                        bands = (fc.HasDd && fc.Value.Trim().Length > 0 ? 2 : 1)
-                                * FlexLineBandPt;
-                    rowBands = Math.Max(rowBands, bands);
-                    wraps.Add(wl);
-                    cx0 += cw;
-                }
-                var rowH = rowBands + FlexRowBorderPt;
-                var rowBottom = fy + rowH;
-                var nextRowTop = rowBottom + rowGap;
-                // Draw the cells.
-                var cx = wrapL;
-                for (var ci = 0; ci < frow.Cells.Count; ci++)
-                {
-                    var fc = frow.Cells[ci];
-                    var cw = fc.WFrac * wrapW;
-                    var cellR = cx + cw;
-                    if (fc.BL) FLine(cx + 0.38, fy - 0.38, cx + 0.38, rowBottom + 0.38);
-                    if (fc.BR) FLine(cellR - 0.38, fy - 0.38, cellR - 0.38, rowBottom + 0.38);
-                    if (fc.BT) FLine(cx, fy - 0.38, cellR, fy - 0.38);
-                    if (fc.BB) FLine(cx, rowBottom - 0.38, cellR, rowBottom - 0.38);
-                    var textX = cx + fc.PadFrac * wrapW + FlexRowBorderPt;
-                    if (fc.PlainWrap)
-                    {
-                        var wl = wraps[ci] ?? Array.Empty<string>();
-                        for (var li = 0; li < wl.Length; li++)
-                        {
-                            var lx = fc.Center
-                                ? cx + (cw - FWidth(wl[li], CellFontPt)) / 2
-                                : textX;
-                            FDraw(wl[li], lx, fy + labelDy + li * FlexLineBandPt, CellFontPt);
-                        }
-                    }
-                    else if (fc.ValueWide)
-                    {
-                        FDraw(fc.Label, textX, fy + labelDy, CellFontPt);
-                        if (fc.LabelRight.Length > 0)
-                            FDraw(fc.LabelRight,
-                                cellR - fc.LabelRightMrFrac * cw
-                                      - FWidth(fc.LabelRight, CellFontPt),
-                                fy + labelDy, CellFontPt);
-                        var vTop = fy + FlexLineBandPt + fc.ValuePadPx * 0.75 + labelDy;
-                        if (fc.ValueLeft.Length > 0)
-                            FDraw(fc.ValueLeft, textX, vTop, CellFontPt);
-                        if (fc.ValueRight.Length > 0)
-                            FDraw(fc.ValueRight,
-                                cellR - fc.ValueRightMrFrac * cw
-                                      - FWidth(fc.ValueRight, CellFontPt),
-                                vTop, CellFontPt);
-                    }
-                    else
-                    {
-                        if (fc.Label.Length > 0)
-                            FDraw(fc.Label, fc.Center
-                                    ? cx + (cw - FWidth(fc.Label, CellFontPt)) / 2
-                                    : textX,
-                                fy + labelDy, CellFontPt);
-                        if (fc.Value.Length > 0)
-                            FDraw(fc.Value,
-                                cellR - valueInset - FWidth(fc.Value, CellFontPt),
-                                fy + FlexLineBandPt + labelDy, CellFontPt);
-                    }
-                    cx = cellR;
-                }
-                fy = nextRowTop;
-            }
-            // The container's own border box: a wrapper-declared height runs to
-            // its full depth — past the flow.page bottom onto a continuation flow.page —
-            // otherwise it closes at the last row.
-            FLine(contL + 0.38, contT + 0.38, contR - 0.38, contT + 0.38);
-            if (fg.PageContentHPt > 0)
-            {
-                var pageBottomTd = pageHeight - marginBottom;
-                var contBottomTd = contT + fg.PageContentHPt;
-                var b1 = Math.Min(contBottomTd, pageBottomTd);
-                FLine(contL + 0.38, contT + 0.38, contL + 0.38, b1);
-                FLine(contR - 0.38, contT + 0.38, contR - 0.38, b1);
-                if (contBottomTd <= pageBottomTd)
-                    FLine(contL + 0.38, b1, contR - 0.38, b1);
-                else
-                {
-                    var tail = contBottomTd - b1;
-                    flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                    EnsureFonts(flow.page, docFontDict);
-                    var t0 = marginTop;
-                    FLine(contL + 0.38, t0, contL + 0.38, t0 + tail);
-                    FLine(contR - 0.38, t0, contR - 0.38, t0 + tail);
-                    FLine(contL + 0.38, t0 + tail, contR - 0.38, t0 + tail);
-                    flow.y = pageHeight - (t0 + tail);
-                }
-            }
+    private static void LayoutFlexGrid(FlexGrid fg, HtmlFlowCursor flow, Document doc, Core.PdfDictionary docFontDict, double marginBottom, double marginLeft, double marginRight, double marginTop, double pageHeight, double pageWidth)
+    {
+        var xg = new FlexGridLayoutState();
+        xg.fg = fg;
+        xg.flow = flow;
+        xg.doc = doc;
+        xg.docFontDict = docFontDict;
+        xg.marginBottom = marginBottom;
+        xg.marginLeft = marginLeft;
+        xg.marginRight = marginRight;
+        xg.marginTop = marginTop;
+        xg.pageHeight = pageHeight;
+        xg.pageWidth = pageWidth;
+        xg.invF = System.Globalization.CultureInfo.InvariantCulture;
+        xg.fSerifB = PosFace("Times New Roman Bold");
+        xg.fontDictF = xg.flow.page.Dict.Get("Resources") is Core.PdfDictionary fres
+            ? fres.Get("Font") as Core.PdfDictionary : null;
+        xg.contL = xg.marginLeft + CardBodyPadPt;
+        xg.contR = xg.fg.PageContentPt > 0
+            ? xg.contL + xg.fg.PageContentPt
+            : xg.pageWidth - xg.marginRight - CardBodyPadPt;
+        xg.contT = xg.marginTop + CardBodyPadPt;
+        xg.contW = xg.contR - xg.contL;
+        xg.wrapL = xg.fg.TableFlavor
+            ? xg.contL + 2.25
+            : xg.contL + xg.contW * 0.01 + FlexRowBorderPt;
+        xg.wrapW = xg.fg.TableFlavor
+            ? xg.contW - 4.5
+            : xg.contW * 0.98 - 2 * FlexRowBorderPt;
+        if (xg.fg.Title.Length > 0)
+            FDraw(xg, xg.fg.Title, xg.wrapL + (xg.wrapW - FWidth(xg.fg.Title, FlexTitleFontPt)) / 2,
+                xg.contT + (xg.fg.TableFlavor ? 1.34 : 0.96), FlexTitleFontPt);
+        xg.fy = xg.contT + FlexTitleBandPt + (xg.fg.TableFlavor ? 3.4 : 0.0);
+        xg.rowGap = xg.fg.TableFlavor ? 1.5 : 0.0;
+        xg.labelDy = xg.fg.TableFlavor ? 1.39 : 0.64;
+        xg.valueInset = xg.fg.TableFlavor ? 2.62 : FlexValueInsetPt;
+        foreach (var frow in xg.fg.Rows)
+        {
+            if (!LayoutFlexRow(xg, frow)) break;
+        }
+        // The container's own border box: a wrapper-declared height runs to
+        // its full depth — past the flow.page bottom onto a continuation flow.page —
+        // otherwise it closes at the last row.
+        FLine(xg, xg.contL + 0.38, xg.contT + 0.38, xg.contR - 0.38, xg.contT + 0.38);
+        if (xg.fg.PageContentHPt > 0)
+        {
+            var pageBottomTd = xg.pageHeight - xg.marginBottom;
+            var contBottomTd = xg.contT + xg.fg.PageContentHPt;
+            var b1 = Math.Min(contBottomTd, pageBottomTd);
+            FLine(xg, xg.contL + 0.38, xg.contT + 0.38, xg.contL + 0.38, b1);
+            FLine(xg, xg.contR - 0.38, xg.contT + 0.38, xg.contR - 0.38, b1);
+            if (contBottomTd <= pageBottomTd)
+                FLine(xg, xg.contL + 0.38, b1, xg.contR - 0.38, b1);
             else
             {
-                FLine(contL + 0.38, fy, contR - 0.38, fy);
-                FLine(contL + 0.38, contT + 0.38, contL + 0.38, fy);
-                FLine(contR - 0.38, contT + 0.38, contR - 0.38, fy);
-                flow.y = pageHeight - fy - FlexRowBorderPt;
+                var tail = contBottomTd - b1;
+                xg.flow.page = xg.doc.Pages.Add(xg.pageWidth, xg.pageHeight);
+                EnsureFonts(xg.flow.page, xg.docFontDict);
+                var t0 = xg.marginTop;
+                FLine(xg, xg.contL + 0.38, t0, xg.contL + 0.38, t0 + tail);
+                FLine(xg, xg.contR - 0.38, t0, xg.contR - 0.38, t0 + tail);
+                FLine(xg, xg.contL + 0.38, t0 + tail, xg.contR - 0.38, t0 + tail);
+                xg.flow.y = xg.pageHeight - (t0 + tail);
             }
-            flow.contentPage = flow.page;
-            flow.lastWasHardBreak = false;
+        }
+        else
+        {
+            FLine(xg, xg.contL + 0.38, xg.fy, xg.contR - 0.38, xg.fy);
+            FLine(xg, xg.contL + 0.38, xg.contT + 0.38, xg.contL + 0.38, xg.fy);
+            FLine(xg, xg.contR - 0.38, xg.contT + 0.38, xg.contR - 0.38, xg.fy);
+            xg.flow.y = xg.pageHeight - xg.fy - FlexRowBorderPt;
+        }
+        xg.flow.contentPage = xg.flow.page;
+        xg.flow.lastWasHardBreak = false;
     }
 
 }

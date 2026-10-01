@@ -9,31 +9,25 @@ internal static partial class HtmlToPdfConverter
 // the source markup and the scan flags it reads. Bodies are verbatim.
     private static bool SelectorUsed(string html, string sel)
     {
+        // (the markup is read once for every selector's question, see MarkupIndex)
+        var markup = MarkupIndex.For(html);
         var last = sel.Trim();
         var sp = last.LastIndexOfAny(new[] { ' ', '>', '+', '~' });
         if (sp >= 0) last = last[(sp + 1)..].Trim();
         if (last.Length == 0) return true;
-        if (last[0] == '.')
-            return Regex.IsMatch(html,
-                @"class\s*=\s*[""'][^""']*\b" + Regex.Escape(last[1..]) + @"\b",
-                RegexOptions.IgnoreCase);
+        if (last[0] == '.') return markup.HasClass(last[1..]);
         // tag.class — the class decides presence: "br.altova-page-break"
         // matches only elements CARRYING the class, so a class nobody uses
         // cannot disqualify the flow no matter how common the tag is.
         if (last.IndexOf('.') > 0)
         {
             var cls = last[(last.IndexOf('.') + 1)..].Split('.')[0];
-            return cls.Length > 0 && Regex.IsMatch(html,
-                @"class\s*=\s*[""'][^""']*\b" + Regex.Escape(cls) + @"\b",
-                RegexOptions.IgnoreCase);
+            return cls.Length > 0 && markup.HasClass(cls);
         }
-        if (last[0] == '#')
-            return Regex.IsMatch(html,
-                @"id\s*=\s*[""']?" + Regex.Escape(last[1..]) + @"\b",
-                RegexOptions.IgnoreCase);
+        if (last[0] == '#') return markup.HasId(last[1..]);
         var tagOnly = Regex.Match(last, @"^[A-Za-z][A-Za-z0-9]*").Value;
         if (tagOnly.Length == 0) return true;
-        return Regex.IsMatch(html, @"<" + Regex.Escape(tagOnly) + @"\b", RegexOptions.IgnoreCase);
+        return markup.HasTag(tagOnly);
     }
 
     private static bool TableScopedSelector(string html, ConvertState cv, bool bodyAllTables, bool edgeToEdgePre, string sel, IReadOnlyDictionary<string, string> decls)
@@ -46,7 +40,8 @@ internal static partial class HtmlToPdfConverter
         var selParts = sel.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         if (selParts.Length == 0) return false;
         var last = selParts[^1];
-        var lastTag = last.Split('.')[0].ToLowerInvariant();
+        // (a pseudo-class on the tail - `th:first-child` - names the same table part)
+        var lastTag = last.Split('.', ':')[0].ToLowerInvariant();
         if (lastTag is "table" or "td" or "th" or "tr" or "img") return true;
         string? scopeCls = null;
         if (last.StartsWith('.'))
@@ -57,38 +52,42 @@ internal static partial class HtmlToPdfConverter
             && lastTag is "div" or "span" or "b" or "p")
             scopeCls = selParts[0][1..].Split('.')[0];
         if (scopeCls is null || scopeCls.Length == 0) return false;
-        var clsUses = Regex.Matches(html,
-            @"<(\w+)\b[^>]*class\s*=\s*[""'][^""']*\b" + Regex.Escape(scopeCls) + @"\b",
-            RegexOptions.IgnoreCase);
+        var markup = MarkupIndex.For(html);
+        var clsUses = markup.TaggedUsesOf(scopeCls).ToList();
         if (clsUses.Count == 0) return false;
         // A div/b/span/p carrying the class is table content only when it
         // sits INSIDE a table (the boleto's in-cell skins); a wrapper div
         // AROUND the tables (the official-letter .Content) keeps its
         // calibrated flow.
-        bool InsideTable(int pos)
-        {
-            var depth = 0;
-            foreach (Match tm in Regex.Matches(html[..pos], @"<(/?)table\b",
-                RegexOptions.IgnoreCase))
-                depth += tm.Groups[1].Value.Length == 0 ? 1 : -1;
-            return depth > 0;
-        }
-        return clsUses.All(u => u.Groups[1].Value.ToLowerInvariant()
+        return clsUses.All(u => u.Tag.ToLowerInvariant()
                 is "table" or "td" or "th" or "tr" or "tbody" or "thead" or "tfoot"
-            || (u.Groups[1].Value.ToLowerInvariant() is "div" or "b" or "span" or "p"
-                && InsideTable(u.Index)));
+            || (u.Tag.ToLowerInvariant() is "div" or "b" or "span" or "p"
+                && markup.InsideTable(u.Index)));
     }
 
     private static bool ImgScopedClass(string html, string cls)
     {
-        var uses = Regex.Matches(html,
-            @"<([a-zA-Z]+)\b[^>]*class\s*=\s*[""'][^""']*\b" + Regex.Escape(cls) + @"\b",
-            RegexOptions.IgnoreCase);
+        var uses = MarkupIndex.For(html).TaggedUsesOf(cls).ToList();
         if (uses.Count == 0) return false;
-        foreach (Match u in uses)
-            if (!u.Groups[1].Value.Equals("img", StringComparison.OrdinalIgnoreCase))
+        foreach (var u in uses)
+            if (!u.Tag.Equals("img", StringComparison.OrdinalIgnoreCase))
                 return false;
         return true;
+    }
+
+    /// <summary>A table cell whose inline style declares both its family and its line box.</summary>
+    private static bool CellStylesAuthorTypography(string html)
+    {
+        foreach (Match cm in Regex.Matches(html,
+                     @"<t[dh]\b[^>]*?style\s*=\s*(?:""(?<s>[^""]*)""|'(?<s>[^']*)')",
+                     RegexOptions.IgnoreCase))
+        {
+            var st = cm.Groups["s"].Value;
+            if (Regex.IsMatch(st, @"font-family\s*:", RegexOptions.IgnoreCase)
+                && Regex.IsMatch(st, @"line-height\s*:", RegexOptions.IgnoreCase))
+                return true;
+        }
+        return false;
     }
 
     private static bool InlineFamiliesDisqualify(ConvertState cv, bool cssLayoutFree, string htmlSansTables)
@@ -110,6 +109,8 @@ internal static partial class HtmlToPdfConverter
                 : "";
             if (ownerTag is "td" or "th" or "tr" or "table" or "tbody")
                 return true;
+            // the body tag's own attribute IS the flow's typography when the UA body face was read off it
+            if (ownerTag is "body" && cv.uaBodyFaceFromAttr) continue;
             // A family that fails to parse — or an EMPTY declaration
             // ("font-family:" with nothing after it, the Word-export idiom) —
             // disqualifies like any other face.
@@ -123,7 +124,23 @@ internal static partial class HtmlToPdfConverter
             // measured on; a family declared ALONE is a candidate face swap.
             if (Regex.IsMatch(sm.Groups["s"].Value, @"font-size|font\s*:|line-height",
                     RegexOptions.IgnoreCase))
-                return true;
+            {
+                // …and the flow this document is pushed ONTO must apply the very
+                // typography that pushed it there: the span draws at its own
+                // declared size (probed: a 22 pt span lands 22 pt at the UA body
+                // top, not at the calibrated flow's 11 pt default).
+                cv.profile.inlineSpanTypography = true;
+                // A sized span in a face the flow can draw is a RUN of the UA flow
+                // (the numbered-outline fragment's arial 13px paragraphs draw arial
+                // 9.75 pt in the expected render); a face the flow has not got, or a
+                // declaration that also states its PITCH (a verdana 9px line-height:2
+                // paragraph beside its table), pushes the document onto the calibrated
+                // flow as before - a run carries a face and a size, not a line box.
+                if (WinMetricsFor(inlFam) is null
+                    || Regex.IsMatch(sm.Groups["s"].Value, @"line-height", RegexOptions.IgnoreCase)) return true;
+                cv.profile.inlineRunFaces = true;
+                continue;
+            }
             seen.Add(inlFam);
         }
         if (seen.Count == 0) return false;

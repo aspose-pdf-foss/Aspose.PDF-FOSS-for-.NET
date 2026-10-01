@@ -1,6 +1,6 @@
 # Comparison
 
-Two ways to compare PDFs, plus the text-diff model both are built on. Everything
+Three ways to compare PDFs, plus the text-diff model they are built on. Everything
 lives in `Aspose.Pdf.Comparison` — including the `Operation` and
 `EditOperationsOrder` enums — except the diff primitives `DiffOperation` and
 `DiffUtils` in `Aspose.Pdf.Comparison.Diff`:
@@ -8,7 +8,8 @@ lives in `Aspose.Pdf.Comparison` — including the `Operation` and
 | API | Compares | Produces |
 |-----|----------|----------|
 | `SideBySidePdfComparer` | extracted **text** of two pages or two documents | a result PDF showing both versions next to each other, changes highlighted |
-| `GraphicalPdfComparer` | rendered **pixels** of two pages | a pixel difference you can turn into an image (Windows only) |
+| `TextPdfComparer` | extracted **text** of two pages or two documents | edit lists you can count (`CreateComparisonStatistics`) and render as PDF, HTML, Markdown or JSON |
+| `GraphicalPdfComparer` | rendered **pixels** of two pages | a pixel difference, written as an image or a PDF report |
 | `Aspose.Pdf.Comparison.Diff` | two strings | a normalized list of equal / delete / insert operations |
 
 ## Side-by-side comparison
@@ -100,10 +101,12 @@ changed, and `ParseSpaces` when spacing itself is meaningful.
 `GraphicalPdfComparer` renders both pages and diffs the pixels, which catches what a
 text comparison cannot — moved images, changed vector art, colour edits.
 
-> **Windows only.** `GraphicalPdfComparer` and `ImagesDifference` are marked
-> `[SupportedOSPlatform("windows")]` because they expose `System.Drawing` bitmaps.
-> Page rendering itself is cross-platform: on Linux/macOS, render both pages with
-> `PngDevice` and diff the bytes yourself.
+> **Cross-platform.** Rendering, the pixel diff and the image and PDF outputs
+> (`ComparePagesToImage`, `CompareDocumentsToImages`, `ComparePagesToPdf`,
+> `CompareDocumentsToPdf`) are managed code and run on every platform. Only the
+> `System.Drawing.Bitmap` views of an `ImagesDifference` — `SourceImage`,
+> `GetDestinationImage()` and `DifferenceToImage(...)` — are
+> `[SupportedOSPlatform("windows")]`.
 
 ```csharp
 using Aspose.Pdf;
@@ -121,6 +124,8 @@ var comparer = new GraphicalPdfComparer
 };
 
 using var difference = comparer.GetDifference(v1.Pages[1], v2.Pages[1]);
+
+// Windows only: a System.Drawing.Bitmap mask of the differing pixels
 using var image = difference.DifferenceToImage(Color.Red, Color.White);
 image.Save("diff.png");
 ```
@@ -129,11 +134,15 @@ image.Save("diff.png");
 channels differ by less than it count as identical. The default `0` flags any
 difference.
 
-`ImagesDifference` also exposes the raw data — `Difference` (an `int[]`), with
-`Stride` and `Height` describing its shape — plus `SourceImage` and
-`GetDestinationImage()` for the two rendered pages.
+`ImagesDifference` also exposes the raw data on every platform: `Difference` is
+an `int[]` with one entry per pixel, row by row — `-1` where the pages agree,
+otherwise the second page's colour as `0xRRGGBB` — and `Height` is the number of
+rows (so the width is `Difference.Length / Height`); `Stride` is the byte length
+of a rendered RGB row, padded to four bytes. `SourceImage` and
+`GetDestinationImage()` are the Windows-only bitmap views of the two rendered
+pages.
 
-The comparer can also write its result directly:
+The comparer can also write its result directly, on any platform:
 
 ```csharp
 comparer.ComparePagesToImage(v1.Pages[1], v2.Pages[1], "diff.png");
@@ -148,7 +157,7 @@ instead of a path.
 
 ## The diff model
 
-Both comparers sit on `Aspose.Pdf.Comparison.Diff`, which you can use directly on
+The text comparers sit on `Aspose.Pdf.Comparison.Diff`, which you can use directly on
 text. A `DiffOperation` pairs an `Operation` (the `Aspose.Pdf.Comparison.Operation`
 enum — `Equal`, `Delete`, or `Insert`) with the text run it applies to, and
 `DiffUtils` provides the helpers around it (`FindCommonStartParts`,
@@ -167,13 +176,54 @@ The edit sequences the comparers return are normalized by the mergers in
 `MergingOptimizer`, `OperationsSlideMerger`, all implementing
 `IDiffOptimizationOperation`). Adjacent deletions and insertions are coalesced
 and emitted in the order given by `EditOperationsOrder` — `DeleteFirst` or
-`InsertFirst`; the comparers use `DeleteFirst`, so a replaced run appears as its
-`Delete` followed by its `Insert`.
+`InsertFirst`; `SideBySidePdfComparer` uses `DeleteFirst`, so a replaced run
+appears as its `Delete` followed by its `Insert`, and `TextPdfComparer` takes the
+order from `ComparisonOptions.EditOperationsOrder` (default `DeleteFirst`).
+
+`TextPdfComparer` hands you these edit lists directly. Its static methods take a
+`ComparisonOptions` — `ExtractionArea` (the part of each page to read),
+`ExcludeAreas1` / `ExcludeAreas2`, `ExcludeTables` and `EditOperationsOrder`:
+
+- `ComparePages(page1, page2, options)` — one `List<DiffOperation>`;
+- `CompareDocumentsPageByPage(doc1, doc2, options)` — one list per page (a missing
+  page reads as empty text);
+- `CompareFlatDocuments(doc1, doc2, options)` — one list over each document's
+  whole text, so a change that crosses a page boundary reads as one edit.
+
+The document methods have an overload with a result PDF path. Any edit list can be
+rendered by an output generator — `PdfOutputGenerator`, `HtmlDiffOutputGenerator`
+and `MarkdownDiffOutputGenerator` (these two also return a string through
+`IStringOutputGenerator`) and `JsonDiffOutputGenerator` (file only), all
+`IFileOutputGenerator`s. The PDF and HTML generators take an `OutputTextStyle`
+(`InsertedStyle`, `DeletedStyle`, `EqualStyle` as `TextStyle` colours,
+`StrikethroughDeleted`), and the PDF one a `PageInfo` for the page geometry.
+`CreateComparisonStatistics` counts characters and operations: a
+`TextItemComparisonStatistics` for one list (`TotalCharacters`,
+`DeletedCharactersCount`, `InsertedCharactersCount`, `DeleteOperationsCount`,
+`InsertOperationsCount`), or a `DocumentComparisonStatistics` with the document
+totals plus `PagesStatistics` for a per-page result.
+
+```csharp
+using Aspose.Pdf;
+using Aspose.Pdf.Comparison;
+
+using var v1 = new Document("contract-v1.pdf");
+using var v2 = new Document("contract-v2.pdf");
+
+var options = new ComparisonOptions { ExcludeTables = true };
+var diffs = TextPdfComparer.CompareDocumentsPageByPage(v1, v2, options);
+
+DocumentComparisonStatistics stats = TextPdfComparer.CreateComparisonStatistics(diffs);
+Console.WriteLine($"{stats.DeleteOperationsCount} deletions, {stats.InsertOperationsCount} insertions");
+
+new HtmlDiffOutputGenerator().GenerateOutput(diffs, "changes.html");
+string markdown = new MarkdownDiffOutputGenerator().GenerateOutput(diffs);
+```
 
 ## Notes
 
-- Side-by-side comparison is **text-based**: it compares extracted text runs, so a
-  change that leaves the text identical (a recoloured heading, a moved image) does
-  not register. Use the graphical comparer for those.
-- `ExcludeTables` drops table content from the comparison — useful when a data table
+- Side-by-side and `TextPdfComparer` comparison are **text-based**: they compare
+  extracted text, so a change that leaves the text identical (a recoloured heading,
+  a moved image) does not register. Use the graphical comparer for those.
+- `ExcludeTables` (on both option classes) drops table content from the comparison — useful when a data table
   is regenerated every run and would swamp the real prose changes.

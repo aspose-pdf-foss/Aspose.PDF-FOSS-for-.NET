@@ -38,4 +38,8 @@ public sealed class SignatureAppearance
     /// <summary>Optional image bytes embedded into the appearance XObject
     /// as the signature graphic.</summary>
     public byte[]? ImageBytes { get; set; }
+
+    /// <summary>The metadata labels a caller-shaped appearance keeps even when their
+    /// value is empty; null for the plain banner, which drops empty rows.</summary>
+    internal BannerLabels? Labels { get; set; }
 }

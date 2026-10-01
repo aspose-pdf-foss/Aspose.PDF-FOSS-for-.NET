@@ -9,7 +9,12 @@ namespace Aspose.Pdf.Text;
 /// </summary>
 public sealed class AbsorbedCell : IComparable<AbsorbedCell>
 {
+    /// <summary>Creates an empty cell with no text and no rectangle.</summary>
+    public AbsorbedCell() { }
+
+    /// <summary>Gets the text of the cell; empty by default.</summary>
     public string Text { get; init; } = "";
+    /// <summary>Gets the bounding rectangle of the cell on the page, in points; <c>null</c> when unknown.</summary>
     public Rectangle? Rect { get; init; }
     /// <summary>Alias for Rect.</summary>
     public Rectangle? Rectangle => Rect;

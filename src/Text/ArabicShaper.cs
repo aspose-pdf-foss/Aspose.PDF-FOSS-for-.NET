@@ -96,6 +96,15 @@ internal static class ArabicShaper
         return BidiReorderer.ReorderIfNeeded(Shape(text));
     }
 
+    /// <summary>Like <see cref="ShapeForDisplay"/> for a paragraph that reads left to
+    /// right whatever it starts with: a generated fragment keeps its segments in order,
+    /// each Arabic one flipped in place.</summary>
+    public static string ShapeForLtrParagraph(string text)
+    {
+        if (string.IsNullOrEmpty(text) || !ContainsArabic(text)) return text;
+        return BidiReorderer.ReorderOnLtrParagraph(Shape(text));
+    }
+
     /// <summary>Replace base Arabic letters with their contextual presentation forms
     /// and form lam-alef ligatures. Non-Arabic characters pass through unchanged.</summary>
     public static string Shape(string text)

@@ -1,9 +1,10 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.Functions;
 using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Annotations;
 
+/// <summary>A free-text annotation: text shown directly on the page inside a box, styled by its default appearance.</summary>
 public partial class FreeTextAnnotation : MarkupAnnotation
 {
     internal FreeTextAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -14,7 +15,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     {
         Dict.Set("Subtype", new PdfName("FreeText"));
         _defaultAppearance = appearance ?? DefaultFreeTextAppearance();
-        Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(_defaultAppearance.ToAppearanceString())));
+        Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(_defaultAppearance.ToAppearanceString())));
     }
 
     /// <summary>Document-bound ctor for creating a FreeTextAnnotation that
@@ -25,7 +26,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     {
         Dict.Set("Subtype", new PdfName("FreeText"));
         _defaultAppearance = appearance ?? DefaultFreeTextAppearance();
-        Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(_defaultAppearance.ToAppearanceString())));
+        Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(_defaultAppearance.ToAppearanceString())));
     }
 
     /// <summary>Fallback /DA for a FreeText annotation created with no explicit
@@ -42,7 +43,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         set
         {
             if (value is null) Dict.Remove("DA");
-            else Dict.Set("DA", new PdfString(System.Text.Encoding.Latin1.GetBytes(value)));
+            else Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(value)));
         }
     }
 
@@ -61,7 +62,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         if (string.IsNullOrWhiteSpace(da)) return null;
         var ci = System.Globalization.CultureInfo.InvariantCulture;
         var t = da.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        bool TryD(string s, out double v) => double.TryParse(s, System.Globalization.NumberStyles.Float, ci, out v);
+        double? TryD(string s) => double.TryParse(s, System.Globalization.NumberStyles.Float, ci, out var v) ? v : null;
         string fontName = "Helvetica"; double size = 12; var color = System.Drawing.Color.Black;
         bool got = false;
         for (int i = 0; i < t.Length; i++)
@@ -69,14 +70,14 @@ public partial class FreeTextAnnotation : MarkupAnnotation
             if (t[i] == "Tf" && i >= 2)
             {
                 if (t[i - 2].StartsWith("/")) fontName = NormalizeDaFontName(t[i - 2].Substring(1));
-                if (TryD(t[i - 1], out var s) && s > 0) size = s;
+                if (TryD(t[i - 1]) is { } s && s > 0) size = s;
                 got = true;
             }
-            else if (t[i] == "rg" && i >= 3 && TryD(t[i - 3], out var r) && TryD(t[i - 2], out var g) && TryD(t[i - 1], out var b))
+            else if (t[i] == "rg" && i >= 3 && TryD(t[i - 3]) is { } r && TryD(t[i - 2]) is { } g && TryD(t[i - 1]) is { } b)
             { color = System.Drawing.Color.FromArgb(C(r), C(g), C(b)); got = true; }
-            else if (t[i] == "g" && i >= 1 && TryD(t[i - 1], out var gray))
+            else if (t[i] == "g" && i >= 1 && TryD(t[i - 1]) is { } gray)
             { color = System.Drawing.Color.FromArgb(C(gray), C(gray), C(gray)); got = true; }
-            else if (t[i] == "k" && i >= 4 && TryD(t[i - 4], out var c) && TryD(t[i - 3], out var m) && TryD(t[i - 2], out var y) && TryD(t[i - 1], out var k))
+            else if (t[i] == "k" && i >= 4 && TryD(t[i - 4]) is { } c && TryD(t[i - 3]) is { } m && TryD(t[i - 2]) is { } y && TryD(t[i - 1]) is { } k)
             { color = System.Drawing.Color.FromArgb(C((1 - c) * (1 - k)), C((1 - m) * (1 - k)), C((1 - y) * (1 - k))); got = true; }
         }
         return got ? new DefaultAppearance(fontName, size, color) : null;
@@ -153,231 +154,6 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         Dict.Remove("AP");
         InvalidateAppearanceCache();
         GenerateAppearance();
-    }
-
-    internal void GenerateAppearance()
-    {
-        if (InternalReader.ResolveDict(Dict.Get("AP")) is not null) return;
-        // Text is taken from /Contents, falling back to the plain text of the
-        // /RC rich-text packet when /Contents is empty (a FreeText can carry its
-        // text only as rich text).
-        var text = Contents;
-        if (string.IsNullOrEmpty(text)) text = PlainTextFromRichText(RichText);
-        if (string.IsNullOrEmpty(text)) return;
-        var rect = Rect;
-        if (rect is null || rect.Width <= 0 || rect.Height <= 0) return;
-
-        var da = DefaultAppearanceObject;
-        var fontName = string.IsNullOrWhiteSpace(da.FontName) ? "Helvetica" : da.FontName!;
-        var fontSize = da.FontSize > 0 ? da.FontSize : 12.0;
-        var color = da.TextColor;
-
-        // Explicit TextStyle values (those differing from its defaults) take precedence
-        // over /DA, so formatting set via TextStyle after creation is honoured.
-        var ts = TextStyle;
-        if (ts is not null)
-        {
-            if (ts.FontSize > 0 && System.Math.Abs(ts.FontSize - 12.0) > 1e-6) fontSize = ts.FontSize;
-            if (ts.Color.ToArgb() != System.Drawing.Color.Black.ToArgb()) color = ts.Color;
-            if (!string.IsNullOrWhiteSpace(ts.FontName) && ts.FontName != "Helvetica") fontName = ts.FontName;
-        }
-
-        double w = rect.Width, h = rect.Height;
-        var borderWidth = ReadBorderWidth();
-        // Text inset scales with the border: 2pt inside a standard 1pt border, flush
-        // with the rectangle for a borderless (W=0) typewriter annotation. Calibrated
-        // so that a 12pt Helvetica line of 130.08pt in a 136.05pt
-        // bordered rect stays on one line (inset ≤ 2.98), while a 12pt Courier line
-        // of 93.6pt in a 96.3pt borderless rect also stays whole (inset ≤ 1.36).
-        var inset = 2.0 * borderWidth;
-        var avail = System.Math.Max(1.0, w - 2 * inset);
-
-        // Arbitrary rotation (Adobe XFDF /Rotate, in degrees). When set, the text is
-        // rotated about the rectangle centre and /Rect is expanded to the rotated
-        // bounding box so the rotated text isn't clipped by the appearance /BBox.
-        double rotateDeg = InternalReader.Resolve(Dict.Get("Rotate")) switch
-        {
-            PdfReal rrv => rrv.Value,
-            PdfInteger riv => riv.Value,
-            _ => 0,
-        };
-        bool rotated = System.Math.Abs(rotateDeg % 360.0) > 1e-6;
-        // ★ A QUARTER TURN (the Rotation enum: on90/on180/on270) is a different model
-        // from the arbitrary-degree XFDF rotation below. /Rect is ALREADY the box the
-        // caller wants — Rectangle.Rotate turned it about its centre, so a 200x30 box
-        // is now the 30x200 box the appearance is drawn in — and re-expanding it here would
-        // rotate the box straight back. The box is kept and only the TEXT turns inside
-        // it: measured on rotated FreeText output, the border is the
-        // plain inset rectangle and the text runs along the box's long axis from the
-        // leading edge, lines advancing across it.
-        bool quarterTurn = rotated && System.Math.Abs(rotateDeg % 90.0) < 1e-6;
-        double bboxW = w, bboxH = h, rcos = 1, rsin = 0, ehw = w / 2, ehh = h / 2;
-        if (rotated && !quarterTurn)
-        {
-            double th = rotateDeg * System.Math.PI / 180.0;
-            rcos = System.Math.Cos(th); rsin = System.Math.Sin(th);
-            ehw = System.Math.Abs(w / 2 * rcos) + System.Math.Abs(h / 2 * rsin);
-            ehh = System.Math.Abs(w / 2 * rsin) + System.Math.Abs(h / 2 * rcos);
-            bboxW = 2 * ehw; bboxH = 2 * ehh;
-            double cx = (rect.LLX + rect.URX) / 2, cy = (rect.LLY + rect.URY) / 2;
-            var exp = new PdfArray();
-            exp.Add(new PdfReal(cx - ehw)); exp.Add(new PdfReal(cy - ehh));
-            exp.Add(new PdfReal(cx + ehw)); exp.Add(new PdfReal(cy + ehh));
-            Dict.Set("Rect", exp);
-        }
-
-        // A quarter turn runs the text along the box's OTHER axis, so that is the
-        // measure it wraps against — wrapping to the box's width would break a line
-        // that comfortably fits the length it is actually drawn along.
-        if (quarterTurn && (System.Math.Abs(rotateDeg % 180.0) > 1e-6))
-            avail = System.Math.Max(1.0, h - 2 * inset);
-
-        var fontDict = MakeFreeTextFontDict(fontName);
-        var metrics = Aspose.Pdf.Text.FontMetrics.FromFontDict(fontDict, InternalReader);
-        var lines = WrapText(text, metrics, fontSize, avail);
-
-        var ci = System.Globalization.CultureInfo.InvariantCulture;
-        string Fmt(double v) => v.ToString("0.###", ci);
-
-        var leading = fontSize * 1.2;
-        var sb = new System.Text.StringBuilder();
-
-        // A FreeText annotation's /C entry is its background colour: fill the
-        // rectangle with it (behind border and text) when
-        // present. Only the unrotated rect is filled —
-        // BBox == rect there; rotated FreeText backgrounds are rare and skipped.
-        if ((!rotated || quarterTurn) && InternalReader.Resolve(Dict.Get("C")) is PdfArray bgArr && bgArr.Count >= 3)
-        {
-            var bg = Color;
-            sb.Append("q\n");
-            sb.Append(Fmt(bg.R / 255.0)).Append(' ').Append(Fmt(bg.G / 255.0)).Append(' ')
-              .Append(Fmt(bg.B / 255.0)).Append(" rg\n");
-            sb.Append("0 0 ").Append(Fmt(w)).Append(' ').Append(Fmt(h)).Append(" re\nf\nQ\n");
-        }
-
-        // Stroke the border rectangle so a styled/dashed border is visible. The
-        // stroke uses the text colour and is inset by half the line width so it
-        // sits centred on the rectangle edge.
-        // A FreeText with no /BS or /Border entry gets the PDF-default 1pt border
-        // (PDF 32000-1 §12.5.4 /Border default [0 0 1]) — only an explicit zero
-        // width suppresses it.
-        var bsDict = InternalReader.ResolveDict(Dict.Get("BS"));
-        if (borderWidth > 0)
-        {
-            bool dashed = bsDict?.Get("S") is PdfName sn && sn.Value == "D";
-            sb.Append("q\n");
-            sb.Append(Fmt(color.R / 255.0)).Append(' ').Append(Fmt(color.G / 255.0)).Append(' ')
-              .Append(Fmt(color.B / 255.0)).Append(" RG\n");
-            sb.Append(Fmt(borderWidth / 2)).Append(' ').Append(Fmt(borderWidth / 2)).Append(' ')
-              .Append(Fmt(w - borderWidth)).Append(' ').Append(Fmt(h - borderWidth)).Append(" re\n");
-            sb.Append(Fmt(borderWidth)).Append(" w\n");
-            if (dashed && InternalReader.Resolve(bsDict!.Get("D")) is PdfArray dArr && dArr.Count > 0)
-            {
-                sb.Append('[');
-                for (int k = 0; k < dArr.Count; k++)
-                {
-                    if (k > 0) sb.Append(' ');
-                    sb.Append(Fmt(PdfArrayHelper.GetDouble(dArr, k)));
-                }
-                sb.Append("] 0 d\n");
-            }
-            sb.Append("s\nQ\n");
-        }
-
-        sb.Append("/Tx BMC\nq\n");
-        if (quarterTurn)
-        {
-            // Turn the TEXT inside the (already-rotated) box. The frame's advance
-            // direction runs along the box's new long axis and its "up" points at the
-            // box edge that became the top; the first baseline is seated exactly as the
-            // unrotated path seats it — `inset` in from the leading edge and one
-            // fontSize down from the top inset — just measured along those axes.
-            string Fmt6(double v) => v.ToString("0.######", ci);
-            var turn = (((int)System.Math.Round(rotateDeg) % 360) + 360) % 360;
-            // (advance, up) per turn, then the frame origin that seats the first baseline.
-            var (fa, fb, fc, fd, ox, oy) = turn switch
-            {
-                90 => (0.0, 1.0, -1.0, 0.0, inset + fontSize, inset),
-                180 => (-1.0, 0.0, 0.0, -1.0, w - inset, h - inset - fontSize),
-                _ => (0.0, -1.0, 1.0, 0.0, w - inset - fontSize, h - inset),
-            };
-            sb.Append(Fmt6(fa)).Append(' ').Append(Fmt6(fb)).Append(' ')
-              .Append(Fmt6(fc)).Append(' ').Append(Fmt6(fd)).Append(' ')
-              .Append(Fmt6(ox)).Append(' ').Append(Fmt6(oy)).Append(" cm\n");
-        }
-        else if (rotated)
-        {
-            // Rotate the text about the expanded box centre. The frame origin is the
-            // box left edge (inset) at the vertical centre, so the rotated text stays
-            // anchored to the rectangle's leading edge.
-            string Fmt6(double v) => v.ToString("0.######", ci);
-            double e = ehw - (ehw - inset) * rcos;
-            double f = ehh - (ehw - inset) * rsin;
-            sb.Append(Fmt6(rcos)).Append(' ').Append(Fmt6(rsin)).Append(' ')
-              .Append(Fmt6(-rsin)).Append(' ').Append(Fmt6(rcos)).Append(' ')
-              .Append(Fmt6(e)).Append(' ').Append(Fmt6(f)).Append(" cm\n");
-        }
-        sb.Append("BT\n");
-        sb.Append('/').Append(ResName(fontName)).Append(' ').Append(Fmt(fontSize)).Append(" Tf\n");
-        sb.Append(Fmt(color.R / 255.0)).Append(' ').Append(Fmt(color.G / 255.0)).Append(' ')
-          .Append(Fmt(color.B / 255.0)).Append(" rg\n");
-        sb.Append(Fmt(leading)).Append(" TL\n");
-        // Alignment is taken from the persisted /Q justification (which survives a
-        // re-wrap of the annotation on save), falling back to the in-memory TextStyle.
-        var align = Justification switch
-        {
-            Justification.Right => Aspose.Pdf.HorizontalAlignment.Right,
-            Justification.Center => Aspose.Pdf.HorizontalAlignment.Center,
-            _ => ts?.HorizontalAlignment ?? Aspose.Pdf.HorizontalAlignment.Left,
-        };
-        if (rotated || align == Aspose.Pdf.HorizontalAlignment.Left)
-        {
-            // A quarter turn needs no Td — its frame above already sits at the first baseline.
-            if (rotated && !quarterTurn)
-                sb.Append("2 ").Append(Fmt(-fontSize)).Append(" Td\n");
-            else if (!rotated)
-                sb.Append(Fmt(inset)).Append(' ').Append(Fmt(h - inset - fontSize)).Append(" Td\n");
-            for (int i = 0; i < lines.Count; i++)
-            {
-                if (i > 0) sb.Append("T*\n");
-                sb.Append('(').Append(EscapePdfString(lines[i])).Append(") Tj\n");
-            }
-        }
-        else
-        {
-            // Center/Right alignment: each line is offset by its own measured width,
-            // so emit a per-line Td (relative to the previous line's position).
-            double prevX = 0;
-            for (int i = 0; i < lines.Count; i++)
-            {
-                var lineW = metrics.MeasureString(lines[i], fontSize);
-                double lineX = align == Aspose.Pdf.HorizontalAlignment.Right
-                    ? w - lineW
-                    : (w - lineW) / 2;
-                double dy = i == 0 ? h - inset - fontSize : -leading;
-                sb.Append(Fmt(lineX - prevX)).Append(' ').Append(Fmt(dy)).Append(" Td\n");
-                sb.Append('(').Append(EscapePdfString(lines[i])).Append(") Tj\n");
-                prevX = lineX;
-            }
-        }
-        sb.Append("ET\nQ\nEMC\n");
-
-        var apStream = new PdfStream(new PdfDictionary(), System.Text.Encoding.Latin1.GetBytes(sb.ToString()));
-        apStream.Dict.Set("Type", new PdfName("XObject"));
-        apStream.Dict.Set("Subtype", new PdfName("Form"));
-        var bbox = new PdfArray();
-        bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(0));
-        bbox.Add(new PdfReal(bboxW)); bbox.Add(new PdfReal(bboxH));
-        apStream.Dict.Set("BBox", bbox);
-        var fonts = new PdfDictionary();
-        fonts.Set(ResName(fontName), fontDict);
-        var res = new PdfDictionary();
-        res.Set("Font", fonts);
-        apStream.Dict.Set("Resources", res);
-
-        var ap = new PdfDictionary();
-        ap.Set("N", apStream);
-        Dict.Set("AP", ap);
     }
 
     /// <summary>Extract the plain text of a FreeText /RC rich-text packet: strip the
@@ -813,124 +589,91 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     /// Word-wraps within the rectangle, measuring each run with its styled font variant.</summary>
     internal void RegenerateStyledAppearance()
     {
-        var rect = Rect;
-        if (rect is null || rect.Width <= 0 || rect.Height <= 0) return;
-        var text = Contents;
-        if (string.IsNullOrEmpty(text)) text = PlainTextFromRichText(RichText);
-        if (string.IsNullOrEmpty(text)) return;
-        text = text!.Replace("\r\n", "\n").Replace("\r", "\n");
+        var ra = new StyledAppearanceState();
+        ra.rect = Rect;
+        if (ra.rect is null || ra.rect.Width <= 0 || ra.rect.Height <= 0) return;
+        ra.text = Contents;
+        if (string.IsNullOrEmpty(ra.text)) ra.text = PlainTextFromRichText(RichText);
+        if (string.IsNullOrEmpty(ra.text)) return;
+        ra.text = ra.text!.Replace("\r\n", "\n").Replace("\r", "\n");
 
-        var da = DefaultAppearanceObject;
-        string baseFont = string.IsNullOrWhiteSpace(da.FontName) ? "Helvetica" : da.FontName!;
-        double size = da.FontSize > 0 ? da.FontSize : 12.0;
-        var color = da.TextColor;
+        ra.da = DefaultAppearanceObject;
+        ra.baseFont = string.IsNullOrWhiteSpace(ra.da.FontName) ? "Helvetica" : ra.da.FontName!;
+        ra.size = ra.da.FontSize > 0 ? ra.da.FontSize : 12.0;
+        ra.color = ra.da.TextColor;
 
-        double border = BorderExplicitlyZero() ? 0 : System.Math.Max(1.0, ReadBorderWidth());
-        double inset = border + 2.0;
-        double w = rect.Width, h = rect.Height;
-        double avail = System.Math.Max(1.0, w - 2 * inset);
-        double leading = size * 1.15;
+        ra.border = BorderExplicitlyZero() ? 0 : System.Math.Max(1.0, ReadBorderWidth());
+        ra.inset = ra.border + 2.0;
+        ra.w = ra.rect.Width;
+        ra.h = ra.rect.Height;
+        ra.avail = System.Math.Max(1.0, ra.w - 2 * ra.inset);
+        ra.leading = ra.size * 1.15;
 
-        var styles = ResolveCharStyles(text.Length);
+        ra.styles = ResolveCharStyles(ra.text.Length);
 
-        // Per-variant font dict + metrics cache.
-        var fontDicts = new System.Collections.Generic.Dictionary<string, PdfDictionary>();
-        var metricsCache = new System.Collections.Generic.Dictionary<string, Aspose.Pdf.Text.FontMetrics>();
-        PdfDictionary FontDict(string v) { if (!fontDicts.TryGetValue(v, out var d)) { d = MakeFreeTextFontDict(v); fontDicts[v] = d; } return d; }
-        Aspose.Pdf.Text.FontMetrics Metrics(string v) { if (!metricsCache.TryGetValue(v, out var m)) { m = Aspose.Pdf.Text.FontMetrics.FromFontDict(FontDict(v), InternalReader); metricsCache[v] = m; } return m; }
-        string VarOf(RichTextFontStyles s) => VariantFontName(baseFont,
-            (s & RichTextFontStyles.Bold) != 0, (s & RichTextFontStyles.Italic) != 0);
-        double CharW(char c, RichTextFontStyles s) => Metrics(VarOf(s)).MeasureString(c.ToString(), size);
-
-        // Tokenise into words / spaces / newlines (carrying each char's style), then greedily
-        // wrap into output lines no wider than `avail`.
-        var outLines = new System.Collections.Generic.List<System.Collections.Generic.List<(char ch, RichTextFontStyles st)>>();
-        var line = new System.Collections.Generic.List<(char, RichTextFontStyles)>();
-        double lineW = 0;
-        var word = new System.Collections.Generic.List<(char ch, RichTextFontStyles st)>();
-        double wordW = 0;
-        void FlushWord()
+        ra.fontDicts = new System.Collections.Generic.Dictionary<string, PdfDictionary>();
+        ra.metricsCache = new System.Collections.Generic.Dictionary<string, Aspose.Pdf.Text.FontMetrics>();
+        ra.outLines = new System.Collections.Generic.List<System.Collections.Generic.List<(char ch, RichTextFontStyles st)>>();
+        ra.line = new System.Collections.Generic.List<(char, RichTextFontStyles)>();
+        ra.lineW = 0;
+        ra.word = new System.Collections.Generic.List<(char ch, RichTextFontStyles st)>();
+        ra.wordW = 0;
+        for (int i = 0; i < ra.text.Length; i++)
         {
-            if (word.Count == 0) return;
-            if (lineW > 0 && lineW + wordW > avail) { outLines.Add(line); line = new(); lineW = 0; }
-            foreach (var t in word) { line.Add(t); }
-            lineW += wordW; word.Clear(); wordW = 0;
-        }
-        for (int i = 0; i < text.Length; i++)
-        {
-            char c = text[i]; var s = styles[i];
-            if (c == '\n') { FlushWord(); outLines.Add(line); line = new(); lineW = 0; continue; }
+            char c = ra.text[i]; var s = ra.styles[i];
+            if (c == '\n') { FtFlushWord(ra); ra.outLines.Add(ra.line); ra.line = new(); ra.lineW = 0; continue; }
             if (c == ' ')
             {
-                FlushWord();
-                double sw = CharW(' ', s);
-                if (lineW > 0) { line.Add((c, s)); lineW += sw; } // skip leading spaces after a wrap
+                FtFlushWord(ra);
+                double sw = FtCharW(ra, ' ', s);
+                if (ra.lineW > 0) { ra.line.Add((c, s)); ra.lineW += sw; } // skip leading spaces after a wrap
                 continue;
             }
-            word.Add((c, s)); wordW += CharW(c, s);
+            ra.word.Add((c, s)); ra.wordW += FtCharW(ra, c, s);
         }
-        FlushWord();
-        if (line.Count > 0 || outLines.Count == 0) outLines.Add(line);
+        FtFlushWord(ra);
+        if (ra.line.Count > 0 || ra.outLines.Count == 0) ra.outLines.Add(ra.line);
 
-        var ci = System.Globalization.CultureInfo.InvariantCulture;
-        string F(double v) => v.ToString("0.###", ci);
-        var sb = new System.Text.StringBuilder();
+        ra.ci = System.Globalization.CultureInfo.InvariantCulture;
+        ra.sb = new System.Text.StringBuilder();
 
         // Border box (default 1pt unless set to 0), stroked in the text colour.
-        if (border > 0)
+        if (ra.border > 0)
         {
-            sb.Append("q\n").Append(F(color.R / 255.0)).Append(' ').Append(F(color.G / 255.0)).Append(' ')
-              .Append(F(color.B / 255.0)).Append(" RG\n").Append(F(border)).Append(" w\n")
-              .Append(F(border / 2)).Append(' ').Append(F(border / 2)).Append(' ')
-              .Append(F(w - border)).Append(' ').Append(F(h - border)).Append(" re\nS\nQ\n");
+            ra.sb.Append("q\n").Append(FtNum(ra, ra.color.R / 255.0)).Append(' ').Append(FtNum(ra, ra.color.G / 255.0)).Append(' ')
+              .Append(FtNum(ra, ra.color.B / 255.0)).Append(" RG\n").Append(FtNum(ra, ra.border)).Append(" w\n")
+              .Append(FtNum(ra, ra.border / 2)).Append(' ').Append(FtNum(ra, ra.border / 2)).Append(' ')
+              .Append(FtNum(ra, ra.w - ra.border)).Append(' ').Append(FtNum(ra, ra.h - ra.border)).Append(" re\nS\nQ\n");
         }
 
-        var underlines = new System.Collections.Generic.List<(double x, double y, double len)>();
-        sb.Append("/Tx BMC\nq\nBT\n");
-        sb.Append(F(color.R / 255.0)).Append(' ').Append(F(color.G / 255.0)).Append(' ').Append(F(color.B / 255.0)).Append(" rg\n");
-        double y0 = h - inset - size;
-        for (int li = 0; li < outLines.Count; li++)
+        ra.underlines = new System.Collections.Generic.List<(double x, double y, double len)>();
+        ra.sb.Append("/Tx BMC\nq\nBT\n");
+        ra.sb.Append(FtNum(ra, ra.color.R / 255.0)).Append(' ').Append(FtNum(ra, ra.color.G / 255.0)).Append(' ').Append(FtNum(ra, ra.color.B / 255.0)).Append(" rg\n");
+        ra.y0 = ra.h - ra.inset - ra.size;
+        for (int li = 0; li < ra.outLines.Count; li++)
         {
-            double baseY = y0 - li * leading;
-            if (baseY < -size) break; // ran past the bottom of the box
-            double x = inset;
-            var cells = outLines[li];
-            int j = 0;
-            while (j < cells.Count)
-            {
-                var st = cells[j].st;
-                var run = new System.Text.StringBuilder();
-                double runW = 0;
-                while (j < cells.Count && cells[j].st == st) { run.Append(cells[j].ch); runW += CharW(cells[j].ch, st); j++; }
-                string v = VarOf(st);
-                sb.Append("/").Append(ResName(v)).Append(' ').Append(F(size)).Append(" Tf\n");
-                sb.Append("1 0 0 1 ").Append(F(x)).Append(' ').Append(F(baseY)).Append(" Tm\n");
-                sb.Append('(').Append(EscapePdfString(run.ToString())).Append(") Tj\n");
-                if ((st & RichTextFontStyles.Underline) != 0)
-                    underlines.Add((x, baseY - size * 0.12, runW));
-                x += runW;
-            }
+            if (!EmitStyledAppearanceLine(ra, li)) break;
         }
-        sb.Append("ET\n");
-        foreach (var (ux, uy, ulen) in underlines)
-            sb.Append(F(color.R / 255.0)).Append(' ').Append(F(color.G / 255.0)).Append(' ').Append(F(color.B / 255.0)).Append(" RG\n")
-              .Append(F(System.Math.Max(0.5, size * 0.06))).Append(" w\n")
-              .Append(F(ux)).Append(' ').Append(F(uy)).Append(" m\n").Append(F(ux + ulen)).Append(' ').Append(F(uy)).Append(" l\nS\n");
-        sb.Append("Q\nEMC\n");
+        ra.sb.Append("ET\n");
+        foreach (var (ux, uy, ulen) in ra.underlines)
+            ra.sb.Append(FtNum(ra, ra.color.R / 255.0)).Append(' ').Append(FtNum(ra, ra.color.G / 255.0)).Append(' ').Append(FtNum(ra, ra.color.B / 255.0)).Append(" RG\n")
+              .Append(FtNum(ra, System.Math.Max(0.5, ra.size * 0.06))).Append(" w\n")
+              .Append(FtNum(ra, ux)).Append(' ').Append(FtNum(ra, uy)).Append(" m\n").Append(FtNum(ra, ux + ulen)).Append(' ').Append(FtNum(ra, uy)).Append(" l\nS\n");
+        ra.sb.Append("Q\nEMC\n");
 
-        var apStream = new PdfStream(new PdfDictionary(), System.Text.Encoding.Latin1.GetBytes(sb.ToString()));
-        apStream.Dict.Set("Type", new PdfName("XObject"));
-        apStream.Dict.Set("Subtype", new PdfName("Form"));
-        var bbox = new PdfArray();
-        bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(0)); bbox.Add(new PdfReal(w)); bbox.Add(new PdfReal(h));
-        apStream.Dict.Set("BBox", bbox);
-        var fonts = new PdfDictionary();
-        foreach (var kv in fontDicts) fonts.Set(ResName(kv.Key), kv.Value);
-        var res = new PdfDictionary();
-        res.Set("Font", fonts);
-        apStream.Dict.Set("Resources", res);
-        var ap = new PdfDictionary();
-        ap.Set("N", apStream);
-        Dict.Set("AP", ap);
+        ra.apStream = new PdfStream(new PdfDictionary(), Compat.Latin1.GetBytes(ra.sb.ToString()));
+        ra.apStream.Dict.Set("Type", new PdfName("XObject"));
+        ra.apStream.Dict.Set("Subtype", new PdfName("Form"));
+        ra.bbox = new PdfArray();
+        ra.bbox.Add(new PdfReal(0)); ra.bbox.Add(new PdfReal(0)); ra.bbox.Add(new PdfReal(ra.w)); ra.bbox.Add(new PdfReal(ra.h));
+        ra.apStream.Dict.Set("BBox", ra.bbox);
+        ra.fonts = new PdfDictionary();
+        foreach (var kv in ra.fontDicts) ra.fonts.Set(ResName(kv.Key), kv.Value);
+        ra.res = new PdfDictionary();
+        ra.res.Set("Font", ra.fonts);
+        ra.apStream.Dict.Set("Resources", ra.res);
+        ra.ap = new PdfDictionary();
+        ra.ap.Set("N", ra.apStream);
+        Dict.Set("AP", ra.ap);
     }
 }

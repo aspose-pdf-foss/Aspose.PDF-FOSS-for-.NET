@@ -10,11 +10,16 @@ public class ButtonField : Field
 {
     internal ButtonField(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
+    /// <summary>Creates a push-button field that is not yet bound to a document; add it through <c>Form.Add</c>.</summary>
     public ButtonField() : base(BuildButtonDict(), PdfReader.Empty) { }
 
+    /// <summary>Creates a push-button field for the given document with its widget at the given rectangle.
+    /// The field is not placed until it is added through <c>Form.Add</c>.</summary>
     public ButtonField(Document doc, Rectangle rect)
         : base(BuildButtonDict(rect), doc?.Reader ?? PdfReader.Empty) { }
 
+    /// <summary>Creates a push-button field for the page's document with its widget at the given rectangle.
+    /// The field is not placed until it is added through <c>Form.Add</c>.</summary>
     public ButtonField(Page page, Rectangle rect)
         : base(BuildButtonDict(rect), page?.Reader ?? PdfReader.Empty) { }
 
@@ -54,7 +59,7 @@ public class ButtonField : Field
             if (value is null)
                 mk.Remove("CA");
             else
-                mk.Set("CA", new PdfString(System.Text.Encoding.Latin1.GetBytes(value)));
+                mk.Set("CA", new PdfString(Compat.Latin1.GetBytes(value)));
             // Drop any pre-existing /AP so the button face is rebuilt with the new
             // caption (a loaded button carries a baked-in appearance that
             // GenerateAppearance would otherwise leave untouched).
@@ -68,8 +73,8 @@ public class ButtonField : Field
     internal override void GenerateAppearance()
     {
         if (Reader.ResolveDict(Dict.Get("AP")) is not null) return;
-        if (!TryWidgetSize(out var w, out var h)) return;
-        ParseDefaultAppearance(out var fontName, out var fontSize);
+        if (TryWidgetSize() is not (var w, var h)) return;
+        var (fontName, fontSize) = ParseDefaultAppearanceFont();
 
         // A non-solid border style (Beveled/Inset/Underline/Dashed) draws
         // style-specific chrome; the plain solid
@@ -237,7 +242,7 @@ public class ButtonField : Field
         if (value is null)
             mk.Remove(key);
         else
-            mk.Set(key, new PdfString(System.Text.Encoding.Latin1.GetBytes(value)));
+            mk.Set(key, new PdfString(Compat.Latin1.GetBytes(value)));
     }
 
     /// <summary>Caption shown when the user holds the mouse button down (/MK /AC).</summary>
@@ -305,7 +310,7 @@ public enum IconCaptionPosition
 
 /// <summary>
 /// PDF Annotation Handler "IF" entry — icon-fit dictionary for push-button widgets.
-/// Stored-only wrapper; values are not currently emitted into /MK /IF.
+/// Read from a widget's /MK /IF when built over one; values are not yet emitted back.
 /// </summary>
 public class IconFit
 {
@@ -314,6 +319,34 @@ public class IconFit
     public double LeftoverLeft { get; set; } = 0.5;
     public double LeftoverBottom { get; set; } = 0.5;
     public bool SpreadOnBorder { get; set; }
+
+    /// <summary>The PDF defaults: proportional, always, centred, not spread.</summary>
+    public IconFit() { }
+
+    /// <summary>The icon-fit settings a widget carries under /MK /IF; a widget without an /IF
+    /// entry reports the PDF defaults.</summary>
+    internal IconFit(FieldDictionaryView widget)
+    {
+        var reader = widget.Reader ?? Aspose.Pdf.IO.PdfReader.Empty;
+        var mk = reader.ResolveDict(widget.Dictionary.Get("MK"));
+        var fit = mk is null ? null : reader.ResolveDict(mk.Get("IF"));
+        if (fit is null) return;
+        if (fit.GetName("SW") is { } reason) ScalingReason = NameToScalingReason(reason);
+        if (fit.GetName("S") is { } mode) ScalingMode = NameToScalingMode(mode);
+        if (reader.ResolveArray(fit.Get("A")) is { Count: >= 2 } leftover)
+        {
+            LeftoverLeft = Fraction(reader.Resolve(leftover[0]), LeftoverLeft);
+            LeftoverBottom = Fraction(reader.Resolve(leftover[1]), LeftoverBottom);
+        }
+        SpreadOnBorder = fit.GetBool("FB", SpreadOnBorder);
+    }
+
+    private static double Fraction(PdfObject? value, double fallback) => value switch
+    {
+        PdfReal real => real.Value,
+        PdfInteger integer => integer.Value,
+        _ => fallback,
+    };
 
     public static ScalingMode NameToScalingMode(string mode) => mode switch
     {
@@ -364,10 +397,12 @@ public enum ScalingReason
     Never = 3,
 }
 
+/// <summary>A signature form field. It exposes the signature already stored in it and can sign the document
+/// with a <c>Signature</c> configuration.</summary>
 public class SignatureField : Field
 {
     /// <summary>Latest signed PDF bytes produced by <see cref="Sign(Signature)"/>.
-    /// The caller retrieves these via the <see cref="OwnerDocument"/>'s
+    /// The caller retrieves these via the <c>OwnerDocument</c>'s
     /// document-level signing flow — the field itself can't mutate its
     /// owner Document's underlying byte buffer in the FOSS build.</summary>
     private byte[]? _signedBytes;
@@ -492,7 +527,7 @@ public class SignatureField : Field
         // Windows serve the render (or the stored appearance) for PNG and report
         // null for the formats that genuinely need GDI+; the Windows path below
         // stays byte-identical.
-        if (!OperatingSystem.IsWindows())
+        if (!Compat.IsWindows())
         {
             // ImageFormat is inert metadata - comparing codec GUIDs runs anywhere;
             // only ENCODING through System.Drawing is Windows-bound. The analyzer
@@ -652,8 +687,12 @@ public sealed class RadioButtonOptionField : RadioButtonField
     // RadioButtonOptionField while the object still behaves like the RadioButtonField the
     // XFA/value machinery expects. The option-specific properties below shadow (new) the
     // inherited members so the stored-only generator semantics are unchanged.
+    /// <summary>Creates an option with no rectangle; its <c>Width</c> and <c>Height</c> size the widget when it is
+    /// added to a radio group.</summary>
     public RadioButtonOptionField() : base(new PdfDictionary(), PdfReader.Empty) { }
 
+    /// <summary>Creates an option whose widget is placed at the given rectangle when it is added to a radio group.
+    /// The page argument is not used; the group decides the page.</summary>
     public RadioButtonOptionField(Page page, Rectangle rect) : base(new PdfDictionary(), PdfReader.Empty)
     {
         _ = page;

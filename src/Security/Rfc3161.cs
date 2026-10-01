@@ -44,11 +44,11 @@ internal static class Rfc3161
         if (!string.IsNullOrEmpty(basicAuth))
             message.Headers.Authorization = new AuthenticationHeaderValue("Basic", basicAuth);
 
-        using var response = Http.Send(message, HttpCompletionOption.ResponseContentRead);
+        using var response = Compat.Send(Http, message, HttpCompletionOption.ResponseContentRead);
         response.EnsureSuccessStatusCode();
 
         byte[] respBytes;
-        using (var stream = response.Content.ReadAsStream())
+        using (var stream = Compat.ReadAsStream(response.Content))
         using (var buffer = new MemoryStream())
         {
             stream.CopyTo(buffer);
@@ -72,7 +72,7 @@ internal static class Rfc3161
             // needed here with the eContent supplied as the "detached" content.
             if (!CmsBuilder.VerifyDetached(tstInfo, token)) return false;
 
-            if (!TryReadMessageImprint(tstInfo, out var hashOid, out var hashedMessage))
+            if (TryReadMessageImprint(tstInfo) is not (var hashOid, var hashedMessage))
                 return false;
             var actual = HashByOid(hashOid, timestampedData);
             return actual.AsSpan().SequenceEqual(hashedMessage);
@@ -84,22 +84,20 @@ internal static class Rfc3161
     }
 
     /// <summary>Read the message-imprint digest algorithm from a timestamp token
-    /// (the content hash the timestamp covers). Returns false on any parse
+    /// (the content hash the timestamp covers). Returns null on any parse
     /// failure.</summary>
-    public static bool TryGetContentHashAlgorithm(byte[] token, out DigestHashAlgorithm digest)
+    public static DigestHashAlgorithm? TryGetContentHashAlgorithm(byte[] token)
     {
-        digest = DigestHashAlgorithm.Sha256;
         try
         {
             var tstInfo = ExtractEContent(token);
-            if (tstInfo is null) return false;
-            if (!TryReadMessageImprint(tstInfo, out var hashOid, out _)) return false;
-            digest = MapDigest(hashOid);
-            return true;
+            if (tstInfo is null) return null;
+            if (TryReadMessageImprint(tstInfo) is not (var hashOid, _)) return null;
+            return MapDigest(hashOid);
         }
         catch
         {
-            return false;
+            return null;
         }
     }
 
@@ -113,7 +111,7 @@ internal static class Rfc3161
         //   reqPolicy TSAPolicyId OPTIONAL,          -- omitted
         //   nonce INTEGER OPTIONAL,                   -- random, for freshness
         //   certReq BOOLEAN DEFAULT FALSE }           -- TRUE: embed TSA cert
-        var nonce = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
+        var nonce = Compat.RandomBytes(8);
         var w = new Asn1Writer();
         w.WriteSequence(req =>
         {
@@ -165,8 +163,10 @@ internal static class Rfc3161
         return eContent is null || !eContent.HasData ? null : eContent.ReadOctetString();
     }
 
-    private static bool TryReadMessageImprint(byte[] tstInfo, out string hashOid, out byte[] hashedMessage)
+    private static (string hashOid, byte[] hashedMessage)? TryReadMessageImprint(byte[] tstInfo)
     {
+        string? hashOid = default;
+        byte[]? hashedMessage = default;
         hashOid = string.Empty;
         hashedMessage = [];
         var tst = new Asn1Reader(tstInfo).ReadSequence();
@@ -175,7 +175,7 @@ internal static class Rfc3161
         var messageImprint = tst.ReadSequence();  // MessageImprint
         hashOid = messageImprint.ReadSequence().ReadOid();
         hashedMessage = messageImprint.ReadOctetString();
-        return hashOid.Length > 0 && hashedMessage.Length > 0;
+        return (hashOid.Length > 0 && hashedMessage.Length > 0) ? (hashOid, hashedMessage) : null;
     }
 
     // ── Digest helpers ─────────────────────────────────────────────────

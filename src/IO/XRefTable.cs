@@ -1,9 +1,9 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.IO;
 
-internal sealed class XRefTable
+internal sealed partial class XRefTable
 {
     private readonly Dictionary<int, XRefEntry> _entries = new();
     private readonly HashSet<(int objNum, long offset)> _xrefStreamObjNums = new();
@@ -121,7 +121,40 @@ internal sealed class XRefTable
             ScanTrailersForRoot(data, trailer);
         }
 
+        AdoptScannedTrailerKeys(data, trailer);
         _trailer = trailer;
+    }
+
+    // A file whose table is wrong usually still carries its trailer: the last parseable one names the
+    // document information, the file identifier and the encryption, which the recovered table cannot.
+    private static readonly string[] ScannedTrailerKeys = { "Info", "ID", "Encrypt" };
+
+    private void AdoptScannedTrailerKeys(byte[] data, PdfDictionary trailer)
+    {
+        var text = System.Text.Encoding.ASCII.GetString(data);
+        for (var pos = text.LastIndexOf("trailer", StringComparison.Ordinal); pos >= 0;
+             pos = pos == 0 ? -1 : text.LastIndexOf("trailer", pos - 1, StringComparison.Ordinal))
+        {
+            var at = pos + "trailer".Length;
+            while (at < data.Length && PdfLexer.IsWhitespace(data[at])) at++;
+            if (at >= data.Length || data[at] != '<') continue;
+            PdfDictionary? scanned;
+            try
+            {
+                var parser = new PdfParser(data);
+                parser.Lexer.Position = at;
+                scanned = parser.ParseObject() as PdfDictionary;
+            }
+            catch { continue; /* a malformed trailer: try an earlier one */ }
+            if (scanned is null) continue;
+            foreach (var key in ScannedTrailerKeys)
+            {
+                if (trailer.ContainsKey(key) || scanned.Get(key) is not { } value) continue;
+                if (value is PdfIndirectRef reference && !_entries.ContainsKey(reference.ObjectNumber)) continue;
+                trailer.Set(key, value);
+            }
+            return;
+        }
     }
 
     /// <summary>
@@ -147,42 +180,44 @@ internal sealed class XRefTable
 
                 parser.Lexer.Position = parsePos;
                 var obj = parser.ParseObject();
-                if (obj is PdfDictionary dict && dict.ContainsKey("Root"))
-                {
-                    var rootRef = dict.Get("Root");
-                    if (rootRef is PdfIndirectRef indRef)
-                    {
-                        // Verify the referenced object is a real Catalog by scanning
-                        // the file for the object header and parsing it
-                        var objHeader = $"{indRef.ObjectNumber} {indRef.Generation} obj";
-                        var headerPos = text.IndexOf(objHeader, StringComparison.Ordinal);
-                        if (headerPos >= 0)
-                        {
-                            parser.Lexer.Position = headerPos;
-                            var indirect = parser.ParseIndirectObject();
-                            if (indirect.Value is PdfDictionary catDict && catDict.GetName("Type") == "Catalog")
-                            {
-                                // Found a valid catalog — add entry if not present and set Root
-                                if (!_entries.ContainsKey(indRef.ObjectNumber) ||
-                                    _entries[indRef.ObjectNumber].Offset != headerPos)
-                                {
-                                    _entries[indRef.ObjectNumber] = new XRefEntry
-                                    {
-                                        ObjectNumber = indRef.ObjectNumber,
-                                        Generation = indRef.Generation,
-                                        Offset = headerPos,
-                                        InUse = true
-                                    };
-                                }
-                                trailer.Set("Root", rootRef);
-                                return;
-                            }
-                        }
-                    }
-                }
+                if (obj is PdfDictionary dict && dict.ContainsKey("Root")
+                    && TryAdoptScannedRoot(parser, text, dict.Get("Root"), trailer))
+                    return;
             }
             catch { /* skip malformed trailer */ }
         }
+    }
+
+    /// <summary>Verify a scanned trailer's /Root points at a real /Catalog object; when it does,
+    /// register the catalog's xref entry at the offset the scan found and set the trailer's
+    /// /Root. Returns false when the reference does not resolve to a catalog.</summary>
+    private bool TryAdoptScannedRoot(PdfParser parser, string text, PdfObject? rootRef, PdfDictionary trailer)
+    {
+        if (rootRef is not PdfIndirectRef indRef) return false;
+
+        // Verify the referenced object is a real Catalog by scanning
+        // the file for the object header and parsing it
+        var objHeader = $"{indRef.ObjectNumber} {indRef.Generation} obj";
+        var headerPos = text.IndexOf(objHeader, StringComparison.Ordinal);
+        if (headerPos < 0) return false;
+        parser.Lexer.Position = headerPos;
+        var indirect = parser.ParseIndirectObject();
+        if (indirect.Value is not PdfDictionary catDict || catDict.GetName("Type") != "Catalog") return false;
+
+        // Found a valid catalog - add entry if not present and set Root
+        if (!_entries.ContainsKey(indRef.ObjectNumber) ||
+            _entries[indRef.ObjectNumber].Offset != headerPos)
+        {
+            _entries[indRef.ObjectNumber] = new XRefEntry
+            {
+                ObjectNumber = indRef.ObjectNumber,
+                Generation = indRef.Generation,
+                Offset = headerPos,
+                InUse = true
+            };
+        }
+        trailer.Set("Root", rootRef);
+        return true;
     }
 
     /// <summary>
@@ -311,131 +346,45 @@ internal sealed class XRefTable
 
     private void ReadTraditionalXref(byte[] data, long offset, HashSet<long> visited)
     {
-        var pos = offset + 4; // skip "xref"
-        pos = SkipWhitespace(data, pos);
+        var xt = new TraditionalXrefState();
+        xt.data = data;
+        xt.offset = offset;
+        xt.visited = visited;
+        xt.pos = xt.offset + 4; // skip "xref"
+        xt.pos = SkipWhitespace(xt.data, xt.pos);
 
-        var firstSubsection = true;
+        xt.firstSubsection = true;
 
         // Parse subsections
-        while (pos < data.Length)
+        while (xt.pos < xt.data.Length)
         {
-            // Check if we've reached "trailer"
-            if (pos + 7 <= data.Length && Encoding.ASCII.GetString(data, (int)pos, 7) == "trailer")
-            {
-                pos += 7;
-                break;
-            }
-
-            // Read "startObj count"
-            var (startObj, afterStart) = ReadLong(data, pos);
-            if (afterStart == pos)
-                throw new InvalidOperationException(
-                    $"Corrupt xref table: expected subsection header at offset {pos}");
-            var (count, afterCount) = ReadLong(data, afterStart);
-            pos = SkipWhitespace(data, afterCount);
-
-            // Off-by-one shifted xref signature: some PDFs ship "xref\n1 7\n0000000000 65535 f\n…"
-            // where the head free-list entry "obj0 gen=65535 free" is in the very first slot but
-            // the subsection declares it as object 1. Per PDF 32000 §7.5.4 obj 0 is always the
-            // head of the linked free list, so a leading "0 65535 f" inside the very first
-            // subsection of an xref table that nominally starts at startObj > 0 is the canonical
-            // signature. Re-anchor here. (Restricted to firstSubsection because gen=65535 free
-            // entries also legally appear deeper in the table as next-free-list pointers, and
-            // re-anchoring those would break valid PDFs.)
-            if (firstSubsection && startObj > 0 && count > 0 && pos + 20 <= data.Length)
-            {
-                var (peekOffset, peekP1) = ReadLong(data, pos);
-                var (peekGen, peekP2) = ReadLong(data, peekP1);
-                peekP2 = SkipWhitespace(data, peekP2);
-                if (peekOffset == 0 && peekGen == 65535 &&
-                    peekP2 < data.Length && data[peekP2] == 'f')
-                {
-                    startObj = 0;
-                }
-            }
-            firstSubsection = false;
-
-            for (var i = 0; i < count; i++)
-            {
-                var objNum = (int)startObj + i;
-                // Each entry is exactly 20 bytes: "OOOOOOOOOO GGGGG F \n"
-                if (pos + 20 > data.Length) break;
-
-                var (entryOffset, p1) = ReadLong(data, pos);
-                var (gen, p2) = ReadLong(data, p1);
-                p2 = SkipWhitespace(data, p2);
-                var flag = p2 < data.Length ? (char)data[p2] : 'f';
-
-                // First occurrence wins in the /Prev chain (most-recent section read first),
-                // EXCEPT a free entry with generation 65535 — the "free, never reuse"
-                // placeholder a linearized PDF's first-page xref lists for objects that are
-                // really defined (in use) further down. A later in-use entry must override
-                // that placeholder, or e.g. the /Pages root resolves to nothing (PDF 32000
-                // §7.5.4 / Annex F linearization). Mirrors the xref-stream override below.
-                var inUse = flag == 'n';
-                var overridePlaceholder = _entries.TryGetValue(objNum, out var existing)
-                    && !existing.InUse && existing.Generation == 65535 && inUse;
-                if (!_entries.ContainsKey(objNum) || overridePlaceholder)
-                {
-                    _entries[objNum] = new XRefEntry
-                    {
-                        ObjectNumber = objNum,
-                        Generation = (int)gen,
-                        Offset = entryOffset,
-                        InUse = inUse
-                    };
-                }
-
-                // Advance to next line
-                pos = SkipToNextLine(data, p2);
-            }
-
-            pos = SkipWhitespace(data, pos);
+            if (!ReadTraditionalXrefSection(xt)) break;
         }
 
         // Parse trailer dictionary
-        pos = SkipWhitespace(data, pos);
-        var parser = new PdfParser(data);
-        parser.Lexer.Position = pos;
-        var trailerObj = parser.ParseObject();
+        xt.pos = SkipWhitespace(xt.data, xt.pos);
+        xt.parser = new PdfParser(xt.data);
+        xt.parser.Lexer.Position = xt.pos;
+        xt.trailerObj = xt.parser.ParseObject();
 
-        if (trailerObj is PdfDictionary trailerDict)
+        if (xt.trailerObj is PdfDictionary trailerDict)
         {
-            _trailer ??= trailerDict;
-
-            // Hybrid-reference file (PDF 32000 §7.5.8.4): a traditional section may carry
-            // a supplementary cross-reference STREAM via /XRefStm that holds the real
-            // entries for compressed (and updated) objects, which the traditional table
-            // lists only as free placeholders. Merge it for EVERY section in the /Prev
-            // chain — not just the main trailer — so those in-use entries override the
-            // free placeholders (the stream merge already prefers in-use over free).
-            var xrefStm = trailerDict.GetInt("XRefStm", -1);
-            if (xrefStm >= 0)
-            {
-                try { ReadXrefStream(data, xrefStm, visited); } catch { /* tolerate a bad supplementary stream */ }
-            }
-
-            // Follow /Prev
-            var prev = trailerDict.GetInt("Prev", -1);
-            if (prev >= 0)
-            {
-                ReadXrefAt(data, prev, visited);
-            }
+            ReadTraditionalTrailer(xt, trailerDict);
         }
     }
 
     private void ReadXrefStream(byte[] data, long offset, HashSet<long> visited)
     {
-        var parser = new PdfParser(data);
-        parser.Lexer.Position = offset;
+        var xs = new XrefStreamState();
+        xs.data = data;
+        xs.offset = offset;
+        xs.visited = visited;
+        xs.parser = new PdfParser(xs.data);
+        xs.parser.Lexer.Position = xs.offset;
 
-        // No strict header check here: /Prev chain nodes with shifted offsets rely
-        // on the lexer's garbage-skipping recovery (a broken chain). The TOP-LEVEL
-        // startxref target is vetted in Read() instead — only a target that names
-        // no object at all routes to the tail-stream recovery.
-        var indirectObj = parser.ParseIndirectObject();
-        if (indirectObj.Value is not PdfStream stream)
-            throw new InvalidOperationException($"Expected xref stream at offset {offset}");
+        xs.indirectObj = xs.parser.ParseIndirectObject();
+        if (xs.indirectObj.Value is not PdfStream stream)
+            throw new InvalidOperationException($"Expected xref stream at offset {xs.offset}");
 
         UsedXrefStream = true;
 
@@ -443,105 +392,44 @@ internal sealed class XRefTable
         // (the cross-reference stream is always regenerated, never carried over). The
         // offset is kept so InfrastructureObjectNumbers can tell a still-current xref
         // stream from a number a later increment redefined as a live object.
-        _xrefStreamObjNums.Add((indirectObj.ObjectNumber, offset));
+        _xrefStreamObjNums.Add((xs.indirectObj.ObjectNumber, xs.offset));
 
-        var dict = stream.Dict;
-        _trailer ??= dict;
+        xs.dict = stream.Dict;
+        _trailer ??= xs.dict;
 
-        // Decode the stream
-        var decodedData = Filters.StreamFilter.Decode(stream.RawData, dict);
+        xs.decodedData = Filters.StreamFilter.Decode(stream.RawData, xs.dict);
 
-        // Parse W array
-        var wArray = dict.Get("W") as PdfArray;
-        if (wArray is null || wArray.Count < 3)
+        xs.wArray = xs.dict.Get("W") as PdfArray;
+        if (xs.wArray is null || xs.wArray.Count < 3)
             throw new InvalidOperationException("XRef stream missing /W array");
 
-        var w1 = (int)((PdfInteger)wArray[0]).Value;
-        var w2 = (int)((PdfInteger)wArray[1]).Value;
-        var w3 = (int)((PdfInteger)wArray[2]).Value;
-        var entrySize = w1 + w2 + w3;
+        xs.w1 = (int)((PdfInteger)xs.wArray[0]).Value;
+        xs.w2 = (int)((PdfInteger)xs.wArray[1]).Value;
+        xs.w3 = (int)((PdfInteger)xs.wArray[2]).Value;
+        xs.entrySize = xs.w1 + xs.w2 + xs.w3;
 
-        // Parse Index array (default: [0 Size])
-        var indexArray = dict.Get("Index") as PdfArray;
-        var size = (int)dict.GetInt("Size");
-        List<(int start, int count)> subsections;
+        xs.indexArray = xs.dict.Get("Index") as PdfArray;
+        xs.size = (int)xs.dict.GetInt("Size");
 
-        if (indexArray is not null)
+        if (xs.indexArray is not null)
         {
-            subsections = new List<(int, int)>();
-            for (var i = 0; i < indexArray.Count; i += 2)
-            {
-                subsections.Add((
-                    (int)((PdfInteger)indexArray[i]).Value,
-                    (int)((PdfInteger)indexArray[i + 1]).Value
-                ));
-            }
+            ReadXrefIndex(xs);
         }
         else
         {
-            subsections = [(0, size)];
+            xs.subsections = [(0, xs.size)];
         }
 
-        var dataPos = 0;
-        foreach (var (start, count) in subsections)
+        xs.dataPos = 0;
+        foreach (var (start, count) in xs.subsections)
         {
-            for (var i = 0; i < count; i++)
-            {
-                if (dataPos + entrySize > decodedData.Length) break;
-
-                var type = w1 > 0 ? ReadFieldValue(decodedData, dataPos, w1) : 1; // default type=1
-                var field2 = ReadFieldValue(decodedData, dataPos + w1, w2);
-                var field3 = ReadFieldValue(decodedData, dataPos + w1 + w2, w3);
-                dataPos += entrySize;
-
-                var objNum = start + i;
-                // In hybrid-reference PDFs, the traditional xref marks compressed objects
-                // as free while the xref stream has the real entries. Allow in-use entries
-                // from the xref stream to override free entries from the traditional table.
-                if (_entries.TryGetValue(objNum, out var existing))
-                {
-                    if (existing.InUse || type == 0) continue;
-                    // Existing is free but xref stream says in-use — override below
-                }
-
-                switch (type)
-                {
-                    case 0: // free
-                        _entries[objNum] = new XRefEntry
-                        {
-                            ObjectNumber = objNum,
-                            Generation = (int)field3,
-                            InUse = false
-                        };
-                        break;
-                    case 1: // uncompressed
-                        _entries[objNum] = new XRefEntry
-                        {
-                            ObjectNumber = objNum,
-                            Offset = field2,
-                            Generation = (int)field3,
-                            InUse = true
-                        };
-                        break;
-                    case 2: // compressed in object stream
-                        _entries[objNum] = new XRefEntry
-                        {
-                            ObjectNumber = objNum,
-                            InUse = true,
-                            IsCompressed = true,
-                            StreamObjectNumber = (int)field2,
-                            IndexInStream = (int)field3
-                        };
-                        break;
-                }
-            }
+            ReadXrefSubsection(xs, start, count);
         }
 
-        // Follow /Prev
-        var prev = dict.GetInt("Prev", -1);
-        if (prev >= 0)
+        xs.prev = xs.dict.GetInt("Prev", -1);
+        if (xs.prev >= 0)
         {
-            ReadXrefAt(data, prev, visited);
+            ReadXrefAt(xs.data, xs.prev, xs.visited);
         }
     }
 

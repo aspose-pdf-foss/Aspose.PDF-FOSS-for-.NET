@@ -1,11 +1,11 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
-/// <summary>Per-call working state of <see cref="BuildTableFromHtml"/>: the column
+/// <summary>Per-call working state of <c>BuildTableFromHtml</c>: the column
 /// and width model the parse loop fills and the width solver consumes. One instance
 /// per invocation; never shared.</summary>
 private sealed class TableStyleConfig
@@ -18,6 +18,9 @@ private sealed class TableStyleConfig
     // The document sheet's `a { color: … }` rule colours anchor text in cells
     // (the expected render applies it like any inline colour).
     public Color? docAnchorColor;
+    public bool docAnchorBold;
+    // This build is a grid NESTED in a host cell (its widths feed the host, not the sheet).
+    public bool nestedGrid;      // …and its `a { font-weight: bold }` rule
     public Dictionary<string, Dictionary<string, string>> css = null!;
     public double cellFontSize;
     // Cells sized by a `font:` SHORTHAND rule render as CSS line boxes (1.2 em
@@ -90,5 +93,64 @@ private sealed class TableStyleConfig
     // grid), then build it on its own when the placeholder reaches the cell
     // that held it.
     public List<string> nestedHtml = null!;
+    // The render inputs, captured from the method parameters.
+    public bool authoredCellChrome;
+    public List<CssChainRule>? chainRules;
+    public List<CssElem>? cssAncestors;
+    public string? defaultCellFace;
+    public bool docElementGrid;
+    public bool dwFormCells;
+    public bool wordMailCells;   // Word mail: a missing local image shows its alt text in its cell
+    public bool formGridDialect;
+    public double formGridStrutDropPt;
+    public double formGridStrutPt;
+    public bool fullWidthCjkMin;
+    public Func<string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio;
+    /// <summary>Factory for a checkbox input in a UA-flow grid cell: (checked) -> a CheckboxField already on the form; the cell carries it as a paragraph the row plan seats.</summary>
+    public Func<bool, Aspose.Pdf.Forms.CheckboxField>? makeCheckbox;
+    /// <summary>The table's class rule declares border-collapse: collapse - the cells' borders are the grid, with no spacing and no second outer frame (UA control grids).</summary>
+    public bool collapsedGrid;
+    public bool overDeclaredDraw;
+    public bool pinnedBodyGrid;
+    public bool ptCellWidths;
+    public bool redlineCells;
+    // The render inputs, captured from the method parameters.
+    public HtmlLoadOptions? options;
+    public double availWidthPt;
+    public List<byte[]>? inlineSvgs;
+    public IReadOnlyDictionary<string, Dictionary<string, string>>? docCss;
+    public bool bandDialect;
+    public bool widenProbe;
+    public double cellLineHeightPt;
+    // A UA-boxed grid: the face the sheet's body rule names (handed down to nested grids) and the body
+    // line-height FACTOR every line stands on (0 when the body states none).
+    public string? uaBodyFace;
+    public double uaLineFactor;
+    // The grid belongs to a trigger-claimed UA-grid SHEET (not a sectioned report): the chain dialect stays off.
+    public bool uaSheetGrid;
+    public double defaultCellFontPt;
+    public bool tightExtras;
+    public bool liftNestedTables;
+    public bool uaCellBoxes;
+    public bool uaSerifMin;
+
+    // The <table> tag's own class list and the declaration blocks its class rules give.
+    // Settled once at the top of the parse context and read by the border, colour and
+    // spacing stages that follow it.
+    // Whether any rule actually declared the cell size, or it fell back to the calibrated default.
+    public bool cellSizeDeclared;
+    public List<string> tblClasses = null!;
+    public Dictionary<string, string>? tblClassDecl;
+    public Dictionary<string, string>? tblChainDecls;
+    // The tag's presentational attributes, kept for the stages that read them late.
+    public string? tblBorderAttr;
+    public string? tblCellPadAttr;
+    public string? tblBorderColorAttr;
+    public bool tblCellSpacingDeclared;
+    // The markup with its nested grids lifted out: what the column scan and the tokenizer read.
+    public string scanHtml = null!;
+    // The frame the table draws and the side border its cells take, as the class rules settle them.
+    public BorderInfo? outerBorder;
+    public BorderInfo? cellSideBorder;
 }
 }

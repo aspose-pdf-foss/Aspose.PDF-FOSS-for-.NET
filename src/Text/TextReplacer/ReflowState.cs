@@ -105,5 +105,70 @@ private sealed class ReflowState
     public double rightMargin;
     public double pitch;
     public double newLineSpacingFactor;
+    public int curLi;
+    public int prevOrigLine;
+    public string prevOrigText = null!;
+    public bool isHead;
+    public double wOrig;
+    public double gap;
+    public double startX;
+    // The head run is emitted as up to THREE runs: the source bytes that survive
+    // BEFORE the match, the replacement, and the source bytes that survive AFTER it.
+    // The replacement is written as its own run, and that boundary is what
+    // lets a later restyle name it: a replacement glued into one show with the text
+    // around it can only be resized by resizing that text too. Needs a 1:1 byte-char
+    // run (guaranteed non-CID here) and a single-operator match.
+    public List<(byte[] bytes, int off)> headParts = null!;
+    public bool partFirst;
+    // Where this run starts in the SHIFTED layout, so a split point can be
+    // mapped back to the source document's coordinates for the push-down note.
+    public double runStartX;
+    public int guard;
+    // The placement loop's own cursor: the head-part bytes still to place, their
+    // byte offset inside the run (so each piece measures with the kerns that
+    // belong to it), and whether those bytes are still the operation's FULL
+    // original run - true only until the first split, since a split piece can no
+    // longer be measured with the op's own kerning.
+    public byte[] rest = null!;
+    public int restOff;
+    public bool wholeOriginal;
+    // Only the REPLACEMENT changes face. The bytes of the run that survive on
+    // either side of the match are source text the caller never touched, so they
+    // keep their original font resource — the expected output splits the run exactly
+    // this way (a replacement lands in a fresh "CalibriBold" while the
+    // trailing "'s Mental Golf DISC Style" stays in the document's own
+    // Calibri-Bold, and its rectangle keeps that descriptor's deeper descent).
+    // Re-dressing the survivors as well moved them by the descent difference.
+    // Needs a 1:1 byte↔char run (guaranteed non-CID here) and a single-op match.
+    public int matchAt;
+    public byte[] headSuffix = null!;
+    // Flow the replacement TEXT, measured with the substitute face's raw TTF
+    // advances; split greedily at spaces.
+    public string swRest = null!;
+    // A MONOSPACED source keeps its cell grid: where the substituted word is
+    // WIDER than the cells it replaces, the writer squeezes it back with a
+    // Tz and re-emits the separator that follows it at the head of the next
+    // line, so the break carries a space on BOTH sides. Measured on two source
+    // documents: one face is DejaVuSansMono ("leap" 24.000 wide against
+    // Times "LEAP" 24.90, so it squeezes) and the spill reads " INTO
+    // ELECTRONIC", seating the E one space further in - 130.211 from a 101.420
+    // left, where a consumed separator gives 127.696. doc2's OpenSans-Light is
+    // proportional ("leap" 18.9937) and never squeezes, and its spill reads
+    // "INTO ELECTRONIC" with no such space. A replacement whose word is
+    // NARROWER than the original is not stretched, and does not double either.
+    public bool swDoubleSeparator;
+    public int guardSw;
+    public System.Text.StringBuilder cat = null!;
+    public List<int> starts = null!;
+    public int l0Count;
+    public int mi;
+    public int mLen;
+    public int opCount;
+    public bool crossedLines;
+    public int firstOp;
+    public int lastOp;
+    public int tailStart;
+    public string headPrefix = null!;
+    public string lastTail = null!;
 }
 }

@@ -35,15 +35,25 @@ public sealed class JpegDevice : ImageDevice
     /// <summary>Form presentation mode (Production renders form values; Editor renders empty fields).</summary>
     public new FormPresentationMode FormPresentationMode { get; set; } = FormPresentationMode.Production;
 
+    /// <summary>Creates a JpegDevice that renders pages with the given <c>renderer</c> at the default resolution of 150 DPI. JPEG quality is 100.</summary>
     public JpegDevice(IPageRenderer renderer) : base(renderer) { Quality = 100; }
+    /// <summary>Creates a JpegDevice that renders pages with the given <c>renderer</c> at the given resolution (150 DPI when <c>resolution</c> is null). JPEG quality is 100.</summary>
     public JpegDevice(IPageRenderer renderer, Resolution resolution) : base(renderer, resolution) { Quality = 100; }
+    /// <summary>Creates a JpegDevice that renders pages with the given <c>renderer</c> at the given resolution and encodes with the given JPEG quality (1-100).</summary>
     public JpegDevice(IPageRenderer renderer, Resolution resolution, int quality) : base(renderer, resolution) { Quality = quality; }
+    /// <summary>Creates a JpegDevice that renders pages with the built-in renderer at the default resolution of 150 DPI. JPEG quality is 100.</summary>
     public JpegDevice() : base() { Quality = 100; }
+    /// <summary>Creates a JpegDevice that renders pages with the built-in renderer at the given resolution. JPEG quality is 100.</summary>
     public JpegDevice(Resolution resolution) : base(resolution) { Quality = 100; }
+    /// <summary>Creates a JpegDevice that renders pages at the given resolution and encodes with the given JPEG quality (1-100).</summary>
     public JpegDevice(Resolution resolution, int quality) : base(resolution) { Quality = quality; }
+    /// <summary>Creates a JpegDevice that renders pages at 150 DPI and encodes with the given JPEG quality (1-100).</summary>
     public JpegDevice(int quality) : base() { Quality = quality; }
+    /// <summary>Creates a JpegDevice whose output image is resampled to the given width and height in pixels; pages are rendered at 150 DPI. JPEG quality is 100.</summary>
     public JpegDevice(int width, int height) : base(width, height) { Quality = 100; }
+    /// <summary>Creates a JpegDevice that renders pages at the given resolution and resamples the output image to the given width and height in pixels. JPEG quality is 100.</summary>
     public JpegDevice(int width, int height, Resolution resolution) : base(width, height, resolution) { Quality = 100; }
+    /// <summary>Creates a JpegDevice that renders pages at the given resolution, resamples the output to the given width and height in pixels, and encodes with the given JPEG quality (1-100).</summary>
     public JpegDevice(int width, int height, Resolution resolution, int quality) : base(width, height, resolution) { Quality = quality; }
 
     /// <summary>Construct sized to <paramref name="pageSize"/> at 150 DPI, default quality 100.</summary>
@@ -75,7 +85,7 @@ public sealed class JpegDevice : ImageDevice
             var jpeg = _encoder(rgba.Data, rgba.Width, rgba.Height, Quality);
             output.Write(jpeg);
         }
-        else if (System.OperatingSystem.IsWindows())
+        else if (Compat.IsWindows())
         {
             // The platform (GDI+) codec, not the managed encoder: rendered-page JPEG
             // consumers compare against outputs produced by this codec, and the managed

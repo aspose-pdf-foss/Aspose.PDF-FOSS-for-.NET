@@ -1,5 +1,4 @@
-using System.IO.Compression;
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.IO.Filters;
 
@@ -29,19 +28,7 @@ internal static partial class ImageCompressor
         // quality / no subsampling shrinks noticeably; keep the result only when it is actually
         // smaller so size never regresses. Progressive / CMYK JPEGs the native decoder can't
         // handle, image masks, and mask images are left as-is.
-        if (filterName == "DCTDecode")
-        {
-            if (stream.Dict.Get("Filter") is PdfArray) return;     // only the sole-filter case: RawData is raw JPEG
-            if (stream.Dict.GetBool("ImageMask") || maskStreams.Contains(stream)) return;
-            // A colour-key /Mask matches EXACT sample values; palettizing rewrites samples
-            // into palette indices, so such images must keep their original encoding.
-            if (reader.Resolve(stream.Dict.Get("Mask")) is not PdfArray &&
-                TryPalettizeJpeg(stream, width, height))
-                return;
-            if (quality >= 75) return;                             // default/high quality: leave JPEGs intact
-            TryReencodeJpeg(stream, width, height, quality);
-            return;
-        }
+        if (!RecodeExistingJpeg(stream, reader, filterName, width, height, quality, maskStreams)) return;
 
         // Decode the image data
         byte[] decoded;
@@ -67,46 +54,7 @@ internal static partial class ImageCompressor
         // as Flate. Re-encode 8-bit colour images to DCTDecode at the requested quality,
         // keeping whichever encoding is smaller. Stencil/soft-mask images are excluded so
         // their alpha channel is preserved.
-        if (!stream.Dict.GetBool("ImageMask") && !maskStreams.Contains(stream) && !hasColorKeyMask)
-        {
-            var rgb = TryBuildRgb(decoded, width, height, stream, reader);
-            if (rgb is not null)
-            {
-                // Lossless palette re-encode first: for flat-colour graphics it beats both
-                // JPEG and plain Flate while preserving every sample exactly.
-                if (TryPalettize(stream, rgb, width, height)) return;
-
-                byte[] jpeg;
-                try
-                {
-                    jpeg = JpegEncoderImpl.Encode((int x, int y, out byte r, out byte g, out byte b) =>
-                    {
-                        var idx = (y * width + x) * 3;
-                        r = rgb[idx];
-                        g = rgb[idx + 1];
-                        b = rgb[idx + 2];
-                    }, width, height, quality);
-                }
-                catch
-                {
-                    jpeg = [];
-                }
-
-                if (jpeg.Length > 0 && jpeg.Length < stream.RawData.Length)
-                {
-                    stream.ReplaceData(jpeg);
-                    stream.Dict.Set("Filter", new PdfName("DCTDecode"));
-                    stream.Dict.Set("Length", new PdfInteger(jpeg.Length));
-                    stream.Dict.Set("ColorSpace", new PdfName("DeviceRGB"));
-                    stream.Dict.Set("BitsPerComponent", new PdfInteger(8));
-                    // A custom /Decode array or /DecodeParms no longer matches the
-                    // re-encoded DeviceRGB sample stream.
-                    stream.Dict.Remove("DecodeParms");
-                    stream.Dict.Remove("Decode");
-                    return;
-                }
-            }
-        }
+        if (!TryRecodeLossyJpeg(stream, reader, decoded, width, height, quality, maskStreams, hasColorKeyMask)) return;
 
         // Lossless fallback: re-compress with FlateDecode at highest compression level.
         var compressed = Compress(decoded);
@@ -148,18 +96,15 @@ internal static partial class ImageCompressor
         byte[] jpeg;
         try
         {
-            jpeg = JpegEncoderImpl.Encode((int x, int y, out byte r, out byte g, out byte b) =>
+            jpeg = JpegEncoderImpl.Encode((int x, int y) =>
             {
                 if (comp == 3)
                 {
                     var i = (y * jw + x) * 3;
-                    r = pixels[i]; g = pixels[i + 1]; b = pixels[i + 2];
+                    return (pixels[i], pixels[i + 1], pixels[i + 2]);
                 }
-                else
-                {
-                    var v = pixels[y * jw + x];
-                    r = g = b = v;
-                }
+                var v = pixels[y * jw + x];
+                return (v, v, v);
             }, jw, jh, quality);
         }
         catch
@@ -308,7 +253,7 @@ internal static partial class ImageCompressor
 
         var pixels = width * height;
         var csObj = reader.Resolve(stream.Dict.Get("ColorSpace"));
-        var kind = ClassifyColorSpace(csObj, reader, out var indexBase, out var lookup);
+        var (kind, indexBase, lookup) = ClassifyColorSpace(csObj, reader);
 
         switch (kind)
         {
@@ -360,21 +305,19 @@ internal static partial class ImageCompressor
 
     /// <summary>Classify a (resolved) colour-space object into an RGB/Gray/Indexed kind.
     /// For Indexed spaces, also returns the base-space kind and its decoded lookup table.</summary>
-    private static CsKind ClassifyColorSpace(PdfObject? csObj, PdfReader reader,
-        out CsKind indexBase, out byte[]? lookup)
+    private static (CsKind kind, CsKind indexBase, byte[]? lookup) ClassifyColorSpace(PdfObject? csObj, PdfReader reader)
     {
-        indexBase = CsKind.Unknown;
-        lookup = null;
+        static (CsKind kind, CsKind indexBase, byte[]? lookup) Plain(CsKind kind) => (kind, CsKind.Unknown, null);
 
         switch (csObj)
         {
             case PdfName name:
-                return name.Value switch
+                return Plain(name.Value switch
                 {
                     "DeviceRGB" or "RGB" or "CalRGB" => CsKind.Rgb,
                     "DeviceGray" or "G" or "CalGray" => CsKind.Gray,
                     _ => CsKind.Unknown,
-                };
+                });
 
             case PdfArray arr when arr.Count > 0 && (reader.Resolve(arr[0]) as PdfName)?.Value is { } family:
                 switch (family)
@@ -382,32 +325,32 @@ internal static partial class ImageCompressor
                     case "ICCBased":
                         if (reader.Resolve(arr.Count > 1 ? arr[1] : null) is PdfStream icc)
                         {
-                            return (int)icc.Dict.GetInt("N", 0) switch
+                            return Plain((int)icc.Dict.GetInt("N", 0) switch
                             {
                                 1 => CsKind.Gray,
                                 3 => CsKind.Rgb,
                                 _ => CsKind.Unknown,
-                            };
+                            });
                         }
-                        return CsKind.Unknown;
+                        return Plain(CsKind.Unknown);
 
                     case "CalRGB":
-                        return CsKind.Rgb;
+                        return Plain(CsKind.Rgb);
                     case "CalGray":
-                        return CsKind.Gray;
+                        return Plain(CsKind.Gray);
 
                     case "Indexed" or "I":
-                        if (arr.Count < 4) return CsKind.Unknown;
-                        indexBase = ClassifyColorSpace(reader.Resolve(arr[1]), reader, out _, out _);
-                        lookup = ResolveIndexedLookup(reader.Resolve(arr[3]), reader);
-                        return CsKind.Indexed;
+                        if (arr.Count < 4) return Plain(CsKind.Unknown);
+                        return (CsKind.Indexed,
+                            ClassifyColorSpace(reader.Resolve(arr[1]), reader).kind,
+                            ResolveIndexedLookup(reader.Resolve(arr[3]), reader));
 
                     default:
-                        return CsKind.Unknown;
+                        return Plain(CsKind.Unknown);
                 }
 
             default:
-                return CsKind.Unknown;
+                return Plain(CsKind.Unknown);
         }
     }
 

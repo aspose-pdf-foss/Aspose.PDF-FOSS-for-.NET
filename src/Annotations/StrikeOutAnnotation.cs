@@ -8,6 +8,7 @@ namespace Aspose.Pdf.Annotations;
 public partial class StrikeOutAnnotation : TextMarkupAnnotation
 {
     internal StrikeOutAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
+    /// <summary>Creates a strike-out annotation on <c>page</c> covering <c>rect</c>. The quad points default to the four corners of <c>rect</c>.</summary>
     public StrikeOutAnnotation(Page page, Rectangle rect) : base(page, rect)
     {
         Dict.Set("Subtype", new PdfName("StrikeOut"));

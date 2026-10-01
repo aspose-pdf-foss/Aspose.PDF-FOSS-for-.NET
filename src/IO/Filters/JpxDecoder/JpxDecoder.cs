@@ -13,21 +13,21 @@ namespace Aspose.Pdf.IO.Filters;
 /// </summary>
 internal static partial class JpxDecoder
 {
-    public static bool TryDecode(byte[] data, out byte[] pixels, out int width, out int height, out int components)
+    public static (byte[] pixels, int width, int height, int components)? TryDecode(byte[] data)
     {
-        pixels = Array.Empty<byte>();
-        width = height = components = 0;
         try
         {
             var dec = new Decoder(data);
-            if (!dec.Run()) return false;
-            pixels = dec.Pixels;
-            width = dec.Width;
-            height = dec.Height;
-            components = dec.Components;
-            return pixels.Length == width * height * components && width > 0 && height > 0;
+            if (!dec.Run()) return null;
+            var pixels = dec.Pixels;
+            var width = dec.Width;
+            var height = dec.Height;
+            var components = dec.Components;
+            return pixels.Length == width * height * components && width > 0 && height > 0
+                ? (pixels, width, height, components)
+                : null;
         }
-        catch { return false; }
+        catch { return null; }
     }
 
     // ── Codestream model ────────────────────────────────────────────

@@ -21,7 +21,7 @@ internal static class CallerPaths
     /// </summary>
     public static string? NormalizeDirectory(string? path)
     {
-        if (string.IsNullOrEmpty(path) || System.OperatingSystem.IsWindows()) return path;
+        if (string.IsNullOrEmpty(path) || Compat.IsWindows()) return path;
         return path!.Replace('\\', System.IO.Path.DirectorySeparatorChar);
     }
 
@@ -41,10 +41,11 @@ internal static class CallerPaths
         var rest = src.Substring("file:".Length);
         var slashes = 0;
         while (slashes < rest.Length && (rest[slashes] == '/' || rest[slashes] == '\\')) slashes++;
-        // Exactly two slashes is a genuine UNC reference (file://server/share/x); Windows
-        // knows what to do with it, so hand that shape back to Uri unchanged.
-        if (slashes == 2 && System.OperatingSystem.IsWindows()) return src;
         var body = rest.Substring(slashes);
+        // Exactly two slashes is a genuine UNC reference (file://server/share/x); Windows
+        // knows what to do with it, so hand that shape back to Uri unchanged - unless a
+        // drive letter follows (file://C:\x, the two-slash local form), which is a path.
+        if (slashes == 2 && Compat.IsWindows() && !(body.Length > 1 && body[1] == ':')) return src;
         try { body = System.Uri.UnescapeDataString(body); } catch { /* keep it raw */ }
         // A drive letter stands on its own; anything else was absolute before the scheme
         // was glued on and keeps its leading separator.

@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
@@ -17,174 +17,69 @@ public sealed partial class TableAbsorber
         double ctmA = 1, double ctmB = 0, double ctmC = 0, double ctmD = 1, double ctmE = 0, double ctmF = 0,
         PdfDictionary? xobjects = null, int depth = 0)
     {
-        var lexer = new PdfLexer(stream); var operands = new List<PdfObject>();
-        Dictionary<int, string>? toUnicode = null; PdfDictionary? fontDict = null;
-        FontMetrics? curMetrics = null;
-        double fontSize = 12, tx = 0, ty = 0, txLine = 0, tyLine = 0;
-        double tmA = 1, tmB = 0, tmC = 0, tmD = 1, leading = 0;
-        double curX = 0, curY = 0, moveX = 0, moveY = 0;
-        var ctmStack = new Stack<(double a, double b, double c, double d, double e, double f)>();
+        var tl = new TableLinesState();
+        tl.lexer = new PdfLexer(stream);
+        tl.operands = new List<PdfObject>();
+        tl.toUnicode = null;
+        tl.fontDict = null;
+        tl.curMetrics = null;
+        tl.fontSize = 12;
+        tl.tx = 0;
+        tl.ty = 0;
+        tl.txLine = 0;
+        tl.tyLine = 0;
+        tl.tmA = 1;
+        tl.tmB = 0;
+        tl.tmC = 0;
+        tl.tmD = 1;
+        tl.leading = 0;
+        tl.curX = 0;
+        tl.curY = 0;
+        tl.moveX = 0;
+        tl.moveY = 0;
+        tl.ctmStack = new Stack<(double a, double b, double c, double d, double e, double f)>();
+        // The CTM this stream is drawn under: the identity for a page, the form's
+        // own matrix for an XObject the walk recursed into.
+        tl.ctmA = ctmA;
+        tl.ctmB = ctmB;
+        tl.ctmC = ctmC;
+        tl.ctmD = ctmD;
+        tl.ctmE = ctmE;
+        tl.ctmF = ctmF;
 
-        // Buffer path segments until a paint operator finalizes them
-        var pendingLines = new List<PendingLine>();
-        var pendingRects = new List<PendingRect>();
+        tl.pendingLines = new List<PendingLine>();
+        tl.pendingRects = new List<PendingRect>();
 
         while (true)
         {
-            var token = lexer.NextToken(); if (token.Kind == TokenKind.Eof) break;
+            var token = tl.lexer.NextToken(); if (token.Kind == TokenKind.Eof) break;
             switch (token.Kind)
             {
-                case TokenKind.Integer: operands.Add(new PdfInteger(token.IntValue)); break;
-                case TokenKind.Real: operands.Add(new PdfReal(token.RealValue)); break;
-                case TokenKind.LiteralString: operands.Add(new PdfString(token.BytesValue!)); break;
-                case TokenKind.HexString: operands.Add(new PdfString(token.BytesValue!, isHex: true)); break;
-                case TokenKind.Name: operands.Add(new PdfName(token.StringValue!)); break;
-                case TokenKind.ArrayStart: operands.Add(ParseArray(lexer)); break;
+                case TokenKind.Integer: tl.operands.Add(new PdfInteger(token.IntValue)); break;
+                case TokenKind.Real: tl.operands.Add(new PdfReal(token.RealValue)); break;
+                case TokenKind.LiteralString: tl.operands.Add(new PdfString(token.BytesValue!)); break;
+                case TokenKind.HexString: tl.operands.Add(new PdfString(token.BytesValue!, isHex: true)); break;
+                case TokenKind.Name: tl.operands.Add(new PdfName(token.StringValue!)); break;
+                case TokenKind.ArrayStart: tl.operands.Add(ParseArray(tl.lexer)); break;
                 case TokenKind.Keyword:
                 {
                     var op = token.StringValue!;
                     switch (op)
                     {
-                        case "q": ctmStack.Push((ctmA,ctmB,ctmC,ctmD,ctmE,ctmF)); break;
-                        case "Q": if (ctmStack.Count > 0) (ctmA,ctmB,ctmC,ctmD,ctmE,ctmF) = ctmStack.Pop(); break;
-                        case "cm":
-                            if (operands.Count >= 6)
-                            { var a=Num(operands[0]);var b=Num(operands[1]);var c=Num(operands[2]);var d=Num(operands[3]);var e=Num(operands[4]);var f=Num(operands[5]);
-                              var nA=a*ctmA+b*ctmC;var nB=a*ctmB+b*ctmD;var nC=c*ctmA+d*ctmC;var nD=c*ctmB+d*ctmD;var nE=e*ctmA+f*ctmC+ctmE;var nF=e*ctmB+f*ctmD+ctmF;
-                              ctmA=nA;ctmB=nB;ctmC=nC;ctmD=nD;ctmE=nE;ctmF=nF; }
+                        case "q": case "Q": case "cm": case "Do":
+                            ExtractLinesStateOperator(tl, fonts, reader, textRuns, hEdges, vEdges, xobjects, depth, op);
                             break;
-                        case "BT": tx=txLine=0;ty=tyLine=0;tmA=1;tmB=0;tmC=0;tmD=1;leading=0; break;
-                        case "TL": if (operands.Count>=1) leading=Num(operands[0]); break;
-                        case "Tf":
-                            if (operands.Count>=1&&operands[0] is PdfName fn&&fonts.TryGetValue(fn.Value,out var fd)){fontDict=fd;toUnicode=TextAbsorber.ParseToUnicodeFromDict(fd,reader);curMetrics=null;try{curMetrics=FontMetrics.FromFontDict(fd,reader);}catch{}}
-                            if (operands.Count>=2) fontSize=Math.Abs(Num(operands[1])); break;
-                        case "Td": if (operands.Count>=2){var tdX=Num(operands[0]);var tdY=Num(operands[1]);txLine=tmA*tdX+tmC*tdY+txLine;tyLine=tmB*tdX+tmD*tdY+tyLine;tx=txLine;ty=tyLine;} break;
-                        case "TD": if (operands.Count>=2){var tdX=Num(operands[0]);var tdY=Num(operands[1]);leading=-tdY;txLine=tmA*tdX+tmC*tdY+txLine;tyLine=tmB*tdX+tmD*tdY+tyLine;tx=txLine;ty=tyLine;} break;
-                        case "T*": txLine=tmC*(-leading)+txLine;tyLine=tmD*(-leading)+tyLine;tx=txLine;ty=tyLine; break;
-                        case "Tm": if (operands.Count>=6){tmA=Num(operands[0]);tmB=Num(operands[1]);tmC=Num(operands[2]);tmD=Num(operands[3]);tx=txLine=Num(operands[4]);ty=tyLine=Num(operands[5]);} break;
-                        case "Tj":
-                            // Estimated advance must carry the Tm and CTM scales — a
-                            // `117 Tf` with a 0.12-scale Tm is ~14pt text, and an
-                            // unscaled estimate would balloon the run width (and push
-                            // its centre outside every cell).
-                            if (operands.Count>=1&&operands[0] is PdfString s){var text=Decode(s.Value,toUnicode,fontDict);var(px,py)=ApplyMatrix(tx,ty,ctmA,ctmB,ctmC,ctmD,ctmE,ctmF);var hsX=tmA*ctmA+tmB*ctmC;var hsY=tmA*ctmB+tmB*ctmD;var hs=Math.Sqrt(hsX*hsX+hsY*hsY);var vsX=tmC*ctmA+tmD*ctmC;var vsY=tmC*ctmB+tmD*ctmD;var vs=Math.Sqrt(vsX*vsX+vsY*vsY);textRuns.Add(new TextRun(text,px,py,text.Length*fontSize*0.5*hs,fontSize*vs));} break;
-                        case "TJ":
-                            if (operands.Count>=1&&operands[0] is PdfArray arr)
-                            {
-                                // Walk the array element-by-element accumulating a text-space pen
-                                // offset. A large NEGATIVE adjustment (a rightward jump ≫ kerning,
-                                // e.g. the multi-em gaps a single TJ uses to lay out columns) is a
-                                // column boundary: flush the run so far and start a new run at the
-                                // jumped-to X. Without this, a header/row drawn as one TJ across
-                                // several columns collapses into the first column.
-                                var sb=new StringBuilder();
-                                double pen=0;          // text-space advance from (tx,ty)
-                                double runStartPen=0;  // pen at the current sub-run's first glyph
-                                // Gap threshold: 1.5 em. Normal inter-glyph kerning is <0.05 em;
-                                // an inter-word space char is a real glyph (not an adjustment).
-                                double gapTU=fontSize*1.5;
-                                void FlushSub()
-                                {
-                                    if (sb.Length==0) return;
-                                    var txx=tx+tmA*runStartPen; var tyy=ty+tmB*runStartPen;
-                                    var(px2,py2)=ApplyMatrix(txx,tyy,ctmA,ctmB,ctmC,ctmD,ctmE,ctmF);
-                                    var hsX=tmA*ctmA+tmB*ctmC;var hsY=tmA*ctmB+tmB*ctmD;var hs=Math.Sqrt(hsX*hsX+hsY*hsY);
-                                    var vsX=tmC*ctmA+tmD*ctmC;var vsY=tmC*ctmB+tmD*ctmD;var vs=Math.Sqrt(vsX*vsX+vsY*vsY);
-                                    textRuns.Add(new TextRun(sb.ToString(),px2,py2,sb.Length*fontSize*0.5*hs,fontSize*vs));
-                                    sb.Clear();
-                                }
-                                foreach(var item in arr)
-                                {
-                                    if (item is PdfString ps)
-                                    {
-                                        var t=Decode(ps.Value,toUnicode,fontDict);
-                                        sb.Append(t);
-                                        // Advance the pen by the true glyph run width when the font
-                                        // metrics are available (falling back to a crude 0.5-em/char
-                                        // estimate). Accurate widths keep each post-gap sub-run's X
-                                        // inside its real column — a 0.5-em guess undershoots caps
-                                        // headers and slides text into the wrong cell.
-                                        pen+=curMetrics is not null ? curMetrics.MeasureString(t,fontSize) : t.Length*fontSize*0.5;
-                                    }
-                                    else if (item is PdfInteger or PdfReal)
-                                    {
-                                        var adv=-Num(item)/1000.0*fontSize; // +ve = rightward
-                                        if (adv>gapTU) { FlushSub(); pen+=adv; runStartPen=pen; }
-                                        else pen+=adv;
-                                    }
-                                }
-                                FlushSub();
-                            }
+                        case "BT": case "TL": case "Tf": case "Td": case "TD": case "T*": case "Tm": case "Tj": case "TJ":
+                            ExtractLinesTextOperator(tl, fonts, reader, textRuns, op);
                             break;
-                        case "m":
-                            if (operands.Count>=2){var(px,py)=ApplyMatrix(Num(operands[0]),Num(operands[1]),ctmA,ctmB,ctmC,ctmD,ctmE,ctmF);curX=moveX=px;curY=moveY=py;} break;
-                        case "l":
-                            if (operands.Count>=2)
-                            {
-                                var(lx,ly)=ApplyMatrix(Num(operands[0]),Num(operands[1]),ctmA,ctmB,ctmC,ctmD,ctmE,ctmF);
-                                pendingLines.Add(new PendingLine(curX, curY, lx, ly));
-                                curX=lx;curY=ly;
-                            }
+                        case "m": case "l": case "h": case "re": case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n": case "W": case "W*":
+                            ExtractLinesPathOperator(tl, hEdges, vEdges, op);
                             break;
-                        case "h":
-                            // Close subpath: add a line from current point back to the move-to point
-                            if (Math.Abs(curX - moveX) > 0.01 || Math.Abs(curY - moveY) > 0.01)
-                                pendingLines.Add(new PendingLine(curX, curY, moveX, moveY));
-                            curX = moveX; curY = moveY;
-                            break;
-                        case "re":
-                            if (operands.Count>=4)
-                            {
-                                var rx=Num(operands[0]);var ry=Num(operands[1]);var rw=Num(operands[2]);var rh=Num(operands[3]);
-                                var(p0x,p0y)=ApplyMatrix(rx,ry,ctmA,ctmB,ctmC,ctmD,ctmE,ctmF);
-                                var(p2x,p2y)=ApplyMatrix(rx+rw,ry+rh,ctmA,ctmB,ctmC,ctmD,ctmE,ctmF);
-                                var x=Math.Min(p0x,p2x); var y=Math.Min(p0y,p2y);
-                                var w=Math.Abs(p2x-p0x); var h=Math.Abs(p2y-p0y);
-                                pendingRects.Add(new PendingRect(x, y, w, h));
-                            }
-                            break;
-                        // Paint operators: finalize buffered path segments as edges
-                        case "S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*":
-                            FlushPendingEdges(pendingLines, pendingRects, hEdges, vEdges,
-                                stroked: op is "S" or "s" or "B" or "B*" or "b" or "b*");
-                            pendingLines.Clear(); pendingRects.Clear(); break;
-                        case "n":
-                            // No-paint: discard pending paths (clip-only)
-                            pendingLines.Clear(); pendingRects.Clear(); break;
-                        case "W" or "W*": break; // Clip modifiers don't finalize path
-                        case "BI": SkipInlineImage(lexer); operands.Clear(); continue;
-                        case "Do":
-                            // Recurse into Form XObjects so table grids drawn inside them are
-                            // extracted (nested tables are emitted as forms).
-                            if (xobjects is not null && depth < 12 && operands.Count >= 1 && operands[0] is PdfName xn)
-                            {
-                                var form = reader.ResolveStream(xobjects.Get(xn.Value));
-                                if (form is not null && form.Dict.GetName("Subtype") == "Form")
-                                {
-                                    byte[]? formBytes = null;
-                                    try { formBytes = reader.DecodeStream(form); } catch { }
-                                    if (formBytes is not null)
-                                    {
-                                        double fA = ctmA, fB = ctmB, fC = ctmC, fD = ctmD, fE = ctmE, fF = ctmF;
-                                        if (reader.Resolve(form.Dict.Get("Matrix")) is PdfArray ma && ma.Count >= 6)
-                                        {
-                                            double m0=Num(ma[0]),m1=Num(ma[1]),m2=Num(ma[2]),m3=Num(ma[3]),m4=Num(ma[4]),m5=Num(ma[5]);
-                                            fA=m0*ctmA+m1*ctmC; fB=m0*ctmB+m1*ctmD; fC=m2*ctmA+m3*ctmC; fD=m2*ctmB+m3*ctmD;
-                                            fE=m4*ctmA+m5*ctmC+ctmE; fF=m4*ctmB+m5*ctmD+ctmF;
-                                        }
-                                        var formFonts = TextAbsorber.ResolveFonts(form.Dict, reader);
-                                        foreach (var kv in fonts) formFonts.TryAdd(kv.Key, kv.Value);
-                                        var formXObjects = TextAbsorber.ResolveXObjects(form.Dict, reader) ?? xobjects;
-                                        ExtractTextAndLines(formBytes, formFonts, reader, textRuns, hEdges, vEdges,
-                                            fA, fB, fC, fD, fE, fF, formXObjects, depth + 1);
-                                    }
-                                }
-                            }
-                            break;
+                        case "BI": SkipInlineImage(tl.lexer); tl.operands.Clear(); continue;
                     }
-                    operands.Clear(); break;
+                    tl.operands.Clear(); break;
                 }
-                default: operands.Clear(); break;
+                default: tl.operands.Clear(); break;
             }
         }
     }
@@ -248,7 +143,7 @@ public sealed partial class TableAbsorber
             else foreach (var b in bytes) sb.Append(toUnicode.TryGetValue(b, out var m) ? m : ((char)b).ToString());
             return sb.ToString();
         }
-        return Encoding.Latin1.GetString(bytes);
+        return Compat.Latin1.GetString(bytes);
     }
 
     private static Dictionary<string, PdfDictionary> ResolveFonts(PdfDictionary pageDict, PdfReader reader)

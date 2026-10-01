@@ -1,11 +1,11 @@
-namespace Aspose.Pdf.Text;
+﻿namespace Aspose.Pdf.Text;
 
 /// <summary>
 /// Glyph widths for the 14 standard PDF fonts (PDF32000_2008 §9.6.2.2).
 /// Widths are in units of 1/1000 of a text unit.
 /// Data sourced from Adobe Font Metrics (AFM) files.
 /// </summary>
-internal static class Standard14Fonts
+internal static partial class Standard14Fonts
 {
     /// <summary>Full-size line extent of the DEFAULT face (Helvetica: ascent 718 plus
     /// descent 207 per its AFM), as an em ratio. A line with no glyphs has no font of
@@ -169,14 +169,26 @@ internal static class Standard14Fonts
     internal static int[]? GetFontBBox(string baseFontName)
     {
         var canonical = ResolveAlias(baseFontName);
+        // Each of the 14 faces has its OWN box in Adobe's AFM files -- an
+        // oblique/italic or bold weight is not a crop of its upright's box,
+        // it is measurably wider or taller. Grouping them by family (as this
+        // used to) understated several by ~10%; verified against the
+        // official AFM files, and against a second, independently AFM-derived
+        // table, which agrees with it at all 14.
         return canonical switch
         {
-            "Courier" or "Courier-Bold" or "Courier-Oblique" or "Courier-BoldOblique"
-                => [-23, -250, 715, 805],
-            "Helvetica" or "Helvetica-Oblique" => [-166, -225, 1000, 931],
-            "Helvetica-Bold" or "Helvetica-BoldOblique" => [-170, -228, 1003, 962],
-            "Times-Roman" or "Times-Italic" => [-168, -218, 1000, 898],
-            "Times-Bold" or "Times-BoldItalic" => [-168, -218, 1000, 921],
+            "Courier" => [-23, -250, 715, 805],
+            "Courier-Bold" => [-113, -250, 749, 801],
+            "Courier-Oblique" => [-27, -250, 849, 805],
+            "Courier-BoldOblique" => [-57, -250, 869, 801],
+            "Helvetica" => [-166, -225, 1000, 931],
+            "Helvetica-Oblique" => [-170, -225, 1116, 931],
+            "Helvetica-Bold" => [-170, -228, 1003, 962],
+            "Helvetica-BoldOblique" => [-174, -228, 1114, 962],
+            "Times-Roman" => [-168, -218, 1000, 898],
+            "Times-Italic" => [-169, -217, 1010, 883],
+            "Times-Bold" => [-168, -218, 1000, 935],
+            "Times-BoldItalic" => [-200, -218, 996, 921],
             "Symbol" => [-180, -293, 1090, 1010],
             "ZapfDingbats" => [-1, -143, 981, 820],
             _ => null,
@@ -190,25 +202,12 @@ internal static class Standard14Fonts
     /// </summary>
     internal static int GetFontBBoxHeight(string baseFontName)
     {
-        var canonical = ResolveAlias(baseFontName);
-        if (canonical is null) return 0;
-        // FontBBox = [llx, lly, urx, ury]; height = ury - lly
-        return canonical switch
-        {
-            "Courier" or "Courier-Bold" or "Courier-Oblique" or "Courier-BoldOblique"
-                => 833 - (-250), // BBox: [-23 -250 715 833]
-            "Helvetica" or "Helvetica-Oblique"
-                => 931 - (-225), // BBox: [-166 -225 1000 931]
-            "Helvetica-Bold" or "Helvetica-BoldOblique"
-                => 962 - (-228), // BBox: [-170 -228 1003 962]
-            "Times-Roman" or "Times-Italic"
-                => 898 - (-218), // BBox: [-168 -218 1000 898]
-            "Times-Bold" or "Times-BoldItalic"
-                => 921 - (-218), // BBox: [-168 -218 1000 921]
-            "Symbol" => 1010 - (-293), // BBox: [-180 -293 1090 1010]
-            "ZapfDingbats" => 820 - (-143), // BBox: [-1 -143 981 820]
-            _ => 0,
-        };
+        // FontBBox = [llx, lly, urx, ury]; height = ury - lly. Derived from
+        // GetFontBBox rather than its own hardcoded table -- the two used to
+        // disagree (this one's Courier carried ury=833, GetFontBBox's is 805,
+        // neither of which anyone had traced back to a source).
+        var bbox = GetFontBBox(baseFontName);
+        return bbox is null ? 0 : bbox[3] - bbox[1];
     }
 
     /// <summary>
@@ -294,7 +293,7 @@ internal static class Standard14Fonts
     private static ushort[] MakeCourier()
     {
         var w = new ushort[256];
-        Array.Fill(w, (ushort)600);
+        Compat.Fill(w, (ushort)600);
         return w;
     }
 
@@ -305,229 +304,14 @@ internal static class Standard14Fonts
     {
         var w = new ushort[256];
         // Default to 278 (space width) for undefined codes
-        Array.Fill(w, (ushort)278);
+        Compat.Fill(w, (ushort)278);
 
         // ASCII printable range from AFM
-        w[32] = 278;  // space
-        w[33] = 278;  // exclam
-        w[34] = 355;  // quotedbl
-        w[35] = 556;  // numbersign
-        w[36] = 556;  // dollar
-        w[37] = 889;  // percent
-        w[38] = 667;  // ampersand
-        w[39] = 191;  // quotesingle
-        w[40] = 333;  // parenleft
-        w[41] = 333;  // parenright
-        w[42] = 389;  // asterisk
-        w[43] = 584;  // plus
-        w[44] = 278;  // comma
-        w[45] = 333;  // hyphen
-        w[46] = 278;  // period
-        w[47] = 278;  // slash
-        w[48] = 556;  // zero
-        w[49] = 556;  // one
-        w[50] = 556;  // two
-        w[51] = 556;  // three
-        w[52] = 556;  // four
-        w[53] = 556;  // five
-        w[54] = 556;  // six
-        w[55] = 556;  // seven
-        w[56] = 556;  // eight
-        w[57] = 556;  // nine
-        w[58] = 278;  // colon
-        w[59] = 278;  // semicolon
-        w[60] = 584;  // less
-        w[61] = 584;  // equal
-        w[62] = 584;  // greater
-        w[63] = 556;  // question
-        w[64] = 1015; // at
-        w[65] = 667;  // A
-        w[66] = 667;  // B
-        w[67] = 722;  // C
-        w[68] = 722;  // D
-        w[69] = 667;  // E
-        w[70] = 611;  // F
-        w[71] = 778;  // G
-        w[72] = 722;  // H
-        w[73] = 278;  // I
-        w[74] = 500;  // J
-        w[75] = 667;  // K
-        w[76] = 556;  // L
-        w[77] = 833;  // M
-        w[78] = 722;  // N
-        w[79] = 778;  // O
-        w[80] = 667;  // P
-        w[81] = 778;  // Q
-        w[82] = 722;  // R
-        w[83] = 667;  // S
-        w[84] = 611;  // T
-        w[85] = 722;  // U
-        w[86] = 667;  // V
-        w[87] = 944;  // W
-        w[88] = 667;  // X
-        w[89] = 667;  // Y
-        w[90] = 611;  // Z
-        w[91] = 278;  // bracketleft
-        w[92] = 278;  // backslash
-        w[93] = 278;  // bracketright
-        w[94] = 469;  // asciicircum
-        w[95] = 556;  // underscore
-        w[96] = 333;  // grave
-        w[97] = 556;  // a
-        w[98] = 556;  // b
-        w[99] = 500;  // c
-        w[100] = 556; // d
-        w[101] = 556; // e
-        w[102] = 278; // f
-        w[103] = 556; // g
-        w[104] = 556; // h
-        w[105] = 222; // i
-        w[106] = 222; // j
-        w[107] = 500; // k
-        w[108] = 222; // l
-        w[109] = 833; // m
-        w[110] = 556; // n
-        w[111] = 556; // o
-        w[112] = 556; // p
-        w[113] = 556; // q
-        w[114] = 333; // r
-        w[115] = 500; // s
-        w[116] = 278; // t
-        w[117] = 556; // u
-        w[118] = 500; // v
-        w[119] = 722; // w
-        w[120] = 500; // x
-        w[121] = 500; // y
-        w[122] = 500; // z
-        w[123] = 334; // braceleft
-        w[124] = 260; // bar
-        w[125] = 334; // braceright
-        w[126] = 584; // asciitilde
+        FillHelveticaAscii(w);
 
         // Latin-1 supplement (128-255) from WinAnsiEncoding
-        w[128] = 556; // Euro (often mapped here)
-        w[130] = 222; // quotesinglbase
-        w[131] = 556; // florin
-        w[132] = 333; // quotedblbase
-        w[133] = 1000; // ellipsis
-        w[134] = 556; // dagger
-        w[135] = 556; // daggerdbl
-        w[136] = 333; // circumflex
-        w[137] = 1000; // perthousand
-        w[138] = 667; // Scaron
-        w[139] = 333; // guilsinglleft
-        w[140] = 1000; // OE
-        w[142] = 611; // Zcaron
-        w[145] = 222; // quoteleft
-        w[146] = 222; // quoteright
-        w[147] = 333; // quotedblleft
-        w[148] = 333; // quotedblright
-        w[149] = 350; // bullet
-        w[150] = 556; // endash
-        w[151] = 1000; // emdash
-        w[152] = 333; // tilde
-        w[153] = 1000; // trademark
-        w[154] = 500; // scaron
-        w[155] = 333; // guilsinglright
-        w[156] = 944; // oe
-        w[158] = 500; // zcaron
-        w[159] = 667; // Ydieresis
-        w[160] = 278; // nbspace
-        w[161] = 333; // exclamdown
-        w[162] = 556; // cent
-        w[163] = 556; // sterling
-        w[164] = 556; // currency
-        w[165] = 556; // yen
-        w[166] = 260; // brokenbar
-        w[167] = 556; // section
-        w[168] = 333; // dieresis
-        w[169] = 737; // copyright
-        w[170] = 370; // ordfeminine
-        w[171] = 556; // guillemotleft
-        w[172] = 584; // logicalnot
-        w[173] = 333; // sfthyphen
-        w[174] = 737; // registered
-        w[175] = 333; // macron
-        w[176] = 400; // degree
-        w[177] = 584; // plusminus
-        w[178] = 333; // twosuperior
-        w[179] = 333; // threesuperior
-        w[180] = 333; // acute
-        w[181] = 556; // mu
-        w[182] = 537; // paragraph
-        w[183] = 278; // periodcentered
-        w[184] = 333; // cedilla
-        w[185] = 333; // onesuperior
-        w[186] = 365; // ordmasculine
-        w[187] = 556; // guillemotright
-        w[188] = 834; // onequarter
-        w[189] = 834; // onehalf
-        w[190] = 834; // threequarters
-        w[191] = 611; // questiondown
-        w[192] = 667; // Agrave
-        w[193] = 667; // Aacute
-        w[194] = 667; // Acircumflex
-        w[195] = 667; // Atilde
-        w[196] = 667; // Adieresis
-        w[197] = 667; // Aring
-        w[198] = 1000; // AE
-        w[199] = 722; // Ccedilla
-        w[200] = 667; // Egrave
-        w[201] = 667; // Eacute
-        w[202] = 667; // Ecircumflex
-        w[203] = 667; // Edieresis
-        w[204] = 278; // Igrave
-        w[205] = 278; // Iacute
-        w[206] = 278; // Icircumflex
-        w[207] = 278; // Idieresis
-        w[208] = 722; // Eth
-        w[209] = 722; // Ntilde
-        w[210] = 778; // Ograve
-        w[211] = 778; // Oacute
-        w[212] = 778; // Ocircumflex
-        w[213] = 778; // Otilde
-        w[214] = 778; // Odieresis
-        w[215] = 584; // multiply
-        w[216] = 778; // Oslash
-        w[217] = 722; // Ugrave
-        w[218] = 722; // Uacute
-        w[219] = 722; // Ucircumflex
-        w[220] = 722; // Udieresis
-        w[221] = 667; // Yacute
-        w[222] = 667; // Thorn
-        w[223] = 611; // germandbls
-        w[224] = 556; // agrave
-        w[225] = 556; // aacute
-        w[226] = 556; // acircumflex
-        w[227] = 556; // atilde
-        w[228] = 556; // adieresis
-        w[229] = 556; // aring
-        w[230] = 889; // ae
-        w[231] = 500; // ccedilla
-        w[232] = 556; // egrave
-        w[233] = 556; // eacute
-        w[234] = 556; // ecircumflex
-        w[235] = 556; // edieresis
-        w[236] = 278; // igrave (actually 222 in some AFMs — using correct)
-        w[237] = 278; // iacute
-        w[238] = 278; // icircumflex
-        w[239] = 278; // idieresis
-        w[240] = 556; // eth
-        w[241] = 556; // ntilde
-        w[242] = 556; // ograve
-        w[243] = 556; // oacute
-        w[244] = 556; // ocircumflex
-        w[245] = 556; // otilde
-        w[246] = 556; // odieresis
-        w[247] = 584; // divide
-        w[248] = 611; // oslash
-        w[249] = 556; // ugrave
-        w[250] = 556; // uacute
-        w[251] = 556; // ucircumflex
-        w[252] = 556; // udieresis
-        w[253] = 500; // yacute
-        w[254] = 556; // thorn
-        w[255] = 500; // ydieresis
+        FillHelveticaLatin1Low(w);
+        FillHelveticaLatin1High(w);
         return w;
     }
 
@@ -536,7 +320,7 @@ internal static class Standard14Fonts
     private static ushort[] MakeHelveticaBold()
     {
         var w = new ushort[256];
-        Array.Fill(w, (ushort)278);
+        Compat.Fill(w, (ushort)278);
 
         w[32] = 278;  w[33] = 333;  w[34] = 474;  w[35] = 556;
         w[36] = 556;  w[37] = 889;  w[38] = 722;  w[39] = 238;
@@ -609,7 +393,7 @@ internal static class Standard14Fonts
     private static ushort[] MakeTimesRoman()
     {
         var w = new ushort[256];
-        Array.Fill(w, (ushort)250);
+        Compat.Fill(w, (ushort)250);
 
         w[32] = 250;  w[33] = 333;  w[34] = 408;  w[35] = 500;
         w[36] = 500;  w[37] = 833;  w[38] = 778;  w[39] = 180;
@@ -676,7 +460,7 @@ internal static class Standard14Fonts
     private static ushort[] MakeTimesBold()
     {
         var w = new ushort[256];
-        Array.Fill(w, (ushort)250);
+        Compat.Fill(w, (ushort)250);
 
         w[32] = 250;  w[33] = 333;  w[34] = 555;  w[35] = 500;
         w[36] = 500;  w[37] = 1000; w[38] = 833;  w[39] = 278;
@@ -743,7 +527,7 @@ internal static class Standard14Fonts
     private static ushort[] MakeTimesItalic()
     {
         var w = new ushort[256];
-        Array.Fill(w, (ushort)250);
+        Compat.Fill(w, (ushort)250);
 
         w[32] = 250;  w[33] = 333;  w[34] = 420;  w[35] = 500;
         w[36] = 500;  w[37] = 833;  w[38] = 778;  w[39] = 214;
@@ -810,7 +594,7 @@ internal static class Standard14Fonts
     private static ushort[] MakeTimesBoldItalic()
     {
         var w = new ushort[256];
-        Array.Fill(w, (ushort)250);
+        Compat.Fill(w, (ushort)250);
 
         w[32] = 250;  w[33] = 389;  w[34] = 555;  w[35] = 500;
         w[36] = 500;  w[37] = 833;  w[38] = 778;  w[39] = 278;
@@ -873,11 +657,14 @@ internal static class Standard14Fonts
     }
 
     // ── Symbol ───────────────────────────────────────────────────────
+    // 3 codes (0xA0, 0xAC, 0xF7) were wrong, verified against the official
+    // Symbol.afm (Adobe Core 14), and against a second, independently
+    // AFM-derived table, which agrees with it at all 189 defined codes.
 
     private static ushort[] MakeSymbol()
     {
         var w = new ushort[256];
-        Array.Fill(w, (ushort)250);
+        Compat.Fill(w, (ushort)250);
 
         w[32] = 250;  w[33] = 333;  w[34] = 713;  w[35] = 500;
         w[36] = 549;  w[37] = 833;  w[38] = 778;  w[39] = 439;
@@ -896,47 +683,50 @@ internal static class Standard14Fonts
         w[88] = 645;  w[89] = 795;  w[90] = 611;  w[91] = 333;
         w[92] = 863;  w[93] = 333;  w[94] = 658;  w[95] = 500;
         w[96] = 500;  w[97] = 631;  w[98] = 549;  w[99] = 549;
-        w[100] = 494; w[101] = 439; w[102] = 521; w[103] = 411;
-        w[104] = 603; w[105] = 329; w[106] = 603; w[107] = 549;
-        w[108] = 549; w[109] = 576; w[110] = 521; w[111] = 549;
-        w[112] = 549; w[113] = 521; w[114] = 549; w[115] = 603;
-        w[116] = 439; w[117] = 576; w[118] = 713; w[119] = 686;
-        w[120] = 493; w[121] = 686; w[122] = 494;
-        w[123] = 480; w[124] = 200; w[125] = 480; w[126] = 549;
-        // Higher codes for Symbol font special chars
-        w[160] = 250; w[161] = 620; w[162] = 247; w[163] = 549;
-        w[164] = 167; w[165] = 713; w[166] = 500; w[167] = 753;
-        w[168] = 753; w[169] = 753; w[170] = 753; w[171] = 1042;
-        w[172] = 713; w[173] = 603; w[174] = 987; w[175] = 603;
-        w[176] = 400; w[177] = 549; w[178] = 411; w[179] = 549;
-        w[180] = 549; w[181] = 713; w[182] = 494; w[183] = 460;
-        w[184] = 549; w[185] = 549; w[186] = 549; w[187] = 549;
-        w[188] = 1000; w[189] = 603; w[190] = 1000; w[191] = 658;
-        w[192] = 823; w[193] = 686; w[194] = 795; w[195] = 987;
-        w[196] = 768; w[197] = 768; w[198] = 823; w[199] = 768;
-        w[200] = 768; w[201] = 713; w[202] = 713; w[203] = 713;
-        w[204] = 713; w[205] = 713; w[206] = 713; w[207] = 713;
-        w[208] = 768; w[209] = 713; w[210] = 790; w[211] = 790;
-        w[212] = 890; w[213] = 823; w[214] = 549; w[215] = 250;
-        w[216] = 713; w[217] = 603; w[218] = 603; w[219] = 1042;
-        w[220] = 987; w[221] = 603; w[222] = 987; w[223] = 603;
-        w[224] = 494; w[225] = 329; w[226] = 790; w[227] = 790;
-        w[228] = 786; w[229] = 713; w[230] = 384; w[231] = 384;
-        w[232] = 384; w[233] = 384; w[234] = 384; w[235] = 384;
-        w[236] = 494; w[237] = 494; w[238] = 494; w[239] = 494;
-        w[241] = 329; w[242] = 274; w[243] = 686; w[244] = 686;
-        w[245] = 686; w[246] = 384; w[247] = 549; w[248] = 384;
-        w[249] = 384; w[250] = 384; w[251] = 384; w[252] = 494;
-        w[253] = 494; w[254] = 494;
+        w[100] = 494;  w[101] = 439;  w[102] = 521;  w[103] = 411;
+        w[104] = 603;  w[105] = 329;  w[106] = 603;  w[107] = 549;
+        w[108] = 549;  w[109] = 576;  w[110] = 521;  w[111] = 549;
+        w[112] = 549;  w[113] = 521;  w[114] = 549;  w[115] = 603;
+        w[116] = 439;  w[117] = 576;  w[118] = 713;  w[119] = 686;
+        w[120] = 493;  w[121] = 686;  w[122] = 494;  w[123] = 480;
+        w[124] = 200;  w[125] = 480;  w[126] = 549;  w[160] = 750;
+        w[161] = 620;  w[162] = 247;  w[163] = 549;  w[164] = 167;
+        w[165] = 713;  w[166] = 500;  w[167] = 753;  w[168] = 753;
+        w[169] = 753;  w[170] = 753;  w[171] = 1042;  w[172] = 987;
+        w[173] = 603;  w[174] = 987;  w[175] = 603;  w[176] = 400;
+        w[177] = 549;  w[178] = 411;  w[179] = 549;  w[180] = 549;
+        w[181] = 713;  w[182] = 494;  w[183] = 460;  w[184] = 549;
+        w[185] = 549;  w[186] = 549;  w[187] = 549;  w[188] = 1000;
+        w[189] = 603;  w[190] = 1000;  w[191] = 658;  w[192] = 823;
+        w[193] = 686;  w[194] = 795;  w[195] = 987;  w[196] = 768;
+        w[197] = 768;  w[198] = 823;  w[199] = 768;  w[200] = 768;
+        w[201] = 713;  w[202] = 713;  w[203] = 713;  w[204] = 713;
+        w[205] = 713;  w[206] = 713;  w[207] = 713;  w[208] = 768;
+        w[209] = 713;  w[210] = 790;  w[211] = 790;  w[212] = 890;
+        w[213] = 823;  w[214] = 549;  w[215] = 250;  w[216] = 713;
+        w[217] = 603;  w[218] = 603;  w[219] = 1042;  w[220] = 987;
+        w[221] = 603;  w[222] = 987;  w[223] = 603;  w[224] = 494;
+        w[225] = 329;  w[226] = 790;  w[227] = 790;  w[228] = 786;
+        w[229] = 713;  w[230] = 384;  w[231] = 384;  w[232] = 384;
+        w[233] = 384;  w[234] = 384;  w[235] = 384;  w[236] = 494;
+        w[237] = 494;  w[238] = 494;  w[239] = 494;  w[241] = 329;
+        w[242] = 274;  w[243] = 686;  w[244] = 686;  w[245] = 686;
+        w[246] = 384;  w[247] = 384;  w[248] = 384;  w[249] = 384;
+        w[250] = 384;  w[251] = 384;  w[252] = 494;  w[253] = 494;
+        w[254] = 494;
         return w;
     }
 
     // ── ZapfDingbats ─────────────────────────────────────────────────
+    // 62 of 202 defined codes were wrong (mostly 0x81-0x8D and 0xCC on up --
+    // looks like an offset/transcription slip), verified against the official
+    // ZapfDingbats.afm (Adobe Core 14), and against a second, independently
+    // AFM-derived table, which agrees with it at all 202 codes.
 
     private static ushort[] MakeZapfDingbats()
     {
         var w = new ushort[256];
-        Array.Fill(w, (ushort)278);
+        Compat.Fill(w, (ushort)278);
 
         w[32] = 278;  w[33] = 974;  w[34] = 961;  w[35] = 974;
         w[36] = 980;  w[37] = 719;  w[38] = 789;  w[39] = 790;
@@ -955,40 +745,40 @@ internal static class Standard14Fonts
         w[88] = 768;  w[89] = 792;  w[90] = 759;  w[91] = 707;
         w[92] = 708;  w[93] = 682;  w[94] = 701;  w[95] = 826;
         w[96] = 815;  w[97] = 789;  w[98] = 789;  w[99] = 707;
-        w[100] = 687; w[101] = 696; w[102] = 689; w[103] = 786;
-        w[104] = 787; w[105] = 713; w[106] = 791; w[107] = 785;
-        w[108] = 791; w[109] = 873; w[110] = 761; w[111] = 762;
-        w[112] = 762; w[113] = 759; w[114] = 759; w[115] = 892;
-        w[116] = 892; w[117] = 788; w[118] = 784; w[119] = 438;
-        w[120] = 138; w[121] = 277; w[122] = 415; w[123] = 392;
-        w[124] = 392; w[125] = 668; w[126] = 668;
-
-        w[128] = 390; w[130] = 390; w[131] = 317;
-        w[132] = 401; w[133] = 938; w[134] = 1024; w[135] = 461;
-        w[136] = 480; w[137] = 896; w[138] = 734; w[139] = 496;
-        w[140] = 873; w[141] = 461;
-        w[161] = 732; w[162] = 544; w[163] = 544; w[164] = 910;
-        w[165] = 667; w[166] = 760; w[167] = 760; w[168] = 776;
-        w[169] = 595; w[170] = 694; w[171] = 626; w[172] = 788;
-        w[173] = 788; w[174] = 788; w[175] = 788; w[176] = 788;
-        w[177] = 788; w[178] = 788; w[179] = 788; w[180] = 788;
-        w[181] = 788; w[182] = 788; w[183] = 788; w[184] = 788;
-        w[185] = 788; w[186] = 788; w[187] = 788; w[188] = 788;
-        w[189] = 788; w[190] = 788; w[191] = 788; w[192] = 788;
-        w[193] = 788; w[194] = 788; w[195] = 788; w[196] = 788;
-        w[197] = 788; w[198] = 788; w[199] = 788; w[200] = 788;
-        w[201] = 788; w[202] = 788; w[203] = 788; w[204] = 894;
-        w[205] = 838; w[206] = 1016; w[207] = 458; w[208] = 748;
-        w[209] = 924; w[210] = 748; w[211] = 918; w[212] = 927;
-        w[213] = 928; w[214] = 928; w[215] = 834; w[216] = 873;
-        w[217] = 828; w[218] = 924; w[219] = 924; w[220] = 917;
-        w[221] = 930; w[222] = 931; w[223] = 463; w[224] = 883;
-        w[225] = 836; w[226] = 836; w[227] = 867; w[228] = 867;
-        w[229] = 696; w[230] = 696; w[231] = 874;
-        w[234] = 874; w[235] = 760; w[236] = 946; w[237] = 771;
-        w[238] = 865; w[239] = 771; w[240] = 888; w[241] = 967;
-        w[242] = 888; w[243] = 831; w[244] = 873; w[245] = 927;
-        w[246] = 970; w[247] = 918;
+        w[100] = 687;  w[101] = 696;  w[102] = 689;  w[103] = 786;
+        w[104] = 787;  w[105] = 713;  w[106] = 791;  w[107] = 785;
+        w[108] = 791;  w[109] = 873;  w[110] = 761;  w[111] = 762;
+        w[112] = 762;  w[113] = 759;  w[114] = 759;  w[115] = 892;
+        w[116] = 892;  w[117] = 788;  w[118] = 784;  w[119] = 438;
+        w[120] = 138;  w[121] = 277;  w[122] = 415;  w[123] = 392;
+        w[124] = 392;  w[125] = 668;  w[126] = 668;  w[128] = 390;
+        w[129] = 390;  w[130] = 317;  w[131] = 317;  w[132] = 276;
+        w[133] = 276;  w[134] = 509;  w[135] = 509;  w[136] = 410;
+        w[137] = 410;  w[138] = 234;  w[139] = 234;  w[140] = 334;
+        w[141] = 334;  w[161] = 732;  w[162] = 544;  w[163] = 544;
+        w[164] = 910;  w[165] = 667;  w[166] = 760;  w[167] = 760;
+        w[168] = 776;  w[169] = 595;  w[170] = 694;  w[171] = 626;
+        w[172] = 788;  w[173] = 788;  w[174] = 788;  w[175] = 788;
+        w[176] = 788;  w[177] = 788;  w[178] = 788;  w[179] = 788;
+        w[180] = 788;  w[181] = 788;  w[182] = 788;  w[183] = 788;
+        w[184] = 788;  w[185] = 788;  w[186] = 788;  w[187] = 788;
+        w[188] = 788;  w[189] = 788;  w[190] = 788;  w[191] = 788;
+        w[192] = 788;  w[193] = 788;  w[194] = 788;  w[195] = 788;
+        w[196] = 788;  w[197] = 788;  w[198] = 788;  w[199] = 788;
+        w[200] = 788;  w[201] = 788;  w[202] = 788;  w[203] = 788;
+        w[204] = 788;  w[205] = 788;  w[206] = 788;  w[207] = 788;
+        w[208] = 788;  w[209] = 788;  w[210] = 788;  w[211] = 788;
+        w[212] = 894;  w[213] = 838;  w[214] = 1016;  w[215] = 458;
+        w[216] = 748;  w[217] = 924;  w[218] = 748;  w[219] = 918;
+        w[220] = 927;  w[221] = 928;  w[222] = 928;  w[223] = 834;
+        w[224] = 873;  w[225] = 828;  w[226] = 924;  w[227] = 924;
+        w[228] = 917;  w[229] = 930;  w[230] = 931;  w[231] = 463;
+        w[232] = 883;  w[233] = 836;  w[234] = 836;  w[235] = 867;
+        w[236] = 867;  w[237] = 696;  w[238] = 696;  w[239] = 874;
+        w[241] = 874;  w[242] = 760;  w[243] = 946;  w[244] = 771;
+        w[245] = 865;  w[246] = 771;  w[247] = 888;  w[248] = 967;
+        w[249] = 888;  w[250] = 831;  w[251] = 873;  w[252] = 927;
+        w[253] = 970;  w[254] = 918;
         return w;
     }
 }

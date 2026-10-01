@@ -166,6 +166,15 @@ internal static class ArabicTextNormalizer
             '\uFEC1' or '\uFEC2' or '\uFEC3' or '\uFEC4' => "\u0637",
             // Zah
             '\uFEC5' or '\uFEC6' or '\uFEC7' or '\uFEC8' => "\u0638",
+            _ => MapPresentationFormRest(c),
+        };
+    }
+
+    /// <summary>The second half of the presentation-form table: the letters from the split point on, and the identity default.</summary>
+    private static string MapPresentationFormRest(char c)
+    {
+        return c switch
+        {
             // Ain
             '\uFEC9' or '\uFECA' or '\uFECB' or '\uFECC' => "\u0639",
             // Ghain

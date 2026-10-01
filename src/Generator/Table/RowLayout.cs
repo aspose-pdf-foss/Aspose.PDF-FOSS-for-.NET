@@ -46,6 +46,7 @@ public partial class Table : BaseParagraph
         rp.maxLineHeight = 0;
         rp.tightForMax = 0;
         rp.maxVertPad = 0;
+        rp.maxBorderV = 0;
         rp.maxTopPad = 0;
         rp.cellTotals = new List<(double padV, int lineCount, double tight, double exact, double ownStack)>();
 
@@ -54,49 +55,8 @@ public partial class Table : BaseParagraph
         foreach (var cellLines2 in rp.plan.CellLines)
             foreach (var cl2 in cellLines2)
                 if (cl2.Leading > rp.plan.Leading) rp.plan.Leading = cl2.Leading;
-        rp.plan.LineHeight = rp.maxLineHeight > 0 ? rp.maxLineHeight : DefaultLineHeightPt;
-        rp.plan.TightLine = rp.tightForMax > 0 ? rp.tightForMax : rp.plan.LineHeight;
-        // Band-doc tables (HonorCellFontFaces): unstyled text rows advance at the CSS
-        // line box of their font size — round(pt·(4/3)·1.15)px·0.75, e.g. 9 pt for an
-        // 8 pt line — not at the bare font size, which packs multi-line cells ~1 pt/line
-        // tighter than a browser lays them out.
-        // The lifted HTML render lays its text out on the same browser line box (its
-        // 8 pt body columns pitch at 9 pt, line for line with a browser).
-        // …and so does a grid the stylesheet styles: its 8 pt body columns pitch at 9,
-        // line for line with a browser. A table the stylesheet never addresses
-        // keeps the calibrated bare-em pitch — re-pitching it grows every row ~12 %
-        // and walks the whole table down the page.
-        if ((HonorCellFontFaces || (NestedTableRender && HtmlChainStyledCells))
-            && rp.plan.CssContentH <= 0 && rp.maxLineHeight > 0)
-        {
-            rp.plan.LineHeight = CssLineBoxPt(rp.plan.LineHeight);
-            rp.plan.TightLine = CssLineBoxPt(rp.plan.TightLine);
-        }
-        // An inline-styled grid pitches at ITS face's CSS line box (Verdana's
-        // 2489/2048 em puts a 9 px cell on an 11 px = 8.25 pt line, the pitch the
-        // reference rows step at).
-        else if (InlineFaceGridRatio > 0 && rp.plan.CssContentH <= 0 && rp.maxLineHeight > 0)
-        {
-            rp.plan.LineHeight = FaceCssLineBoxPt(rp.plan.LineHeight, InlineFaceGridRatio);
-            rp.plan.TightLine = FaceCssLineBoxPt(rp.plan.TightLine, InlineFaceGridRatio);
-        }
-        rp.rowContentH = rp.plan.LineCount == 0 ? 0.0
-            : (rp.plan.LineCount - 1) * rp.plan.LineHeight + rp.plan.TightLine;
-        rp.maxCellTotal = 0.0;
-        rp.anyExactCell = false;
-        rp.maxOwnTotal = 0.0;
-        foreach (var (cpv, cn, ctight, cexact, cown) in rp.cellTotals)
-        {
-            var ch = cexact > 0 ? cexact : cn == 0 ? 0 : (cn - 1) * rp.plan.LineHeight + ctight;
-            if (cexact > 0) rp.anyExactCell = true;
-            if (cpv + ch > rp.maxCellTotal) rp.maxCellTotal = cpv + ch;
-            if (cn > 0 && cpv + cown > rp.maxOwnTotal) rp.maxOwnTotal = cpv + cown;
-        }
-        // A row holding an exact-stack control cell sizes to the max over cells
-        // of each cell's OWN stacked height (every text line at its own font
-        // size, boxes at their box height) — the uniform grid would price a
-        // 7pt side label at the row's 10pt pitch and oversize the row.
-        rp.plan.ExactTotalH = rp.anyExactCell ? rp.maxOwnTotal : 0;
+        SettleRowLineHeight(rp);
+        FoldRowCellTotals(rp);
         // UA cell boxes: the row's content already stacks on the CSS line-box grid, so
         // the padding is simply the widest cell's own — deriving it from
         // maxCellTotal−rowContentH would net off the difference between the per-cell
@@ -110,12 +70,17 @@ public partial class Table : BaseParagraph
         // lifted nested-table render keeps the cells' own padding too: its rows stack
         // reserve lines/css boxes exactly, and the net-off would swallow the
         // cellspacing bands the outer table declares.
+        // A row holding a line that is a box of its own pitch (a picture under
+        // CellPictureBoxesAreExact) stacks exactly too: netting the uniform estimate
+        // off the exact stack would hand the box's height back as padding.
         rp.plan.VertPadding = UaCellBoxes || CssRunBoxes || HonorCellTtfFaces || NestedTableRender
+            || rp.plan.CellLines.Exists(lines => lines.Exists(l => l.OwnPitch > 0))
             ? rp.maxVertPad
             : rp.plan.LineCount == 0 || rp.maxCellTotal <= 0
             ? rp.maxVertPad
             : Math.Max(0, rp.maxCellTotal - rp.rowContentH);
         rp.plan.CellPadV = rp.maxVertPad;
+        rp.plan.RuleBand = rp.maxBorderV;
         rp.plan.TopPad = rp.maxTopPad;
         rp.plan.MinBlankHeight = Math.Max(row.FixedRowHeight, row.MinRowHeight);
         // A content-less row reserves a single line (no padding, see the slice loop) —
@@ -123,56 +88,7 @@ public partial class Table : BaseParagraph
         // tables (HonorCellFontFaces) collapse it to nothing instead: their all-empty
         // rows are CSS column-width definitions (<td width="6%"></td>…), which browsers
         // lay out at zero height.
-        if (rp.plan.MinBlankHeight <= 0)
-            // A row with NO CELLS reserves nothing: it draws nothing and the generator
-            // gives it no height (a `Rows.Add()` with only FixedRowHeight = 0 in front of
-            // a fixed-height row leaves that row at the content top, not a line below it).
-            rp.plan.MinBlankHeight = row.Cells.Count == 0 ? 0
-                : rp.plan.LineCount != 0 ? 20
-                : HonorCellFontFaces ? 0
-                // redline grids: a hidden-content row collapses to the tight
-                // spacer drawn for it (3.2 pt — measured net of the next
-                // row's own billed margin-top)
-                : RedlineCellSeat ? 3.2
-                // A column-pagination slice: this row's text lives in another
-                // slice; here it is one line of the row's cell font (the height
-                // the row has where its text renders), not the generic blank slot.
-                : ColumnSliceChild && row.Cells.Count > 0
-                    ? ResolveFragmentDrawSize(row.Cells.At(0), row)
-                : rp.plan.LineHeight;
-        // A whitespace-only row (e.g. a " " spacer) is likewise a tight spacer drawn
-        // without cell padding so it reserves just its line.
-        // …but under CSS run boxes a row of empty cells is an ORDINARY row: the browser
-        // gives it its cells' padding plus one line box (the invisible character those
-        // cells hold is still a line), which is what draws its rules.
-        // Under the lifted nested-table render, a row whose "blank" lines are
-        // nested-table or image RESERVES is content, not a spacer — dropping its
-        // padding would strip the cellspacing bands and jam the nested grid
-        // against the row border. Legacy dialects keep the historical rule.
-        rp.plan.IsBlankRow = !CssRunBoxes && rp.plan.CellInline is null && rp.plan.LineCount > 0
-            && row.FixedRowHeight <= 0
-            && !((NestedTableRender || GeneratorCellModel) && rp.plan.CellTables is not null)
-            && System.Linq.Enumerable.All(rp.plan.CellLines,
-                cl => System.Linq.Enumerable.All(cl,
-                    l => string.IsNullOrWhiteSpace(l.Text) && !(NestedTableRender && l.ImgReserve)));
-        // XML-generator dialect: an all-empty row is an
-        // ORDINARY row — its cells' padding plus one line at the default cell
-        // font size (5+10+5 = 20 for the padded report rows), never the tight
-        // spacer or the 1.2-em default line.
-        if (XmlGeneratorModel)
-        {
-            rp.plan.IsBlankRow = false;
-            if (rp.plan.LineCount == 0)
-            {
-                var xmlFs = DefaultCellTextState?.FontSize > 0 ? (double)DefaultCellTextState.FontSize : 10.0;
-                rp.plan.MinBlankHeight = Math.Max(rp.plan.MinBlankHeight, rp.maxVertPad + xmlFs + XmlLineSpacing);
-            }
-            // Every line advances by its OWN font size (a 14/10/14 pt paragraph
-            // stack is 38 pt of content, not 3 × 14) — the row sizes to the exact
-            // per-cell stacks, like the control-cell rule.
-            else if (rp.maxOwnTotal > 0)
-                rp.plan.ExactTotalH = rp.maxOwnTotal;
-        }
+        SettleBlankRowHeight(rp, row);
         return rp.plan;
     }
 
@@ -217,6 +133,21 @@ public partial class Table : BaseParagraph
     /// assigned (the HTML block renderer's 1.2× pitch) is not the caller's and carries
     /// no leading here. Segment states are consulted when the fragment's own is bare —
     /// a fragment built from segments declares its spacing on them.</summary>
+    /// <summary>The caller's leading for a cell paragraph, falling back to the leading the
+    /// cell, its row or the table declared for every cell: a header table whose
+    /// DefaultCellTextState says 6 paces its 10 pt rows at 16.</summary>
+    private double CallerLineSpacing(BaseParagraph paragraph, Cell cell, Row row)
+    {
+        var own = CallerLineSpacing(paragraph);
+        if (own > 0) return own;
+        if (paragraph is not Aspose.Pdf.Text.TextFragment tf || string.IsNullOrEmpty(tf.Text)) return 0;
+        // Cell, row and table each hold a default state (a bare one declares no leading),
+        // so the nearest one that DECLARES a leading wins.
+        foreach (var st in new[] { cell.DefaultCellTextState, row.DefaultCellTextState, DefaultCellTextState })
+            if (st is { LineSpacingSynthetic: false, LineSpacing: > 0 }) return st.LineSpacing;
+        return 0;
+    }
+
     private static double CallerLineSpacing(BaseParagraph paragraph)
     {
         if (paragraph is not Aspose.Pdf.Text.TextFragment tf) return 0;
@@ -251,6 +182,58 @@ public partial class Table : BaseParagraph
         for (var i = start; i < lines.Count; i++) lines[i].Leading = leading;
     }
 
+    /// <summary>The line box a cell paragraph DECLARED, in em, or (0, 0) when it
+    /// declared none. A caller asks for one exactly as it does of the page flow:
+    /// <see cref="Aspose.Pdf.Text.TextFormattingOptions.LineSpacingMode.LineBox"/>
+    /// plus both extents. Both halves must be present — half a pair is a caller
+    /// mistake, and mixing one declared edge with one the face supplied would seat
+    /// the text somewhere neither asked for.</summary>
+    private static (double AscentEm, double DescentEm) DeclaredCellLineBox(BaseParagraph paragraph)
+    {
+        if (paragraph is not Aspose.Pdf.Text.TextFragment tf) return (0, 0);
+        if (tf.TextState.FormattingOptions is not
+            { LineSpacing: Aspose.Pdf.Text.TextFormattingOptions.LineSpacingMode.LineBox }) return (0, 0);
+        return tf.TextState is { LineBoxAscentEm: { } ascent, LineBoxDescentEm: { } descent }
+            ? (ascent, descent) : (0, 0);
+    }
+
+    /// <summary>Records a declared line box on the lines one cell paragraph
+    /// produced, the way <see cref="StampLeading"/> records its leading.</summary>
+    private static void StampDeclaredLineBox(List<CellLine> lines, int start,
+        (double AscentEm, double DescentEm) box)
+    {
+        if (box.AscentEm <= 0 || box.DescentEm <= 0) return;
+        for (var i = start; i < lines.Count; i++)
+        {
+            lines[i].LineBoxAscentEm = box.AscentEm;
+            lines[i].LineBoxDescentEm = box.DescentEm;
+        }
+    }
+
+    /// <summary>True when this line carries a line box the caller declared -- or
+    /// seated itself (see <see cref="CellLine.OwnBaseline"/>).</summary>
+    private static bool DeclaresLineBox(CellLine line) =>
+        line.OwnBaseline > 0 || (line.LineBoxAscentEm > 0 && line.LineBoxDescentEm > 0);
+
+    /// <summary>The advance from one line of a cell to the next. A declared line
+    /// box IS the line's own advance, so a cell keeps its own rhythm beside a
+    /// taller neighbour instead of stretching to the row's uniform pitch; a line
+    /// that declared none pitches at that uniform height as before.</summary>
+    private static double DeclaredLinePitch(CellLine line, double uniformLineHeight) =>
+        line.OwnPitch > 0 ? line.OwnPitch
+        : DeclaresLineBox(line) ? line.FontSize + line.Leading : uniformLineHeight;
+
+    /// <summary>How far below its line box's top a declared line box seats the
+    /// baseline: half the box's surplus leading, then the ascent. Zero when the
+    /// line declared no box.</summary>
+    private static double DeclaredLineBoxBaseOff(CellLine line)
+    {
+        if (line.OwnBaseline > 0) return line.OwnBaseline;
+        if (!DeclaresLineBox(line)) return 0;
+        var extent = (line.LineBoxAscentEm + line.LineBoxDescentEm) * line.FontSize;
+        return (line.FontSize + line.Leading - extent) / 2 + line.LineBoxAscentEm * line.FontSize;
+    }
+
     /// <summary>Font size a cell paragraph draws at: a declared cell/row/table default
     /// wins over the fragment's own state; otherwise the fragment's.</summary>
     private double ResolveCellParagraphFontSize(
@@ -279,10 +262,47 @@ public partial class Table : BaseParagraph
     /// (those keep the Standard-14 path).</summary>
     private Aspose.Pdf.Text.Font? ResolveGeneratorCellFont(TextFragment tf, Cell cell, Row row)
     {
+        // A table's default state names the face of a cell when nothing nearer does (probed:
+        // a table whose DefaultCellTextState names Arial after its cells were added draws
+        // them in Arial, set before or after alike); a cell or row that named one keeps it.
+        if (!tf.TextState.FontTouched && cell.DefaultCellTextState is not { FontTouched: true }
+            && row.DefaultCellTextState is not { FontTouched: true }
+            && DefaultCellTextState is { FontTouched: true, Font: { } tableFont })
+            return tableFont;
         var f = tf.TextState.Font;
         if (f is null || ReferenceEquals(f, Aspose.Pdf.Text.FontInfo.DefaultHelvetica))
             f = cell.DefaultCellTextState?.Font ?? row.DefaultCellTextState?.Font ?? DefaultCellTextState?.Font;
         return f;
+    }
+
+    /// <summary>The face data the generator path draws this fragment with (its resolved
+    /// face's file in the fragment's weight and slant, else the resolved font's own data for
+    /// a plain run); null when it keeps the default face - the same answer for the wrap
+    /// measure and for the draw, so a face named but not drawable measures on the default.</summary>
+    private byte[]? GeneratorCellTtf(TextFragment tf, Cell cell, Row row, bool bold, bool italic)
+    {
+        if (ResolveGeneratorCellFace(tf, cell, row) is not { } name) return null;
+        return CellFaceTtf(name, bold, italic)
+            ?? (bold || italic ? null : tf.TextState.Font?.SourceFontData?.TtfData);
+    }
+
+    /// <summary>The Standard-14 face a cell fragment names by NAME alone -- a state given a face
+    /// by name keeps the default font object and carries the name in TextState.FontName -- in the
+    /// weight and slant asked for: Times-Roman, Courier-Bold, ... Null when the fragment names
+    /// none, draws through a program of its own, names a family outside the fourteen, or names
+    /// plain Helvetica, the table's own face, which the plain path draws already. Only a
+    /// fragment that declares its own line box asks for this: the generator, XML and HTML
+    /// dialects name faces too, and their tables keep drawing in the table's face (their
+    /// references were made that way - an XML report's footnote pages moved when they did not).</summary>
+    internal static string? NamedStandard14Face(TextFragment tf, bool bold, bool italic)
+    {
+        var state = tf.TextState;
+        if (state.FormattingOptions is not { LineSpacing: TextFormattingOptions.LineSpacingMode.LineBox }) return null;
+        if (state.Font is { } font && !ReferenceEquals(font, Aspose.Pdf.Text.FontInfo.DefaultHelvetica)) return null;
+        if (state.FontData is not null || string.IsNullOrEmpty(state.FontName)) return null;
+        if (!TextBuilder.IsStandard14Family(state.FontName)) return null;
+        var face = TextBuilder.MapToStandard14Public(new TextState { FontName = state.FontName, IsBold = bold, IsItalic = italic });
+        return face == "Helvetica" ? null : face;
     }
 
     private string? ResolveGeneratorCellFace(TextFragment tf, Cell cell, Row row)
@@ -295,8 +315,11 @@ public partial class Table : BaseParagraph
     }
 
     /// <summary>Greedy word wrap on an embedded face's plain advances (no kerning —
-    /// the generator draws unkerned shows).</summary>
-    private static List<string> WrapLinesWithFont(string s, double size, byte[] ttf, double avail)
+    /// the generator draws unkerned shows). A wrapped line keeps the space it broke
+    /// at when the fragment asks for hanging break spaces
+    /// (<see cref="Aspose.Pdf.Text.TextFormattingOptions.HangingBreakSpace"/>).</summary>
+    private static List<string> WrapLinesWithFont(string s, double size, byte[] ttf, double avail,
+        bool hangingBreakSpace = false)
     {
         var res = new List<string>();
         var cur = "";
@@ -304,7 +327,7 @@ public partial class Table : BaseParagraph
         {
             var cand = cur.Length == 0 ? word : cur + " " + word;
             if (cur.Length > 0 && avail > 0 && MeasureWidthWithFont(cand, size, ttf) > avail + 1e-6)
-            { res.Add(cur); cur = word; }
+            { res.Add(hangingBreakSpace ? cur + " " : cur); cur = word; }
             else cur = cand;
         }
         if (cur.Length > 0) res.Add(cur);
@@ -331,9 +354,12 @@ public partial class Table : BaseParagraph
     };
 
     /// <summary>A TextFragment carrying more than one non-empty segment — each segment has its own
-    /// TextState (size/colour/super-subscript) and is laid out as a distinct inline run.</summary>
+    /// TextState (size/colour/super-subscript) and is laid out as a distinct inline run. One whose
+    /// segments were asked to flow as runs is not this shape: its lines are planned as runs of
+    /// their own sizes and faces (see <c>PlanSegmentRunsText</c>).</summary>
     private static bool IsMultiSegmentFragment(BaseParagraph p) =>
         p is Aspose.Pdf.Text.TextFragment tf
+        && !SegmentsFlowAsRuns(tf)
         && System.Linq.Enumerable.Count(tf.Segments, s => !string.IsNullOrEmpty(s.Text)) > 1;
 
     /// <summary>The vertical alignment a row's cells share in the generator model:
@@ -393,7 +419,7 @@ public partial class Table : BaseParagraph
     }
 
     /// <summary>Height of one inline row: the tallest item on it (a text run's
-    /// pitch, an image's box), or <paramref name="fallback"/> for an empty row.</summary>
+    /// pitch, an image's box), or <c>fallback</c> for an empty row.</summary>
     /// <summary>Row height in a cell that went inline ONLY because it holds a Graph:
     /// a graph row is exactly the graph's declared box (zero for a Graph(0, 0)) and a
     /// text row is the cell's own resolved size, as the plain cell path prices it.</summary>
@@ -410,32 +436,25 @@ public partial class Table : BaseParagraph
         return any;
     }
 
-    private static double GraphOnlyRowHeight(List<InlineItem> row, double cellFontSize)
-    {
-        double h = 0;
-        var allGraphs = row.Count > 0;
-        foreach (var it in row)
-        {
-            if (it.Graph is null) { allGraphs = false; continue; }
-            if (it.Height > h) h = it.Height;
-        }
-        return allGraphs ? h : cellFontSize;
-    }
-
+    /// <summary>The height of one inline row of a generator cell. A row of graphs
+    /// alone is exactly the tallest box it DECLARES, zero included: a Graph(0, 0) in
+    /// a cell takes no room at all and its shapes overhang whatever follows, so the
+    /// cell's own text stays on the row's first line (probed 2026-08-26). Once a
+    /// text run is on the row the row is the text's line: a graph BEFORE the text
+    /// is ignored (a 30 pt swatch in front of 12 pt text leaves a 12 pt row, the
+    /// swatch overhanging the rule), a graph AFTER it raises the line to its own
+    /// height (probed 2026-09-05). An empty row falls back to one text line.</summary>
     private static double InlineRowHeight(List<InlineItem> row, double fallback)
     {
-        double h = 0;
-        var allGraphs = row.Count > 0;
+        double graphs = 0, h = 0;
+        var seenText = false;
         foreach (var it in row)
         {
-            if (it.Height > h) h = it.Height;
-            if (it.Graph is null) allGraphs = false;
+            if (it.Graph is null) { seenText = true; if (it.Height > h) h = it.Height; }
+            else if (seenText) { if (it.Height > h) h = it.Height; }
+            else if (it.Height > graphs) graphs = it.Height;
         }
-        // A Graph occupies exactly the box it DECLARES, zero included: a Graph(0, 0)
-        // in a cell takes no room at all and its shapes overhang whatever follows,
-        // so the cell's own text stays on the row's first line (probed 2026-08-26).
-        // Every other empty row falls back to one text line.
-        if (allGraphs) return h;
+        if (!seenText && row.Count > 0) return graphs;
         return h > 0 ? h : fallback;
     }
 
@@ -487,10 +506,12 @@ public partial class Table : BaseParagraph
     /// the platform decoder is used so images without explicit density (JFIF units=0)
     /// resolve at the 96-DPI default the generator assumes; elsewhere it falls back to the
     /// header parser (which defaults such images to 72 DPI).</summary>
-    private static bool TryGetCellImageSizePt(byte[] data, out double widthPt, out double heightPt)
+    private static (double widthPt, double heightPt)? TryGetCellImageSizePt(byte[] data)
     {
+        double widthPt = default;
+        double heightPt = default;
         widthPt = 0; heightPt = 0;
-        if (OperatingSystem.IsWindows())
+        if (Compat.IsWindows())
         {
             try
             {
@@ -501,12 +522,12 @@ public partial class Table : BaseParagraph
                 var dpiY = img.VerticalResolution > 0 ? img.VerticalResolution : 96;
                 widthPt = img.Width * 72.0 / dpiX;
                 heightPt = img.Height * 72.0 / dpiY;
-                if (widthPt > 0 && heightPt > 0) return true;
+                if (widthPt > 0 && heightPt > 0) return (widthPt, heightPt);
 #pragma warning restore CA1416
             }
             catch { /* fall through to the header parser */ }
         }
-        return Document.TryGetImageNaturalSizePt(data, out widthPt, out heightPt);
+        return Document.TryGetImageNaturalSizePt(data);
     }
 
     /// <summary>Read an <see cref="Image"/> paragraph's bytes from its stream or file,
@@ -606,30 +627,49 @@ public partial class Table : BaseParagraph
         List<byte[]>? graphSink = null,
         List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>? checkboxSink = null,
         Page? page = null,
-        List<(Note note, double x, double baseline, double size)>? footnoteSink = null)
+        List<(Note note, double x, double baseline, double size)>? footnoteSink = null,
+        List<(ReservedBlock block, ReservedPart part, Rectangle rect)>? blockSink = null)
     {
         var row = slice.Plan.Row;
         var defaultPad = row.DefaultCellPadding ?? DefaultCellPadding;
-        var cellX = tableX;
+        // (a spaced grid's first box stands one gap inside its edge)
+        var cellX = tableX + CellSpacingH;
 
         // Table background: the table-level BackgroundColor paints the whole row band
         // (cell/row colours draw over it); under the XML dialect a header band bleeds
         // edge-to-edge from x = 0 (the era template dialect). The plain generator
         // paints it too — five LightYellow grids fill their whole column block.
-        if ((XmlGeneratorModel || GeneratorDialect) && BackgroundColor is not null)
+        // (a grid with rounded corners paints its background once per page instead,
+        // see PaintRoundedGridBackground)
+        if ((XmlGeneratorModel || GeneratorDialect) && BackgroundColor is not null && CornerRadii is null)
         {
-            double bgX = tableX, bgW = 0;
-            foreach (var w in colWidths) bgW += w;
+            double bgX = tableX, bgW = GridBoxWidth(colWidths);
             if (XmlBandBleedWidth > 0) { bgX = 0; bgW = XmlBandBleedWidth; }
+            // A spaced grid's background covers the gaps too: the one above every
+            // row, and the one under the last row on the page.
+            var bgBelow = slice.RowIndex >= Rows.Count - 1 || _sliceClosesPage ? CellSpacingV : 0;
             builder.SetFillColor(BackgroundColor);
-            builder.Rectangle(bgX, slice.TopY - slice.Height, bgW, slice.Height);
+            builder.Rectangle(bgX, slice.TopY - slice.Height - bgBelow, bgW, slice.Height + CellSpacingV + bgBelow);
+            builder.Fill();
+        }
+
+        // A row painted as one band: its box across every column, between the grid
+        // lines above and below it. A collapsed grid's slice box stands half a rule
+        // above and left of those lines, so the band starts that much in.
+        if (row.BackgroundIsBand && row.BackgroundColor is { } band)
+        {
+            var inset = IsBordersCollapsed ? CollapsedSkeleton() / 2 : 0;
+            double bandW = 0;
+            foreach (var w in colWidths) bandW += w;
+            builder.SetFillColor(band);
+            builder.Rectangle(tableX + inset, slice.TopY - inset - slice.Height, bandW, slice.Height);
             builder.Fill();
         }
 
         var gridToCell = slice.Plan.GridToCell;
         for (var col = 0; col < colWidths.Length; col++)
-            RenderRowSliceColumn(col, ref cellX, builder, slice, colWidths, fontName, cellMap,
-                links, imageSink, optionSink, graphSink, checkboxSink, page, footnoteSink);
+            cellX = RenderRowSliceColumn(col, cellX, builder, slice, colWidths, fontName, cellMap,
+                links, imageSink, optionSink, graphSink, checkboxSink, page, footnoteSink, blockSink);
     }
 
     // Anchor styling: link text draws pure
@@ -741,6 +781,9 @@ public partial class Table : BaseParagraph
     internal const double DwRadioLeadPt = 4.8;
     internal const double DwRadioGlyphDPt = 12.0;
 
+    /// <summary>The Times-Roman AFM advance of the bullet (U+2022), in 1/1000 em - a list marker's glyph.</summary>
+    private const int TimesBulletWidth = 350;
+
     /// <summary>Std14 Times-Roman advance for a WinAnsi string (per-char AFM
     /// widths, 1/1000 em) — the measure twin of the serif control-cell text.</summary>
     private static double MeasureTimesRoman(string s, double fontSize)
@@ -748,7 +791,7 @@ public partial class Table : BaseParagraph
         double w = 0;
         foreach (var ch in s)
         {
-            var cw = Standard14Fonts.GetWidth("Times-Roman", ch);
+            var cw = ch == '\u2022' ? TimesBulletWidth : Standard14Fonts.GetWidth("Times-Roman", ch);
             w += cw > 0 ? cw : Standard14Fonts.GetDefaultWidth("Times-Roman");
         }
         return w * fontSize / 1000.0;

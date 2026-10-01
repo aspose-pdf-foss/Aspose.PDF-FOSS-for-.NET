@@ -60,7 +60,7 @@ public partial class MarkupAnnotation : Annotation
 
     // /State and /StateModel are text strings (PDF §12.5.6.4), not names.
     private static PdfString StateString(string value) =>
-        new PdfString(System.Text.Encoding.Latin1.GetBytes(value));
+        new PdfString(Compat.Latin1.GetBytes(value));
 
     /// <summary>Set /State to Marked or Unmarked plus /StateModel = Marked.</summary>
     public void SetMarkedState(bool marked)
@@ -118,12 +118,12 @@ public partial class MarkupAnnotation : Annotation
                 : ParsePdfDate(raw) ?? System.DateTime.MinValue;
         }
         set => Dict.Set("CreationDate",
-            new PdfString(System.Text.Encoding.Latin1.GetBytes(
+            new PdfString(Compat.Latin1.GetBytes(
                 "D:" + value.ToUniversalTime().ToString("yyyyMMddHHmmss") + "Z")));
     }
 
     /// <summary>Opacity (0..1) carried in /CA.</summary>
-    public new double Opacity
+    public new virtual double Opacity
     {
         get
         {
@@ -153,7 +153,7 @@ public partial class MarkupAnnotation : Annotation
         }
     }
 
-    /// <summary>Reply relationship to <see cref="InReplyTo"/> (/RT).</summary>
+    /// <summary>Reply relationship to <c>InReplyTo</c> (/RT).</summary>
     public new ReplyType ReplyType
     {
         get => Dict.GetName("RT") switch

@@ -6,12 +6,16 @@ namespace Aspose.Pdf;
 /// (no public members).</summary>
 public class Hyperlink
 {
+    /// <summary>Creates a hyperlink with no destination. Use <c>WebHyperlink</c>, <c>FileHyperlink</c> or <c>LocalHyperlink</c> to link somewhere.</summary>
+    public Hyperlink() { }
 }
 
 /// <summary>Hyperlink that opens an external URL.</summary>
 public class WebHyperlink : Hyperlink
 {
+    /// <summary>Creates a web hyperlink with no URL; set <c>Url</c> before use.</summary>
     public WebHyperlink() { }
+    /// <summary>Creates a web hyperlink that opens the given URL.</summary>
     public WebHyperlink(string url) { Url = url; }
 
     /// <summary>Destination URL.</summary>
@@ -36,7 +40,9 @@ public class FileHyperlink : Hyperlink
 /// same document.</summary>
 public class LocalHyperlink : Hyperlink
 {
+    /// <summary>Creates a local hyperlink with no target; set <c>Target</c> or <c>TargetPageNumber</c> before use.</summary>
     public LocalHyperlink() { }
+    /// <summary>Creates a local hyperlink that jumps to the given paragraph.</summary>
     public LocalHyperlink(BaseParagraph target) { Target = target; }
 
     /// <summary>Target paragraph within the document.</summary>

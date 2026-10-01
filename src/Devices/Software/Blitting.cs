@@ -62,8 +62,8 @@ public sealed partial class SoftwarePageRenderer
         if (mode != Rasterizer.BlendMode.Normal)
         {
             if (a == 0) return;
-            BlendModes.Blend(mode, ctx.Pixels[idx], ctx.Pixels[idx + 1], ctx.Pixels[idx + 2],
-                r, g, b, out var ibr, out var ibg, out var ibb);
+            var (ibr, ibg, ibb) = BlendModes.Blend(mode, ctx.Pixels[idx], ctx.Pixels[idx + 1], ctx.Pixels[idx + 2],
+                r, g, b);
             // Cs′ = (1 − αb)·Cs + αb·B(Cb, Cs): the blend applies only in proportion to how
             // much backdrop is actually there.
             byte br = (byte)(r + (ibr - r) * backdropA);

@@ -69,8 +69,8 @@ public class PdfAction : IAppointment
     internal PdfReader Reader => _reader;
 
     /// <summary>Low-level view of the action's underlying PDF dictionary
-    /// (the corpus' <c>EngineDict</c> assert surface).</summary>
-    internal Forms.FieldDictionaryView EngineDict =>
+    /// (HasKey / indexer / ToDictionary chains over the stored entries).</summary>
+    internal Forms.FieldDictionaryView DictionaryView =>
         Forms.FieldDictionaryView.For(_dict, _reader ?? Aspose.Pdf.IO.PdfReader.Empty);
 
     internal static PdfAction Create(PdfDictionary dict, PdfReader reader)
@@ -148,7 +148,7 @@ public class PdfAction : IAppointment
     {
         var dict = new PdfDictionary();
         dict.Set("S", new PdfName("URI"));
-        dict.Set("URI", new PdfString(Encoding.Latin1.GetBytes(uri)));
+        dict.Set("URI", new PdfString(Compat.Latin1.GetBytes(uri)));
         return new PdfAction(dict);
     }
 
@@ -159,7 +159,7 @@ public class PdfAction : IAppointment
     {
         var dict = new PdfDictionary();
         dict.Set("S", new PdfName("JavaScript"));
-        dict.Set("JS", new PdfString(Encoding.Latin1.GetBytes(script)));
+        dict.Set("JS", new PdfString(Compat.Latin1.GetBytes(script)));
         return new PdfAction(dict);
     }
 
@@ -181,7 +181,7 @@ public class PdfAction : IAppointment
     {
         var dict = new PdfDictionary();
         dict.Set("S", new PdfName("Launch"));
-        dict.Set("F", new PdfString(Encoding.Latin1.GetBytes(filePath)));
+        dict.Set("F", new PdfString(Compat.Latin1.GetBytes(filePath)));
         return new PdfAction(dict);
     }
 
@@ -202,6 +202,7 @@ public class PdfAction : IAppointment
     };
 }
 
+/// <summary>An action that jumps to a destination in the same document (/S /GoTo), such as a page or an explicit view of a page.</summary>
 public sealed class GoToAction : PdfAction
 {
     internal GoToAction(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -325,14 +326,14 @@ public sealed class GoToAction : PdfAction
         var catalog = reader.Catalog;
         var pagesDict = reader.ResolveDict(catalog.Get("Pages"));
         if (pagesDict is null) return null;
-        var counter = 0;
-        return FindPageByIndex(reader, pagesDict, pageNumber, ref counter);
+        return FindPageByIndex(reader, pagesDict, pageNumber, 0).page;
     }
 
-    private static Page? FindPageByIndex(PdfReader reader, PdfDictionary node, int targetOneBasedIndex, ref int counter)
+    /// <returns>The page at the index when this subtree holds it, and the pages counted so far.</returns>
+    private static (Page? page, int counter) FindPageByIndex(PdfReader reader, PdfDictionary node, int targetOneBasedIndex, int counter)
     {
         var kids = reader.Resolve(node.Get("Kids")) as PdfArray;
-        if (kids is null) return null;
+        if (kids is null) return (null, counter);
         foreach (var kid in kids)
         {
             var kidDict = reader.ResolveDict(kid);
@@ -342,15 +343,16 @@ public sealed class GoToAction : PdfAction
             {
                 counter++;
                 if (counter == targetOneBasedIndex)
-                    return new Page(kidDict, reader, counter - 1);
+                    return (new Page(kidDict, reader, counter - 1), counter);
             }
             else if (type == "Pages")
             {
-                var found = FindPageByIndex(reader, kidDict, targetOneBasedIndex, ref counter);
-                if (found is not null) return found;
+                Page? found;
+                (found, counter) = FindPageByIndex(reader, kidDict, targetOneBasedIndex, counter);
+                if (found is not null) return (found, counter);
             }
         }
-        return null;
+        return (null, counter);
     }
 
     /// <summary>The destination page number (0-based), or -1 if not resolved.</summary>
@@ -399,29 +401,30 @@ public sealed class GoToAction : PdfAction
         var pagesDict = Reader.ResolveDict(catalog.Get("Pages"));
         if (pagesDict is null) return -1;
 
-        var index = 0;
-        return FindPageInTree(pagesDict, targetObjNum, ref index) ? index : -1;
+        var (found, index) = FindPageInTree(pagesDict, targetObjNum, 0);
+        return found ? index : -1;
     }
 
-    private bool FindPageInTree(PdfDictionary node, int targetObjNum, ref int index)
+    /// <returns>Whether the page is in this subtree, and the pages counted before it.</returns>
+    private (bool found, int index) FindPageInTree(PdfDictionary node, int targetObjNum, int index)
     {
         var type = node.GetName("Type");
         if (type == "Page")
         {
             // Can't directly compare dict identity — we'd need object numbers
             // This path is reached when node is directly embedded (rare)
-            return false;
+            return (false, index);
         }
 
         var kids = Reader.Resolve(node.Get("Kids")) as PdfArray;
-        if (kids is null) return false;
+        if (kids is null) return (false, index);
 
         foreach (var kid in kids)
         {
             if (kid is PdfIndirectRef kidRef)
             {
                 if (kidRef.ObjectNumber == targetObjNum)
-                    return true;
+                    return (true, index);
 
                 var kidDict = Reader.ResolveDict(kid);
                 if (kidDict is null) continue;
@@ -430,13 +433,14 @@ public sealed class GoToAction : PdfAction
                 if (kidType == "Page")
                 {
                     if (kidRef.ObjectNumber == targetObjNum)
-                        return true;
+                        return (true, index);
                     index++;
                 }
                 else if (kidType == "Pages")
                 {
-                    if (FindPageInTree(kidDict, targetObjNum, ref index))
-                        return true;
+                    bool found;
+                    (found, index) = FindPageInTree(kidDict, targetObjNum, index);
+                    if (found) return (true, index);
                 }
             }
             else
@@ -449,14 +453,15 @@ public sealed class GoToAction : PdfAction
                         index++;
                     else if (kidType == "Pages")
                     {
-                        if (FindPageInTree(kidDict, targetObjNum, ref index))
-                            return true;
+                        bool found;
+                        (found, index) = FindPageInTree(kidDict, targetObjNum, index);
+                        if (found) return (true, index);
                     }
                 }
             }
         }
 
-        return false;
+        return (false, index);
     }
 }
 
@@ -510,7 +515,7 @@ public sealed class GoToURIAction : PdfAction
     {
         var dict = new PdfDictionary();
         dict.Set("S", new PdfName("URI"));
-        dict.Set("URI", new PdfString(Encoding.Latin1.GetBytes(uri)));
+        dict.Set("URI", new PdfString(Compat.Latin1.GetBytes(uri)));
         return dict;
     }
 }
@@ -598,10 +603,12 @@ public sealed class GoToRemoteAction : PdfAction
     }
 }
 
+/// <summary>An action that launches an application or opens a file (/S /Launch).</summary>
 public sealed class LaunchAction : PdfAction
 {
     internal LaunchAction(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
+    /// <summary>Creates a launch action that opens the file or application at <c>file</c>.</summary>
     public LaunchAction(string file) : base(BuildDict(file))
     {
     }
@@ -620,6 +627,7 @@ public sealed class LaunchAction : PdfAction
         return dict;
     }
 
+    /// <summary>Gets or sets the path of the file to launch. Reading it also looks inside a file specification or a /Win entry; an empty string means no file is named.</summary>
     public string File
     {
         get
@@ -673,6 +681,7 @@ public sealed class LaunchAction : PdfAction
     }
 }
 
+/// <summary>An action that runs a predefined viewer command (/S /Named), such as going to the next page or printing.</summary>
 public sealed class NamedAction : PdfAction
 {
     // PrintDialog is the one predefined action with no /Named vocabulary entry:
@@ -694,7 +703,7 @@ public sealed class NamedAction : PdfAction
         if (action == Annotations.PredefinedAction.PrintDialog)
         {
             dict.Set("S", new PdfName("JavaScript"));
-            dict.Set("JS", new PdfString(Encoding.Latin1.GetBytes(PrintDialogScript)));
+            dict.Set("JS", new PdfString(Compat.Latin1.GetBytes(PrintDialogScript)));
             dict.Set("Type", new PdfName("Action"));
             return dict;
         }
@@ -789,6 +798,7 @@ public sealed class HideAction : PdfAction
     }
 }
 
+/// <summary>An action that runs a JavaScript script (/S /JavaScript). Viewers run the script; this library only interprets simple form-field colour assignments in it.</summary>
 public sealed class JavascriptAction : PdfAction
 {
     internal JavascriptAction(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }

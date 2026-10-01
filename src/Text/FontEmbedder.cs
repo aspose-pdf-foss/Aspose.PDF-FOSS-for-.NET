@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Text;
@@ -7,7 +7,7 @@ namespace Aspose.Pdf.Text;
 /// Embeds TrueType fonts into PDF documents for custom text rendering.
 /// Creates the font dictionary, font descriptor, and font file stream.
 /// </summary>
-public sealed class FontEmbedder
+public sealed partial class FontEmbedder
 {
     private readonly Document _document;
     private readonly TrueTypeParser _parser;
@@ -147,111 +147,86 @@ public sealed class FontEmbedder
     /// <paramref name="baseFontName"/>. Used by PDF/A conversion to embed a font that was
     /// referenced but not embedded, without changing the resource reference that points at
     /// this dictionary.</summary>
-    internal static void EmbedIntoFontDict(Document document, byte[] ttfData,
-        PdfDictionary fontDict, string baseFontName,
-        Dictionary<string, (int objNum, string embedName)>? fontFileCache = null,
-        bool subset = true)
+    internal static void EmbedIntoFontDict(Document document, byte[] ttfData, PdfDictionary fontDict, string baseFontName, Dictionary<string, (int objNum, string embedName)>? fontFileCache = null, bool subset = true)
     {
-        var parser = new TrueTypeParser(ttfData);
-        parser.Parse();
-        var scale = 1000.0 / parser.UnitsPerEm;
+        var fe = new FontDictEmbedState();
+        fe.document = document;
+        fe.ttfData = ttfData;
+        fe.fontDict = fontDict;
+        fe.baseFontName = baseFontName;
+        fe.fontFileCache = fontFileCache;
+        fe.subset = subset;
+        fe.parser = new TrueTypeParser(fe.ttfData);
+        fe.parser.Parse();
+        fe.scale = 1000.0 / fe.parser.UnitsPerEm;
 
-        // Embedding the whole system TTF (often ~1 MB) for every referenced font bloats the
-        // output enormously — a PDF/A conversion of a small file can balloon to tens of MB.
-        // Reduce the font program to just the glyphs reachable through this dictionary's
-        // WinAnsi 32..255 range, which is all a simple TrueType font can address. When the
-        // subset is a proper reduction it is presented under a 6-letter subset tag per
-        // PDF 32000-1 §9.6.4. Falls back to the full program if subsetting can't apply
-        // (e.g. CFF-based or loca-less fonts).
-        var fontProgram = parser.FontData;
-        var embedName = baseFontName;
+        fe.fontProgram = fe.parser.FontData;
+        fe.embedName = fe.baseFontName;
         // A caller that explicitly cleared IsSubset wants the full program embedded under
         // the bare name (no subset tag). Skip the WinAnsi reduction then.
-        if (subset)
+        if (fe.subset)
         try
         {
-            var winAnsiCodes = new HashSet<int>();
-            for (var b = 32; b <= 255; b++)
-                winAnsiCodes.Add(Cp1252.GetString(new[] { (byte)b })[0]);
-            var (subsetData, _) = new TrueTypeSubsetter(ttfData, parser).Subset(winAnsiCodes);
-            if (subsetData.Length > 0 && subsetData.Length < parser.FontData.Length)
-            {
-                fontProgram = subsetData;
-                embedName = GenerateSubsetTag() + "+" + baseFontName;
-            }
+            SubsetEmbeddedFont(fe);
         }
         catch { /* keep the full program if subsetting throws */ }
 
-        // The same system face is typically referenced by many font dictionaries
-        // (e.g. dozens of "Arial"/"ArialMT" entries across a converted document). Embedding
-        // an identical program once and sharing the FontFile2 object keeps the output small.
-        int fontFileObjNum;
-        var cacheKey = fontFileCache is null
+        fe.cacheKey = fe.fontFileCache is null
             ? null
-            : Convert.ToHexString(Security.ShaDigest.Sha256(fontProgram));
-        if (cacheKey is not null && fontFileCache!.TryGetValue(cacheKey, out var cached))
+            : Compat.ToHexString(Security.ShaDigest.Sha256(fe.fontProgram));
+        if (fe.cacheKey is not null && fe.fontFileCache!.TryGetValue(fe.cacheKey, out var cached))
         {
-            fontFileObjNum = cached.objNum;
-            embedName = cached.embedName; // keep the subset tag consistent with the shared program
+            fe.fontFileObjNum = cached.objNum;
+            fe.embedName = cached.embedName; // keep the subset tag consistent with the shared program
         }
         else
         {
-            fontFileObjNum = document.AllocateObjectNumber();
+            fe.fontFileObjNum = fe.document.AllocateObjectNumber();
             var fontFileDict = new PdfDictionary();
-            fontFileDict.Set("Length1", new PdfInteger(fontProgram.Length));
-            document.AddNewObject(fontFileObjNum, new PdfStream(fontFileDict, fontProgram));
-            if (cacheKey is not null)
-                fontFileCache![cacheKey] = (fontFileObjNum, embedName);
+            fontFileDict.Set("Length1", new PdfInteger(fe.fontProgram.Length));
+            fe.document.AddNewObject(fe.fontFileObjNum, new PdfStream(fontFileDict, fe.fontProgram));
+            if (fe.cacheKey is not null)
+                fe.fontFileCache![fe.cacheKey] = (fe.fontFileObjNum, fe.embedName);
         }
 
-        var descriptor = new PdfDictionary();
-        descriptor.Set("Type", new PdfName("FontDescriptor"));
-        descriptor.Set("FontName", new PdfName(embedName));
-        descriptor.Set("Flags", new PdfInteger(parser.GetPdfFlags()));
-        descriptor.Set("ItalicAngle", new PdfReal(parser.ItalicAngle));
-        var bbox = parser.BBox;
-        var bboxArray = new PdfArray();
-        for (var i = 0; i < 4; i++) bboxArray.Add(new PdfInteger((int)(bbox[i] * scale)));
-        descriptor.Set("FontBBox", bboxArray);
-        descriptor.Set("Ascent", new PdfInteger((int)(parser.Ascent * scale)));
-        descriptor.Set("Descent", new PdfInteger((int)(parser.Descent * scale)));
-        descriptor.Set("CapHeight", new PdfInteger((int)(parser.CapHeight * scale)));
-        descriptor.Set("StemV", new PdfInteger(85));
-        descriptor.Set("FontFile2", new PdfIndirectRef(fontFileObjNum, 0));
+        fe.descriptor = new PdfDictionary();
+        fe.descriptor.Set("Type", new PdfName("FontDescriptor"));
+        fe.descriptor.Set("FontName", new PdfName(fe.embedName));
+        fe.descriptor.Set("Flags", new PdfInteger(fe.parser.GetPdfFlags()));
+        fe.descriptor.Set("ItalicAngle", new PdfReal(fe.parser.ItalicAngle));
+        fe.bbox = fe.parser.BBox;
+        fe.bboxArray = new PdfArray();
+        for (var i = 0; i < 4; i++) fe.bboxArray.Add(new PdfInteger((int)(fe.bbox[i] * fe.scale)));
+        fe.descriptor.Set("FontBBox", fe.bboxArray);
+        fe.descriptor.Set("Ascent", new PdfInteger((int)(fe.parser.Ascent * fe.scale)));
+        fe.descriptor.Set("Descent", new PdfInteger((int)(fe.parser.Descent * fe.scale)));
+        fe.descriptor.Set("CapHeight", new PdfInteger((int)(fe.parser.CapHeight * fe.scale)));
+        fe.descriptor.Set("StemV", new PdfInteger(85));
+        fe.descriptor.Set("FontFile2", new PdfIndirectRef(fe.fontFileObjNum, 0));
 
         // Drop any prior simple-font entries that no longer apply, then write the
         // embedded-TrueType shape over the existing dictionary. The descriptor is held
         // inline (direct) so an in-memory re-read of the font sees the FontFile2 entry
         // without resolving a not-yet-written indirect object; the font program stream
         // itself is indirect (it is serialised at save time).
-        fontDict.Remove("FontFile");
-        fontDict.Remove("FontFile3");
-        fontDict.Set("Type", new PdfName("Font"));
-        fontDict.Set("Subtype", new PdfName("TrueType"));
-        fontDict.Set("BaseFont", new PdfName(embedName));
+        fe.fontDict.Remove("FontFile");
+        fe.fontDict.Remove("FontFile3");
+        fe.fontDict.Set("Type", new PdfName("Font"));
+        fe.fontDict.Set("Subtype", new PdfName("TrueType"));
+        fe.fontDict.Set("BaseFont", new PdfName(fe.embedName));
         // Preserve the source's /Widths (and the /FirstChar-/LastChar range and /Encoding)
         // when the dictionary already carries them: the page content was laid out against
         // those advances, so replacing them with the substitute face's own metrics shifts
         // every glyph on a text-showing run by a small, accumulating amount — the same text
         // then renders a fraction of a point off where the un-embedded source drew it. Only
         // synthesise a WinAnsi 32..255 width array (and encoding) when the source had none.
-        if (fontDict.Get("Widths") is null)
+        if (fe.fontDict.Get("Widths") is null)
         {
-            var widths = new PdfArray();
-            // The array is indexed by WinAnsi CODE, so each code must resolve
-            // through CP1252 to its character before the cmap lookup — the
-            // 0x80..0x9F block (€, curly quotes, dashes, ™ …) otherwise reads
-            // control codepoints and lands on the notdef advance.
-            for (var c = 32; c <= 255; c++)
-                widths.Add(new PdfInteger((int)(
-                    parser.GetCharWidth(Cp1252.GetString(new[] { (byte)c })[0]) * scale)));
-            fontDict.Set("FirstChar", new PdfInteger(32));
-            fontDict.Set("LastChar", new PdfInteger(255));
-            fontDict.Set("Widths", widths);
+            WriteFontDescriptor(fe);
         }
-        if (fontDict.Get("Encoding") is null)
-            fontDict.Set("Encoding", new PdfName("WinAnsiEncoding"));
-        fontDict.Set("FontDescriptor", descriptor);
+        if (fe.fontDict.Get("Encoding") is null)
+            fe.fontDict.Set("Encoding", new PdfName("WinAnsiEncoding"));
+        fe.fontDict.Set("FontDescriptor", fe.descriptor);
     }
 
     /// <summary>Embed <paramref name="ttfData"/> as the /FontFile2 of an EXISTING
@@ -271,11 +246,29 @@ public sealed class FontEmbedder
         var scale = 1000.0 / parser.UnitsPerEm;
         var reader = document.Reader;
 
+        // Under an Identity encoding and ordering the CIDs are glyph ids: the program takes the
+        // widths /W states for them (the page was laid out against /W), so the two agree.
+        var identityOrdering = reader.ResolveDict(cidFontDict.Get("CIDSystemInfo"))?.Get("Ordering") switch
+        {
+            PdfString s => AdobeCidTables.MaxCid(s.ToText()) <= 0,
+            PdfName n => AdobeCidTables.MaxCid(n.Value) <= 0,
+            _ => true,
+        };
+        if (document.ReconcileEmbeddedWidths && identityOrdering
+            && type0Dict.GetName("Encoding") is null or "Identity-H" or "Identity-V"
+            && cidFontDict.Get("CIDToGIDMap") is null or PdfName { Value: "Identity" })
+        {
+            var advances = new Dictionary<int, int>();
+            foreach (var (cid, width) in TrueTypeAdvances.CidWidths(reader.Resolve(cidFontDict.Get("W")) as PdfArray, reader))
+                advances[cid] = (int)Math.Round(width / scale);
+            ttfData = TrueTypeAdvances.Patch(ttfData, advances);
+        }
+
         // Share one FontFile2 object per distinct program (CJK faces run to many MB).
         int fontFileObjNum;
         var cacheKey = fontFileCache is null
             ? null
-            : Convert.ToHexString(Security.ShaDigest.Sha256(ttfData));
+            : Compat.ToHexString(Security.ShaDigest.Sha256(ttfData));
         if (cacheKey is not null && fontFileCache!.TryGetValue(cacheKey, out var cached))
             fontFileObjNum = cached.objNum;
         else
@@ -466,13 +459,17 @@ public sealed class FontEmbedder
     {
         // PDF spec requires a 6-letter uppercase tag
         var chars = new char[6];
-        var random = Random.Shared;
+        var random = Compat.SharedRandom;
         for (var i = 0; i < 6; i++)
             chars[i] = (char)('A' + random.Next(26));
         return new string(chars);
     }
 
-    private static byte[] BuildToUnicodeCMap(HashSet<int> charCodes)
+    private static byte[] BuildToUnicodeCMap(HashSet<int> charCodes) =>
+        BuildToUnicodeCMap(charCodes.Where(c => c >= 32 && c <= 255).ToDictionary(c => c, c => (char)c));
+
+    /// <summary>A single-byte ToUnicode CMap mapping each code to its character.</summary>
+    private static byte[] BuildToUnicodeCMap(IReadOnlyDictionary<int, char> unicodeOf)
     {
         var sb = new StringBuilder();
         sb.Append("/CIDInit /ProcSet findresource begin\n");
@@ -485,7 +482,7 @@ public sealed class FontEmbedder
         sb.Append("<00> <FF>\n");
         sb.Append("endcodespacerange\n");
 
-        var sorted = charCodes.Where(c => c >= 32 && c <= 255).OrderBy(c => c).ToList();
+        var sorted = unicodeOf.Keys.OrderBy(c => c).ToList();
         if (sorted.Count > 0)
         {
             // Write in groups of up to 100 (CMap spec limit)
@@ -496,7 +493,7 @@ public sealed class FontEmbedder
                 for (var j = 0; j < count; j++)
                 {
                     var c = sorted[i + j];
-                    sb.Append($"<{c:X2}> <{c:X4}>\n");
+                    sb.Append($"<{c:X2}> <{(int)unicodeOf[c]:X4}>\n");
                 }
                 sb.Append("endbfchar\n");
             }

@@ -159,7 +159,7 @@ public class FontSubsetterTests
 
             // The 6-char prefix should be all uppercase letters
             var prefix = baseFont[..6];
-            Assert.All(prefix.ToCharArray(), c => Assert.True(char.IsAsciiLetterUpper(c),
+            Assert.All(prefix.ToCharArray(), c => Assert.True(c is >= 'A' and <= 'Z',
                 $"Expected uppercase letter but got '{c}' in prefix '{prefix}'"));
 
             // Original name should follow after the '+'

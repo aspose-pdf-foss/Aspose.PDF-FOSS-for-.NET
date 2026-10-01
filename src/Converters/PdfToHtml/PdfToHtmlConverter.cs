@@ -128,7 +128,9 @@ public sealed partial class PdfToHtmlConverter
     private static string EscapeHrefAmpersands(string url) =>
         url.Contains('&') ? System.Text.RegularExpressions.Regex.Replace(url, "&(?!amp;)", "&amp;") : url;
 
-    /// <summary>Decoded FontFile2 (TrueType) program of a simple or Type0/CID font, or null.</summary>
+    /// <summary>Decoded FontFile2 (TrueType) program of a simple or Type0/CID font, or null -
+    /// also when the entry holds a bare CFF program under the wrong key (a producer's slip a
+    /// viewer tolerates), which <see cref="GetEmbeddedBareCff"/> serves instead.</summary>
     private static byte[]? GetEmbeddedTtf(PdfDictionary font, PdfReader reader)
     {
         try
@@ -140,10 +142,15 @@ public sealed partial class PdfToHtmlConverter
                 descriptor = descFont is not null ? reader.ResolveDict(descFont.Get("FontDescriptor")) : null;
             }
             var fontFile = descriptor is not null ? reader.ResolveStream(descriptor.Get("FontFile2")) : null;
-            return fontFile is not null ? reader.DecodeStream(fontFile) : null;
+            var bytes = fontFile is not null ? reader.DecodeStream(fontFile) : null;
+            return bytes is not null && LooksLikeBareCff(bytes) ? null : bytes;
         }
         catch { return null; }
     }
+
+    /// <summary>A bare CFF program starts with its header: major version 1, minor 0, header size 4.</summary>
+    private static bool LooksLikeBareCff(byte[] bytes)
+        => bytes.Length >= 4 && bytes[0] == 1 && bytes[1] == 0 && bytes[2] == 4;
 
     /// <summary>Decoded FontFile3 program when it is a full OpenType sfnt (Subtype
     /// OpenType — a CFF outline table wrapped in an sfnt), which the WOFF wrapper can

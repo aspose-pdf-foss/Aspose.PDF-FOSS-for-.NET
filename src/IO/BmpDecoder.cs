@@ -1,4 +1,4 @@
-namespace Aspose.Pdf.IO;
+﻿namespace Aspose.Pdf.IO;
 
 /// <summary>
 /// Managed BMP decoder: reads a Windows bitmap into PNG bytes (via <see cref="PngEncoder"/>)
@@ -13,7 +13,7 @@ namespace Aspose.Pdf.IO;
 /// half-decoded. Any alpha channel is composited over WHITE, matching what the platform
 /// codec path produces when it draws the image onto a cleared bitmap.
 /// </summary>
-internal static class BmpDecoder
+internal static partial class BmpDecoder
 {
     public static bool IsBmp(byte[] d) =>
         d is { Length: >= 26 } && d[0] == 0x42 && d[1] == 0x4D;
@@ -28,118 +28,83 @@ internal static class BmpDecoder
 
     private static byte[]? DecodeCore(byte[] d)
     {
-        if (!IsBmp(d)) return null;
-        var dataOffset = (int)U32(d, 10);
-        var dibSize = (int)U32(d, 14);
-        int width, height, bitCount, compression = 0, clrUsed = 0, paletteEntry;
-        if (dibSize == 12)
+        var bd = new BmpDecodeState();
+        bd.d = d;
+        if (!IsBmp(bd.d)) return null;
+        bd.dataOffset = (int)U32(bd.d, 10);
+        bd.dibSize = (int)U32(bd.d, 14);
+        bd.compression = 0;
+        bd.clrUsed = 0;
+        if (bd.dibSize == 12)
         {
-            width = U16(d, 18);
-            height = U16(d, 20);
-            bitCount = U16(d, 24);
-            paletteEntry = 3;                       // BITMAPCOREHEADER palette is RGB triplets
+            bd.width = U16(bd.d, 18);
+            bd.height = U16(bd.d, 20);
+            bd.bitCount = U16(bd.d, 24);
+            bd.paletteEntry = 3;                       // BITMAPCOREHEADER palette is RGB triplets
         }
-        else if (dibSize >= 40)
+        else if (bd.dibSize >= 40)
         {
-            width = (int)U32(d, 18);
-            height = (int)U32(d, 22);
-            bitCount = U16(d, 28);
-            compression = (int)U32(d, 30);
-            clrUsed = (int)U32(d, 46);
-            paletteEntry = 4;
+            bd.width = (int)U32(bd.d, 18);
+            bd.height = (int)U32(bd.d, 22);
+            bd.bitCount = U16(bd.d, 28);
+            bd.compression = (int)U32(bd.d, 30);
+            bd.clrUsed = (int)U32(bd.d, 46);
+            bd.paletteEntry = 4;
         }
         else return null;
 
-        // A negative height means the rows are stored TOP-DOWN instead of the usual
-        // bottom-up order.
-        var topDown = height < 0;
-        if (topDown) height = -height;
-        if (width <= 0 || height <= 0 || width > 65535 || height > 65535) return null;
-        if ((long)width * height > 268_435_456) return null;          // 256M px sanity cap
-        if (bitCount is not (1 or 4 or 8 or 16 or 24 or 32)) return null;
-        if (compression is not (0 or 3)) return null;                 // RLE4/RLE8 not read here
+        bd.topDown = bd.height < 0;
+        if (bd.topDown) bd.height = -bd.height;
+        if (bd.width <= 0 || bd.height <= 0 || bd.width > 65535 || bd.height > 65535) return null;
+        if ((long)bd.width * bd.height > 268_435_456) return null;          // 256M px sanity cap
+        if (bd.bitCount is not (1 or 4 or 8 or 16 or 24 or 32)) return null;
+        if (bd.compression is 1 or 2) return RleAsPng(bd.d);
+        if (bd.compression is not (0 or 3)) return null;
 
         // Channel masks: BI_BITFIELDS states them, either inside a V4/V5 header or in the
         // three words right after a plain one. BI_RGB implies the classic packing.
-        uint mR, mG, mB, mA = 0;
-        if (compression == 3 && dibSize >= 52)
+        uint mR;
+        uint mG;
+        uint mB;
+        uint mA = 0;
+        if (bd.compression == 3 && bd.dibSize >= 52)
         {
-            mR = U32(d, 54); mG = U32(d, 58); mB = U32(d, 62);
-            if (dibSize >= 56) mA = U32(d, 66);
+            mR = U32(bd.d, 54); mG = U32(bd.d, 58); mB = U32(bd.d, 62);
+            if (bd.dibSize >= 56) mA = U32(bd.d, 66);
         }
-        else if (compression == 3 && 14 + dibSize + 12 <= d.Length)
+        else if (bd.compression == 3 && 14 + bd.dibSize + 12 <= bd.d.Length)
         {
-            mR = U32(d, 14 + dibSize); mG = U32(d, 18 + dibSize); mB = U32(d, 22 + dibSize);
+            mR = U32(bd.d, 14 + bd.dibSize); mG = U32(bd.d, 18 + bd.dibSize); mB = U32(bd.d, 22 + bd.dibSize);
         }
-        else if (bitCount == 16) { mR = 0x7C00; mG = 0x03E0; mB = 0x001F; }
+        else if (bd.bitCount == 16) { mR = 0x7C00; mG = 0x03E0; mB = 0x001F; }
         else { mR = 0x00FF0000; mG = 0x0000FF00; mB = 0x000000FF; }
 
-        byte[]? palette = null;
-        if (bitCount <= 8)
+        bd.palette = null;
+        if (bd.bitCount <= 8)
         {
-            var count = clrUsed > 0 ? clrUsed : 1 << bitCount;
-            var at = 14 + dibSize;
-            if (count <= 0 || at + count * paletteEntry > d.Length) return null;
-            palette = new byte[count * 3];
+            var count = bd.clrUsed > 0 ? bd.clrUsed : 1 << bd.bitCount;
+            var at = 14 + bd.dibSize;
+            if (count <= 0 || at + count * bd.paletteEntry > bd.d.Length) return null;
+            bd.palette = new byte[count * 3];
             for (var i = 0; i < count; i++)
             {
                 // Stored BLUE, GREEN, RED (then a pad byte in the 4-byte form).
-                palette[i * 3]     = d[at + i * paletteEntry + 2];
-                palette[i * 3 + 1] = d[at + i * paletteEntry + 1];
-                palette[i * 3 + 2] = d[at + i * paletteEntry];
+                bd.palette[i * 3]     = bd.d[at + i * bd.paletteEntry + 2];
+                bd.palette[i * 3 + 1] = bd.d[at + i * bd.paletteEntry + 1];
+                bd.palette[i * 3 + 2] = bd.d[at + i * bd.paletteEntry];
             }
         }
 
-        var rowBytes = (width * bitCount + 31) / 32 * 4;              // rows pad to 4 bytes
-        if (dataOffset <= 0 || dataOffset >= d.Length) return null;
-        if ((long)dataOffset + (long)rowBytes * height > d.Length) return null;
+        bd.rowBytes = (bd.width * bd.bitCount + 31) / 32 * 4;              // rows pad to 4 bytes
+        if (bd.dataOffset <= 0 || bd.dataOffset >= bd.d.Length) return null;
+        if ((long)bd.dataOffset + (long)bd.rowBytes * bd.height > bd.d.Length) return null;
 
-        var rgb = new byte[(long)width * height * 3];
-        for (var y = 0; y < height; y++)
+        bd.rgb = new byte[(long)bd.width * bd.height * 3];
+        for (var y = 0; y < bd.height; y++)
         {
-            var srcRow = dataOffset + (topDown ? y : height - 1 - y) * rowBytes;
-            var dst = y * width * 3;
-            for (var x = 0; x < width; x++)
-            {
-                byte r, g, b, a = 255;
-                if (bitCount <= 8)
-                {
-                    var bitPos = x * bitCount;
-                    var idx = bitCount switch
-                    {
-                        8 => d[srcRow + x],
-                        4 => (d[srcRow + bitPos / 8] >> (bitPos % 8 == 0 ? 4 : 0)) & 0x0F,
-                        _ => (d[srcRow + bitPos / 8] >> (7 - bitPos % 8)) & 0x01,
-                    };
-                    if (palette is null || idx * 3 + 2 >= palette.Length) { r = g = b = 0; }
-                    else { r = palette[idx * 3]; g = palette[idx * 3 + 1]; b = palette[idx * 3 + 2]; }
-                }
-                else
-                {
-                    var bytesPer = bitCount / 8;
-                    var at = srcRow + x * bytesPer;
-                    uint px = bytesPer switch
-                    {
-                        2 => (uint)(d[at] | (d[at + 1] << 8)),
-                        3 => (uint)(d[at] | (d[at + 1] << 8) | (d[at + 2] << 16)),
-                        _ => (uint)(d[at] | (d[at + 1] << 8) | (d[at + 2] << 16) | (d[at + 3] << 24)),
-                    };
-                    r = Channel(px, mR); g = Channel(px, mG); b = Channel(px, mB);
-                    if (mA != 0) a = Channel(px, mA);
-                }
-                if (a != 255)
-                {
-                    // Composite over white - the platform codec path draws onto a cleared
-                    // bitmap, so a transparent BMP has always reached the page that way.
-                    var inv = 255 - a;
-                    r = (byte)((r * a + 255 * inv + 127) / 255);
-                    g = (byte)((g * a + 255 * inv + 127) / 255);
-                    b = (byte)((b * a + 255 * inv + 127) / 255);
-                }
-                rgb[dst + x * 3] = r; rgb[dst + x * 3 + 1] = g; rgb[dst + x * 3 + 2] = b;
-            }
+            DecodeBmpRow(bd, y, mR, mG, mB, mA);
         }
-        return PngEncoder.Encode(rgb, width, height, colorType: 2);
+        return PngEncoder.Encode(bd.rgb, bd.width, bd.height, colorType: 2);
     }
 
     /// <summary>One channel out of a packed pixel, scaled up to a full byte so a 5-bit

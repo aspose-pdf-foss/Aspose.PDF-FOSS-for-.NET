@@ -207,6 +207,67 @@ public class PdfWriterXRefStreamTests
         Assert.Contains("/Type/XRef", text);
     }
 
+    [Fact]
+    public void Save_ObjectStreams_AnnotationAddedToThePageSurvives()
+    {
+        // A page's /Annots items are written as indirect objects. With object streams the
+        // page is measured for packing before it is written, and the promotion made during
+        // that measurement must be the one the file carries - a throwaway measuring writer
+        // left /Annots pointing at an object that was never written.
+        byte[] packed;
+        using (var source = Document.Open(PdfBuilder.BuildMinimal()))
+        using (var ms = new MemoryStream())
+        {
+            CreateWriterWithXRefStream(source, ms, useXRefStream: true, useObjectStreams: true);
+            packed = ms.ToArray();
+        }
+
+        byte[] saved;
+        using (var doc = Document.Open(packed))
+        {
+            var page = doc.Pages[1];
+            page.Annotations.Add(new Aspose.Pdf.Annotations.LinkAnnotation(page, new Rectangle(0, 0, 100, 100)));
+            using var ms = new MemoryStream();
+            doc.Save(ms);
+            saved = ms.ToArray();
+        }
+
+        Assert.Contains("/Type/ObjStm", Encoding.ASCII.GetString(saved));
+        using var reloaded = Document.Open(saved);
+        var annotation = Assert.Single(reloaded.Pages[1].Annotations);
+        Assert.IsType<Aspose.Pdf.Annotations.LinkAnnotation>(annotation);
+    }
+
+    [Fact]
+    public void Save_ObjectStreams_InfoStaysDirectSoADateChangeKeepsTheSize()
+    {
+        // The information dictionary's ModDate moves on every save. Packed into a
+        // compressed object stream, a changed digit changes the deflated length and
+        // two saves a second apart differ in size; written direct, they do not.
+        byte[] packed;
+        using (var source = Document.Open(PdfBuilder.BuildMinimal()))
+        using (var ms = new MemoryStream())
+        {
+            CreateWriterWithXRefStream(source, ms, useXRefStream: true, useObjectStreams: true);
+            packed = ms.ToArray();
+        }
+
+        byte[] SaveAt(DateTime modDate)
+        {
+            using var doc = Document.Open(packed);
+            doc.Info.ModDate = modDate;
+            return doc.ToArray();
+        }
+        var first = SaveAt(new DateTime(2026, 9, 20, 1, 5, 1, DateTimeKind.Utc));
+        var second = SaveAt(new DateTime(2026, 9, 20, 1, 5, 2, DateTimeKind.Utc));
+
+        Assert.Contains("/Type/ObjStm", Encoding.ASCII.GetString(first));
+        Assert.Equal(first.Length, second.Length);
+        using var reloaded = Document.Open(first);
+        var info = Assert.IsType<Aspose.Pdf.Core.PdfIndirectRef>(reloaded.Reader.Trailer.Get("Info"));
+        Assert.False(reloaded.Reader.XRefTable.Entries[info.ObjectNumber].IsCompressed);
+    }
+
     /// <summary>
     /// Helper that manually saves a Document using PdfWriter with xref/object stream options.
     /// This mirrors what Document.Save does but with the stream options enabled.

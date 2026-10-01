@@ -16,6 +16,11 @@ namespace Aspose.Pdf.Devices;
 
 public sealed partial class GdiPlusPageRenderer
 {
+    /// <summary>Annotation flag bits (PDF 32000 12.5.3): a Hidden annotation is never shown, a
+    /// NoView one is not displayed on screen (a no-print watermark stamp carries it).</summary>
+    private const int AnnotHiddenFlag = 0x02;
+    private const int AnnotNoViewFlag = 0x20;
+
     private void DrawAnnotations(PdfDictionary pageDict)
     {
         if (_reader.Resolve(pageDict.Get("Annots")) is not PdfArray annots) return;
@@ -24,7 +29,7 @@ public sealed partial class GdiPlusPageRenderer
             var annot = _reader.ResolveDict(item);
             if (annot is null) continue;
             var flags = (int)annot.GetInt("F");
-            if ((flags & 0x02) != 0) continue; // Hidden
+            if ((flags & AnnotHiddenFlag) != 0 || (flags & AnnotNoViewFlag) != 0) continue;
             var subtype = annot.GetName("Subtype");
 
             if (_reader.ResolveDict(annot.Get("AP")) is not null)

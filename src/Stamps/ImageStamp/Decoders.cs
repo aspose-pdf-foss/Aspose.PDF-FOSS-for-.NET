@@ -1,5 +1,4 @@
-﻿using System.IO.Compression;
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf;
 
@@ -27,7 +26,7 @@ public partial class ImageStamp
     /// the GDI+ codec set reads them and this is a no-op.</summary>
     internal static void ThrowIfWindowsOnlyMetafile(byte[] data)
     {
-        if (OperatingSystem.IsWindows() || !IsWindowsMetafile(data)) return;
+        if (Compat.IsWindows() || !IsWindowsMetafile(data)) return;
         throw new PlatformNotSupportedException(
             "EMF and WMF are recorded GDI call streams and are readable on Windows only.");
     }
@@ -110,7 +109,7 @@ public partial class ImageStamp
         // Off Windows the depth is read straight out of the header: a PNG states its bit
         // depth and colour type in IHDR, a BMP its bit count in the DIB header. Reporting
         // false there embedded every bilevel scan as 8-bit colour.
-        if (!OperatingSystem.IsWindows()) return IsBilevelHeader(imageData);
+        if (!Compat.IsWindows()) return IsBilevelHeader(imageData);
         try
         {
 #pragma warning disable CA1416
@@ -281,7 +280,7 @@ public partial class ImageStamp
         // there meant IsBlackWhite quietly did nothing: the picture embedded as 8-bit
         // colour instead of the compact 1-bit image the property promises, which for a
         // scanned page is a forty-fold larger document.
-        if (!OperatingSystem.IsWindows()) return FromBlackWhiteManaged(imageData);
+        if (!Compat.IsWindows()) return FromBlackWhiteManaged(imageData);
         try
         {
 #pragma warning disable CA1416
@@ -418,7 +417,7 @@ public partial class ImageStamp
         if (imageData.Length >= 4 && imageData[0] == 0x89 && imageData[1] == 0x50
             && imageData[2] == 0x4E && imageData[3] == 0x47)
             return FromPngData(imageData);
-        if (OperatingSystem.IsWindows() && TryFromGdiPlusDecoder(imageData) is { } gdi)
+        if (Compat.IsWindows() && TryFromGdiPlusDecoder(imageData) is { } gdi)
             return gdi;
         if (TryFromManagedDecoder(imageData) is { } managed)
             return managed;
@@ -535,7 +534,7 @@ public partial class ImageStamp
         if (imageData is null || imageData.Length < 4) return null;
         try
         {
-            if (IO.GifDecoder.TryDecode(imageData, out var gifRgb, out var gifAlpha, out var gw, out var gh))
+            if (IO.GifDecoder.TryDecode(imageData) is (var gifRgb, var gifAlpha, var gw, var gh))
             {
                 var stamp = FromRgb(gifRgb, gw, gh);
                 foreach (var a in gifAlpha)
@@ -615,61 +614,42 @@ public partial class ImageStamp
     /// </summary>
     public static ImageStamp FromPngData(byte[] pngData)
     {
+        var pn = DecodePngPixels(pngData);
+        pn.stamp = FromRgb(pn.rgb, pn.width, pn.height);
+        if (pn.alpha is not null && pn.anyTransparent)
+            pn.stamp.SetAlphaMask(pn.alpha);
+        return pn.stamp;
+    }
+
+    /// <summary>A PNG's pixels as 8-bit RGB, with its alpha (or palette transparency) beside them when it
+    /// has any; <see cref="FromPngData"/> and <see cref="DecodeRaster"/> both read a PNG this way.</summary>
+    private static PngDecodeState DecodePngPixels(byte[] pngData)
+    {
+        var pn = new PngDecodeState();
+        pn.pngData = pngData;
         // Parse PNG IHDR for dimensions and color type
-        if (pngData.Length < 24 || pngData[0] != 0x89 || pngData[1] != 0x50)
+        if (pn.pngData.Length < 24 || pn.pngData[0] != 0x89 || pn.pngData[1] != 0x50)
             throw new ArgumentException("Invalid PNG data");
 
-        int ReadInt32BE(byte[] d, int offset) =>
-            (d[offset] << 24) | (d[offset + 1] << 16) | (d[offset + 2] << 8) | d[offset + 3];
+        pn.width = ReadInt32BE(pn.pngData, 16);
+        pn.height = ReadInt32BE(pn.pngData, 20);
+        pn.bitDepth = pn.pngData[24];
+        pn.colorType = pn.pngData[25];
 
-        var width = ReadInt32BE(pngData, 16);
-        var height = ReadInt32BE(pngData, 20);
-        var bitDepth = pngData[24];
-        var colorType = pngData[25];
+        pn.idatData = new MemoryStream();
+        pn.palette = null;
+        pn.trns = null;
+        pn.pos = 8; // skip signature
+        ReadPngChunks(pn);
 
-        // Collect all IDAT chunks, plus the PLTE palette and the tRNS per-index
-        // alpha table for indexed-colour PNGs.
-        var idatData = new MemoryStream();
-        byte[]? palette = null;
-        byte[]? trns = null;
-        var pos = 8; // skip signature
-        while (pos + 8 < pngData.Length)
-        {
-            var chunkLen = ReadInt32BE(pngData, pos);
-            var chunkType = System.Text.Encoding.ASCII.GetString(pngData, pos + 4, 4);
-            if (chunkType == "IDAT")
-                idatData.Write(pngData, pos + 8, chunkLen);
-            else if (chunkType == "PLTE" && pos + 8 + chunkLen <= pngData.Length)
-            {
-                palette = new byte[chunkLen];
-                Array.Copy(pngData, pos + 8, palette, 0, chunkLen);
-            }
-            else if (chunkType == "tRNS" && pos + 8 + chunkLen <= pngData.Length)
-            {
-                trns = new byte[chunkLen];
-                Array.Copy(pngData, pos + 8, trns, 0, chunkLen);
-            }
-            else if (chunkType == "IEND")
-                break;
-            pos += 12 + chunkLen; // length + type + data + CRC
-        }
-
-        // Decompress (skip 2-byte zlib header)
-        var compressed = idatData.ToArray();
-        if (compressed.Length < 2)
+        pn.compressed = pn.idatData.ToArray();
+        if (pn.compressed.Length < 2)
             throw new ArgumentException("No IDAT data in PNG");
 
-        byte[] rawScanlines;
-        using (var input = new MemoryStream(compressed, 2, compressed.Length - 2))
-        using (var deflate = new DeflateStream(input, CompressionMode.Decompress))
-        using (var output = new MemoryStream())
-        {
-            deflate.CopyTo(output);
-            rawScanlines = output.ToArray();
-        }
+        // The zlib header is skipped unchecked and the check value never read: raw deflate.
+        pn.rawScanlines = IO.Filters.ManagedInflater.InflateToEnd(pn.compressed, 2, pn.compressed.Length - 2, zlibWrapper: false);
 
-        // Determine bytes per pixel and extract RGB data
-        var channels = colorType switch
+        pn.channels = pn.colorType switch
         {
             0 => 1,  // Grayscale
             2 => 3,  // RGB
@@ -679,122 +659,63 @@ public partial class ImageStamp
             _ => 3
         };
 
-        // Indexed PNGs pack the sample at the image bit depth (1/2/4/8); every other
-        // supported colour type here is byte-per-channel.
-        var stride = colorType == 3
-            ? (width * bitDepth + 7) / 8
-            : width * channels;
-        var rgb = new byte[width * height * 3];
+        pn.stride = pn.colorType == 3
+            ? (pn.width * pn.bitDepth + 7) / 8
+            : pn.width * pn.channels;
+        pn.rgb = new byte[pn.width * pn.height * 3];
 
-        // Alpha channel for the truecolour/grayscale+alpha types is split out into a
-        // DeviceGray soft mask so transparent pixels show the page behind instead of
-        // rendering as black. Built only when the source actually carries alpha:
-        // an alpha channel (4/6), or an indexed image's tRNS per-index table —
-        // without which a transparent palette entry would paint its PLTE colour
-        // (typically black) over the page.
-        var hasAlphaChannel = colorType == 4 || colorType == 6;
-        var indexedAlpha = colorType == 3 && trns is not null;
-        var alpha = hasAlphaChannel || indexedAlpha ? new byte[width * height] : null;
-        var anyTransparent = false;
+        pn.hasAlphaChannel = pn.colorType == 4 || pn.colorType == 6;
+        pn.indexedAlpha = pn.colorType == 3 && pn.trns is not null;
+        pn.alpha = pn.hasAlphaChannel || pn.indexedAlpha ? new byte[pn.width * pn.height] : null;
+        pn.anyTransparent = false;
 
-        // Reverse PNG filtering and extract RGB
-        var prevRow = new byte[stride];
-        var curRow = new byte[stride];
-        var scanPos = 0;
+        pn.prevRow = new byte[pn.stride];
+        pn.curRow = new byte[pn.stride];
+        pn.scanPos = 0;
 
-        for (var y = 0; y < height; y++)
+        for (var y = 0; y < pn.height; y++)
         {
-            if (scanPos >= rawScanlines.Length) break;
-            var filterByte = rawScanlines[scanPos++];
+            if (pn.scanPos >= pn.rawScanlines.Length) break;
+            UnfilterPngRow(pn);
 
-            // Read filtered row
-            var bytesToRead = Math.Min(stride, rawScanlines.Length - scanPos);
-            Array.Copy(rawScanlines, scanPos, curRow, 0, bytesToRead);
-            scanPos += stride;
-
-            // Apply PNG filter
-            for (var x = 0; x < stride; x++)
-            {
-                byte a = x >= channels ? curRow[x - channels] : (byte)0;
-                byte b = prevRow[x];
-                byte c = x >= channels ? prevRow[x - channels] : (byte)0;
-
-                curRow[x] = filterByte switch
-                {
-                    1 => (byte)(curRow[x] + a),             // Sub
-                    2 => (byte)(curRow[x] + b),             // Up
-                    3 => (byte)(curRow[x] + (a + b) / 2),   // Average
-                    4 => (byte)(curRow[x] + PaethPredictor(a, b, c)), // Paeth
-                    _ => curRow[x]                           // None
-                };
-            }
-
-            // Convert to RGB
-            for (var x = 0; x < width; x++)
-            {
-                var rgbIdx = (y * width + x) * 3;
-                switch (colorType)
-                {
-                    case 0: // Grayscale
-                        rgb[rgbIdx] = rgb[rgbIdx + 1] = rgb[rgbIdx + 2] = curRow[x];
-                        break;
-                    case 2: // RGB
-                        rgb[rgbIdx] = curRow[x * 3];
-                        rgb[rgbIdx + 1] = curRow[x * 3 + 1];
-                        rgb[rgbIdx + 2] = curRow[x * 3 + 2];
-                        break;
-                    case 4: // Grayscale + Alpha
-                        rgb[rgbIdx] = rgb[rgbIdx + 1] = rgb[rgbIdx + 2] = curRow[x * 2];
-                        var ga = curRow[x * 2 + 1];
-                        alpha![y * width + x] = ga;
-                        if (ga != 255) anyTransparent = true;
-                        break;
-                    case 6: // RGBA
-                        rgb[rgbIdx] = curRow[x * 4];
-                        rgb[rgbIdx + 1] = curRow[x * 4 + 1];
-                        rgb[rgbIdx + 2] = curRow[x * 4 + 2];
-                        var ra = curRow[x * 4 + 3];
-                        alpha![y * width + x] = ra;
-                        if (ra != 255) anyTransparent = true;
-                        break;
-                    case 3: // Indexed: unpack the index at the image bit depth, look up /PLTE
-                        int idx;
-                        if (bitDepth == 8)
-                            idx = curRow[x];
-                        else
-                        {
-                            var bitPos = x * bitDepth;
-                            var shift = 8 - bitDepth - (bitPos % 8);
-                            idx = (curRow[bitPos / 8] >> shift) & ((1 << bitDepth) - 1);
-                        }
-                        var pi = idx * 3;
-                        if (palette is not null && pi + 2 < palette.Length)
-                        {
-                            rgb[rgbIdx] = palette[pi];
-                            rgb[rgbIdx + 1] = palette[pi + 1];
-                            rgb[rgbIdx + 2] = palette[pi + 2];
-                        }
-                        if (indexedAlpha)
-                        {
-                            // tRNS lists alpha per palette index; indices past its
-                            // end are fully opaque.
-                            var ia = idx < trns!.Length ? trns[idx] : (byte)255;
-                            alpha![y * width + x] = ia;
-                            if (ia != 255) anyTransparent = true;
-                        }
-                        break;
-                }
-            }
+            ConvertPngRowToRgb(pn, y);
 
             // Swap prev/cur
-            (prevRow, curRow) = (curRow, prevRow);
+            (pn.prevRow, pn.curRow) = (pn.curRow, pn.prevRow);
         }
-
-        var stamp = FromRgb(rgb, width, height);
-        if (alpha is not null && anyTransparent)
-            stamp.SetAlphaMask(alpha);
-        return stamp;
+        return pn;
     }
+
+    /// <summary>An encoded raster's pixels as 8-bit RGB (and its alpha, when it has any), read by the
+    /// library's own decoders - PNG, JPEG, GIF and the first frame of a TIFF - so it works wherever the
+    /// library runs, GDI+ or not. Null when none of them recognises the bytes.</summary>
+    internal static (byte[] rgb, byte[]? alpha, int width, int height)? DecodeRaster(byte[] data)
+    {
+        if (data is null || data.Length < 4) return null;
+        if (data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47)
+        {
+            var pn = DecodePngPixels(data);
+            return (pn.rgb, pn.anyTransparent ? pn.alpha : null, pn.width, pn.height);
+        }
+        if (data[0] == 0xFF && data[1] == 0xD8)
+        {
+            var (pixels, width, height, components) = IO.Filters.JpegDecoder.Decode(data);
+            if (components >= 3) return (pixels, null, width, height);
+            var rgb = new byte[width * height * 3];
+            for (var i = 0; i < width * height; i++)
+                rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = pixels[i * components];
+            return (rgb, null, width, height);
+        }
+        if (IO.GifDecoder.TryDecode(data) is (var gifRgb, var gifAlpha, var gw, var gh))
+            return (gifRgb, gifAlpha, gw, gh);
+        if (IO.TiffDecoder.IsTiff(data) && IO.TiffDecoder.DecodeFramesAsPng(data) is { Count: > 0 } frames)
+            return DecodeRaster(frames[0]);
+        return null;
+    }
+
+    /// <summary>Big-endian 32-bit read, the byte order of every PNG length and IHDR field.</summary>
+    private static int ReadInt32BE(byte[] d, int offset) =>
+        (d[offset] << 24) | (d[offset + 1] << 16) | (d[offset + 2] << 8) | d[offset + 3];
 
     private static byte PaethPredictor(byte a, byte b, byte c)
     {

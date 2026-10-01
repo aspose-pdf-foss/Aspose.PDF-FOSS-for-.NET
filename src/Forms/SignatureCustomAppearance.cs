@@ -7,6 +7,9 @@ namespace Aspose.Pdf.Forms;
 /// </summary>
 public class SignatureCustomAppearance
 {
+    /// <summary>Creates appearance settings with their default values (10-point Helvetica).</summary>
+    public SignatureCustomAppearance() { }
+
     /// <summary>Background color of the appearance XObject.</summary>
     public Color? BackgroundColor { get; set; }
 

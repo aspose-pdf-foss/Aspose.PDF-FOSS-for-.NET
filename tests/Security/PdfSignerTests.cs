@@ -273,7 +273,7 @@ public class PdfSignerTests
     /// character through the /ToUnicode bfchar entries the file carries.</summary>
     private static string DecodeBannerText(byte[] signed)
     {
-        var raw = System.Text.Encoding.Latin1.GetString(signed);
+        var raw = Compat.Latin1.GetString(signed);
         var map = new System.Collections.Generic.Dictionary<int, char>();
         foreach (System.Text.RegularExpressions.Match pair in
                  System.Text.RegularExpressions.Regex.Matches(raw,
@@ -358,7 +358,7 @@ public class PdfSignerTests
 
         var streamData = dict.Get("__StreamData") as Aspose.Pdf.Core.PdfString;
         Assert.NotNull(streamData);
-        var text = System.Text.Encoding.Latin1.GetString(streamData!.Value);
+        var text = Compat.Latin1.GetString(streamData!.Value);
         Assert.Contains("Digitally signed by 'Test User'", text);
         Assert.Contains("Reason: Testing", text);
         Assert.Contains("Location: Office", text);
@@ -372,26 +372,36 @@ public class PdfSignerTests
     }
 
     [Fact]
-    public void Sign_CustomSignHash_EmbedsExternalEnvelope()
+    public void Sign_CustomSignHash_WrapsTheSignedHashInTheEnvelope()
     {
         var pdf = PdfBuilder.BuildMinimal();
-        var cert = CreateTestCertificate();
-        var sentinel = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE };
+        // The signer keeps the key; the certificate handed to the library carries it too,
+        // but the delegate is what signs.
+        using var rsa = RSA.Create(2048);
+        var request = new CertificateRequest("CN=External Signer", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var x509 = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddYears(1));
+        var cert = PdfCertificate.FromPfx(x509.Export(X509ContentType.Pfx, "test"), "test");
         byte[]? observedHash = null;
+        var calls = 0;
 
         var signed = PdfSigner.Sign(pdf, cert, new SignatureOptions
         {
             FieldName = "ExtSig",
-            CustomSignHash = (hash, _) =>
+            CustomSignHash = (hash, digest) =>
             {
+                calls++;
                 observedHash = (byte[])hash.Clone();
-                return sentinel;
+                Assert.Equal(DigestHashAlgorithm.Sha256, digest);
+                return rsa.SignHash(hash, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
             },
         });
 
         Assert.NotNull(observedHash);
         Assert.Equal(32, observedHash!.Length); // SHA-256
+        Assert.True(calls >= 1);
 
+        // The raw signature value went into a CMS envelope (a DER SEQUENCE), which the
+        // verifier accepts like a key-signed one.
         using var doc = Document.Open(signed);
         var sigs = Signature.EnumerateSignatures(doc).ToList();
         Assert.Single(sigs);
@@ -399,9 +409,12 @@ public class PdfSignerTests
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
             ?.GetValue(sigs[0]);
         Assert.NotNull(contents);
-        // The first 6 bytes of /Contents must be exactly our sentinel envelope
-        // (the rest is zero-padded up to ContentsSize).
-        for (var i = 0; i < sentinel.Length; i++)
-            Assert.Equal(sentinel[i], contents![i]);
+        Assert.Equal(0x30, contents![0]);
+
+        using var facade = new Aspose.Pdf.Facades.PdfFileSignature();
+        facade.BindPdf(signed);
+        var names = facade.GetSignNames();
+        Assert.Single(names);
+        Assert.True(facade.VerifySignature(names[0]));
     }
 }

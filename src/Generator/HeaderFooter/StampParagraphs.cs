@@ -1,6 +1,5 @@
 ﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -20,11 +19,17 @@ public sealed partial class HeaderFooter
         hf.fontSize = TextState.FontSize > 0 ? TextState.FontSize : 10;
         hf.mTop = Margin.TopTouched ? Margin.Top : 0;
         hf.mBottom = Margin.BottomTouched ? Margin.Bottom : 20;
-        hf.mLeft = Margin.LeftTouched ? Margin.Left
-            : hf.page.PageInfo?.Margin is { LeftTouched: true } pm ? pm.Left
-            : hf.document?.PageInfo?.Margin is { LeftTouched: true } dm ? dm.Left
-            : 90;
-        hf.probedFooterBand = !hf.isHeader && Margin.TopTouched
+        // The band's side margins are the header/footer's OWN (90 when it names none):
+        // probed with a 650 pt page whose document margins are 40, a text member, a
+        // picture and a table all seat at x 90 and run to 560, and setting the page's
+        // own margins moves nothing either; a footer Margin of 20 puts them at 20 / 630.
+        hf.mLeft = Margin.LeftTouched ? Margin.Left : DefaultBandMargin;
+        // A footer whose bottom margin is untouched hangs from the page's bottom
+        // content margin (its top margin, when any, below that line): probed with a
+        // Margin.Top-only footer, and again with NO margin at all - a single 12 pt
+        // right-aligned fragment seats its baseline 72 - 9.47 = 62.53 on a page whose
+        // body ends 72 up, not on the band's 20 pt default.
+        hf.probedFooterBand = !hf.isHeader
             && (!Margin.BottomTouched || Margin.Bottom == 0);
         if (hf.probedFooterBand)
             foreach (var member in Paragraphs)

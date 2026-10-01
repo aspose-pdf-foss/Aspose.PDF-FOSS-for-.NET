@@ -42,7 +42,7 @@ internal static class Pkcs12Parser
             {
                 // Unencrypted SafeContents (or contains encrypted bags)
                 var octetData = content.ReadOctetString();
-                ParseSafeBags(octetData, password, ref certDer, ref key);
+                (certDer, key) = ParseSafeBags(octetData, password, certDer, key);
             }
             else if (contentType == OidEncryptedData)
             {
@@ -83,7 +83,7 @@ internal static class Pkcs12Parser
                 }
                 else continue;
 
-                ParseSafeBags(decrypted, password, ref certDer, ref key);
+                (certDer, key) = ParseSafeBags(decrypted, password, certDer, key);
             }
         }
 
@@ -91,7 +91,8 @@ internal static class Pkcs12Parser
                 key ?? throw new InvalidOperationException("No private key found in PFX"));
     }
 
-    private static void ParseSafeBags(byte[] data, string password, ref byte[]? certDer, ref RsaKey? key)
+    /// <returns>The certificate and key found so far: the first of each the bags hold, or the ones passed in.</returns>
+    private static (byte[]? certDer, RsaKey? key) ParseSafeBags(byte[] data, string password, byte[]? certDer, RsaKey? key)
     {
         var bags = new Asn1Reader(data).ReadSequence();
         while (bags.HasData)
@@ -122,6 +123,7 @@ internal static class Pkcs12Parser
                 key ??= RsaKey.FromPkcs8(bagValue.ReadRawTlv());
             }
         }
+        return (certDer, key);
     }
 
     private static RsaKey DecryptPkcs8ShroudedKey(Asn1Reader reader, string password)

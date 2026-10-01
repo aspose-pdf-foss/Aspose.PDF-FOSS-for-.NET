@@ -11,7 +11,7 @@
 /// XObject shows one frame, and the first is the frame every other decoder here
 /// would also present.
 /// </summary>
-internal static class GifDecoder
+internal static partial class GifDecoder
 {
     /// <summary>True when the bytes begin with a GIF87a / GIF89a signature.</summary>
     internal static bool IsGif(byte[] data) =>
@@ -20,27 +20,20 @@ internal static class GifDecoder
 
     /// <summary>
     /// Decode the first frame to interleaved RGB plus a parallel 8-bit alpha plane
-    /// (255 opaque). Returns false for anything this decoder does not recognise, so
+    /// (255 opaque). Returns null for anything this decoder does not recognise, so
     /// the caller stays on its own error path rather than being handed invented pixels.
     /// </summary>
-    internal static bool TryDecode(byte[] data, out byte[] rgb, out byte[] alpha, out int width, out int height)
+    internal static (byte[] rgb, byte[] alpha, int width, int height)? TryDecode(byte[] data)
     {
-        rgb = System.Array.Empty<byte>();
-        alpha = System.Array.Empty<byte>();
-        width = height = 0;
-        if (!IsGif(data)) return false;
-        try { return Decode(data, out rgb, out alpha, out width, out height); }
-        catch { return false; }
+        if (!IsGif(data)) return null;
+        try { return Decode(data); }
+        catch { return null; }
     }
 
-    private static bool Decode(byte[] d, out byte[] rgb, out byte[] alpha, out int width, out int height)
+    private static (byte[] rgb, byte[] alpha, int width, int height)? Decode(byte[] d)
     {
-        rgb = System.Array.Empty<byte>();
-        alpha = System.Array.Empty<byte>();
-        width = height = 0;
-
         // Logical Screen Descriptor: width(2) height(2) packed(1) background(1) aspect(1).
-        if (d.Length < 13) return false;
+        if (d.Length < 13) return null;
         var p = 6;
         var packed = d[p + 4];
         p += 7;
@@ -49,7 +42,7 @@ internal static class GifDecoder
         if ((packed & 0x80) != 0)
         {
             var n = 2 << (packed & 0x07);
-            if (p + n * 3 > d.Length) return false;
+            if (p + n * 3 > d.Length) return null;
             globalTable = new byte[n * 3];
             System.Array.Copy(d, p, globalTable, 0, n * 3);
             p += n * 3;
@@ -62,10 +55,10 @@ internal static class GifDecoder
         while (p < d.Length)
         {
             var block = d[p++];
-            if (block == 0x3B) return false;               // trailer before any frame
+            if (block == 0x3B) return null;               // trailer before any frame
             if (block == 0x21)                             // extension
             {
-                if (p >= d.Length) return false;
+                if (p >= d.Length) return null;
                 var label = d[p++];
                 if (label == 0xF9 && p + 4 < d.Length && d[p] >= 4)
                 {
@@ -75,38 +68,36 @@ internal static class GifDecoder
                 p = SkipSubBlocks(d, p);
                 continue;
             }
-            if (block != 0x2C) return false;               // not an Image Descriptor
+            if (block != 0x2C) return null;               // not an Image Descriptor
 
             // Image Descriptor: left(2) top(2) width(2) height(2) packed(1).
-            if (p + 9 > d.Length) return false;
+            if (p + 9 > d.Length) return null;
             var iw = d[p + 4] | (d[p + 5] << 8);
             var ih = d[p + 6] | (d[p + 7] << 8);
             var iPacked = d[p + 8];
             p += 9;
-            if (iw <= 0 || ih <= 0) return false;
+            if (iw <= 0 || ih <= 0) return null;
 
             var table = globalTable;
             if ((iPacked & 0x80) != 0)
             {
                 var n = 2 << (iPacked & 0x07);
-                if (p + n * 3 > d.Length) return false;
+                if (p + n * 3 > d.Length) return null;
                 table = new byte[n * 3];
                 System.Array.Copy(d, p, table, 0, n * 3);
                 p += n * 3;
             }
-            if (table is null) return false;
+            if (table is null) return null;
 
-            if (p >= d.Length) return false;
+            if (p >= d.Length) return null;
             var minCodeSize = d[p++];
-            var indices = Unpack(d, ref p, minCodeSize, iw * ih);
-            if (indices is null) return false;
+            var indices = Unpack(d, p, minCodeSize, iw * ih);
+            if (indices is null) return null;
 
             if ((iPacked & 0x40) != 0) Deinterlace(indices, iw, ih);
 
-            width = iw;
-            height = ih;
-            rgb = new byte[iw * ih * 3];
-            alpha = new byte[iw * ih];
+            var rgb = new byte[iw * ih * 3];
+            var alpha = new byte[iw * ih];
             var colours = table.Length / 3;
             for (var i = 0; i < indices.Length; i++)
             {
@@ -117,9 +108,9 @@ internal static class GifDecoder
                 rgb[i * 3 + 2] = table[idx * 3 + 2];
                 alpha[i] = (byte)(idx == transparentIndex ? 0 : 255);
             }
-            return true;
+            return (rgb, alpha, iw, ih);
         }
-        return false;
+        return null;
     }
 
     /// <summary>Walk a chain of length-prefixed sub-blocks to the terminating zero byte.</summary>
@@ -140,7 +131,7 @@ internal static class GifDecoder
     /// codes, and the codes arrive packed LEAST-significant bit first inside
     /// length-prefixed sub-blocks.
     /// </summary>
-    private static byte[]? Unpack(byte[] d, ref int p, int minCodeSize, int expected)
+    private static byte[]? Unpack(byte[] d, int p, int minCodeSize, int expected)
     {
         if (minCodeSize is < 2 or > 8) return null;
         var clearCode = 1 << minCodeSize;

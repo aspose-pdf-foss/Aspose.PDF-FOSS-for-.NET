@@ -8,6 +8,7 @@ namespace Aspose.Pdf.Annotations;
 public partial class HighlightAnnotation : TextMarkupAnnotation
 {
     internal HighlightAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
+    /// <summary>Creates a highlight annotation on <c>page</c> covering <c>rect</c>. The quad points default to the four corners of <c>rect</c>.</summary>
     public HighlightAnnotation(Page page, Rectangle rect) : base(page, rect)
     {
         Dict.Set("Subtype", new PdfName("Highlight"));

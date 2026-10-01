@@ -5,7 +5,7 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.Facades;
 using Aspose.Pdf.Text;
 
-namespace Aspose.Pdf.Stamps;
+namespace Aspose.Pdf;
 
 /// <summary>
 /// A text stamp that can be applied to PDF pages.
@@ -38,9 +38,9 @@ public partial class TextStamp : Stamp
     public Color Color { get; set; } = Aspose.Pdf.Color.FromArgb(0, 0, 0);
 
     /// <summary>Text formatting state. When set, <see cref="FontSize"/> and <see cref="Color"/> are derived from it.</summary>
-    public TextState TextState { get; set; } = new TextState();
+    public TextState TextState { get; internal set; } = new TextState();
 
-    /// <summary>Whether to wrap text at <see cref="Width"/> boundary.</summary>
+    /// <summary>Whether to wrap text at <c>Width</c> boundary.</summary>
     public bool WordWrap { get; set; }
 
     /// <summary>Word-wrap mode applied to the stamp text. Stored only — the
@@ -48,28 +48,21 @@ public partial class TextStamp : Stamp
     /// as wrapping enabled.</summary>
     public TextFormattingOptions.WordWrapMode WordWrapMode { get; set; } = TextFormattingOptions.WordWrapMode.NoWrap;
 
-    /// <summary>Width constraint used for word wrapping (in points).</summary>
-    public double Width { get; set; }
 
-    /// <summary>Effective wrap width (points) used to break the stamp text into
-    /// rows. The base uses <see cref="Width"/>; the compat surface overrides this
-    /// to prefer its <c>MaxRowWidth</c>.</summary>
-    protected virtual double WrapWidth => Width;
+    /// <summary>Effective wrap width (points) used to break the stamp text into rows:
+    /// <see cref="MaxRowWidth"/> when set, else <c>Width</c>.</summary>
+    private double WrapWidth => MaxRowWidth > 0 ? MaxRowWidth : Width;
 
     /// <summary>When true, the stamp shrinks/grows its font size so the word-wrapped
-    /// text fits the <see cref="Width"/>×<see cref="Height"/> box. Off in the base;
-    /// the compat surface maps it onto <c>AutoAdjustFontSizeToFitStampRectangle</c>.</summary>
-    protected virtual bool AutoFitToBox => false;
+    /// text fits the <c>Width</c>×<c>Height</c> box.</summary>
+    private bool AutoFitToBox => AutoAdjustFontSizeToFitStampRectangle;
 
     /// <summary>Bisection stop interval (points) for the auto-fit font-size search.</summary>
-    protected virtual double AutoFitPrecision => 0.1;
+    private double AutoFitPrecision => AutoAdjustFontSizePrecision > 0 ? AutoAdjustFontSizePrecision : DefaultAutoFitPrecision;
 
-    /// <summary>Height constraint for the stamp box. Stored only — the
-    /// renderer auto-sizes around the text.</summary>
-    public double Height { get; set; }
 
     /// <summary>When true, the stamp text is scaled to fit
-    /// <see cref="Width"/> × <see cref="Height"/>. Stored only, for API
+    /// <c>Width</c> × <c>Height</c>. Stored only, for API
     /// compatibility.</summary>
     public bool Scale { get => _scale ?? false; set => _scale = value; }
 
@@ -82,16 +75,60 @@ public partial class TextStamp : Stamp
     private bool? _scale;
     private protected bool CidScaleEnabled => _scale ?? true;
 
-    /// <summary>Zoom factor applied to the stamp. Stored only, for API
-    /// compatibility.</summary>
-    public double Zoom { get; set; } = 1.0;
-
     /// <summary>
     /// Horizontal alignment of the text lines inside the stamp box.
     /// Distinct from <see cref="Stamp.HorizontalAlignment"/> which positions the whole stamp on the page.
     /// </summary>
     public HorizontalAlignment TextAlignment { get; set; } = HorizontalAlignment.None;
 
+    /// <summary>Action taken when the configured font has no glyph for a character of the stamp text.</summary>
+    public enum NoCharacterAction
+    {
+        /// <summary>Use the configured font even when it lacks the glyph (renders a tofu box).</summary>
+        UseStandardFont = 0,
+        /// <summary>Substitute the missing glyph from the <see cref="ReplacementFont"/>.</summary>
+        UseCustomReplacementFont = 1,
+        /// <summary>Render the glyph in whatever font has it; no fallback.</summary>
+        ReplaceAnyway = 2,
+        /// <summary>Throw an exception when a glyph is missing.</summary>
+        ThrowException = 3,
+    }
+
+    // The bisection stop interval the auto-fit search falls back to when none is configured.
+    private const double DefaultAutoFitPrecision = 0.1;
+
+    /// <summary>When auto-adjusting the font size to fit the stamp rectangle, the precision in points.</summary>
+    public float AutoAdjustFontSizePrecision { get; set; } = (float)DefaultAutoFitPrecision;
+
+    /// <summary>When true, the renderer shrinks the font size until the text fits the stamp's Width/Height.</summary>
+    public bool AutoAdjustFontSizeToFitStampRectangle { get; set; }
+
+    /// <summary>When false, the stamp records intent but skips drawing. Stored only.</summary>
+    public bool Draw { get; set; } = true;
+
+    /// <summary>When true, the stamp's text is full-justified within the stamp width. Stored only.</summary>
+    public bool Justify { get; set; }
+
+    /// <summary>Maximum row width before wrapping; 0 means use the stamp <c>Width</c>.</summary>
+    public double MaxRowWidth { get; set; }
+
+    /// <summary>Strategy used when a character has no glyph in the configured font.</summary>
+    public NoCharacterAction NoCharacterBehavior { get; set; } = NoCharacterAction.UseStandardFont;
+
+    /// <summary>Fallback font used when the main font lacks a required glyph.</summary>
+    public Aspose.Pdf.Text.Font? ReplacementFont { get; set; }
+
+    /// <summary>When true, the stamp's Y-indent is the text baseline rather than the bounding-box top.</summary>
+    public bool TreatYIndentAsBaseLine { get; set; }
+
+    /// <summary>A text stamp over <paramref name="value"/> carrying a precomputed text state.</summary>
+    public TextStamp(string value, TextState textState) : this(value)
+    {
+        if (textState is not null) TextState = textState;
+    }
+
+
+    /// <summary>Creates a text stamp that draws the given text with the default text state.</summary>
     public TextStamp(string text)
     {
         Text = text;
@@ -122,18 +159,20 @@ public partial class TextStamp : Stamp
             // (edge to edge of the stamp box).
             if (!formattedText.BackgroundColor.IsEmpty)
                 TextState.BackgroundColor = formattedText.BackgroundColor;
+            if (formattedText.ForegroundColor is not null)
+                Color = formattedText.ForegroundColor;
         }
     }
 
     /// <summary>The replacement font program (raw TrueType bytes + name) used to render
-    /// glyphs the primary font lacks. Null when no fallback is configured. Overridden by the
-    /// public <c>Aspose.Pdf.TextStamp</c>, which exposes the <c>ReplacementFont</c> property.</summary>
-    protected virtual (byte[] ttf, string name)? ReplacementFontProgram => null;
+    /// glyphs the primary font lacks: the configured <see cref="ReplacementFont"/>'s embedded
+    /// TrueType program, or null when none is usable.</summary>
+    private (byte[] ttf, string name)? ReplacementFontProgram =>
+        ReplacementFont?.SourceFontData?.TtfData is { } ttf ? (ttf, ReplacementFont.FontName) : null;
 
     /// <summary>True when the caller declared YIndent to be the text BASELINE rather than
-    /// the box edge — the bottom seat then lands exactly on it, with no descent inset.
-    /// Overridden by the public <c>Aspose.Pdf.TextStamp</c> (TreatYIndentAsBaseLine).</summary>
-    protected virtual bool YIndentIsBaseline => false;
+    /// the box edge (<see cref="TreatYIndentAsBaseLine"/>) - the bottom seat then lands exactly on it.</summary>
+    private bool YIndentIsBaseline => TreatYIndentAsBaseLine;
 
     /// <summary>When the stamp's base font is a non-embedded Standard-14 face, resolve the
     /// matching TrueType substitute (Arial / Times New Roman / Courier New, honouring

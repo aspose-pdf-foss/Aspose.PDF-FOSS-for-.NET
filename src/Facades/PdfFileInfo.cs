@@ -48,8 +48,9 @@ public sealed class PdfFileInfo : IDisposable
         return (hasOpen, false); // hasEdit determined after doc is opened
     }
 
-    private void DetectEditPassword(out bool hasEdit)
+    private bool DetectEditPassword()
     {
+        bool hasEdit = default;
         // HasEditPassword: the file has an effective owner password — i.e.
         // an owner password that is DIFFERENT from the user password. When
         // owner == user the encryption mechanically requires owner=user but
@@ -58,7 +59,7 @@ public sealed class PdfFileInfo : IDisposable
         if (_doc is null || !_doc.IsEncrypted)
         {
             hasEdit = false;
-            return;
+            return hasEdit;
         }
         if (_doc.IsOwnerAuthentication)
         {
@@ -73,6 +74,7 @@ public sealed class PdfFileInfo : IDisposable
             // no separate owner password.
             hasEdit = !_doc.OwnerPasswordEqualsUserPassword;
         }
+        return hasEdit;
     }
 
     /// <summary>
@@ -92,7 +94,7 @@ public sealed class PdfFileInfo : IDisposable
     {
         _doc = document;
         _hasOpenPassword = document.IsEncrypted && !document.IsDecrypted;
-        DetectEditPassword(out _hasEditPassword);
+        _hasEditPassword = DetectEditPassword();
     }
 
     /// <summary>The bound Document. Callers use this to perform
@@ -111,7 +113,7 @@ public sealed class PdfFileInfo : IDisposable
         {
             _doc = Document.Open(input);
             _hasOpenPassword = _doc.IsEncrypted && (!_doc.IsDecrypted || _doc.IsOwnerAuthentication);
-            DetectEditPassword(out _hasEditPassword);
+            _hasEditPassword = DetectEditPassword();
         }
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
@@ -133,7 +135,7 @@ public sealed class PdfFileInfo : IDisposable
         try
         {
             _doc = Document.Open(input, password);
-            DetectEditPassword(out _hasEditPassword);
+            _hasEditPassword = DetectEditPassword();
         }
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
@@ -172,7 +174,7 @@ public sealed class PdfFileInfo : IDisposable
         {
             _doc = Document.Open(bytes);
             _hasOpenPassword = _doc.IsEncrypted && (!_doc.IsDecrypted || _doc.IsOwnerAuthentication);
-            DetectEditPassword(out _hasEditPassword);
+            _hasEditPassword = DetectEditPassword();
         }
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
@@ -194,7 +196,7 @@ public sealed class PdfFileInfo : IDisposable
         try
         {
             _doc = Document.Open(bytes, password);
-            DetectEditPassword(out _hasEditPassword);
+            _hasEditPassword = DetectEditPassword();
         }
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
@@ -233,7 +235,7 @@ public sealed class PdfFileInfo : IDisposable
             _doc = new Document(new MemoryStream(bytes), password, customSecurityHandler);
             _hasOpenPassword = customSecurityHandler.GetUserKey(string.Empty).Length > 0
                 || !customSecurityHandler.IsUserPassword(string.Empty);
-            DetectEditPassword(out _hasEditPassword);
+            _hasEditPassword = DetectEditPassword();
         }
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
@@ -269,7 +271,7 @@ public sealed class PdfFileInfo : IDisposable
             {
                 _doc = Document.Open(bytes);
                 _hasOpenPassword = _doc.IsEncrypted && (!_doc.IsDecrypted || _doc.IsOwnerAuthentication);
-                DetectEditPassword(out _hasEditPassword);
+                _hasEditPassword = DetectEditPassword();
             }
             catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
             {
@@ -651,7 +653,7 @@ public sealed class PdfFileInfo : IDisposable
     {
         _doc = srcDoc;
         _hasOpenPassword = srcDoc.IsEncrypted && !srcDoc.IsDecrypted;
-        DetectEditPassword(out _hasEditPassword);
+        _hasEditPassword = DetectEditPassword();
     }
 
     /// <summary>
@@ -685,7 +687,7 @@ public sealed class PdfFileInfo : IDisposable
         {
             _doc = Document.Open(bytes);
             _hasOpenPassword = _doc.IsEncrypted && (!_doc.IsDecrypted || _doc.IsOwnerAuthentication);
-            DetectEditPassword(out _hasEditPassword);
+            _hasEditPassword = DetectEditPassword();
         }
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
@@ -786,7 +788,7 @@ public sealed class PdfFileInfo : IDisposable
             {
                 _doc = Document.Open(ms.ToArray());
                 _hasOpenPassword = _doc.IsEncrypted && (!_doc.IsDecrypted || _doc.IsOwnerAuthentication);
-                DetectEditPassword(out _hasEditPassword);
+                _hasEditPassword = DetectEditPassword();
             }
             catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
             {

@@ -65,15 +65,23 @@ internal static class TaggedXmlExporter
         foreach (var (key, value) in AttributePairs(reader, elem))
             sb.Append(' ').Append(key).Append("=\"").Append(EscapeAttr(value)).Append('"');
 
-        // Split kids into nested structure elements vs marked-content leaves.
+        // Split kids into nested structure elements vs marked-content leaves, keeping their
+        // order: an element can hold both (a paragraph's text around a Link).
         var structKids = new List<PdfDictionary>();
+        var parts = new List<(PdfDictionary? Kid, string Text)>();
         var text = new StringBuilder();
+        void AddText(string t)
+        {
+            text.Append(t);
+            if (parts.Count > 0 && parts[^1].Kid is null) parts[^1] = (null, parts[^1].Text + t);
+            else parts.Add((null, t));
+        }
         foreach (var kidObj in RawKids(reader, elem))
         {
             var resolved = reader.Resolve(kidObj);
             if (resolved is PdfInteger mcid)
             {
-                text.Append(McidText(ctx, PageDict(reader, elem), null, (int)mcid.Value));
+                AddText(McidText(ctx, PageDict(reader, elem), null, (int)mcid.Value));
             }
             else if (resolved is PdfDictionary kd)
             {
@@ -83,7 +91,7 @@ internal static class TaggedXmlExporter
                     var stm = reader.ResolveStream(kd.Get("Stm"));
                     var m = reader.Resolve(kd.Get("MCID")) as PdfInteger;
                     if (m is not null)
-                        text.Append(McidText(ctx, PageDict(reader, kd) ?? PageDict(reader, elem), stm, (int)m.Value));
+                        AddText(McidText(ctx, PageDict(reader, kd) ?? PageDict(reader, elem), stm, (int)m.Value));
                 }
                 else if (type == "OBJR")
                 {
@@ -92,6 +100,7 @@ internal static class TaggedXmlExporter
                 else
                 {
                     structKids.Add(kd);
+                    parts.Add((kd, string.Empty));
                 }
             }
         }
@@ -103,8 +112,11 @@ internal static class TaggedXmlExporter
         else
         {
             sb.Append(">\r\n");
-            foreach (var kid in structKids)
-                EmitElement(sb, ctx, kid, depth + 1);
+            foreach (var (kid, t) in parts)
+            {
+                if (kid is not null) EmitElement(sb, ctx, kid, depth + 1);
+                else if (t.Length > 0) sb.Append(indent).Append("  ").Append(EscapeText(t)).Append("\r\n");
+            }
             sb.Append(indent).Append("</").Append(name).Append(">\r\n");
         }
     }
@@ -230,8 +242,25 @@ internal static class TaggedXmlExporter
         {
             if (stack.Count > 0) stack.RemoveAt(stack.Count - 1);
         };
-        parser.OnTextShown += (text, _, _) =>
+        // The parser decodes shown bytes one per character, which splits a 2-byte CID code
+        // (Identity-H) into a NUL plus a letter; such fonts go through the extraction decoder.
+        var cidFonts = new Dictionary<string, (PdfDictionary Font, Dictionary<int, string>? ToUnicode)?>();
+        parser.OnTextShown += (text, bytes, state) =>
         {
+            if (state.FontName is { } key && fonts.TryGetValue(key, out var fontDict))
+            {
+                if (!cidFonts.TryGetValue(key, out var cid))
+                {
+                    Text.CidFontInfo? info = null;
+                    try { info = Text.CidFontInfo.TryBuild(fontDict, reader); } catch { }
+                    cid = info is { IsTwoByteEncoding: true }
+                        ? (fontDict, Text.TextAbsorber.ParseToUnicodeFromDict(fontDict, reader))
+                        : null;
+                    cidFonts[key] = cid;
+                }
+                if (cid is { } c)
+                    text = Text.TextAbsorber.DecodeStringPublic(bytes, c.ToUnicode, c.Font, reader, foldNbsp: false);
+            }
             for (var i = stack.Count - 1; i >= 0; i--)
             {
                 if (stack[i] is { } mcid)

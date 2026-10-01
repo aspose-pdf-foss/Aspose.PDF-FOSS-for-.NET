@@ -14,8 +14,13 @@ public sealed class PageInfo
     private double _width = 595;
     private double _height = 842;
 
-    /// <summary>Create a free-standing PageInfo (not bound to any page).</summary>
-    public PageInfo() { }
+    /// <summary>Create a free-standing PageInfo (not bound to any page). It carries the
+    /// same 90/72 pt margins as a page-bound one — that is the documented default, and a
+    /// markdown import handed a default PageInfo seats its text at those margins in the
+    /// reference render. Assigning the field (not the property) keeps MarginAssigned and
+    /// every per-side Touched flag false, so <c>Document.PageInfo</c> still reads as
+    /// untouched and never propagates these values onto a page.</summary>
+    public PageInfo() { _margin = MarginInfo.Defaults(90, 72, 90, 72); }
 
     /// <summary>Bound constructor used by <c>Page.PageInfo</c>. A page's margins default
     /// to the same values the layout engine falls back to (90 pt left/right, 72 pt
@@ -38,7 +43,7 @@ public sealed class PageInfo
     /// its column widths from 595 even inside a US-Letter document).</summary>
     public double Width
     {
-        get => _authoredWidth ?? (_page is not null ? (_page.SizeInherited ? _width : _page.MediaBox.Width) : _width);
+        get => _authoredWidth ?? (_page is not null && !BoundSizeAssigned ? _width : BoxWidth);
         set
         {
             LandscapeSwapApplied = false;
@@ -49,6 +54,7 @@ public sealed class PageInfo
                 var h = _page.MediaBox.Height;
                 _page.MediaBox = new Rectangle(0, 0, value, h);
                 _page.SizeInherited = false;
+                BoundSizeAssigned = true;
             }
             else
             {
@@ -63,11 +69,24 @@ public sealed class PageInfo
     /// printing to a fixed paper size does.</summary>
     internal bool WidthAssigned { get; private set; }
 
+    /// <summary>True once a bound page was sized through this descriptor: from then on
+    /// <see cref="Width"/>/<see cref="Height"/> read the box they set. Until then the
+    /// descriptor answers its A4 default whatever the page's box says - a loaded
+    /// US-Legal page reports 595x842, as the reference does (a page editor fitting
+    /// the document to "its own PageInfo" fits it to A4).</summary>
+    private bool BoundSizeAssigned { get; set; }
+
+    /// <summary>The geometry the orientation logic works on: the box of a sized bound
+    /// page, the A4 default of a size-inherited or free-standing one.</summary>
+    private double BoxWidth => _page is not null ? (_page.SizeInherited ? _width : _page.MediaBox.Width) : _width;
+
+    private double BoxHeight => _page is not null ? (_page.SizeInherited ? _height : _page.MediaBox.Height) : _height;
+
     /// <summary>Page height in points. See <see cref="Width"/> for the
     /// size-inherited rule.</summary>
     public double Height
     {
-        get => _authoredHeight ?? (_page is not null ? (_page.SizeInherited ? _height : _page.MediaBox.Height) : _height);
+        get => _authoredHeight ?? (_page is not null && !BoundSizeAssigned ? _height : BoxHeight);
         set
         {
             LandscapeSwapApplied = false;
@@ -77,6 +96,7 @@ public sealed class PageInfo
                 var w = _page.MediaBox.Width;
                 _page.MediaBox = new Rectangle(0, 0, w, value);
                 _page.SizeInherited = false;
+                BoundSizeAssigned = true;
             }
             else
             {
@@ -104,7 +124,7 @@ public sealed class PageInfo
         // media box FIRST, so the test below reads the box itself and a page the setter
         // already turned is not turned back.
         _authoredWidth = _authoredHeight = null;
-        if (LandscapeRequested && Height > Width)
+        if (LandscapeRequested && BoxHeight > BoxWidth)
             SwapDimensions();
     }
 
@@ -126,7 +146,7 @@ public sealed class PageInfo
     private void SwapDimensions()
     {
         var authored = WidthAssigned;
-        (Width, Height) = (Height, Width);
+        (Width, Height) = (BoxHeight, BoxWidth);
         WidthAssigned = authored;
     }
 
@@ -136,7 +156,7 @@ public sealed class PageInfo
     /// deferred to layout.</summary>
     public bool IsLandscape
     {
-        get => _page is not null ? (LandscapeRequested || Width > Height) : Width > Height;
+        get => _page is not null ? (LandscapeRequested || BoxWidth > BoxHeight) : Width > Height;
         set
         {
             if (value) LandscapeRequested = true;
@@ -152,10 +172,10 @@ public sealed class PageInfo
             // (an HTML conversion's auto-sized wide media box must not be
             // rotated back under its laid-out content).
             if (_page is not null && !value) return;
-            var isCurrentlyLandscape = Width > Height;
+            var isCurrentlyLandscape = BoxWidth > BoxHeight;
             if (isCurrentlyLandscape == value) return;
-            var authoredW = Width;
-            var authoredH = Height;
+            var authoredW = BoxWidth;
+            var authoredH = BoxHeight;
             SwapDimensions();
             if (value)
             {

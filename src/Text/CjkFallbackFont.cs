@@ -84,7 +84,7 @@ internal static class CjkFallbackFont
     /// <summary>
     /// Advance width (1/1000 em) for one legacy-CMap byte-code, taken from the
     /// resolved substitute font's own hmtx — proportional for MS-PMincho, full/half
-    /// for SimSun. Both <see cref="ContentStreamParser"/> (cursor between show-strings)
+    /// for SimSun. Both <c>ContentStreamParser</c> (cursor between show-strings)
     /// and the renderers (glyph placement within a string) call this so they advance
     /// in lockstep. Vertical text is one em per glyph; unmapped codes fall back to
     /// nominal full-/half-width by code length.
@@ -280,7 +280,7 @@ internal static class CjkFallbackFont
 
     /// <summary>
     /// Raw, embeddable single-font sfnt bytes of an installed system font that covers the
-    /// CJK <paramref name="text"/> — picked by script (kana→Japanese, hangul→Korean, else
+    /// CJK <c>text</c> — picked by script (kana→Japanese, hangul→Korean, else
     /// Han→Chinese). If the system face is a TrueType Collection (.ttc) its first font is
     /// extracted into a standalone sfnt so it embeds as a valid FontFile2. Returns null
     /// when no covering system font is found. Cached per file path.

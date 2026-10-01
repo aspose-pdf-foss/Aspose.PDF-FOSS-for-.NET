@@ -6,7 +6,7 @@ namespace Aspose.Pdf.Content;
 internal sealed partial class ContentStreamParser
 {
     /// <summary>
-    /// Parse an inline image (BI . ID <data> EI).
+    /// Parse an inline image (BI . ID &lt;data> EI).
     /// Abbreviated keys: W=Width, H=Height, BPC=BitsPerComponent, CS=ColorSpace, F=Filter.
     /// </summary>
     private void ParseInlineImage(PdfLexer lexer)

@@ -1,4 +1,4 @@
-#nullable disable
+﻿#nullable disable
 
 using System.Drawing;
 using System.IO;
@@ -8,20 +8,22 @@ using Aspose.Pdf.Printing;
 namespace Aspose.Pdf.Facades;
 
 /// <summary>
-/// Façade for viewing / printing a PDF document. Wraps a bound
-/// <see cref="Aspose.Pdf.Document"/>; the configuration surface mirrors the
-/// public API but printing methods reject calls because the FOSS
-/// build does not depend on a print spooler. Page rasterisation
+/// Façade for viewing and printing a PDF document. Wraps a bound
+/// <see cref="Aspose.Pdf.Document"/>. Page rasterisation
 /// (<see cref="DecodePage"/>, <see cref="DecodeAllPages"/>) renders through
-/// the same device pipeline as <see cref="ImageDevice"/>.
+/// the same device pipeline as <see cref="ImageDevice"/>, and the print methods
+/// hand those rendered pages to an installed printer - see the printing half of
+/// this class for what a job does with them.
 /// </summary>
-public class PdfViewer : IFacade, System.IDisposable
+public partial class PdfViewer : IFacade, System.IDisposable
 {
     private Document _document;
     private bool _ownsDocument;
 
+    /// <summary>Creates a viewer with no document bound; call <c>BindPdf</c> before printing or rendering.</summary>
     public PdfViewer() { }
 
+    /// <summary>Creates a viewer bound to an already opened document, which the viewer does not dispose.</summary>
     public PdfViewer(Document document)
     {
         _document = document ?? throw new System.ArgumentNullException(nameof(document));
@@ -29,13 +31,34 @@ public class PdfViewer : IFacade, System.IDisposable
 
     // ── Properties (auto-properties; configuration storage only) ────────────
 
+    /// <summary>Gets or sets whether a printed page is scaled to fit the sheet (then multiplied by <c>ScaleFactor</c>). Default false.</summary>
     public bool AutoResize { get; set; }
-    public bool AutoRotate { get; set; }
+
+    /// <summary>
+    /// Turn a page whose orientation disagrees with the sheet's. One setting with
+    /// <see cref="AutoRotateMode"/>, as in the reference: switching it on turns pages
+    /// counter-clockwise unless a direction is already chosen, and switching it off clears the
+    /// direction.
+    /// </summary>
+    public bool AutoRotate
+    {
+        get => AutoRotateMode != AutoRotateMode.None;
+        set => AutoRotateMode = !value ? AutoRotateMode.None
+            : AutoRotateMode == AutoRotateMode.None ? AutoRotateMode.AntiClockWise
+            : AutoRotateMode;
+    }
+
+    /// <summary>Which way a page is turned onto a sheet of the other orientation;
+    /// <see cref="AutoRotateMode.None"/> leaves it as it is.</summary>
     public AutoRotateMode AutoRotateMode { get; set; }
+    /// <summary>Gets or sets the page box used for printing. Stored only; has no effect in this library.</summary>
     public PageCoordinateType CoordinateType { get; set; }
+    /// <summary>Gets or sets how form fields are presented when printing. Stored only; has no effect in this library.</summary>
     public FormPresentationMode FormPresentationMode { get; set; }
+    /// <summary>Gets or sets where a printed page that does not fill the sheet sits horizontally (left, center or right).</summary>
     public HorizontalAlignment HorizontalAlignment { get; set; }
-    public VerticalAlignment VerticalAlignment { get; set; } = VerticalAlignment.Bottom;
+    /// <summary>Gets or sets where a printed page that does not fill the sheet sits vertically (top, center or bottom).</summary>
+    public VerticalAlignment VerticalAlignment { get; set; }
 
     /// <summary>Number of pages in the bound document, or 0 when nothing is bound.</summary>
     public int PageCount => _document?.Pages.Count ?? 0;
@@ -44,24 +67,33 @@ public class PdfViewer : IFacade, System.IDisposable
     /// <see cref="OpenPdfFile(string)"/>.</summary>
     public string Password { get; set; }
 
+    /// <summary>Gets or sets whether pages print in gray ink only; such pages are sent to the printer as images. Default false.</summary>
     public bool PrintAsGrayscale { get; set; }
+    /// <summary>Gets or sets whether each page is sent to the printer as an image rendered at <c>Resolution</c> DPI instead of as drawing commands. Default false.</summary>
     public bool PrintAsImage { get; set; }
 
-    /// <summary>When true, <see cref="PrintDocumentWithSetup"/> would surface
-    /// the OS print dialog. Stored only — printing is not implemented in this build.</summary>
+    /// <summary>When true, <see cref="PrintDocumentWithSetup"/> surfaces the OS print
+    /// dialog. Stored only — this build has no windowing dependency to raise one with,
+    /// so a job runs with the settings it was given either way.</summary>
     public bool PrintPageDialog { get; set; }
 
-    /// <summary>Always returns null in this build; printing is not implemented.</summary>
-    public object PrintStatus => null;
+    /// <summary>The failure that ended the last print job, or null when it finished.</summary>
+    public object PrintStatus => _printStatus;
 
-    public string PrinterJobName { get; set; } = "Aspose.Pdf Print";
+    /// <summary>Gets or sets the job name shown in the printer queue. Default <c>Aspose.PDF FOSS Print</c>.</summary>
+    public string PrinterJobName { get; set; } = "Aspose.PDF FOSS Print";
 
-    public Aspose.Pdf.RenderingOptions RenderingOptions { get; set; }
+    /// <summary>Rendering options applied to every page this viewer rasterises, for
+    /// <see cref="DecodePage"/> and for print jobs alike. Never null by default, as on
+    /// <see cref="PdfConverter"/> and <see cref="ImageDevice"/>: callers set a flag on it in
+    /// place rather than assigning a fresh instance.</summary>
+    public Aspose.Pdf.RenderingOptions RenderingOptions { get; set; } = new Aspose.Pdf.RenderingOptions();
 
     /// <summary>Target rasterisation DPI used by <see cref="DecodePage"/> /
     /// <see cref="DecodeAllPages"/>.</summary>
     public int Resolution { get; set; } = 150;
 
+    /// <summary>Gets or sets the scale applied to each printed page; values of 0 or less mean 1. Default 1.</summary>
     public float ScaleFactor { get; set; } = 1f;
     public bool ShowHiddenAreas { get; set; }
     public bool UseIntermidiateImage { get; set; }
@@ -76,6 +108,7 @@ public class PdfViewer : IFacade, System.IDisposable
 
     // ── Lifecycle / file binding ────────────────────────────────────────────
 
+    /// <summary>Binds an already opened document, which the viewer does not dispose. Throws when the document is null.</summary>
     public void BindPdf(Document srcDoc)
     {
         ReleaseOwnedDocument();
@@ -83,6 +116,7 @@ public class PdfViewer : IFacade, System.IDisposable
         _ownsDocument = false;
     }
 
+    /// <summary>Opens the PDF file at the given path (using <c>Password</c> when set) and binds it.</summary>
     public void BindPdf(string srcFile)
     {
         ReleaseOwnedDocument();
@@ -92,6 +126,7 @@ public class PdfViewer : IFacade, System.IDisposable
         _ownsDocument = true;
     }
 
+    /// <summary>Reads the whole stream (from the start when it is seekable), opens it using <c>Password</c> when set, and binds it.</summary>
     public void BindPdf(Stream srcStream)
     {
         ReleaseOwnedDocument();
@@ -107,18 +142,21 @@ public class PdfViewer : IFacade, System.IDisposable
     public void OpenPdfFile(string filePath) => BindPdf(filePath);
     public void OpenPdfFile(Stream inputStream) => BindPdf(inputStream);
 
+    /// <summary>Releases the bound document; it is disposed only when the viewer opened it itself.</summary>
     public void Close() => ReleaseOwnedDocument();
     public void ClosePdfFile() => Close();
     public void Dispose() => Close();
 
     // ── Save (passes through to the bound document) ────────────────────────
 
+    /// <summary>Saves the bound document to the given file path.</summary>
     public void Save(string destFile)
     {
         EnsureBound();
         _document.Save(destFile);
     }
 
+    /// <summary>Saves the bound document to the given stream.</summary>
     public void Save(Stream destStream)
     {
         EnsureBound();
@@ -133,12 +171,21 @@ public class PdfViewer : IFacade, System.IDisposable
     public Bitmap DecodePage(int pageNumber)
     {
         EnsureBound();
-        if (pageNumber < 1 || pageNumber > _document.Pages.Count)
+        return RenderPage(_document, pageNumber, Resolution);
+    }
+
+    /// <summary>Renders one page (1-based) of <paramref name="document"/> at
+    /// <paramref name="dpi"/>, with this viewer's rendering options.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    internal Bitmap RenderPage(Document document, int pageNumber, int dpi)
+    {
+        if (pageNumber < 1 || pageNumber > document.Pages.Count)
             throw new System.ArgumentOutOfRangeException(nameof(pageNumber));
 
-        var device = new BmpDevice(new Devices.Resolution(Resolution));
+        var device = new BmpDevice(new Devices.Resolution(dpi));
+        if (RenderingOptions is not null) device.RenderingOptions = RenderingOptions;
         using var ms = new MemoryStream();
-        device.Process(_document.Pages[pageNumber], ms);
+        device.Process(document.Pages[pageNumber], ms);
         ms.Position = 0;
         // Copy out of the stream-backed image: GDI+ requires the source stream
         // to outlive a Bitmap decoded from it, and callers own the result.
@@ -146,8 +193,92 @@ public class PdfViewer : IFacade, System.IDisposable
         var result = new Bitmap(decoded);
         // The Bitmap(Image) copy resets DPI metadata to the screen default;
         // restore the requested rasterisation resolution.
-        result.SetResolution(Resolution, Resolution);
+        result.SetResolution(dpi, dpi);
         return result;
+    }
+
+    /// <summary>
+    /// Renders one page (1-based) of <paramref name="document"/> at <paramref name="dpi"/> for a
+    /// printer, with this viewer's rendering options, as the reference renders a page it prints as
+    /// an image: opaque, on white paper.
+    /// </summary>
+    /// <remarks>
+    /// The reference's printed page image is its own PNG render of the page, byte for byte, alpha
+    /// 255 throughout. A transparent render, cropped by the XPS writer to what the page paints,
+    /// measures the same once the page reaches the writer as a PNG (a fallback page 112 pixels
+    /// outside its template's match window transparent, 111 opaque).
+    /// </remarks>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    internal Bitmap RenderPageForPrint(Document document, int pageNumber, int dpi)
+    {
+        if (pageNumber < 1 || pageNumber > document.Pages.Count)
+            throw new System.ArgumentOutOfRangeException(nameof(pageNumber));
+
+        var renderer = new GdiPlusPageRenderer
+        {
+            DefaultFontName = RenderingOptions?.DefaultFontName,
+            AliasedVectorFills = RenderingOptions?.BarcodeOptimization ?? false,
+            ConvertFontsToUnicodeTtf = RenderingOptions?.ConvertFontsToUnicodeTTF ?? false,
+            PrintedPageImage = true,
+        };
+        var rgba = renderer.RenderPage(document.Pages[pageNumber], dpi);
+        var bitmap = new Bitmap(rgba.Width, rgba.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        var bits = bitmap.LockBits(new System.Drawing.Rectangle(0, 0, rgba.Width, rgba.Height),
+            System.Drawing.Imaging.ImageLockMode.WriteOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            var row = new byte[rgba.Width * 4];
+            for (var y = 0; y < rgba.Height; y++)
+            {
+                // RGBA to GDI+'s BGRA byte order.
+                System.Array.Copy(rgba.Data, y * row.Length, row, 0, row.Length);
+                for (var x = 0; x < row.Length; x += 4)
+                    (row[x], row[x + 2]) = (row[x + 2], row[x]);
+                System.Runtime.InteropServices.Marshal.Copy(row, 0, System.IntPtr.Add(bits.Scan0, y * bits.Stride), row.Length);
+            }
+        }
+        finally
+        {
+            bitmap.UnlockBits(bits);
+        }
+        bitmap.SetResolution(dpi, dpi);
+        return bitmap;
+    }
+
+    /// <summary>Draws one page (1-based) of <paramref name="document"/> as drawing commands into
+    /// <paramref name="destination"/> on a printer surface, with this viewer's rendering options,
+    /// laid out as a render at <paramref name="dpi"/>. False, with nothing drawn, when the page
+    /// has to be printed as an image: it holds content composited from pixels, or the options ask
+    /// for a render that only exists in pixels.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    internal bool DrawPage(Document document, int pageNumber, Graphics graphics, RectangleF destination, int dpi)
+    {
+        if (pageNumber < 1 || pageNumber > document.Pages.Count)
+            throw new System.ArgumentOutOfRangeException(nameof(pageNumber));
+        if (RenderingOptions?.BarcodeOptimization == true) return false;
+
+        var renderer = new GdiPlusPageRenderer
+        {
+            DefaultFontName = RenderingOptions?.DefaultFontName,
+            ConvertFontsToUnicodeTtf = RenderingOptions?.ConvertFontsToUnicodeTTF ?? false,
+        };
+        return renderer.TryRenderPageToGraphics(document.Pages[pageNumber], graphics, destination, dpi);
+    }
+
+    /// <summary>Renders one page (1-based) at <see cref="Resolution"/> DPI and returns it as an
+    /// image encoded in <paramref name="imageFormat"/> - a PNG by default. The encoded form is
+    /// the point: the image is decoded back from that format, so a caller saving it again, or
+    /// handing it to a print job, sees exactly what that format keeps, resolution included.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public System.Drawing.Image DecodePageToImage(int pageNumber, System.Drawing.Imaging.ImageFormat imageFormat)
+    {
+        using var page = DecodePage(pageNumber);
+        // Image.FromStream reads lazily from the stream it is given, so the stream has to live as
+        // long as the image does; it is left to the image rather than disposed here.
+        var encoded = new MemoryStream();
+        page.Save(encoded, imageFormat ?? System.Drawing.Imaging.ImageFormat.Png);
+        encoded.Position = 0;
+        return System.Drawing.Image.FromStream(encoded);
     }
 
     /// <summary>Renders every page to a <see cref="Bitmap"/>; see
@@ -162,86 +293,6 @@ public class PdfViewer : IFacade, System.IDisposable
         return pages;
     }
 
-    // ── Print methods (not implemented in FOSS) ────────────────────────────
-
-    /// <summary>Returns a fresh, empty <see cref="PageSettings"/>. The FOSS
-    /// build does not query the OS print spooler.</summary>
-    public PageSettings GetDefaultPageSettings() => new();
-
-    /// <summary>Returns a fresh, empty <see cref="PrinterSettings"/>. The FOSS
-    /// build does not query the OS print spooler.</summary>
-    public PrinterSettings GetDefaultPrinterSettings() => new();
-
-    public void PrintDocument() => ThrowPrintingNotSupported();
-    public void PrintDocumentWithSettings(PrinterSettings printerSettings)
-    {
-        // A print-TO-FILE job needs no spooler: the document a spooler would hand
-        // to "Microsoft Print to PDF" is reproduced directly — each requested
-        // copy of the page range lands in the target file as its own pages
-        // (2 copies of a 1-page document print as a 2-page PDF).
-        if (printerSettings is { PrintToFile: true } ps
-            && !string.IsNullOrEmpty(ps.PrintFileName)
-            && ps.PrintFileName.EndsWith(".pdf", System.StringComparison.OrdinalIgnoreCase))
-        {
-            EnsureBound();
-            using var outDoc = new Document();
-            var from = ps.FromPage > 0 ? ps.FromPage : 1;
-            var to = ps.ToPage >= from && ps.ToPage > 0 && ps.ToPage <= _document.Pages.Count
-                ? ps.ToPage : _document.Pages.Count;
-            var copies = System.Math.Max(1, ps.Copies);
-            for (var c = 0; c < copies; c++)
-                for (var p = from; p <= to; p++)
-                    outDoc.Pages.Add(_document.Pages[p]);
-            outDoc.Save(ps.PrintFileName);
-            return;
-        }
-        ThrowPrintingNotSupported();
-    }
-    public void PrintDocumentWithSettings(PageSettings pageSettings, PrinterSettings printerSettings)
-    {
-        _ = pageSettings;
-        if (printerSettings is { PrintToFile: true }
-            && printerSettings.PrintFileName is { Length: > 0 } target
-            && target.EndsWith(".pdf", System.StringComparison.OrdinalIgnoreCase))
-        {
-            PrintDocumentWithSettings(printerSettings);
-            return;
-        }
-        ThrowPrintingNotSupported();
-    }
-    public void PrintDocumentWithSetup() => ThrowPrintingNotSupported();
-
-    public void PrintDocuments(Document[] documents)
-    { _ = documents; ThrowPrintingNotSupported(); }
-    public void PrintDocuments(string[] filePaths)
-    { _ = filePaths; ThrowPrintingNotSupported(); }
-    public void PrintDocuments(Stream[] documentStreams)
-    { _ = documentStreams; ThrowPrintingNotSupported(); }
-    public void PrintDocuments(PrinterSettings printerSettings, Document[] documents)
-    { _ = printerSettings; _ = documents; ThrowPrintingNotSupported(); }
-    public void PrintDocuments(PrinterSettings printerSettings, string[] filePaths)
-    { _ = printerSettings; _ = filePaths; ThrowPrintingNotSupported(); }
-    public void PrintDocuments(PrinterSettings printerSettings, Stream[] documentStreams)
-    { _ = printerSettings; _ = documentStreams; ThrowPrintingNotSupported(); }
-    public void PrintDocuments(PrinterSettings printerSettings, PageSettings pageSettings, Document[] documents)
-    { _ = printerSettings; _ = pageSettings; _ = documents; ThrowPrintingNotSupported(); }
-    public void PrintDocuments(PrinterSettings printerSettings, PageSettings pageSettings, string[] filePaths)
-    { _ = printerSettings; _ = pageSettings; _ = filePaths; ThrowPrintingNotSupported(); }
-    public void PrintDocuments(PrinterSettings printerSettings, PageSettings pageSettings, Stream[] documentStreams)
-    { _ = printerSettings; _ = pageSettings; _ = documentStreams; ThrowPrintingNotSupported(); }
-
-    public void PrintLargePdf(string filePath)
-    { _ = filePath; ThrowPrintingNotSupported(); }
-    public void PrintLargePdf(Stream inputStream)
-    { _ = inputStream; ThrowPrintingNotSupported(); }
-    public void PrintLargePdf(string filePath, PrinterSettings printerSettings)
-    { _ = filePath; _ = printerSettings; ThrowPrintingNotSupported(); }
-    public void PrintLargePdf(Stream inputStream, PrinterSettings printerSettings)
-    { _ = inputStream; _ = printerSettings; ThrowPrintingNotSupported(); }
-    public void PrintLargePdf(string filePath, PageSettings pageSettings, PrinterSettings printerSettings)
-    { _ = filePath; _ = pageSettings; _ = printerSettings; ThrowPrintingNotSupported(); }
-    public void PrintLargePdf(Stream inputStream, PageSettings pageSettings, PrinterSettings printerSettings)
-    { _ = inputStream; _ = pageSettings; _ = printerSettings; ThrowPrintingNotSupported(); }
 
     // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -260,17 +311,4 @@ public class PdfViewer : IFacade, System.IDisposable
         _ownsDocument = false;
     }
 
-    private static void ThrowPrintingNotSupported()
-        => throw new System.PlatformNotSupportedException(
-            "PdfViewer spooler-backed printing is not implemented. Render pages with ImageDevice and print the resulting images instead.");
-
-    // Keep the compiler from complaining about unused events (no FOSS code raises them).
-    private void _suppressEventWarnings()
-    {
-        CustomPrint?.Invoke(this, null);
-        EndPage?.Invoke(this, null);
-        EndPrint?.Invoke(this, null);
-        PdfQueryPageSettings?.Invoke(this, null!, null!);
-        StartPage?.Invoke(this, null);
-    }
 }

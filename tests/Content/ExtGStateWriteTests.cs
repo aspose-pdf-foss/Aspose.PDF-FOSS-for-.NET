@@ -3,7 +3,6 @@ using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.Drawing;
 using Aspose.Pdf.IO;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Tests.Helpers;
 using Xunit;
 

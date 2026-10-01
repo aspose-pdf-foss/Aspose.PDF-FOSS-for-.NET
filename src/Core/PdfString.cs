@@ -3,7 +3,7 @@ using System.Globalization;
 using System.Text;
 namespace Aspose.Pdf.Core;
 
-internal sealed class PdfString : PdfObject
+internal sealed partial class PdfString : PdfObject
 {
     public byte[] Value { get; }
     public bool IsHex { get; }
@@ -62,7 +62,7 @@ internal sealed class PdfString : PdfObject
     public override string ToString()
     {
         if (IsHex)
-            return $"<{Convert.ToHexString(Value)}>";
-        return $"({Encoding.Latin1.GetString(Value)})";
+            return $"<{Compat.ToHexString(Value)}>";
+        return $"({Compat.Latin1.GetString(Value)})";
     }
 }

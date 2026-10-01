@@ -1,6 +1,5 @@
 ﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -25,6 +24,17 @@ public sealed partial class HeaderFooter
             // its first sized segment carries (generator-style fragments hold
             // their size and face on the segment).
             var (tfFs, tfFace) = FragmentSizeAndFace(tf);
+            // The fragment's FontStyle picks the face's variant (probed: Arial with
+            // FontStyles.Bold draws the band line in Arial Bold).
+            if (tfFace is not null && tf.TextState.FontStyle is var fstyle && fstyle != FontStyles.Regular)
+            {
+                try
+                {
+                    var styled = FontRepository.FindFont(tfFace.FontName, fstyle);
+                    if (styled?.SourceFontData?.TtfData is { Length: > 0 }) tfFace = styled;
+                }
+                catch { /* the plain face stays */ }
+            }
             if (tfFace?.FontName is { Length: > 0 } tfFaceName) ts.fn = tfFaceName;
             else if (tf.TextState.FontName is not null) ts.fn = tf.TextState.FontName;
             if (tfFs > 0) ts.fs = (float)tfFs;
@@ -33,6 +43,17 @@ public sealed partial class HeaderFooter
         else if (para is HtmlFragment htmlFrag)
         {
             if (!ResolveHtmlFragmentText(hf, ts, htmlFrag)) return;
+            // A band fragment that names no face — on itself, on the band's text state
+            // and in its markup — sets in the UA serif at the UA base, as an in-page
+            // fragment does (measured: the plain header line draws Times 12).
+            if (TextState.FontName is null && htmlFrag.TextState?.Font is null
+                && string.IsNullOrEmpty(htmlFrag.TextState?.FontName) && ts.embedFont is null
+                && !System.Text.RegularExpressions.Regex.IsMatch(ts.hc,
+                    @"font-family|font-size|<font\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            {
+                ts.fn = "Times-Roman";
+                if (TextState.FontSize <= 0 && htmlFrag.TextState is not { FontSizeTouched: true }) ts.fs = 12;
+            }
         }
 
         if (string.IsNullOrWhiteSpace(ts.text)) return;
@@ -50,6 +71,20 @@ public sealed partial class HeaderFooter
         hf.lastTextEndX = ts.drawX + ts.textW;
         if (!ts.inline) hf.y -= ts.fs * 1.2;
         hf.firstParagraph = false;
+    }
+
+    /// <summary>The advance of the spaces a line ends with, in the line's face and size.</summary>
+    private static double TrailingSpaceWidth(string text, double fs, string face)
+    {
+        var trimmed = text.TrimEnd(' ');
+        if (trimmed.Length == text.Length) return 0;
+        var spaces = text.Substring(trimmed.Length);
+        try
+        {
+            var mw = FontRepository.TryFindFont(face)?.MeasureString(spaces, fs) ?? 0;
+            return mw > 0 ? mw : EstimateWidth(spaces, fs);
+        }
+        catch { return EstimateWidth(spaces, fs); }
     }
 
     /// <summary>Writes the resolved text at its seat and measures the advance it took.</summary>
@@ -114,7 +149,13 @@ public sealed partial class HeaderFooter
             lineB.SaveState();
             if (para is TextFragment bandTf && FragmentForeground(bandTf) is { } bandFore)
                 lineB.SetFillColor(bandFore);
-            double lastBase = hf.y, lastEnd = hf.x + ts.cssLeftIndent;
+            // The member's own margins: its top margin hangs it further below the band
+            // top, its left margin indents it (probed: Margin.Top 20 / Left 30 seat the
+            // footer line 20 pt lower at x 120; Margin.Bottom moves nothing).
+            var memberTop = para is TextFragment mtTf && mtTf.Margin.TopTouched ? mtTf.Margin.Top : 0.0;
+            var memberLeft = para is TextFragment mlTf && mlTf.Margin.LeftTouched ? mlTf.Margin.Left : 0.0;
+            hf.y -= memberTop;
+            double lastBase = hf.y, lastEnd = hf.x + ts.cssLeftIndent + memberLeft;
             foreach (var lnText in bandLines)
             {
                 var baseline = hf.y - (ts.fs - descEm * ts.fs);
@@ -127,11 +168,15 @@ public sealed partial class HeaderFooter
                     lnW = mw > 0 ? mw : EstimateWidth(lnText, ts.fs);
                 }
                 catch { lnW = EstimateWidth(lnText, ts.fs); }
+                // A right-aligned line's TRAILING space hangs past the band edge: the
+                // last glyph ends on it (probed: " Total pages 2 " at 12 pt Arial draws
+                // at 505 - 79.38 + 3.34 with the band's right edge at 505).
                 var lnX = ts.alignment switch
                 {
                     HorizontalAlignment.Center => hf.mLeft + (bandWidth - lnW) / 2,
-                    HorizontalAlignment.Right => hf.page.Width - bandRightMargin - lnW,
-                    _ => hf.x + ts.cssLeftIndent,
+                    HorizontalAlignment.Right => hf.page.Width - bandRightMargin - lnW
+                        + TrailingSpaceWidth(lnText, ts.fs, ts.fn),
+                    _ => hf.x + ts.cssLeftIndent + memberLeft,
                 };
                 if (ts.embedFont?.SourceFontData?.TtfData is { Length: > 0 } bandTtf)
                 {
@@ -187,6 +232,28 @@ public sealed partial class HeaderFooter
             && !double.IsNaN(hf.lastTextY);
         ts.drawX = ts.inline ? hf.lastTextEndX : hf.x + ts.cssLeftIndent;
         ts.drawY = ts.inline ? hf.lastTextY : hf.y;
+        // A header's text members stack their own boxes (size + leading) down from the
+        // band top, each baseline one descent above its box bottom (probed: Arial Bold 16
+        // with 5 pt leading at 17.624, Arial 12 with 5 pt leading under it at 35.468; a lone
+        // Arial Bold 9 at 7.101), not the band's default 10 pt drop and 1.2 em step.
+        if (hf.isHeader && !ts.inline && para is TextFragment headerTf)
+        {
+            var box = ts.fs + FragmentLeading(headerTf);
+            ts.drawY = hf.pageHeight - hf.mTop - hf.headerStackH - box + FaceDescentEm(ts.fn, ts.embedFont) * ts.fs;
+            hf.headerStackH += box;
+        }
+        // A header fragment's own top margin hangs it that much further below the
+        // band top (measured: a 20 pt Margin.Top seats the header line 20 pt lower).
+        if (hf.isHeader && !ts.inline && para is HtmlFragment marginFrag && marginFrag.Margin.TopTouched)
+            ts.drawY -= marginFrag.Margin.Top;
+        // A text member's own margins move it in both bands (probed: a header fragment
+        // with Margin.Top 50 / Left 8 seats at x 98, 50 pt lower; a footer fragment with
+        // Margin.Top 20 / Left 30 at x 120, 20 pt lower; Margin.Bottom moves nothing).
+        if (!ts.inline && para is TextFragment marginTf)
+        {
+            if (marginTf.Margin.TopTouched) ts.drawY -= marginTf.Margin.Top;
+            if (marginTf.Margin.LeftTouched) ts.drawX += marginTf.Margin.Left;
+        }
         // A footer's first text line: each member's box hangs its own pitch
         // (size + leading) from the line top, its baseline one descent up.
         // (Legacy bottom-up band only — the probed band seats below.)

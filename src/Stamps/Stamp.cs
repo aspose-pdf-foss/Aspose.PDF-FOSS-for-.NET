@@ -1,10 +1,9 @@
-using Aspose.Pdf;
 using Aspose.Pdf.Annotations;
 
-namespace Aspose.Pdf.Stamps;
+namespace Aspose.Pdf;
 
 /// <summary>
-/// Base class for stamps that can be applied to PDF pages.
+/// Base class for the stamps a <see cref="Page"/> takes through <see cref="Page.AddStamp(Stamp)"/>.
 /// </summary>
 public abstract class Stamp
 {
@@ -72,11 +71,34 @@ public abstract class Stamp
     /// default) draws filled content with no outline.</summary>
     public double OutlineWidth { get; set; }
 
+    /// <summary>Opacity of the outline stroke (0.0 = transparent, 1.0 = opaque).</summary>
+    public double OutlineOpacity { get; set; } = 1.0;
+
+    /// <summary>Uniform scale factor. Stored only; <see cref="ZoomX"/> and <see cref="ZoomY"/> drive the drawing.</summary>
+    public double Zoom { get; set; } = 1.0;
+
+    /// <summary>Width of the stamp box in points - the wrap width of a text stamp, the
+    /// drawn size of a page stamp.</summary>
+    public virtual double Width { get; set; }
+
+    /// <summary>Height of the stamp box in points.</summary>
+    public virtual double Height { get; set; }
+
+    /// <summary>Gets <see cref="StampId"/>.</summary>
+    public int getStampId() => StampId;
+
+    /// <summary>Apply this stamp to <paramref name="page"/>.</summary>
+    public virtual void Put(Page page) => page?.ApplyStamp(this);
+
     /// <summary>Optional pre-computed bounding rectangle (page space) for this stamp.
     /// When set, the stamp emits a <c>%StampRect</c> content-stream comment so
     /// <see cref="Aspose.Pdf.Facades.PdfContentEditor.GetStamps"/> can report the stamp's
     /// exact geometry on reload instead of deriving it from the drawing matrix.</summary>
     internal Aspose.Pdf.Rectangle? MetaRect { get; set; }
+
+    /// <summary>The bounding box the stamp's Form XObject is written with when the stamp's
+    /// content does not fit the page box - null keeps the page's MediaBox.</summary>
+    internal Aspose.Pdf.Rectangle? FormBBox { get; set; }
 
     /// <summary>Apply this stamp to a page (modifies the page's content stream).</summary>
     internal abstract byte[] BuildContentStream(Page page);

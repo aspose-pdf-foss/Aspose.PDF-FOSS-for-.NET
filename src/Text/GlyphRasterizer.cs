@@ -30,29 +30,25 @@ internal static class GlyphRasterizer
     /// <summary>
     /// Rasterize a glyph outline to a single-channel alpha mask with anti-aliasing.
     /// </summary>
-    public static byte[]? Rasterize(GlyphOutline outline, int unitsPerEm, double fontSize,
-        double scale, out int width, out int height, out int bearingX, out int bearingY,
-        double horizontalScale = 1.0)
+    public static (byte[] mask, int width, int height, int bearingX, int bearingY)? Rasterize(
+        GlyphOutline outline, int unitsPerEm, double fontSize, double scale, double horizontalScale = 1.0)
     {
         // The upright case stated as the general one: x grows right and device y grows
         // DOWN, which is what the negated d says.
         var pixelScale = fontSize * scale / unitsPerEm;
-        return RasterizeTransformed(outline, pixelScale * horizontalScale, 0, 0, -pixelScale,
-            out width, out height, out bearingX, out bearingY);
+        return RasterizeTransformed(outline, pixelScale * horizontalScale, 0, 0, -pixelScale);
     }
 
     /// <summary>
     /// Rasterize an outline through an arbitrary 2x2 map from FONT UNITS to device pixels
     /// (device y pointing down), so a glyph can carry the rotation or skew its text matrix
     /// asks for. The mask comes back in its own upright buffer;
-    /// <paramref name="bearingX"/> and <paramref name="bearingY"/> place its top-left
+    /// <c>bearingX</c> and <c>bearingY</c> place its top-left
     /// corner relative to the glyph origin.
     /// </summary>
-    public static byte[]? RasterizeTransformed(GlyphOutline outline,
-        double a, double b, double c, double d,
-        out int width, out int height, out int bearingX, out int bearingY)
+    public static (byte[] mask, int width, int height, int bearingX, int bearingY)? RasterizeTransformed(
+        GlyphOutline outline, double a, double b, double c, double d)
     {
-        width = height = bearingX = bearingY = 0;
         if (outline.Contours.Length == 0) return null;
 
         // XMin/XMax describe the upright box only, so a rotated map has to measure the
@@ -74,8 +70,8 @@ internal static class GlyphRasterizer
         }
         if (pxMin > pxMax) return null;
 
-        width = (int)Math.Ceiling(pxMax - pxMin) + 2;
-        height = (int)Math.Ceiling(pyMax - pyMin) + 2;
+        var width = (int)Math.Ceiling(pxMax - pxMin) + 2;
+        var height = (int)Math.Ceiling(pyMax - pyMin) + 2;
         // Display sizes are legitimate content: a 175 pt plate number at 300 dpi is ~730 px
         // tall, and a hard 512 px side dropped it SILENTLY — the whole run vanished while
         // the 12 pt labels beside it drew. Bound the WORK instead of the size: the glyph is
@@ -85,8 +81,8 @@ internal static class GlyphRasterizer
         // fraction of the shape.
         if (width <= 0 || height <= 0 || width > MaxGlyphSide || height > MaxGlyphSide) return null;
 
-        bearingX = (int)Math.Floor(pxMin);
-        bearingY = (int)Math.Floor(pyMin);
+        var bearingX = (int)Math.Floor(pxMin);
+        var bearingY = (int)Math.Floor(pyMin);
 
         var superSample = SuperSampleFor(width, height);
 
@@ -130,14 +126,20 @@ internal static class GlyphRasterizer
                     {
                         var col = x * superSample + sx;
                         if (col >= ssW) continue;
-                        sum += rgba[(row * ssW + col) * 4]; // R channel
+                        // The ALPHA channel is the coverage. The buffer starts transparent,
+                        // and the filler composites straight alpha onto a transparent pixel
+                        // at full source colour with the coverage in alpha - so R reads 255
+                        // on every sub-pixel an edge merely touched, and each glyph came out
+                        // a supersample pixel fatter on every edge (a third to a half more
+                        // ink on body text).
+                        sum += rgba[(row * ssW + col) * 4 + 3];
                     }
                 }
                 alpha[y * width + x] = (byte)(sum / ss2);
             }
         }
 
-        return alpha;
+        return (alpha, width, height, bearingX, bearingY);
     }
 
     private static void BuildContourEdges(EdgeTable edgeTable, ContourPoint[] contour,

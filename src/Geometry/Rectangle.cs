@@ -7,9 +7,12 @@ namespace Aspose.Pdf;
 /// </summary>
 public sealed class Point
 {
+    /// <summary>Gets or sets the X coordinate, in points.</summary>
     public double X { get; set; }
+    /// <summary>Gets or sets the Y coordinate, in points.</summary>
     public double Y { get; set; }
 
+    /// <summary>Creates a point at the given X and Y coordinates.</summary>
     public Point(double x, double y)
     {
         X = x;
@@ -65,11 +68,16 @@ public sealed class Point3D
 /// </summary>
 public sealed class Rectangle
 {
+    /// <summary>Gets or sets the X coordinate of the lower-left corner, in points.</summary>
     public double LLX { get; set; }
+    /// <summary>Gets or sets the Y coordinate of the lower-left corner, in points.</summary>
     public double LLY { get; set; }
+    /// <summary>Gets or sets the X coordinate of the upper-right corner, in points.</summary>
     public double URX { get; set; }
+    /// <summary>Gets or sets the Y coordinate of the upper-right corner, in points.</summary>
     public double URY { get; set; }
 
+    /// <summary>Creates a rectangle from its lower-left and upper-right corners. Swapped coordinates are corrected, so the lower-left corner always holds the smaller values.</summary>
     public Rectangle(double llx, double lly, double urx, double ury)
     {
         // Auto-normalize: ensure LLX <= URX and LLY <= URY
@@ -106,7 +114,9 @@ public sealed class Rectangle
         }
     }
 
+    /// <summary>Gets the width (<c>URX - LLX</c>), in points.</summary>
     public double Width => URX - LLX;
+    /// <summary>Gets the height (<c>URY - LLY</c>), in points.</summary>
     public double Height => URY - LLY;
 
     /// <summary>An empty rectangle (all coordinates zero). Equivalent to <c>new Rectangle(0, 0, 0, 0)</c>.</summary>
@@ -158,12 +168,14 @@ public sealed class Rectangle
     public bool ContainsLine(double x1, double y1, double x2, double y2)
         => ContainsPoint(x1, y1) && ContainsPoint(x2, y2);
 
+    /// <summary>Returns <c>true</c> when the point (<c>x</c>, <c>y</c>) lies inside the rectangle, edges included.</summary>
     public bool Contains(double x, double y) => ContainsPoint(x, y);
 
     /// <summary>Test whether <paramref name="point"/> falls inside the
     /// rectangle (inclusive of edges).</summary>
     public bool Contains(Point point) => Contains(point, inclusive: true);
 
+    /// <summary>Returns <c>true</c> when the other rectangle lies entirely inside this one, edges included.</summary>
     public bool Contains(Rectangle other) =>
         other.LLX >= LLX && other.LLY >= LLY &&
         other.URX <= URX && other.URY <= URY;
@@ -349,12 +361,14 @@ public sealed class PageSize
     /// <summary>Height in points.</summary>
     public float Height { get; set; }
 
+    /// <summary>Creates a page size of the given width and height in points (1/72 inch).</summary>
     public PageSize(double width, double height)
     {
         Width = (float)width;
         Height = (float)height;
     }
 
+    /// <summary>Creates a page size of the given width (<c>x</c>) and height (<c>y</c>) in points (1/72 inch).</summary>
     public PageSize(float x, float y)
     {
         Width = x;
@@ -373,31 +387,33 @@ public sealed class PageSize
         }
     }
 
-    /// <summary>ISO A0 — 841 × 1189 mm (2383.937 × 3370.394 pt).</summary>
-    public static PageSize A0 => new(2383.937, 3370.394);
+    // Every ISO constant is the WHOLE-POINT size (measured on the reference: A3 reads
+    // 842 x 1190, A5 421 x 595, B5 501 x 709), so a page resized to one of them lands
+    // its content at whole-point offsets (an A4 sheet right-aligned on A3 shifts by 247).
 
-    /// <summary>ISO A1 — 594 × 841 mm (1683.780 × 2383.937 pt).</summary>
-    public static PageSize A1 => new(1683.780, 2383.937);
+    /// <summary>ISO A0 — 841 × 1189 mm, as the whole-point 2384 × 3370.</summary>
+    public static PageSize A0 => new(2384, 3370);
 
-    /// <summary>ISO A2 — 420 × 594 mm (1190.551 × 1683.780 pt).</summary>
-    public static PageSize A2 => new(1190.551, 1683.780);
+    /// <summary>ISO A1 — 594 × 841 mm, as the whole-point 1684 × 2384.</summary>
+    public static PageSize A1 => new(1684, 2384);
 
-    /// <summary>ISO A3 — 297 × 420 mm (841.890 × 1190.551 pt).</summary>
-    public static PageSize A3 => new(841.890, 1190.551);
+    /// <summary>ISO A2 — 420 × 594 mm, as the whole-point 1190 × 1684.</summary>
+    public static PageSize A2 => new(1190, 1684);
 
-    /// <summary>ISO A4. Exposed as the rounded 595 × 842 pt
-    /// (not the exact 595.276 × 841.890) — the values callers resize/compare
-    /// against via PageSize.A4.</summary>
+    /// <summary>ISO A3 — 297 × 420 mm, as the whole-point 842 × 1190.</summary>
+    public static PageSize A3 => new(842, 1190);
+
+    /// <summary>ISO A4 — 210 × 297 mm, as the whole-point 595 × 842.</summary>
     public static PageSize A4 => new(595, 842);
 
-    /// <summary>ISO A5 — 148 × 210 mm (419.528 × 595.276 pt).</summary>
-    public static PageSize A5 => new(419.528, 595.276);
+    /// <summary>ISO A5 — 148 × 210 mm, as the whole-point 421 × 595.</summary>
+    public static PageSize A5 => new(421, 595);
 
-    /// <summary>ISO A6 — 105 × 148 mm (297.638 × 419.528 pt).</summary>
-    public static PageSize A6 => new(297.638, 419.528);
+    /// <summary>ISO A6 — 105 × 148 mm, as the whole-point 297 × 421.</summary>
+    public static PageSize A6 => new(297, 421);
 
-    /// <summary>ISO B5 — 176 × 250 mm (498.898 × 708.661 pt).</summary>
-    public static PageSize B5 => new(498.898, 708.661);
+    /// <summary>ISO B5 — 176 × 250 mm, as the whole-point 501 × 709.</summary>
+    public static PageSize B5 => new(501, 709);
 
     /// <summary>US Letter — 8.5 × 11 in (612 × 792 pt).</summary>
     public static PageSize Letter => new(612, 792);

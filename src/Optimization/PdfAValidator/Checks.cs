@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Optimization;
 
@@ -11,8 +11,7 @@ internal static partial class PdfAValidator
     /// ("Path object not tagged", "Text object not tagged"), matching the
     /// reference validator's vocabulary.</summary>
     private static void CheckUaUntaggedContent(
-        Page page, List<string> issues, List<PdfAViolation> violations,
-        HashSet<string> reportedClasses)
+        Page page, UaReport report, HashSet<string> reportedClasses)
     {
         System.Collections.Generic.IEnumerable<Operator> ops;
         try { ops = page.Contents; } catch { return; }
@@ -24,15 +23,8 @@ internal static partial class PdfAValidator
         void Report(string objectClass)
         {
             if (!reportedClasses.Add(objectClass)) return;
-            var description = $"{objectClass} object not tagged";
-            issues.Add(description);
-            violations.Add(new PdfAViolation
-            {
-                Rule = "UaUntaggedContent",
-                Clause = UaUntaggedClause,
-                Description = description,
-                PageNumber = page.Number,
-            });
+            report.Add(UaProblems.ObjectNotTagged, "UaUntaggedContent",
+                $"{objectClass} object not tagged", page.Number);
         }
 
         foreach (var op in ops)
@@ -70,7 +62,10 @@ internal static partial class PdfAValidator
 
             switch (op)
             {
-                case Aspose.Pdf.Operators.TextShowOperator:
+                // A show operator with no glyphs paints nothing, so there is nothing
+                // for a reader to reach and nothing to tag - an empty () Tj outside
+                // every marked-content sequence is not untagged content.
+                case Aspose.Pdf.Operators.TextShowOperator { Text.Length: > 0 }:
                     Report("Text");
                     break;
                 case Aspose.Pdf.Operators.Stroke or Aspose.Pdf.Operators.ClosePathStroke
@@ -130,106 +125,40 @@ internal static partial class PdfAValidator
         }
     }
 
-    private static void CheckTransparency(Document document, Page page, bool isPdfA1,
-        List<string> issues, List<PdfAViolation> violations)
+    private static void CheckTransparency(Document document, Page page, bool isPdfA1, List<string> issues, List<PdfAViolation> violations)
     {
+        var tc = new TransparencyCheckState();
+        tc.document = document;
+        tc.page = page;
+        tc.isPdfA1 = isPdfA1;
+        tc.issues = issues;
+        tc.violations = violations;
         // Check page-level transparency group
-        if (isPdfA1)
+        if (tc.isPdfA1)
         {
-            var group = document.Reader.ResolveDict(page.Dict.Get("Group"));
+            var group = tc.document.Reader.ResolveDict(tc.page.Dict.Get("Group"));
             if (group is not null && group.GetName("S") == "Transparency")
             {
-                var msg = $"Page {page.Number} uses transparency group (not allowed in PDF/A-1).";
-                issues.Add(msg);
-                violations.Add(new PdfAViolation
+                var msg = $"Page {tc.page.Number} uses transparency group (not allowed in PDF/A-1).";
+                tc.issues.Add(msg);
+                tc.violations.Add(new PdfAViolation
                 {
                     Rule = "Transparency",
-                    Description = $"Page {page.Number} uses transparency (not allowed in PDF/A-1)",
-                    PageNumber = page.Number,
+                    Description = $"Page {tc.page.Number} uses transparency (not allowed in PDF/A-1)",
+                    PageNumber = tc.page.Number,
                 });
             }
         }
 
-        // Check ExtGState for transparency-related entries
-        var resources = document.Reader.ResolveDict(page.Dict.Get("Resources"));
-        if (resources is null) return;
+        tc.resources = tc.document.Reader.ResolveDict(tc.page.Dict.Get("Resources"));
+        if (tc.resources is null) return;
 
-        var extGStateDict = document.Reader.ResolveDict(resources.Get("ExtGState"));
-        if (extGStateDict is null) return;
+        tc.extGStateDict = tc.document.Reader.ResolveDict(tc.resources.Get("ExtGState"));
+        if (tc.extGStateDict is null) return;
 
-        foreach (var gsName in extGStateDict.Keys)
+        foreach (var gsName in tc.extGStateDict.Keys)
         {
-            var gs = document.Reader.ResolveDict(extGStateDict.Get(gsName));
-            if (gs is null) continue;
-
-            var hasTransparency = false;
-            string? detail = null;
-
-            // Check /SMask
-            var smask = gs.Get("SMask");
-            if (smask is not null && smask is not PdfName { Value: "None" })
-            {
-                hasTransparency = true;
-                detail = "has soft mask (SMask)";
-            }
-
-            // Check /ca (non-stroking alpha) < 1
-            if (!hasTransparency)
-            {
-                var caObj = gs.Get("ca");
-                if (caObj is PdfReal caReal && caReal.Value < 1.0)
-                {
-                    hasTransparency = true;
-                    detail = $"has non-stroking alpha ca={caReal.Value}";
-                }
-                else if (caObj is PdfInteger caInt && caInt.Value < 1)
-                {
-                    hasTransparency = true;
-                    detail = $"has non-stroking alpha ca={caInt.Value}";
-                }
-            }
-
-            // Check /CA (stroking alpha) < 1
-            if (!hasTransparency)
-            {
-                var bigCaObj = gs.Get("CA");
-                if (bigCaObj is PdfReal bigCaReal && bigCaReal.Value < 1.0)
-                {
-                    hasTransparency = true;
-                    detail = $"has stroking alpha CA={bigCaReal.Value}";
-                }
-                else if (bigCaObj is PdfInteger bigCaInt && bigCaInt.Value < 1)
-                {
-                    hasTransparency = true;
-                    detail = $"has stroking alpha CA={bigCaInt.Value}";
-                }
-            }
-
-            // Check /BM (blend mode) not Normal
-            if (!hasTransparency)
-            {
-                var bm = gs.GetName("BM");
-                if (bm is not null && bm != "Normal" && bm != "Compatible")
-                {
-                    hasTransparency = true;
-                    detail = $"has blend mode BM={bm}";
-                }
-            }
-
-            if (hasTransparency && isPdfA1)
-            {
-                var msg = $"Page {page.Number} uses transparency (not allowed in PDF/A-1)";
-                if (!issues.Contains(msg))
-                {
-                    issues.Add(msg);
-                    violations.Add(new PdfAViolation
-                    {
-                        Rule = "Transparency",
-                        Description = $"Page {page.Number} ExtGState '{gsName}' {detail}",
-                        PageNumber = page.Number,
-                    });
-                }
-            }
+            CheckExtGStateTransparency(tc, gsName);
         }
     }
 
@@ -341,71 +270,6 @@ internal static partial class PdfAValidator
                 Description = msg,
                 PageNumber = pageNumber,
             });
-        }
-    }
-
-    /// <summary>PDF/UA-1 §7.21.4.2: a symbolic TrueType font program (one whose
-    /// cmap carries a Windows-Symbol (3,0) subtable) must contain EXACTLY one
-    /// cmap encoding. Checks the embedded programs of fonts used on the page
-    /// (Type0 descendants included).</summary>
-    private static void CheckUaSymbolicCmap(Document document, Page page,
-        List<string> issues, List<PdfAViolation> violations)
-    {
-        var reader = document.Reader;
-        var resources = reader.ResolveDict(page.Dict.Get("Resources"));
-        var fontRes = resources is null ? null : reader.ResolveDict(resources.Get("Font"));
-        if (fontRes is null) return;
-
-        foreach (var fontKey in fontRes.Keys)
-        {
-            var font = reader.ResolveDict(fontRes.Get(fontKey));
-            if (font is null) continue;
-            var baseFont = font.GetName("BaseFont") ?? "Unknown";
-            var target = font;
-            if (font.GetName("Subtype") == "Type0"
-                && reader.Resolve(font.Get("DescendantFonts")) is PdfArray { Count: > 0 } desc)
-                target = reader.ResolveDict(desc[0]) ?? font;
-            var descriptor = reader.ResolveDict(target.Get("FontDescriptor"));
-            var ff = descriptor is null ? null : reader.ResolveStream(descriptor.Get("FontFile2"));
-            if (ff is null) continue;
-
-            byte[] prog;
-            try { prog = reader.DecodeStream(ff); } catch { continue; }
-            if (prog.Length < 12) continue;
-
-            // Locate the cmap table in the sfnt directory and count its subtables.
-            int numTables = (prog[4] << 8) | prog[5];
-            for (var i = 0; i < numTables; i++)
-            {
-                var off = 12 + i * 16;
-                if (off + 16 > prog.Length) break;
-                if (prog[off] != 'c' || prog[off + 1] != 'm' || prog[off + 2] != 'a' || prog[off + 3] != 'p')
-                    continue;
-                var toff = (prog[off + 8] << 24) | (prog[off + 9] << 16) | (prog[off + 10] << 8) | prog[off + 11];
-                if (toff + 4 > prog.Length) break;
-                int subtables = (prog[toff + 2] << 8) | prog[toff + 3];
-                var hasSymbol = false;
-                for (var j = 0; j < subtables; j++)
-                {
-                    var e = toff + 4 + j * 8;
-                    if (e + 8 > prog.Length) break;
-                    int pid = (prog[e] << 8) | prog[e + 1];
-                    int eid = (prog[e + 2] << 8) | prog[e + 3];
-                    if (pid == 3 && eid == 0) hasSymbol = true;
-                }
-                if (hasSymbol && subtables != 1)
-                {
-                    var msg = $"Symbolic TrueType font '{baseFont}' program cmap must contain exactly one encoding (PDF/UA-1 7.21.4.2), found {subtables}";
-                    issues.Add(msg);
-                    violations.Add(new PdfAViolation
-                    {
-                        Rule = "FontCmap",
-                        Description = msg,
-                        PageNumber = page.Number,
-                    });
-                }
-                break;
-            }
         }
     }
 

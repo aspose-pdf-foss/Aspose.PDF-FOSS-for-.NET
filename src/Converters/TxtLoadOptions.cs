@@ -10,6 +10,9 @@ namespace Aspose.Pdf
     /// </summary>
     public sealed class TxtLoadOptions : LoadOptions
     {
+        /// <summary>Creates plain-text load options with an 11-point font size.</summary>
+        public TxtLoadOptions() { }
+
         /// <summary>Font size (points) used for the rendered text. Default 11.</summary>
         public double FontSize { get; set; } = 11;
     }

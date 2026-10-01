@@ -91,6 +91,24 @@ foreach (var fig in figures)
 }
 ```
 
+`GetMarkedContent(includeDescendants: true)` reads back the page content an
+element marks, in reading order, as `MarkedContentItem`s: each has a `Kind`
+(`MarkedContentKind.Text`, `Image` or `Drawing`), the `Element` and `Page` it
+belongs to, its `Mcid`, and its `Rectangle` and `Rotation` on the page. A text
+item is a run in one style — `Text` (with the spaces between words and lines
+restored), `Font`, `FontName`, `FontSize`, `IsBold`, `IsItalic`,
+`ForegroundColor`; an image item carries its `Image`, and `SaveImage(stream)`
+writes it as it appears on the page — turned and mirrored as the page draws it,
+a JPEG as JPEG and any other image as PNG. `Page.GetArtifactContent()`
+returns the page's artifact content the same way, with `ArtifactType` and
+`ArtifactSubtype` set.
+
+```csharp
+foreach (var item in paragraphs[0].GetMarkedContent())
+    Console.WriteLine($"{item.Kind} p.{item.Page?.Number}: '{item.Text}' " +
+                      $"{item.FontName} {item.FontSize}pt");
+```
+
 ## Creating tagged content
 
 `Document.TaggedContent` returns an `ITaggedContent` that ensures the document
@@ -191,7 +209,13 @@ element maps to (`StructureTypeStandard.P`, `.H1`, `.Table`, `.Ruby`, ...),
 with a `Tag` string and a `Category` (`StructureTypeCategory.GroupingElements`,
 `.BLSEs`, `.ILSEs`, `.IllustrationElements`). A custom role applied with
 `SetTag` still reports the standard type it is role-mapped to; `S` returns the
-raw `/S` tag.
+raw `/S` tag (a `StructureType` whose `Name` is the tag).
+
+For a tagged table of contents, `TOCElement.LinkTocPageTitleToHeaderElement(tocPage,
+header)` binds a header element to the title of a TOC page (its `TocInfo.Title`).
+It throws `TOCpageHasNoTitleException` when that page has no title, and saving
+throws `HeaderElementTextConflictException` when the linked header carries text
+of its own that differs from the title; a header without text takes the title.
 
 Ruby and Warichu containers are created with `CreateRubyElement()` and
 `CreateWarichuElement()`. Their content children — `RubyRBElement`,

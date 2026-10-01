@@ -123,7 +123,7 @@ internal static class XfdfAppearanceCodec
     }
 
     private static string ToHex(byte[] data)
-        => Convert.ToHexString(data);
+        => Compat.ToHexString(data);
 
     private static bool IsTextSafe(byte[] data)
     {
@@ -237,6 +237,6 @@ internal static class XfdfAppearanceCodec
         var compact = new StringBuilder(text.Length);
         foreach (var c in text)
             if (!char.IsWhiteSpace(c)) compact.Append(c);
-        return Convert.FromHexString(compact.ToString());
+        return Compat.FromHexString(compact.ToString());
     }
 }

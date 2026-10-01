@@ -8,6 +8,9 @@ namespace Aspose.Pdf.Tagged;
 /// </summary>
 public sealed class PositionSettings
 {
+    /// <summary>Creates position settings with no alignment and no margin.</summary>
+    public PositionSettings() { }
+
     /// <summary>Horizontal alignment of the element within its column.</summary>
     public HorizontalAlignment HorizontalAlignment { get; set; } = HorizontalAlignment.None;
 

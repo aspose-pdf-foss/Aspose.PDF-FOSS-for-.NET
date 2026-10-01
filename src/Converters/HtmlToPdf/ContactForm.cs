@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -76,163 +76,71 @@ internal static partial class HtmlToPdfConverter
         public bool HasControl = true;
     }
 
-    private static Document? TryRenderContactForm(string html, HtmlLoadOptions? options,
-        double pageWidth, double pageHeight, double marginLeft, double marginRight, double marginTop)
+    private static Document? TryRenderContactForm(string html, HtmlLoadOptions? options, double pageWidth, double pageHeight, double marginLeft, double marginRight, double marginTop)
     {
-        if (!html.Contains("contact-form-row", System.StringComparison.Ordinal)
-            || !html.Contains("contact-form-field", System.StringComparison.Ordinal)) return null;
+        var cf = new ContactFormRenderState();
+        cf.html = html;
+        cf.options = options;
+        cf.pageWidth = pageWidth;
+        cf.pageHeight = pageHeight;
+        cf.marginLeft = marginLeft;
+        cf.marginRight = marginRight;
+        cf.marginTop = marginTop;
+        if (!cf.html.Contains("contact-form-row", System.StringComparison.Ordinal)
+            || !cf.html.Contains("contact-form-field", System.StringComparison.Ordinal)) return null;
 
-        var css = ParseStyleSheet(html);
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        double Em(double em) => em * CfEmPx * 0.75;
-
-        // Per-field-class widths/heights, straight from the sheet.
-        var clsW = new Dictionary<string, (double W, double H)>(System.StringComparer.Ordinal);
-        foreach (Match m in Regex.Matches(html, @"\.(?<c>contact-form-field-[\w-]+)\s*\{(?<b>[^}]*)\}"))
+        cf.css = ParseStyleSheet(cf.html);
+        cf.inv = System.Globalization.CultureInfo.InvariantCulture;
+        cf.clsW = new Dictionary<string, (double W, double H)>(System.StringComparer.Ordinal);
+        foreach (Match m in Regex.Matches(cf.html, @"\.(?<c>contact-form-field-[\w-]+)\s*\{(?<b>[^}]*)\}"))
         {
             var body = m.Groups["b"].Value;
             var wm = Regex.Match(body, @"(?<![-\w])width\s*:\s*([\d.]+)em");
             var hm = Regex.Match(body, @"(?<![-\w])height\s*:\s*([\d.]+)em");
             if (!wm.Success) continue;
-            clsW[m.Groups["c"].Value] = (
-                double.Parse(wm.Groups[1].Value, inv),
-                hm.Success ? double.Parse(hm.Groups[1].Value, inv) : CfFieldHeightEm);
+            cf.clsW[m.Groups["c"].Value] = (
+                double.Parse(wm.Groups[1].Value, cf.inv),
+                hm.Success ? double.Parse(hm.Groups[1].Value, cf.inv) : CfFieldHeightEm);
         }
-        if (clsW.Count == 0) return null;
+        if (cf.clsW.Count == 0) return null;
 
-        var bodyM = Regex.Match(html, @"<body[^>]*>(?<b>[\s\S]*)</body\s*>", RegexOptions.IgnoreCase);
-        if (!bodyM.Success) return null;
-        var body2 = bodyM.Groups["b"].Value;
+        cf.bodyM = Regex.Match(cf.html, @"<body[^>]*>(?<b>[\s\S]*)</body\s*>", RegexOptions.IgnoreCase);
+        if (!cf.bodyM.Success) return null;
+        cf.body2 = cf.bodyM.Groups["b"].Value;
 
-        // Blocks in document order: section headings and rows of fields.
-        var blocks = new List<(string Kind, string Text, List<CfField> Fields)>();
-        var tokRx = new Regex(
+        cf.blocks = new List<(string Kind, string Text, List<CfField> Fields)>();
+        cf.tokRx = new Regex(
             @"<h2\b[^>]*>(?<h2>[\s\S]*?)</h2\s*>|<div\b[^>]*class=""[^""]*\bcontact-form-row\b[^""]*""[^>]*>",
             RegexOptions.IgnoreCase);
-        var divRx = new Regex(@"<(?<c>/?)div\b[^>]*>", RegexOptions.IgnoreCase);
-        var scanPos = 0;
-        while (scanPos < body2.Length)
+        cf.divRx = new Regex(@"<(?<c>/?)div\b[^>]*>", RegexOptions.IgnoreCase);
+        cf.scanPos = 0;
+        while (cf.scanPos < cf.body2.Length)
         {
-            var m = tokRx.Match(body2, scanPos);
-            if (!m.Success) break;
-            if (m.Groups["h2"].Success)
-            {
-                var t = Regex.Replace(m.Groups["h2"].Value, "<[^>]+>", "");
-                blocks.Add(("h2", Regex.Replace(DecodeEntities(t), @"\s+", " ").Trim(), new List<CfField>()));
-                scanPos = m.Index + m.Length;
-                continue;
-            }
-            // The row runs to its matching </div>.
-            var depth = 1;
-            var end = -1;
-            for (var s = divRx.Match(body2, m.Index + m.Length); s.Success;
-                 s = divRx.Match(body2, s.Index + s.Length))
-            {
-                depth += s.Groups["c"].Length > 0 ? -1 : 1;
-                if (depth == 0) { end = s.Index; break; }
-            }
-            if (end < 0) break;
-            var rowHtml = body2[(m.Index + m.Length)..end];
-            var rowH2 = Regex.Match(rowHtml, @"<h2\b[^>]*>(?<t>[\s\S]*?)</h2\s*>", RegexOptions.IgnoreCase);
-            if (rowH2.Success)
-            {
-                var rt = Regex.Replace(rowH2.Groups["t"].Value, "<[^>]+>", "");
-                blocks.Add(("h2row", Regex.Replace(DecodeEntities(rt), @"\s+", " ").Trim(), new List<CfField>()));
-            }
-            var fields = ParseContactFields(rowHtml, clsW);
-            if (fields.Count > 0) blocks.Add(("row", "", fields));
-            scanPos = end;
+            if (!ScanContactFormToken(cf)) break;
         }
-        if (blocks.Count == 0) return null;
+        if (cf.blocks.Count == 0) return null;
 
-        // Column: min(1025px, content) centred in the page's content box.
-        var contentPt = pageWidth - marginLeft - marginRight;
-        var colPt = System.Math.Min(Em(CfMaxWidthPx / CfEmPx), contentPt);
-        var colX = marginLeft + (contentPt - colPt) / 2;
+        cf.contentPt = cf.pageWidth - cf.marginLeft - cf.marginRight;
+        cf.colPt = System.Math.Min(CfEm(CfMaxWidthPx / CfEmPx), cf.contentPt);
+        cf.colX = cf.marginLeft + (cf.contentPt - cf.colPt) / 2;
 
-        var doc = new Document();
-        var page = doc.Pages.Add(pageWidth, pageHeight);
-        EnsureFonts(page);
-        var resByFace = new Dictionary<string, string>(System.StringComparer.Ordinal);
-        var sb = new StringBuilder();
+        cf.doc = new Document();
+        cf.page = cf.doc.Pages.Add(cf.pageWidth, cf.pageHeight);
+        EnsureFonts(cf.page);
+        cf.resByFace = new Dictionary<string, string>(System.StringComparer.Ordinal);
+        cf.sb = new StringBuilder();
 
-        // The first heading's glyph top: the page margin plus the h2's own
-        // margin-top (20 px) and its ascent within the 1.1 line box.
-        var y = marginTop + CfFirstHeadingTopPt;
-        var pendingHeading = true;
+        cf.y = cf.marginTop + CfFirstHeadingTopPt;
+        cf.pendingHeading = true;
 
-        foreach (var (kind, text, fields) in blocks)
+        foreach (var (kind, text, fields) in cf.blocks)
         {
-            if (kind is "h2" or "h2row")
-            {
-                if (kind == "h2row") y += CfInRowHeadingLeadPt;
-                EmitGridsterText(page, resByFace, CfSectionPt, colX,
-                    pageHeight - (y + CfSectionPt + CfSectionSeatPt), text, "Arial");
-                y += CfHeadingToFirstTitlePt;
-                pendingHeading = true;
-                continue;
-            }
-
-            var x = colX;
-            double rowH = 0;
-            foreach (var f in fields)
-            {
-                var fw = Em(f.WidthEm) + Em(CfBorderPx / CfEmPx);
-                var fh = f.IsRadioGroup ? CfRadioRowHeightPt : Em(f.HeightEm);
-                rowH = System.Math.Max(rowH, fh);
-                var boxTop = y + CfTitleAboveBoxPt;
-
-                if (f.Title.Length > 0)
-                    EmitGridsterText(page, resByFace, CfTitlePt, x,
-                        pageHeight - (y + CfTitlePt), f.Title, "Arial,Bold");
-
-                if (f.IsRadioGroup)
-                {
-                    // Option circles on the value line, each followed by its label
-                    // (probed: circles at +5.76 on a 43.02 pt pitch, 18.98 under the
-                    // title's glyph top; labels 14.5 to the right of each circle).
-                    var rx = x + CfRadioFirstPt;
-                    foreach (var (lab, on) in f.Radios)
-                    {
-                        var cy = pageHeight - (y + CfRadioTopPt + CfRadioRPt);
-                        var r = CfRadioRPt;
-                        sb.Append(string.Create(inv,
-                            $"q 0 0 0 RG 1 w {rx + r:F2} {cy:F2} m " +
-                            $"{rx + r:F2} {cy + r:F2} {rx - r:F2} {cy + r:F2} {rx - r:F2} {cy:F2} c " +
-                            $"{rx - r:F2} {cy - r:F2} {rx + r:F2} {cy - r:F2} {rx + r:F2} {cy:F2} c S Q\n"));
-                        if (on)
-                            sb.Append(string.Create(inv,
-                                $"q 0 0 0 rg {rx - r / 2:F2} {cy - r / 2:F2} {r:F2} {r:F2} re f Q\n"));
-                        EmitGridsterText(page, resByFace, CfValuePt, rx + CfRadioLabelPt,
-                            cy - CfValuePt * 0.30, lab, "Arial,Bold");
-                        rx += CfRadioPitchPt;
-                    }
-                }
-                else if (f.HasControl)
-                {
-                    // The 2 px-bordered control box, stroked on its inset centre line.
-                    sb.Append(string.Create(inv,
-                        $"q 0 0 0 RG 1 w {x + 0.5:F2} {pageHeight - boxTop - 0.5:F2} " +
-                        $"{fw - Em(CfBorderPx / CfEmPx) - 1:F2} {-(fh):F2} re S Q\n"));
-                    if (f.Value.Length > 0)
-                        EmitGridsterText(page, resByFace, CfValuePt, x + CfValueInsetPt,
-                            pageHeight - (boxTop + CfValueBelowBoxPt), f.Value, "Times New Roman");
-                }
-                else if (f.Value.Length > 0)
-                {
-                    EmitGridsterText(page, resByFace, CfValuePt, x,
-                        pageHeight - (boxTop + CfValueBelowBoxPt), f.Value, "Arial,Bold");
-                }
-
-                x += fw + Em(CfFieldGapEm);
-            }
-            _ = pendingHeading;
-            y += rowH + Em(CfRowGapEm);
+            if (!RenderContactFormBlock(cf, kind, text, fields)) break;
         }
 
-        page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
-        PruneUnusedFonts(doc);
-        return doc;
+        cf.page.AddContentStream(Encoding.ASCII.GetBytes(cf.sb.ToString()));
+        PruneUnusedFonts(cf.doc);
+        return cf.doc;
     }
 
     private static List<CfField> ParseContactFields(string rowHtml,

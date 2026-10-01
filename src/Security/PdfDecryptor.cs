@@ -100,6 +100,9 @@ internal sealed class PdfDecryptor
     /// empty/user password.</summary>
     public bool IsOwnerAuthentication => _isOwnerAuthentication;
 
+    /// <summary>The file encryption key the password opened (before any per-object mixing).</summary>
+    internal byte[] FileKey => _encryptionKey;
+
     /// <summary>True when the supplied password matched BOTH the user /U
     /// and owner /O entries — i.e. the file was encrypted with the same
     /// password for user and owner, so there is no effective owner password
@@ -146,9 +149,9 @@ internal sealed class PdfDecryptor
             strF = ResolveFilterName(strFName, cfDict);
         }
 
-        if (v == 5)
+        if (v == 5 || v == 6)
         {
-            // AES-256 (R5 or R6)
+            // AES-256 (R5 or R6; V6/R7 with the GCM filter)
             return TryCreateV5(encryptDict, r, keyLength, oBytes, uBytes, password, encryptMetadata, stmF, strF);
         }
 
@@ -245,6 +248,7 @@ internal sealed class PdfDecryptor
         {
             "V2" or "RC4" => Rc4Cipher.Decrypt(key, data), // RC4 is symmetric
             "AESV2" or "AESV3" => EncryptAesCbc(key, data),
+            "AESV4" => AesGcmCipher.EncryptObject(key, data),
             _ => data,
         };
     }
@@ -254,7 +258,7 @@ internal sealed class PdfDecryptor
         // Object encryption stores IV(16) + AES-CBC(PKCS#7) ciphertext
         // (PDF 32000 §7.6.2); AesCipher.EncryptCbc returns the ciphertext
         // alone, so the IV is prepended here.
-        var iv = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        var iv = Compat.RandomBytes(16);
         var cipher = new AesCipher(key).EncryptCbc(data, iv, pkcs7Padding: true);
         var outBytes = new byte[16 + cipher.Length];
         System.Array.Copy(iv, 0, outBytes, 0, 16);
@@ -297,6 +301,7 @@ internal sealed class PdfDecryptor
         {
             "V2" or "RC4" => Rc4Cipher.Decrypt(key, data),
             "AESV2" or "AESV3" => DecryptAesCbc(key, data),
+            "AESV4" => AesGcmCipher.DecryptObject(key, data),
             _ => data // Unknown filter — return as-is
         };
     }
@@ -337,7 +342,7 @@ internal sealed class PdfDecryptor
     private static byte[] PadPassword(string password)
     {
         var result = new byte[32];
-        var pwBytes = System.Text.Encoding.Latin1.GetBytes(password);
+        var pwBytes = Compat.Latin1.GetBytes(password);
         var len = Math.Min(pwBytes.Length, 32);
         pwBytes.AsSpan(0, len).CopyTo(result);
         PasswordPadding.AsSpan(0, 32 - len).CopyTo(result.AsSpan(len));

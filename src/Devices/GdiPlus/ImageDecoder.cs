@@ -1,4 +1,4 @@
-using System.Drawing;
+﻿using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.Versioning;
@@ -23,15 +23,16 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     /// channel; soft masks (/SMask) are sampled into alpha. GDI+ then resamples with
     /// high-quality bicubic interpolation when the bitmap is placed.
     /// </summary>
-    private static class ImageDecoder
+    private static partial class ImageDecoder
     {
-        public static Bitmap? TryDecode(PdfStream xobj, GraphicsState state, PdfReader reader, bool pdfxOverprintSim = false)
+        public static Bitmap? TryDecode(PdfStream xobj, GraphicsState state, PdfReader reader, bool pdfxOverprintSim = false,
+            bool replicateChroma = false)
         {
             var dict = xobj.Dict;
             byte[] decoded;
             try { decoded = reader.DecodeStream(xobj); }
             catch { return null; }
-            return Build(dict, decoded, state, reader, pdfxOverprintSim);
+            return Build(dict, decoded, state, reader, pdfxOverprintSim, replicateChroma);
         }
 
         public static Bitmap? TryDecodeInline(PdfDictionary dict, byte[] data, GraphicsState state, PdfReader reader, bool pdfxOverprintSim = false)
@@ -42,7 +43,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             return Build(dict, decoded, state, reader, pdfxOverprintSim);
         }
 
-        private static Bitmap? Build(PdfDictionary dict, byte[] decoded, GraphicsState state, PdfReader reader, bool pdfxOverprintSim = false)
+        private static Bitmap? Build(PdfDictionary dict, byte[] decoded, GraphicsState state, PdfReader reader, bool pdfxOverprintSim = false, bool replicateChroma = false)
         {
             var w = (int)dict.GetInt("Width");
             var h = (int)dict.GetInt("Height");
@@ -65,32 +66,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             var opSim = pdfxOverprintSim && state.OverprintFill;
 
             // JPEG carried verbatim through DCTDecode.
-            if (decoded.Length > 2 && decoded[0] == 0xFF && decoded[1] == 0xD8)
-            {
-                // ⚠ Routing this through the PLATFORM codec was tried, to see whether
-                // handing JPEGs to GDI+/WIC would match the expected render: it moves the
-                // output by at most 2 levels and does not close the gap, so the expected
-                // render is not produced that way either. The mechanism was removed rather
-                // than left dormant.
-                try
-                {
-                    var (pixels, jw, jh, comps) = Aspose.Pdf.IO.Filters.JpegDecoder.Decode(decoded,
-                        SoftwarePageRenderer.CmykDecodeInverts(dict));
-                    byte[]? bgraJ;
-                    if (comps == 1 && csInfo.TintTransform is not null && csInfo.TintComponents <= 1)
-                        bgraJ = SeparationToBgra(pixels, jw, jh,
-                            (opSim ? SoftwarePageRenderer.BuildSeparationOverprintLut(csInfo, DecodeInverts(dict)) : SoftwarePageRenderer.BuildSeparationLut(csInfo, DecodeInverts(dict))));
-                    else if (comps > 1 && csInfo.TintTransform is not null && csInfo.TintComponents == comps)
-                        // Multi-colorant /DeviceN JPEG: raw ink tuples through the tint transform.
-                        bgraJ = DeviceNToBgra(pixels, jw, jh, csInfo);
-                    else
-                        bgraJ = comps == 1 ? GrayToBgra(pixels, jw, jh) : RgbToBgra(pixels, jw, jh);
-                    if (bgraJ is null) return null;
-                    var (mb, mw, mh) = ApplyMasks(dict, reader, bgraJ, jw, jh);
-                    return FromBgra(mb, mw, mh);
-                }
-                catch { return null; }
-            }
+            if (TryDecodeJpegImage(dict, reader, decoded, csInfo, opSim, replicateChroma) is { } jpegBmp) return jpegBmp;
 
             // JPEG 2000 (JPXDecode): raw codestream (FF4F) or JP2 box wrapper.
             bool isJ2k = (decoded.Length > 3 && decoded[0] == 0xFF && decoded[1] == 0x4F)
@@ -98,7 +74,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                     && decoded[4] == 0x6A && decoded[5] == 0x50);
             if (isJ2k)
             {
-                if (Aspose.Pdf.IO.Filters.JpxDecoder.TryDecode(decoded, out var jp, out var jw, out var jh, out var jc))
+                if (Aspose.Pdf.IO.Filters.JpxDecoder.TryDecode(decoded) is (var jp, var jw, var jh, var jc))
                 {
                     // A single-component JPX codestream under an /Indexed colour space
                     // carries palette indices, not gray levels — look each sample up in
@@ -248,7 +224,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                     byte r = 255, g = 255, b = 255;
                     var alt = cs.TintTransform.Evaluate(input);
                     if (alt is not null)
-                        SoftwarePageRenderer.ComponentsToRgb(alt, cs.AltSpaceName ?? "DeviceCMYK", out r, out g, out b);
+                        (r, g, b) = SoftwarePageRenderer.ComponentsToRgb(alt, cs.AltSpaceName ?? "DeviceCMYK");
                     col = (r, g, b);
                     memo[key] = col;
                 }
@@ -333,7 +309,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                 {
                     int idx = ReadBits(data, rowBase, x * bpc, bpc);
                     if (idx > maxIndex) idx = maxIndex;
-                    PaletteRgb(palette, pc, csInfo.BaseName, idx, out byte r, out byte g, out byte b);
+                    (byte r, byte g, byte b) = PaletteRgb(palette, pc, csInfo.BaseName, idx);
                     var o = (y * w + x) * 4;
                     bgra[o + 0] = b; bgra[o + 1] = g; bgra[o + 2] = r; bgra[o + 3] = 255;
                 }
@@ -354,10 +330,13 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             return value;
         }
 
-        private static void PaletteRgb(byte[] palette, int pc, string baseName, int idx, out byte r, out byte g, out byte b)
+        private static (byte r, byte g, byte b) PaletteRgb(byte[] palette, int pc, string baseName, int idx)
         {
+            byte r = default;
+            byte g = default;
+            byte b = default;
             var p = idx * pc;
-            if (p < 0 || p + pc > palette.Length) { r = g = b = 0; return; }
+            if (p < 0 || p + pc > palette.Length) { r = g = b = 0; return (r, g, b); }
             switch (baseName)
             {
                 case "DeviceGray":
@@ -370,6 +349,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                     r = palette[p]; g = palette[p + 1]; b = palette[p + 2];
                     break;
             }
+            return (r, g, b);
         }
 
         // Apply the /SMask soft mask and explicit /Mask stencil to a base-image BGRA buffer,
@@ -380,8 +360,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         // sampling. Behaviour for soft-mask-only / equal-or-lower-res masks is unchanged.
         private static (byte[] bgra, int w, int h) ApplyMasks(PdfDictionary dict, PdfReader reader, byte[] bgra, int w, int h)
         {
-            var alpha = SoftwarePageRenderer.ResolveSMaskAlpha(dict.Get("SMask"), reader, out var sw, out var sh);
-            var stencil = SoftwarePageRenderer.ResolveStencilMaskAlpha(dict.Get("Mask"), reader, out var stw, out var sth);
+            (var alpha, var sw, var sh) = SoftwarePageRenderer.ResolveSMaskAlpha(dict.Get("SMask"), reader);
+            (var stencil, var stw, var sth) = SoftwarePageRenderer.ResolveStencilMaskAlpha(dict.Get("Mask"), reader);
             bool haveSMask = alpha is not null && sw > 0 && sh > 0;
             bool haveStencil = stencil is not null && stw > 0 && sth > 0;
 
@@ -438,51 +418,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             bool upscale = outW != w || outH != h;
             var outBgra = upscale ? new byte[outW * outH * 4] : bgra;
 
-            for (int y = 0; y < outH; y++)
-            {
-                for (int x = 0; x < outW; x++)
-                {
-                    var o = (y * outW + x) * 4;
-                    if (upscale)
-                    {
-                        var bo = ((y * h / outH) * w + (x * w / outW)) * 4;
-                        outBgra[o + 0] = bgra[bo + 0];
-                        outBgra[o + 1] = bgra[bo + 1];
-                        outBgra[o + 2] = bgra[bo + 2];
-                    }
-                    int a = 255;
-                    if (haveSMask)
-                    {
-                        var sy = sh == outH ? y : (int)((long)y * sh / outH);
-                        var sx = sw == outW ? x : (int)((long)x * sw / outW);
-                        var ai = sy * sw + sx;
-                        a = ai < alpha!.Length ? alpha[ai] : 255;
-                    }
-                    if (haveStencil)
-                    {
-                        var ty = sth == outH ? y : (int)((long)y * sth / outH);
-                        var tx = stw == outW ? x : (int)((long)x * stw / outW);
-                        var ti = ty * stw + tx;
-                        if (ti < stencil!.Length) a = a * stencil[ti] / 255;
-                    }
-                    if (haveColorKey && a > 0)
-                    {
-                        // outBgra holds B,G,R at o..o+2 (post-conversion device colour).
-                        int pb = outBgra[o + 0], pg = outBgra[o + 1], pr = outBgra[o + 2];
-                        if (pr >= colorKey![0] && pr <= colorKey[1]
-                            && pg >= colorKey[2] && pg <= colorKey[3]
-                            && pb >= colorKey[4] && pb <= colorKey[5])
-                            a = 0;
-                    }
-                    if (unmatte && a > 0)
-                    {
-                        outBgra[o + 0] = Unmatte(outBgra[o + 0], mB, (byte)a);
-                        outBgra[o + 1] = Unmatte(outBgra[o + 1], mG, (byte)a);
-                        outBgra[o + 2] = Unmatte(outBgra[o + 2], mR, (byte)a);
-                    }
-                    outBgra[o + 3] = (byte)a;
-                }
-            }
+            ApplyMaskRows(bgra, w, h, outBgra, outW, outH, upscale, haveSMask, haveStencil, haveColorKey, unmatte,
+                mB, mG, mR, alpha, sw, sh, stencil, stw, sth, colorKey);
             return (outBgra, outW, outH);
         }
 

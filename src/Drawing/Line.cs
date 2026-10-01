@@ -29,6 +29,7 @@ public sealed class Line : Shape
     public double X2 { get => _coords[2]; set => _coords[2] = value; }
     public double Y2 { get => _coords[3]; set => _coords[3] = value; }
 
+    /// <summary>Creates a straight line from (<c>x1</c>, <c>y1</c>) to (<c>x2</c>, <c>y2</c>), in points relative to the graph.</summary>
     public Line(double x1, double y1, double x2, double y2)
     {
         _coords = new[] { x1, y1, x2, y2 };
@@ -81,6 +82,9 @@ public sealed class Line : Shape
     {
         ApplyOpacity(builder, page);
         builder.SetLineWidth(GraphInfo.LineWidth);
+        // A dashed line dashes (probed: DashArray {2, 2} writes `[2 2] 0 d`).
+        if (GraphInfo.DashPattern is { Length: > 0 })
+            builder.SetDashPattern(GraphInfo.DashPattern, GraphInfo.DashStart);
         if (GraphInfo.StrokeColor is { } sc)
             builder.SetStrokeColor(sc.R, sc.G, sc.B);
         if (GraphInfo.FillColorInternal is { } fc)

@@ -19,8 +19,10 @@ public class TimestampSettings
     public DigestHashAlgorithm DigestHashAlgorithm { get; set; }
         = DigestHashAlgorithm.Sha256;
 
+    /// <summary>Creates empty timestamp settings (no server URL, no credentials, SHA-256 digest).</summary>
     public TimestampSettings() { }
 
+    /// <summary>Creates timestamp settings for the given TSA server URL, Base64 BasicAuth credentials and digest algorithm (SHA-256 by default). A <c>null</c> URL or credential string is stored as empty.</summary>
     public TimestampSettings(string serverUrl,
         string basicAuthCredentials,
         DigestHashAlgorithm digestHashAlgorithm = DigestHashAlgorithm.Sha256)

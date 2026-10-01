@@ -46,7 +46,7 @@ public partial class Field
     {
         if (depth > 8) return null;
         if (_reader.Resolve(dict.Get("DA")) is PdfString ps)
-            return System.Text.Encoding.Latin1.GetString(ps.Value);
+            return Compat.Latin1.GetString(ps.Value);
         if (_reader.ResolveDict(dict.Get("Parent")) is { } parent)
             return FindInheritedDaString(parent, depth + 1);
         return null;
@@ -90,29 +90,27 @@ public partial class Field
         annots.Add(_dict);
     }
 
-    /// <summary>Resolve the widget rectangle's width/height. Returns false when
+    /// <summary>Resolve the widget rectangle's width/height. Null when
     /// there is no usable (positive-area) rectangle.</summary>
-    private protected bool TryWidgetSize(out double w, out double h)
+    private protected (double w, double h)? TryWidgetSize()
     {
-        w = h = 0;
         if (Reader.Resolve(Dict.Get("Rect")) is not PdfArray rectArr || rectArr.Count < 4)
-            return false;
+            return null;
         var r = Rectangle.FromPdfArray(rectArr);
-        w = r.Width; h = r.Height;
-        return w > 0 && h > 0;
+        return r.Width > 0 && r.Height > 0 ? (r.Width, r.Height) : null;
     }
 
     /// <summary>Parse the field's <c>/DA</c> default-appearance string for a font
     /// resource name and size, defaulting to Helvetica 12. A size of 0 in /DA
     /// means auto-size — the caller decides what size to substitute.</summary>
-    private protected void ParseDefaultAppearance(out string fontName, out double fontSize)
-        => ParseDefaultAppearance(out fontName, out fontSize, defaultSize: 12);
+    /// <summary>The font resource name the field's /DA selects (Helv when it names none).</summary>
+    internal string DefaultAppearanceFontName => ParseDefaultAppearanceFont().fontName;
 
-    private protected void ParseDefaultAppearance(out string fontName, out double fontSize, double defaultSize)
+    private protected (string fontName, double fontSize) ParseDefaultAppearanceFont(double defaultSize = 12)
     {
-        fontName = "Helv";
-        fontSize = defaultSize;
-        if (Reader.Resolve(Dict.Get("DA")) is not PdfString daStr) return;
+        var fontName = "Helv";
+        var fontSize = defaultSize;
+        if (Reader.Resolve(Dict.Get("DA")) is not PdfString daStr) return (fontName, fontSize);
         var parts = daStr.ToText().Split(' ', System.StringSplitOptions.RemoveEmptyEntries);
         for (var i = 0; i < parts.Length; i++)
         {
@@ -122,6 +120,7 @@ public partial class Field
                 System.Globalization.CultureInfo.InvariantCulture, out var s);
             if (s > 0) fontSize = s;
         }
+        return (fontName, fontSize);
     }
 
     /// <summary>Extract the fill-colour operator (g/rg/k) from a /DA string,
@@ -144,7 +143,7 @@ public partial class Field
     private protected static PdfStream MakeApXObject(string content, double w, double h,
         PdfDictionary? resources = null)
     {
-        var stream = new PdfStream(new PdfDictionary(), System.Text.Encoding.Latin1.GetBytes(content));
+        var stream = new PdfStream(new PdfDictionary(), Compat.Latin1.GetBytes(content));
         stream.Dict.Set("Type", new PdfName("XObject"));
         stream.Dict.Set("Subtype", new PdfName("Form"));
         var bbox = new PdfArray();

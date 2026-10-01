@@ -122,8 +122,8 @@ internal static class FormJsonSerializer
         var root = jdoc.RootElement;
         var entries = new List<FormFieldData>();
         if (root.ValueKind == JsonValueKind.Array)
-            entries = root.Deserialize<List<FormFieldData>>() ?? entries;
-        else if (root.ValueKind == JsonValueKind.Object && root.Deserialize<FormFieldData>() is { } one)
+            entries = root.Deserialize(FormJsonContext.Default.ListFormFieldData) ?? entries;
+        else if (root.ValueKind == JsonValueKind.Object && root.Deserialize(FormJsonContext.Default.FormFieldData) is { } one)
             entries.Add(one);
 
         if (document.Form.IsXfa)
@@ -194,4 +194,15 @@ internal static class FormJsonSerializer
             value = value.Replace("\r", string.Empty).Replace("\n", " ");
         leaves.Add(new KeyValuePair<string, string>(full, value));
     }
+}
+
+/// <summary>
+/// The form JSON shape, generated at build time. Reflection-based serialization is off where the library is
+/// trimmed (the WebAssembly build), and there ExportJson and ImportJson failed outright; the generated metadata
+/// writes and reads the same JSON everywhere.
+/// </summary>
+[JsonSerializable(typeof(List<FormJsonSerializer.FormFieldData>))]
+[JsonSerializable(typeof(FormJsonSerializer.FormFieldData))]
+internal sealed partial class FormJsonContext : JsonSerializerContext
+{
 }

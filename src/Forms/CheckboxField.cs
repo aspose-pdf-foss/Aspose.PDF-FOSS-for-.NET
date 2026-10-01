@@ -5,6 +5,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Forms;
 
+/// <summary>A check-box form field, checked or unchecked, including grouped check boxes that share one name.</summary>
 public class CheckboxField : Field
 {
     internal CheckboxField(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -156,7 +157,7 @@ public class CheckboxField : Field
         }
         sb.Append("Q ");
 
-        var stream = new PdfStream(new PdfDictionary(), System.Text.Encoding.Latin1.GetBytes(sb.ToString()));
+        var stream = new PdfStream(new PdfDictionary(), Compat.Latin1.GetBytes(sb.ToString()));
         stream.Dict.Set("Type", new PdfName("XObject"));
         stream.Dict.Set("Subtype", new PdfName("Form"));
         var bbox = new PdfArray();
@@ -275,7 +276,7 @@ public class CheckboxField : Field
         return result;
     }
 
-    /// <summary>Select <paramref name="value"/> on a grouped checkbox: set the
+    /// <summary>Select <c>value</c> on a grouped checkbox: set the
     /// field /V and /AS, and set each kid's /AS to its own on-value when it
     /// matches, otherwise "Off".</summary>
     /// <summary>Select the kid widget whose on-value is <paramref name="state"/> (all
@@ -402,11 +403,19 @@ public class CheckboxField : Field
         || value.Equals("true", StringComparison.OrdinalIgnoreCase)
         || value == "1";
 
-    /// <summary>Append <paramref name="optionName"/> as a new selectable
-    /// state on this checkbox (used for grouped checkboxes
-    /// that behave like radio buttons). Stored only; FOSS treats every
-    /// checkbox as a single-state Yes/Off toggle.</summary>
-    public void AddOption(string optionName) => AddOption(optionName, new Rectangle(0, 0, 0, 0));
+    /// <summary>Append <paramref name="optionName"/> as a new selectable state on this
+    /// checkbox (a grouped checkbox that behaves like a radio group). The option's widget
+    /// takes the field's own box moved down one box height per option already present,
+    /// the field's widget counting as the first (measured: a 20 pt box at y 50..70 puts
+    /// its first added option at 30..50).</summary>
+    public void AddOption(string optionName)
+    {
+        var rect = Reader.Resolve(Dict.Get("Rect")) is PdfArray ra && ra.Count >= 4
+            ? Rectangle.FromPdfArray(ra)
+            : new Rectangle(0, 0, 0, 0);
+        var optionsBefore = 1 + (Reader.Resolve(Dict.Get("Kids")) is PdfArray kids ? kids.Count : 0);
+        AddOption(optionName, RadioButtonField.StackedOptionRect(rect, optionsBefore));
+    }
 
     /// <summary>Append an option with an explicit widget rectangle. Turns a single
     /// checkbox into a grouped one (radio-style): the new option becomes a kid widget
@@ -539,6 +548,7 @@ public class CheckboxField : Field
         }
     }
 
+    /// <summary>Gets or sets whether the check box is checked. Same as <c>IsChecked</c>.</summary>
     public bool Checked
     {
         get => IsChecked;

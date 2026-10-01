@@ -150,8 +150,8 @@ public sealed partial class Document
                 actionDict.Set("Type", new Aspose.Pdf.Core.PdfName("Action"));
                 actionDict.Set("S", new Aspose.Pdf.Core.PdfName("JavaScript"));
                 actionDict.Set("JS", new Aspose.Pdf.Core.PdfString(
-                    System.Text.Encoding.Latin1.GetBytes(_scripts![key])));
-                arr.Add(new Aspose.Pdf.Core.PdfString(System.Text.Encoding.Latin1.GetBytes(key)));
+                    Compat.Latin1.GetBytes(_scripts![key])));
+                arr.Add(new Aspose.Pdf.Core.PdfString(Compat.Latin1.GetBytes(key)));
                 arr.Add(actionDict);
             }
             var jsTree = new Aspose.Pdf.Core.PdfDictionary();

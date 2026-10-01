@@ -24,11 +24,15 @@ private sealed class RowPlanParagraphState
     public byte[]? fragEmbeddedTtf;
     public bool fragUnderline;
     public string? fragEmbeddedName;
+    /// <summary>The Standard-14 face the fragment names by name alone, in its weight and slant; null for the table's face.</summary>
+    public string? fragBaseFont;
     // CSS line-box metrics from the HTML styled-cell path (zero = legacy).
     public double fragCssAsc;
     public double fragCssDesc;
     public bool fragKeepBlank;
     public bool fragCssForce;
+    // The fragment asked for a soft-wrap space to HANG past the measure.
+    public bool fragHangingBreakSpace;
     // Cell text / TextFragments follow the cell's resolved alignment; a fragment
     // that sets its own non-default alignment wins. An HtmlFragment keeps its own
     // block alignment (left unless its style centres/right-aligns).

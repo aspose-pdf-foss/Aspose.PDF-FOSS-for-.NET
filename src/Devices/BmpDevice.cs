@@ -5,13 +5,21 @@ namespace Aspose.Pdf.Devices;
 /// </summary>
 public sealed class BmpDevice : ImageDevice
 {
+    /// <summary>Creates a BmpDevice that renders pages with the given <c>renderer</c> at the default resolution of 150 DPI.</summary>
     public BmpDevice(IPageRenderer renderer) : base(renderer) { }
+    /// <summary>Creates a BmpDevice that renders pages with the given <c>renderer</c> at the given resolution (150 DPI when <c>resolution</c> is null).</summary>
     public BmpDevice(IPageRenderer renderer, Resolution resolution) : base(renderer, resolution) { }
+    /// <summary>Creates a BmpDevice that renders pages with the built-in renderer at the default resolution of 150 DPI.</summary>
     public BmpDevice() : base() { }
+    /// <summary>Creates a BmpDevice that renders pages with the built-in renderer at the given resolution.</summary>
     public BmpDevice(Resolution resolution) : base(resolution) { }
+    /// <summary>Creates a BmpDevice whose output image is resampled to the given width and height in pixels; pages are rendered at 150 DPI.</summary>
     public BmpDevice(int width, int height) : base(width, height) { }
+    /// <summary>Creates a BmpDevice that renders pages at the given resolution and resamples the output image to the given width and height in pixels.</summary>
     public BmpDevice(int width, int height, Resolution resolution) : base(width, height, resolution) { }
+    /// <summary>Creates a BmpDevice whose output image has the pixel size of <c>pageSize</c> (in points) at 150 DPI.</summary>
     public BmpDevice(Aspose.Pdf.PageSize pageSize) : base(pageSize) { }
+    /// <summary>Creates a BmpDevice whose output image has the pixel size of <c>pageSize</c> (in points) at the given resolution.</summary>
     public BmpDevice(Aspose.Pdf.PageSize pageSize, Resolution resolution) : base(pageSize, resolution) { }
 
     /// <inheritdoc />
@@ -25,7 +33,7 @@ public sealed class BmpDevice : ImageDevice
     /// <summary>
     /// Encode RGBA pixels to a 24-bit BMP file (bottom-to-top row order).
     /// </summary>
-    private static byte[] EncodeBmp(byte[] rgba, int width, int height)
+    internal static byte[] EncodeBmp(byte[] rgba, int width, int height)
     {
         var rowBytes = width * 3;
         var paddedRowBytes = (rowBytes + 3) & ~3; // pad to 4-byte boundary

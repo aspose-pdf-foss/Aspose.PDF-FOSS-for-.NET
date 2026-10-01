@@ -59,7 +59,7 @@ public sealed class BitString : IEquatable<BitString>
         _length = tmp._length;
     }
 
-    /// <summary>Copy an existing BitString and prepend <paramref name="padding"/> zero bits.</summary>
+    /// <summary>Copy an existing BitString and prepend <c>padding</c> zero bits.</summary>
     public BitString(BitString source) : this(source, 0) { }
 
     /// <summary>Copy an existing BitString and prepend <paramref name="padding"/> zero bits.</summary>

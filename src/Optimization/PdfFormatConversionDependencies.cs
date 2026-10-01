@@ -103,6 +103,9 @@ public enum HeadingRecognitionStrategy
 /// </summary>
 public sealed class AutoTaggingSettings
 {
+    /// <summary>Creates settings with auto-tagging turned off.</summary>
+    public AutoTaggingSettings() { }
+
     /// <summary>Whether auto-tagging runs as part of the conversion pipeline.</summary>
     public bool EnableAutoTagging { get; set; }
 
@@ -111,6 +114,12 @@ public sealed class AutoTaggingSettings
 
     /// <summary>Heuristic used to identify headings.</summary>
     public HeadingRecognitionStrategy HeadingRecognitionStrategy { get; set; }
+
+    /// <summary>Called as the tagger works through the document: <see cref="ProgressEventType.SourcePageAnalysed"/>
+    /// once per page as its layout is analysed (<c>Value</c> of <c>MaxValue</c> pages), and
+    /// <see cref="ProgressEventType.TotalProgress"/> with the share of the tagging done, in percent. Called on the
+    /// converting thread; null (the default) reports nothing.</summary>
+    public UnifiedSaveOptions.ConversionProgressEventHandler? CustomProgressHandler { get; set; }
 
     /// <summary>Default auto-tagging profile — enables structure-tree generation during
     /// conversion. (The bare <c>new AutoTaggingSettings()</c> that

@@ -4,7 +4,6 @@ using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Operators;
 using Aspose.Pdf.Shading;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
@@ -36,290 +35,19 @@ public sealed partial class Page
         // drop the append. Only these passes need it: resetting inside the append itself
         // pulls the view out from under a caller that is still building with it.
         ResetContentsCache();
-        var pageBuilder = new Content.ContentStreamBuilder();
-        // A fragment extracted from a Form XObject gets its highlight drawn INTO
-        // that form's stream (before its text), not onto the page: the rectangle
-        // must live where the text lives, both for the paint order under nested
-        // content and for consumers reading the form's own operator list.
-        var formBuilders = new Dictionary<PdfStream, Content.ContentStreamBuilder>();
+        var bf = new BgColorFlushState();
+        bf.pageBuilder = new Content.ContentStreamBuilder();
+        bf.formBuilders = new Dictionary<PdfStream, Content.ContentStreamBuilder>();
         foreach (var frag in _bgColorFragments)
         {
-            Content.ContentStreamBuilder builder;
-            if (frag.SourceXObjStream is { } sourceForm)
-            {
-                if (!formBuilders.TryGetValue(sourceForm, out builder!))
-                    formBuilders[sourceForm] = builder = new Content.ContentStreamBuilder();
-            }
-            else
-                builder = pageBuilder;
-
-            var fragBg = frag.TextState.BackgroundColor;
-
-            // A fragment whose SOURCE decorations were captured had them spliced out, so its
-            // highlight is a REPLACEMENT for the rect that stood there and belongs where that
-            // rect stood - inline, immediately before the run it backs. Prepended to the page
-            // it lands under everything the source draws, including the very highlight it
-            // replaces, and is simply not seen.
-            if (fragBg is { IsEmpty: false } && frag.SourceXObjStream is null
-                && (frag.CapturedUnderlineSources is { Count: > 0 }
-                    || frag.CapturedBackgroundSources is { Count: > 0 })
-                && frag.PositionOrNull is { } inlinePos && frag.Rectangle is { } inlineRect)
-            {
-                var inlineFs = frag.TextState.RawFontSize > 0
-                    ? (double)frag.TextState.RawFontSize
-                    : (frag.TextState.FontSize > 0 ? frag.TextState.FontSize : 12);
-                var inlineH = ComputeBgRectHeight(frag.TextState.FontName ?? "",
-                    frag.TextState.Font, inlineFs,
-                    Math.Abs(frag.TextState.TmD) > 0.001 ? Math.Abs(frag.TextState.TmD) : 1.0);
-                if (InsertBeforeTextObjectAt(
-                        DecorationBlock(fragBg, inlinePos.XIndent, inlinePos.YIndent,
-                            inlineRect.Width, inlineH),
-                        inlinePos.XIndent, inlinePos.YIndent))
-                    continue;
-            }
-
-            // The run's own transform context, shared by the fragment- and
-            // segment-level emitters below.
-            var ctm = frag.ExtractionCtm;
-            double ctmScaleX = ctm is not null ? Math.Sqrt(ctm.A * ctm.A + ctm.B * ctm.B) : 1.0;
-            bool hasCtm = ctmScaleX > 1.5; // significant scaling (>1.5x)
-            bool ctmNonIdentity = ctm is not null
-                && (Math.Abs(ctm.A - 1) + Math.Abs(ctm.B) + Math.Abs(ctm.C)
-                    + Math.Abs(ctm.D - 1) + Math.Abs(ctm.E) + Math.Abs(ctm.F)) > 1e-6;
-            // An axis-aligned translated/scaled frame — including a y-DOWN
-            // (flipped, D < 0) one, where the local rect anchors one height below
-            // the inverse-mapped page bottom edge and the flip renders it back.
-            Matrix? frame = !hasCtm && ctmNonIdentity && ctm is not null
-                && Math.Abs(ctm.B) < 1e-6 && Math.Abs(ctm.C) < 1e-6
-                && ctm.A > 1e-6 && Math.Abs(ctm.D) > 1e-6 ? ctm : null;
-            // A quarter-turn frame (axis-swapping, |B|,|C| carry the scale — the
-            // page-rotation composition for /Rotate content).
-            bool quarterTurn = !hasCtm && ctm is not null
-                && Math.Abs(ctm.A) < 1e-6 && Math.Abs(ctm.D) < 1e-6
-                && Math.Abs(ctm.B) > 1e-6 && Math.Abs(ctm.C) > 1e-6;
-
-            // Draw one highlight box. The caller supplies the PAGE-space anchor,
-            // width and box height plus the metric height (raw-Tf units, which is
-            // what a local frame measures in); the framing decides where the
-            // numbers actually land.
-            void EmitBg(Aspose.Pdf.Color color, double pageX, double pageY,
-                double pageW, double metricH, double pageH)
-            {
-                builder.SaveState();
-                if (quarterTurn)
-                {
-                    // The box in the CONTENT STREAM's own device space.
-                    var (qx1, qy1) = ctm!.InverseTransformPoint(pageX, pageY);
-                    var (qx2, qy2) = ctm.InverseTransformPoint(pageX + pageW, pageY + pageH);
-                    builder.SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
-                    builder.Rectangle(Math.Min(qx1, qx2), Math.Min(qy1, qy2),
-                        Math.Abs(qx2 - qx1), Math.Abs(qy2 - qy1));
-                }
-                else if (frame is not null)
-                {
-                    // Replay the run's frame around the rectangle and write the rect
-                    // in that local space. cm FIRST, colour second, so the cm stays
-                    // immediately before the rectangle operands.
-                    var (lx, ly) = frame.InverseTransformPoint(pageX, pageY);
-                    if (frame.D < 0) ly -= metricH;
-                    builder.SetMatrix(frame.A, frame.B, frame.C, frame.D, frame.E, frame.F);
-                    builder.SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
-                    builder.Rectangle(lx, ly, pageW / frame.A, metricH);
-                }
-                else
-                {
-                    builder.SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
-                    builder.Rectangle(pageX, pageY, pageW, metricH);
-                }
-                builder.Fill();
-                builder.RestoreState();
-            }
-
-            // Fragment-level BackgroundColor: emit ONE rectangle.
-            // Use fragment rectangle for X/width but compute height from font metrics
-            // using the MAXIMUM rawFs across all segments (the tallest glyph determines height).
-            if (fragBg is { IsEmpty: false } && frag.Segments.Count > 0)
-            {
-                // Rotation-aware path: when the text direction is not horizontal
-                // (text drawn under a rotating CTM), emit the highlight as a
-                // rectangle oriented along the baseline via a cm transform, so it
-                // follows the rotated text instead of being an axis-aligned box.
-                // Horizontal text (the default TextDirX=1, TextDirY=0) is unaffected.
-                double dirX = frag.TextDirX, dirY = frag.TextDirY;
-                double dirLen = Math.Sqrt(dirX * dirX + dirY * dirY);
-                if (dirLen > 1e-6 && Math.Abs(dirY / dirLen) > 0.01)
-                {
-                    double ux = dirX / dirLen, uy = dirY / dirLen;
-                    double ox = frag.PositionOrNull?.XIndent ?? frag.Rectangle?.LLX ?? 0;
-                    double oy = frag.PositionOrNull?.YIndent ?? frag.Rectangle?.LLY ?? 0;
-
-                    double rRawFs = 0, rTmD = 1.0;
-                    string rFontName = frag.TextState.FontName ?? "";
-                    Text.FontInfo? rFont = frag.TextState.Font;
-                    foreach (var seg in frag.Segments)
-                    {
-                        var rfs = seg.TextState.RawFontSize > 0 ? (double)seg.TextState.RawFontSize : (double)seg.TextState.FontSize;
-                        if (rfs > rRawFs)
-                        {
-                            rRawFs = rfs;
-                            rTmD = Math.Abs(seg.TextState.TmD) > 0.001 ? Math.Abs(seg.TextState.TmD) : 1.0;
-                            rFontName = seg.TextState.FontName ?? rFontName;
-                            rFont = seg.TextState.Font ?? rFont;
-                        }
-                    }
-                    if (rRawFs <= 0) rRawFs = frag.TextState.FontSize;
-                    double rFs = frag.TextState.FontSize > 0 ? frag.TextState.FontSize : rRawFs;
-                    double rotW = rFont?.MeasureString(frag.Text, rFs) ?? frag.Text.Length * rFs * 0.5;
-                    double rotH = ComputeBgRectHeight(rFontName, rFont, rRawFs, rTmD);
-                    double rotDescent = rotH * 0.21;
-
-                    builder.SaveState();
-                    builder.SetFillColor(fragBg.R / 255.0, fragBg.G / 255.0, fragBg.B / 255.0);
-                    builder.SetMatrix(ux, uy, -uy, ux, ox, oy);
-                    builder.Rectangle(0, -rotDescent, rotW, rotH);
-                    builder.Fill();
-                    builder.RestoreState();
-                    continue;
-                }
-
-                double fragW, fragH, fragX, fragY;
-
-                if (hasCtm)
-                {
-                    // CTM path: compute width/height from current FontSize in
-                    // Tm (content-stream) space, then inverse-CTM the position.
-                    double localFs = frag.TextState.FontSize / ctmScaleX;
-                    Text.FontInfo? fragFont = frag.TextState.Font;
-                    foreach (var seg in frag.Segments)
-                        if (seg.TextState.Font is not null) { fragFont = seg.TextState.Font; break; }
-                    fragW = fragFont?.MeasureString(frag.Text, localFs)
-                        ?? (frag.Text.Length * localFs * 0.5);
-                    fragH = localFs * 1.1;
-                    fragX = frag.Rectangle?.LLX ?? frag.PositionOrNull?.XIndent ?? 0;
-                    fragY = frag.Rectangle?.LLY ?? frag.PositionOrNull?.YIndent ?? 0;
-                    (fragX, fragY) = ctm!.InverseTransformPoint(fragX, fragY);
-                }
-                else
-                {
-                    // Standard path: use the fragment rectangle for position/width,
-                    // compute height from rawFs/TmD metrics.
-                    fragW = (frag.Rectangle?.Width ?? 0) - frag.TrailingTcPageSpace;
-                    fragX = (frag.Rectangle?.LLX ?? frag.PositionOrNull?.XIndent ?? 0) + frag.PostAbsorbDx;
-                    fragY = (frag.Rectangle?.LLY ?? frag.PositionOrNull?.YIndent ?? 0) + frag.PostAbsorbDy;
-
-                    double maxRawFs = 0;
-                    double maxTmD = 1.0;
-                    string maxFontName = frag.TextState.FontName ?? "";
-                    Text.FontInfo? maxFont = frag.TextState.Font;
-                    foreach (var seg in frag.Segments)
-                    {
-                        var rfs = seg.TextState.RawFontSize > 0 ? (double)seg.TextState.RawFontSize : (double)seg.TextState.FontSize;
-                        if (rfs > maxRawFs)
-                        {
-                            maxRawFs = rfs;
-                            maxTmD = Math.Abs(seg.TextState.TmD) > 0.001 ? Math.Abs(seg.TextState.TmD) : 1.0;
-                            maxFontName = seg.TextState.FontName ?? maxFontName;
-                            maxFont = seg.TextState.Font ?? maxFont;
-                        }
-                    }
-                    if (maxRawFs <= 0) maxRawFs = frag.TextState.FontSize;
-
-                    fragH = ComputeBgRectHeight(maxFontName, maxFont, maxRawFs, maxTmD);
-                }
-
-                EmitBg(fragBg, fragX, fragY, fragW, fragH,
-                    frag.Rectangle?.Height ?? fragH);
-                continue;
-            }
-
-            // Segment-level: collect segments with their own bg colour
-            var segList = new List<Text.TextSegment>();
-            foreach (var seg in frag.Segments)
-            {
-                if (seg.TextState.BackgroundColor is { IsEmpty: false } && seg.Position is not null)
-                    segList.Add(seg);
-            }
-
-            // Merge consecutive segments with the same font size into single rectangles.
-            // The the public API emits one rect per font-size group on the same line.
-            int si = 0;
-            while (si < segList.Count)
-            {
-                var seg = segList[si];
-                var bg = seg.TextState.BackgroundColor!;
-                var segPos = seg.Position!;
-                var fs = seg.TextState.FontSize > 0 ? seg.TextState.FontSize : frag.TextState.FontSize;
-                double startX = segPos.XIndent;
-                double startY = segPos.YIndent;
-
-                // Scan forward to merge consecutive segments from the same source run.
-                // This groups segments by physical Tj/TJ operator, matching the the public API's
-                // per-run background rectangles.
-                int lastMerged = si;
-                while (lastMerged + 1 < segList.Count)
-                {
-                    var nextSeg = segList[lastMerged + 1];
-                    if (nextSeg.SourceRunIndex == seg.SourceRunIndex)
-                        lastMerged++;
-                    else
-                        break;
-                }
-
-                // Width spans from first segment start to last merged segment end
-                double w;
-                if (lastMerged + 1 < segList.Count && segList[lastMerged + 1].Position is not null)
-                {
-                    w = segList[lastMerged + 1].Position!.XIndent - startX;
-                }
-                else
-                {
-                    // Last merged group: check if it's also the last segment of the fragment.
-                    // If all segments have bg color, use frag.Rectangle.URX.
-                    // Otherwise, compute width from font metrics for the covered segments.
-                    bool isLastFragSeg = (segList.Count == frag.Segments.Count);
-                    if (isLastFragSeg && frag.Rectangle is not null)
-                    {
-                        // A segment moved after absorption carries its box with it:
-                        // the fragment rectangle still describes the ORIGINAL span,
-                        // so shift its right edge by the segment's own displacement.
-                        var segDx = seg.Rectangle is { } segRect ? startX - segRect.LLX : 0;
-                        w = frag.Rectangle.URX + segDx - startX;
-                    }
-                    else
-                    {
-                        // Compute width from font metrics for segments si.lastMerged
-                        w = 0;
-                        for (int k = si; k <= lastMerged; k++)
-                        {
-                            var s = segList[k];
-                            var font = s.TextState.Font ?? frag.TextState.Font;
-                            if (font is not null)
-                            {
-                                try { w += font.MeasureString(s.Text, fs); }
-                                catch { w += s.Text.Length * fs * 0.5; }
-                            }
-                            else
-                                w += s.Text.Length * fs * 0.5;
-                        }
-                    }
-                }
-
-                var rawFs = seg.TextState.RawFontSize > 0 ? (double)seg.TextState.RawFontSize : fs;
-                var tmD = Math.Abs(seg.TextState.TmD) > 0.001 ? Math.Abs(seg.TextState.TmD) : 1.0;
-                var fontName2 = seg.TextState.FontName ?? frag.TextState.FontName ?? "";
-                var font2 = seg.TextState.Font ?? frag.TextState.Font;
-                double h = ComputeBgRectHeight(fontName2, font2, rawFs, tmD);
-
-                EmitBg(bg, startX, startY, w, h, h);
-                si = lastMerged + 1;
-            }
+            if (!FlushFragmentBackground(bf, frag)) break;
         }
-        var bytes = pageBuilder.Build();
-        if (bytes.Length > 0)
+        bf.bytes = bf.pageBuilder.Build();
+        if (bf.bytes.Length > 0)
         {
-            PrependContentStream(bytes);
+            PrependContentStream(bf.bytes);
         }
-        foreach (var (formStream, formBuilder) in formBuilders)
+        foreach (var (formStream, formBuilder) in bf.formBuilders)
         {
             var formBytes = formBuilder.Build();
             if (formBytes.Length == 0) continue;
@@ -506,24 +234,10 @@ public sealed partial class Page
                     case "BT":
                         return null; // real content started — no background fill found
                     case "Do":
-                    {
                         // An Acrobat-style background is a Form XObject (OCG
                         // "Background") invoked at the stream head — look for the
                         // full-page fill inside it.
-                        if (parts.Length >= 2 && parts[0].StartsWith('/'))
-                        {
-                            var xname = parts[0][1..];
-                            var res = _reader.ResolveDict(Dict.Get("Resources"));
-                            var xobjs = res is null ? null : _reader.ResolveDict(res.Get("XObject"));
-                            var xstr = xobjs is null ? null : _reader.ResolveStream(xobjs.Get(xname));
-                            if (xstr is not null && xstr.Dict.GetName("Subtype") == "Form")
-                            {
-                                var inner = ScanBytesForBackground(_reader.DecodeStream(xstr), mb);
-                                if (inner is not null) return inner;
-                            }
-                        }
-                        return null;
-                    }
+                        return BackgroundFromFormXObject(parts, mb);
                 }
             }
         }
@@ -531,6 +245,35 @@ public sealed partial class Page
         return null;
     }
 
+    /// <summary>An Acrobat-style background is a Form XObject (OCG "Background") invoked at
+    /// the stream head - look for the full-page fill inside it.</summary>
+    private Color? BackgroundFromFormXObject(string[] parts, Rectangle mb)
+    {
+        if (parts.Length >= 2 && parts[0].StartsWith('/'))
+        {
+            var xname = parts[0][1..];
+            var res = _reader.ResolveDict(Dict.Get("Resources"));
+            var xobjs = res is null ? null : _reader.ResolveDict(res.Get("XObject"));
+            var xstr = xobjs is null ? null : _reader.ResolveStream(xobjs.Get(xname));
+            if (xstr is not null && xstr.Dict.GetName("Subtype") == "Form")
+            {
+                var inner = ScanBytesForBackground(_reader.DecodeStream(xstr), mb);
+                if (inner is not null) return inner;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Determines whether the page is blank. Annotations other than form widgets and
+    /// printer marks make the page non-blank; any visible text, shading, or non-white
+    /// vector fill or stroke does too. Otherwise the non-white pixel fractions of the
+    /// drawn images are summed and compared with <paramref name="fillThresholdFactor"/>.
+    /// </summary>
+    /// <param name="fillThresholdFactor">The largest image coverage (0..1) that still
+    /// counts as blank. The default 0 means any non-white image pixel makes the page
+    /// non-blank.</param>
+    /// <returns><c>true</c> when the page's coverage does not exceed the threshold.</returns>
     public bool IsBlank(double fillThresholdFactor = 0)
     {
         // Check if there are annotations (excluding Widget annotations for form fields)
@@ -560,119 +303,21 @@ public sealed partial class Page
 
     private double ComputeBlankCoverage(double tolerance)
     {
-        var crop = Devices.SoftwarePageRenderer.EffectiveCropRect(this);
-        double sum = 0;
-        var hard = false;
-        var counted = new HashSet<string>(StringComparer.Ordinal);
+        var bk = new BlankCoverageState();
+        bk.tolerance = tolerance;
+        bk.crop = Devices.SoftwarePageRenderer.EffectiveCropRect(this);
+        bk.sum = 0;
+        bk.hard = false;
+        bk.counted = new HashSet<string>(StringComparer.Ordinal);
 
-        void Walk(byte[] content, PdfDictionary? resources, int depth)
-        {
-            if (hard || depth > 16) return;
-            var xobjects = _reader.ResolveDict(resources?.Get("XObject"));
-            var parser = new Content.ContentStreamParser(_reader);
-
-            parser.OnShadingPainted += (_, _) => hard = true;
-
-            parser.OnTextShown += (text, _, state) =>
-            {
-                if (hard || state.RenderingMode == 3) return;
-                foreach (var ch in text)
-                    if (!char.IsWhiteSpace(ch) && ch != '\0') { hard = true; return; }
-            };
-
-            parser.OnPathPainted += (op, state, segments) =>
-            {
-                if (hard || segments.Count == 0) return;
-                var fills = op is "f" or "F" or "f*" or "B" or "B*" or "b" or "b*";
-                var strokes = op is "S" or "s" or "B" or "B*" or "b" or "b*";
-                var nonWhiteFill = state.FillPatternName is not null
-                    || state.FillR < 0.995 || state.FillG < 0.995 || state.FillB < 0.995;
-                var nonWhiteStroke = state.StrokePatternName is not null
-                    || state.StrokeR < 0.995 || state.StrokeG < 0.995 || state.StrokeB < 0.995;
-                if (!(fills && nonWhiteFill) && !(strokes && nonWhiteStroke)) return;
-
-                // Device-space bbox of the path; a mark fully outside the crop box
-                // is invisible and doesn't count.
-                double minX = double.MaxValue, minY = double.MaxValue;
-                double maxX = double.MinValue, maxY = double.MinValue;
-                void Grow(double px, double py)
-                {
-                    var (dx, dy) = state.TransformPoint(px, py);
-                    if (dx < minX) minX = dx;
-                    if (dy < minY) minY = dy;
-                    if (dx > maxX) maxX = dx;
-                    if (dy > maxY) maxY = dy;
-                }
-                foreach (var seg in segments)
-                {
-                    switch (seg.Op)
-                    {
-                        case Content.PathOp.MoveTo:
-                        case Content.PathOp.LineTo:
-                            Grow(seg.X1, seg.Y1);
-                            break;
-                        case Content.PathOp.CurveTo:
-                            Grow(seg.X1, seg.Y1); Grow(seg.X2, seg.Y2); Grow(seg.X3, seg.Y3);
-                            break;
-                        case Content.PathOp.CurveToV:
-                        case Content.PathOp.CurveToY:
-                            Grow(seg.X1, seg.Y1); Grow(seg.X2, seg.Y2);
-                            break;
-                        case Content.PathOp.Rect:
-                            Grow(seg.X1, seg.Y1); Grow(seg.X1 + seg.X2, seg.Y1 + seg.Y2);
-                            break;
-                    }
-                }
-                if (minX > maxX) return;
-                if (maxX < crop.LLX || minX > crop.URX || maxY < crop.LLY || minY > crop.URY) return;
-                hard = true;
-            };
-
-            parser.OnInlineImage += (dict, raw) =>
-            {
-                // Once the summed coverage exceeds the caller's tolerance the verdict
-                // can't change (coverage only grows) — skip further image decodes.
-                if (hard || sum > tolerance) return;
-                try { sum += NonWhiteImageFraction(dict, IO.Filters.StreamFilter.Decode(raw, dict), inline: true); }
-                catch { }
-            };
-
-            parser.OnImageDrawn += (name, _) =>
-            {
-                if (hard || sum > tolerance || xobjects is null) return;
-                var xobj = _reader.ResolveStream(xobjects.Get(name));
-                if (xobj is null) return;
-                if (xobj.Dict.GetName("Subtype") == "Form")
-                {
-                    byte[] formContent;
-                    try { formContent = _reader.DecodeStream(xobj); }
-                    catch { return; }
-                    var formRes = _reader.ResolveDict(xobj.Dict.Get("Resources")) ?? resources;
-                    Walk(formContent, formRes, depth + 1);
-                    return;
-                }
-                // Distinct image resources sum; the same name drawn twice counts once.
-                if (!counted.Add(depth + ":" + name)) return;
-                try
-                {
-                    byte[] decoded;
-                    try { decoded = _reader.DecodeStream(xobj); } catch { return; }
-                    sum += NonWhiteImageFraction(xobj.Dict, decoded, inline: false);
-                }
-                catch { }
-            };
-
-            parser.Parse(content, null, null, null, null, null, null);
-        }
-
-        var resources0 = _reader.ResolveDict(_dict.Get("Resources"));
+        bk.resources0 = _reader.ResolveDict(_dict.Get("Resources"));
         using var contentMs = new MemoryStream();
-        var contentsObj = _reader.Resolve(_dict.Get("Contents"));
-        if (contentsObj is PdfStream single)
+        bk.contentsObj = _reader.Resolve(_dict.Get("Contents"));
+        if (bk.contentsObj is PdfStream single)
         {
             try { var d = _reader.DecodeStream(single); contentMs.Write(d, 0, d.Length); } catch { }
         }
-        else if (contentsObj is PdfArray contentArr)
+        else if (bk.contentsObj is PdfArray contentArr)
         {
             foreach (var item in contentArr)
             {
@@ -681,8 +326,8 @@ public sealed partial class Page
                 catch { }
             }
         }
-        var contents = contentMs.ToArray();
-        if (contents.Length > 0) Walk(contents, resources0, 0);
-        return hard ? double.PositiveInfinity : sum;
+        bk.contents = contentMs.ToArray();
+        if (bk.contents.Length > 0) WalkBlankCoverage(bk, bk.contents, bk.resources0, 0);
+        return bk.hard ? double.PositiveInfinity : bk.sum;
     }
 }

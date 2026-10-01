@@ -48,7 +48,7 @@ public class OptimizeResourcesPruneTests
         foreach (var off in offsets)
             sb.Append($"{off:D10} 00000 n \n");
         sb.Append($"trailer\n<< /Size {objects.Count + 1} /Root 1 0 R >>\nstartxref\n{xrefPos}\n%%EOF");
-        return Encoding.Latin1.GetBytes(sb.ToString());
+        return Compat.Latin1.GetBytes(sb.ToString());
     }
 
     [Fact]

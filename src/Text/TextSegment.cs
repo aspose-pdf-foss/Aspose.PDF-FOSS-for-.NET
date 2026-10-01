@@ -8,8 +8,10 @@ public sealed class TextSegment
 {
     private string _text;
 
+    /// <summary>Creates a segment with empty text and a default text state.</summary>
     public TextSegment() : this(string.Empty) { }
 
+    /// <summary>Creates a segment with the given text and a default text state.</summary>
     public TextSegment(string text)
     {
         _text = text;
@@ -88,6 +90,15 @@ public sealed class TextSegment
 
     public Position? BaselinePosition { get; set; }
 
+    /// <summary>The box of this segment's glyph-bearing content: its run's advance box
+    /// less the whitespace-only array pieces at either end, null when the segment
+    /// shows no glyph at all. Set by the absorber; the page content box reads it.</summary>
+    internal Rectangle? InkRectangle { get; set; }
+
+    /// <summary>The page-space y of the run's baseline when the run is upright, as the
+    /// absorber extracted it; null for rotated or flipped text.</summary>
+    internal double? BaselineY { get; set; }
+
     /// <summary>The text state (font, size, colour, etc.) for this segment.</summary>
     public TextState TextState { get; set; }
 
@@ -135,6 +146,20 @@ public sealed class TextSegment
 
     /// <summary>Optional hyperlink associated with this segment.</summary>
     public Hyperlink? Hyperlink { get; set; }
+
+    /// <summary>A picture standing in this segment's place on the line: it takes the
+    /// picture's box (<see cref="Image.FixWidth"/> by <see cref="Image.FixHeight"/>)
+    /// on the baseline and raises the line's ascent to its height when it is taller,
+    /// and the segment's text is not drawn. Honoured by a paragraph whose segments
+    /// flow as runs (<see cref="TextFormattingOptions.SegmentsFlowAsRuns"/>).</summary>
+    public Image? InlineImage { get; set; }
+
+    /// <summary>The segment is a tab: it draws nothing and carries the line on to the next of
+    /// the paragraph's tab stops past where the line has got to
+    /// (<see cref="TextFormattingOptions.RunTabStops"/>), else to the next multiple of
+    /// <see cref="TextFormattingOptions.RunTabInterval"/>; its text is not drawn. Honoured by a
+    /// paragraph whose segments flow as runs (<see cref="TextFormattingOptions.SegmentsFlowAsRuns"/>).</summary>
+    public bool IsTab { get; set; }
 
     /// <summary>HTML-encode a string by replacing &amp;, &lt;, &gt;, &quot;, and &apos;
     /// with their entity references. Helper used during HTML emission.</summary>
@@ -226,8 +251,8 @@ public sealed class PhysicalTextSegment
     }
 }
 
-/// <summary>Per-character layout information (glyph rectangle + page position).
-/// Empty in FOSS — character-level metrics aren't exposed.</summary>
+/// <summary>Per-character layout information (glyph rectangle + page position): the box
+/// spans the glyph's own advance, from the descent to the ascent.</summary>
 public sealed class CharInfo
 {
     internal CharInfo(Position position, Aspose.Pdf.Rectangle rectangle)
@@ -243,12 +268,16 @@ public sealed class CharInfo
     public Aspose.Pdf.Rectangle Rectangle { get; }
 }
 
-/// <summary>Collection of <see cref="CharInfo"/> entries — supports the public surface used by
-/// TextSegment.Characters but stays empty by default.</summary>
+/// <summary>The characters of a <see cref="TextSegment"/>: each one's position and glyph rectangle,
+/// filled by the text fragment absorber for the segments it finds.</summary>
 public sealed class CharInfoCollection : System.Collections.Generic.IEnumerable<CharInfo>
 {
     private readonly System.Collections.Generic.List<CharInfo> _items = new();
 
+    /// <summary>Creates an empty character collection.</summary>
+    public CharInfoCollection() { }
+
+    /// <summary>Gets the number of characters in the collection.</summary>
     public int Count => _items.Count;
     public bool IsReadOnly => false;
     public bool IsSynchronized => false;
@@ -257,15 +286,20 @@ public sealed class CharInfoCollection : System.Collections.Generic.IEnumerable<
     /// <summary>1-based accessor for the character at the given position.</summary>
     public CharInfo this[int index] => _items[index - 1];
 
+    /// <summary>Adds a character to the end of the collection; throws when <c>item</c> is <c>null</c>.</summary>
     public void Add(CharInfo item)
     {
         if (item is null) throw new ArgumentNullException(nameof(item));
         _items.Add(item);
     }
 
+    /// <summary>Removes all characters from the collection.</summary>
     public void Clear() => _items.Clear();
+    /// <summary>Returns <c>true</c> when the collection contains the given character.</summary>
     public bool Contains(CharInfo item) => _items.Contains(item);
+    /// <summary>Copies the characters into <c>array</c>, starting at the zero-based <c>index</c>.</summary>
     public void CopyTo(CharInfo[] array, int index) => _items.CopyTo(array, index);
+    /// <summary>Removes the given character; returns <c>true</c> when it was found.</summary>
     public bool Remove(CharInfo item) => item is not null && _items.Remove(item);
     public System.Collections.Generic.IEnumerator<CharInfo> GetEnumerator() => _items.GetEnumerator();
     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
@@ -277,6 +311,9 @@ public sealed class CharInfoCollection : System.Collections.Generic.IEnumerable<
 public sealed class TextSegmentCollection : System.Collections.Generic.IEnumerable<TextSegment>
 {
     private readonly System.Collections.Generic.List<TextSegment> _segments = new();
+
+    /// <summary>Creates an empty segment collection that belongs to no fragment.</summary>
+    public TextSegmentCollection() { }
 
     /// <summary>Number of segments.</summary>
     public int Count => _segments.Count;
@@ -299,6 +336,7 @@ public sealed class TextSegmentCollection : System.Collections.Generic.IEnumerab
     public bool IsSynchronized => false;
     public object SyncRoot { get; } = new();
 
+    /// <summary>Adds a segment to the end of the collection and refreshes the owning fragment's text; throws when <c>segment</c> is <c>null</c>.</summary>
     public void Add(TextSegment segment)
     {
         if (segment is null) throw new ArgumentNullException(nameof(segment));
@@ -311,10 +349,13 @@ public sealed class TextSegmentCollection : System.Collections.Generic.IEnumerab
         Owner?.RefreshTextFromSegments();
     }
 
+    /// <summary>Returns <c>true</c> when the collection contains the given segment.</summary>
     public bool Contains(TextSegment item) => _segments.Contains(item);
 
+    /// <summary>Copies the segments into <c>array</c>, starting at the zero-based <c>index</c>.</summary>
     public void CopyTo(TextSegment[] array, int index) => _segments.CopyTo(array, index);
 
+    /// <summary>Removes the given segment and refreshes the owning fragment's text; returns <c>true</c> when it was found.</summary>
     public bool Remove(TextSegment item)
     {
         if (item is null) return false;
@@ -327,6 +368,7 @@ public sealed class TextSegmentCollection : System.Collections.Generic.IEnumerab
         return removed;
     }
 
+    /// <summary>Removes all segments and refreshes the owning fragment's text.</summary>
     public void Clear()
     {
         foreach (var seg in _segments) seg.Owner = null;

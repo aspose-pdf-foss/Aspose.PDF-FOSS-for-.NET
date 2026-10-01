@@ -1,5 +1,4 @@
 using Aspose.Pdf;
-using Aspose.Pdf.Stamps;
 using Aspose.Pdf.Tests.Helpers;
 using Xunit;
 

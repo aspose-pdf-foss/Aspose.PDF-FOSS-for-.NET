@@ -242,10 +242,9 @@ internal static partial class MarkdownRenderer
         return false;
     }
 
-    private static List<MdBlock> CollectTables(Page page, List<TextFragment> pageFrags,
-        List<LinkInfo> links, Rectangle area, out List<Rectangle> regions)
+    private static (List<MdBlock> result, List<Rectangle> regions) CollectTables(Page page, List<TextFragment> pageFrags, List<LinkInfo> links, Rectangle area)
     {
-        regions = new List<Rectangle>();
+        var regions = new List<Rectangle>();
         var result = new List<MdBlock>();
 
         List<GridInfo> grids;
@@ -255,7 +254,7 @@ internal static partial class MarkdownRenderer
         }
         catch
         {
-            return result;
+            return (result, regions);
         }
 
         foreach (var grid in grids)
@@ -268,7 +267,7 @@ internal static partial class MarkdownRenderer
             regions.Add(grid.Bounds);
             result.Add(new MdBlock(text, true, grid.Bounds.URY));
         }
-        return result;
+        return (result, regions);
     }
 
     private sealed class GridInfo

@@ -142,71 +142,12 @@ public sealed partial class TextAbsorber
         // 1. ToUnicode CMap — highest priority; Differences used as fallback for unmapped codes
         if (toUnicode is not null)
         {
-            return DecodeWithToUnicode(bytes, toUnicode, fontDict, reader, differences, baseEncodingName);
+            return MapSymbolPrivateUse(DecodeWithToUnicode(bytes, toUnicode, fontDict, reader, differences, baseEncodingName), fontDict);
         }
 
         // Identity-H / Identity-V — 2-byte CID encoding
         // Also handle Uni*-UCS2-* / Uni*-UTF16-* predefined CMaps (2-byte big-endian → Unicode codepoint)
-        if (fontDict?.GetName("Subtype") == "Type0")
-        {
-            var cidEncoding = fontDict.GetName("Encoding");
-            if (cidEncoding is not null && (
-                cidEncoding == "Identity-H" || cidEncoding == "Identity-V" ||
-                cidEncoding.Contains("-UCS2-") || cidEncoding.Contains("-UTF16-")))
-            {
-                // A Uni*-UCS2-* / Uni*-UTF16-* CMap emits UNICODE, not Adobe CIDs: the
-                // 2-byte code IS the codepoint, so neither the collection's CID table nor
-                // a glyph-id inversion applies to it — both would substitute an unrelated
-                // character for every code that happens to be a valid CID in the
-                // ordering. Same distinction the renderers draw
-                // (CidFontInfo.IsUnicodeEncoding); only Identity-H/V has code == CID.
-                var isUnicodeCMap = cidEncoding.Contains("-UCS2-") || cidEncoding.Contains("-UTF16-");
-                // Try to get Adobe CID collection ordering for predefined table lookup
-                var cidOrdering = isUnicodeCMap ? null : GetCidOrdering(fontDict, reader);
-                // A CID font without /ToUnicode: for a NON-embedded font, recover Unicode by
-                // inverting the installed system face's cmap — the producer assigned glyph
-                // ids from that same face, so these documents stay decodable. For an
-                // EMBEDDED program the raw-code fallback is kept (the
-                // "NoToUnicode_UseRawCode" behaviour), so cmap inversion there stays opt-in
-                // via TextSearchOptions.UseFontEngineEncoding.
-                var gidToUnicode = isUnicodeCMap
-                    ? null
-                    : GetGidToUnicode(fontDict, reader, allowEmbedded: useFontEngineEncoding);
-                return DecodeCidString(bytes, toUnicode, cidOrdering, gidToUnicode);
-            }
-
-            // Predefined legacy national CMap (GBK-EUC-H, 90ms-RKSJ-H, KSC-EUC-H, …):
-            // the show-string bytes are a national multi-byte charset (mixed 1-/2-byte
-            // codes), NOT Adobe CIDs. Without this branch the bytes fell through to the
-            // per-byte WinAnsi default and Chinese/Japanese/Korean text extracted as
-            // Latin-1 mojibake ("由 扫描全能王" → "ÓÉ É¨Ãè…"). Decode through the same
-            // codepage tables the renderer already uses (GbkTable/SjisTable/KscTable).
-            if (cidEncoding is not null && GetLegacyCidInfo(fontDict, reader) is { } legacy)
-            {
-                var sb = new StringBuilder();
-                var i = 0;
-                while (i < bytes.Length)
-                {
-                    var step = legacy.LegacyByteLength(bytes[i]);
-                    if (step == 2 && i + 1 >= bytes.Length) step = 1;
-                    if (step == 1)
-                    {
-                        sb.Append((char)bytes[i]);
-                    }
-                    else
-                    {
-                        var code = (bytes[i] << 8) | bytes[i + 1];
-                        if (legacy.LegacyToUnicode(code) is int u)
-                            sb.Append(char.ConvertFromUtf32(u));
-                        else
-                            sb.Append('�');
-                    }
-                    i += step;
-                }
-                return sb.ToString();
-            }
-        }
-
+        if (DecodeType0String(bytes, toUnicode, fontDict, reader, useFontEngineEncoding) is { } decodeType0StringResult) return decodeType0StringResult;
         // 2. Differences from Encoding dict
         if (differences is not null)
         {
@@ -235,72 +176,9 @@ public sealed partial class TextAbsorber
         // Recover code → Unicode from the embedded cmap + post glyph names (Adobe Glyph
         // List). Without this the bytes fall through to WinAnsi and Cyrillic/Greek subsets
         // decode as control-char mojibake.
-        if (encodingObj is null && fontDict is not null
-            && fontDict.GetName("Subtype") != "Type0")
-        {
-            var postMap = GetPostNameCodeToUnicode(fontDict, reader);
-            if (postMap is not null)
-            {
-                var sb = new StringBuilder(bytes.Length);
-                foreach (var b in bytes)
-                    sb.Append(postMap.TryGetValue(b, out var u) ? u : DecodeByteWithEncoding(b, null).ToString());
-                return sb.ToString();
-            }
-
-            // 4c. Not even post names (format-3 post, PUA-only cmap): zero Unicode
-            // semantics anywhere. Fall back to recognising each
-            // glyph's OUTLINE SHAPE, locked on for the font once a code below
-            // 0x20 proves it is not character-coded (gate machine —
-            // sequential-by-first-use Ghostscript subsets start at 0x01).
-            if (reader is not null)
-            {
-                var shaped = GlyphShapeDecoder.TryDecode(bytes, fontDict, reader);
-                if (shaped is not null) return shaped;
-            }
-
-            // 4d. A non-embedded Standard-14 Type 1 font with no /Encoding entry
-            // uses the font program's BUILT-IN encoding — StandardEncoding, not
-            // WinAnsi. The two agree on printable ASCII but diverge completely in
-            // the high range (0xC1 is the grave ACCENT in Standard, Á in WinAnsi),
-            // so only bytes in Standard's high range take this path; the ASCII
-            // range keeps the established default below.
-            if (IsStandardLatinType1(fontDict) && bytes.Any(b => b >= 0xA1))
-            {
-                var sb = new StringBuilder(bytes.Length);
-                foreach (var b in bytes)
-                {
-                    string? uni = null;
-                    if (b >= 0xA1 && Type1StandardEncoding.GetName(b) is { } gname
-                        && GlyphNameToUnicode.TryGetValue(gname, out var mapped))
-                        uni = mapped;
-                    if (uni is not null) sb.Append(uni);
-                    else sb.Append(DecodeByteWithEncoding(b, "WinAnsiEncoding"));
-                }
-                return sb.ToString();
-            }
-        }
-
+        if (DecodeWithoutEncodingEntry(bytes, encodingObj, fontDict, reader) is { } decodeWithoutEncodingEntryResult) return decodeWithoutEncodingEntryResult;
         // 5. Check for Symbol or ZapfDingbats built-in font encoding
-        var baseFont = fontDict?.GetName("BaseFont");
-        if (baseFont is not null)
-        {
-            var cleanName = baseFont.Contains('+') ? baseFont.Substring(baseFont.IndexOf('+') + 1) : baseFont;
-            if (cleanName == "Symbol")
-            {
-                var sb = new StringBuilder(bytes.Length);
-                foreach (var b in bytes)
-                    sb.Append(SymbolEncoding.TryGetValue(b, out var ch) ? ch : (char)b);
-                return sb.ToString();
-            }
-            if (cleanName == "ZapfDingbats")
-            {
-                var sb = new StringBuilder(bytes.Length);
-                foreach (var b in bytes)
-                    sb.Append(ZapfDingbatsEncoding.TryGetValue(b, out var ch) ? ch : (char)b);
-                return sb.ToString();
-            }
-        }
-
+        if (DecodeSymbolFontString(bytes, fontDict) is { } decodeSymbolFontStringResult) return decodeSymbolFontStringResult;
         // 6. Default: WinAnsiEncoding
         return DecodeWithNamedEncoding(bytes, null);
     }
@@ -309,7 +187,7 @@ public sealed partial class TextAbsorber
     /// Times / Courier families) — the fonts whose built-in encoding is Adobe
     /// StandardEncoding. Symbol and ZapfDingbats have their own built-ins and are
     /// handled separately; an embedded program carries its own encoding.</summary>
-    private static bool IsStandardLatinType1(PdfDictionary fontDict)
+    internal static bool IsStandardLatinType1(PdfDictionary fontDict)
     {
         if (fontDict.GetName("Subtype") != "Type1") return false;
         var baseFont = fontDict.GetName("BaseFont");
@@ -468,7 +346,7 @@ public sealed partial class TextAbsorber
         if (name.Length >= 2 && name[0] == 'G')
         {
             var suffix = name.Substring(1);
-            if (suffix.Length > 0 && suffix.All(char.IsAsciiDigit))
+            if (suffix.Length > 0 && suffix.All(Compat.IsAsciiDigit))
             {
                 var code = int.Parse(suffix);
                 if (code < 128)
@@ -509,6 +387,14 @@ public sealed partial class TextAbsorber
           or '\u00C6' or '\u00E6'                       // AE, ae
           or '\u0152' or '\u0153'                       // OE, oe
           or >= '\uFB00' and <= '\uFB06';               // ff, fi, fl, ffi, ffl, st
+
+    /// <summary>True when <paramref name="mapped"/> is the first letter only of the
+    /// several letters <paramref name="ligature"/> stands for ("f" for U+FB01).</summary>
+    private static bool IsTruncatedLigature(char mapped, char ligature)
+    {
+        var letters = ligature.ToString().Normalize(NormalizationForm.FormKC);
+        return letters.Length > 1 && letters[0] == mapped;
+    }
 
     private static string DecodeWithToUnicode(byte[] bytes, Dictionary<int, string> map,
         PdfDictionary? fontDict, PdfReader reader,
@@ -553,10 +439,13 @@ public sealed partial class TextAbsorber
                 // the page draws and reads as. The test is deliberately narrow: only a
                 // NAMED ligature qualifies, so a code whose CMap value merely carries a
                 // trailing line break, or whose subset name resolves through a numeric
-                // convention, keeps every character the CMap gave it.
-                if (!isCid && mapped1.Length > 1 && !char.IsSurrogate(mapped1[0])
+                // convention, keeps every character the CMap gave it. A CMap that gives only
+                // the ligature's FIRST letter (a producer mapping the fi glyph to "f") loses
+                // the rest of it, so the named ligature wins there too.
+                if (!isCid && mapped1.Length > 0 && !char.IsSurrogate(mapped1[0])
                     && differences is not null && differences.TryGetValue(code1, out var ligature)
-                    && ligature.Length == 1 && IsLigatureChar(ligature[0]))
+                    && ligature.Length == 1 && IsLigatureChar(ligature[0])
+                    && (mapped1.Length > 1 || IsTruncatedLigature(mapped1[0], ligature[0])))
                     sb.Append(ligature);
                 else
                     sb.Append(mapped1);
@@ -853,6 +742,6 @@ public sealed partial class TextAbsorber
     {
         if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
             return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
-        return Encoding.Latin1.GetString(bytes);
+        return Compat.Latin1.GetString(bytes);
     }
 }

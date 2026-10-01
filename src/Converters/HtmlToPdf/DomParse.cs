@@ -68,7 +68,9 @@ internal static partial class HtmlToPdfConverter
             {
                 Kind = TokenKind.Tag,
                 Tag = m.Groups[2].Value,
-                IsClose = m.Groups[1].Value == "/",
+                // (an END tag named br is a line break like a start tag - the HTML parser's rule;
+                // measured on the enterprise summary: `<br></br>` between its tables opens two lines)
+                IsClose = m.Groups[1].Value == "/" && !m.Groups[2].Value.Equals("br", StringComparison.OrdinalIgnoreCase),
                 IsSelfClosing = m.Groups[4].Value == "/",
                 Attributes = attrs,
                 SrcIndex = m.Index,
@@ -164,7 +166,7 @@ internal static partial class HtmlToPdfConverter
         var sb = new StringBuilder(s.Length + 8);
         foreach (var ch in s)
         {
-            byte b = Aspose.Pdf.Text.Cp1252.TryGetByte(ch, out var wb) ? wb : (byte)'?';
+            byte b = Aspose.Pdf.Text.Cp1252.TryGetByte(ch) ?? (byte)'?';
             switch (b)
             {
                 case (byte)'\\': sb.Append("\\\\"); break;
@@ -231,7 +233,35 @@ internal static partial class HtmlToPdfConverter
             font.Set("BaseFont", new Core.PdfName(baseFontName));
             font.Set("Encoding", new Core.PdfName("WinAnsiEncoding"));
             fontDict.Set(resName, font);
+            EmbedNamedFace(page, font, baseFontName);
         }
+    }
+
+    /// <summary>A named face outside the Standard 14 (a `font face="Verdana"` cell, an "ArialBold" run)
+    /// carries its installed program and widths: a bare named Type1 has no widths, and the
+    /// rasteriser spaces its glyphs at the default advance.</summary>
+    private static void EmbedNamedFace(Page page, Core.PdfDictionary font, string baseFontName)
+    {
+        if (Text.Standard14Fonts.IsStandard14(baseFontName)) return;
+        if (page.Reader?.OwnerDocument is not { } doc) return;
+        var spaced = Regex.Replace(baseFontName, "(?<=[a-z])(Bold|Italic)", " $1");
+        var ttf = Text.FontRepository.GetTtfData(baseFontName) ?? Text.FontRepository.GetTtfData(spaced);
+        if (ttf is null) return;
+        // The face is presented under its style-qualified PostScript name when it has one
+        // ("HelveticaNeueLTStd-Roman" for the family "HelveticaNeueLTStd"), as the family
+        // writer presents it; an unqualified face keeps the requested name.
+        var presented = baseFontName;
+        try
+        {
+            var ttp = new Text.TrueTypeParser(ttf);
+            ttp.Parse();
+            if (!string.IsNullOrEmpty(ttp.PostScriptName) && ttp.PostScriptName != "Unknown"
+                && ttp.PostScriptName.Contains('-'))
+                presented = ttp.PostScriptName.Replace(" ", "");
+        }
+        catch { /* keep the requested name */ }
+        try { Text.FontEmbedder.EmbedIntoFontDict(doc, ttf, font, presented, subset: false); }
+        catch { /* the bare name stands */ }
     }
     private enum TokenKind { Text, Tag }
 
@@ -243,6 +273,9 @@ internal static partial class HtmlToPdfConverter
     // tag's attribute) falls back to a plain character, so that tag still
     // ends at its '>' exactly as the legacy scan did, while legitimate
     // multi-line style values keep their spans.
+    /// <summary>A downlevel-revealed conditional comment marker (`&lt;![if …]>` / `&lt;![endif]>`).</summary>
+    private const string ConditionalCommentMarker = @"<!\[(?:if\b[^\]]*|endif)\]>";
+
     private static readonly Regex TagRx = new(
         @"<(/?)([A-Za-z][A-Za-z0-9]*)\s*((?:[^>""']|""[^""]*""(?=[\s/>])|'[^']*'(?=[\s/>])|[""'])*?)(/?)>",
         RegexOptions.Compiled);

@@ -3,6 +3,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.LogicalStructure;
 
+/// <summary>A link structure element (tag <c>/Link</c>) that marks a hyperlink.</summary>
 public sealed class LinkElement : StructureElement
 {
     internal LinkElement() : base("Link") { }

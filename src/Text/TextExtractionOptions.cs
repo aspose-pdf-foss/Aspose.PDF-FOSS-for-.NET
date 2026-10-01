@@ -41,6 +41,6 @@ public sealed class TextExtractionOptions
     /// font in effect (no preceding <c>Tf</c>) instead of throwing
     /// <see cref="Aspose.Pdf.IncorrectFontUsageException"/>. Mirrors the same flag on
     /// <see cref="TextSearchOptions.IgnoreResourceFontErrors"/>; the
-    /// <see cref="TextDevice"/> path reads it from here.</summary>
+    /// <c>TextDevice</c> path reads it from here.</summary>
     public bool IgnoreResourceFontErrors { get; set; }
 }

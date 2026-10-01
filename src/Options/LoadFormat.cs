@@ -11,7 +11,7 @@ public enum LoadFormat
     XPS = 1,
     /// <summary>EPUB input (not implemented).</summary>
     EPUB = 2,
-    /// <summary>PostScript input (not implemented).</summary>
+    /// <summary>PostScript input.</summary>
     PS = 3,
     /// <summary>PCL input (not implemented).</summary>
     PCL = 4,

@@ -1,4 +1,4 @@
-using Aspose.Pdf.Text;
+﻿using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
 
@@ -6,8 +6,9 @@ namespace Aspose.Pdf;
 /// Table of contents information for a page.
 /// When set on a page via <see cref="Page.TocInfo"/>, the page acts as a TOC page.
 /// </summary>
-public sealed class TocInfo
+public sealed partial class TocInfo
 {
+    /// <summary>Creates TOC settings that show page numbers with dotted leaders, count the TOC pages in the numbering, and use a default column layout.</summary>
     public TocInfo()
     {
         ColumnInfo = new ColumnInfo();
@@ -18,6 +19,16 @@ public sealed class TocInfo
 
     /// <summary>Title displayed at the top of the TOC page.</summary>
     public TextFragment? Title { get; set; }
+
+    /// <summary>The headers of an authored tagged document that asked for an entry on this
+    /// page (<see cref="LogicalStructure.HeaderElement.AddEntryToTocPage"/>), each with the
+    /// TOC item that stands for it; the render writes the entries once it knows the pages.</summary>
+    internal List<(LogicalStructure.HeaderElement Header, LogicalStructure.StructureElement Item)> TaggedEntries { get; } = new();
+
+    /// <summary>The header bound to this page's title through
+    /// <see cref="LogicalStructure.TOCElement.LinkTocPageTitleToHeaderElement"/>: the title's
+    /// marked content is that header's content.</summary>
+    internal LogicalStructure.HeaderElement? TitleHeader { get; set; }
 
     /// <summary>Whether page numbers are shown next to each TOC entry.</summary>
     public bool IsShowPageNumbers { get; set; }
@@ -65,6 +76,9 @@ public sealed class TocInfo
 /// margins, indent, text state). Stored only by the FOSS TOC pipeline.</summary>
 public sealed class LevelFormat
 {
+    /// <summary>Creates a level format with a dotted leader, an empty margin and a default text state.</summary>
+    public LevelFormat() { }
+
     /// <summary>Leader style for this level's entries. The per-level default
     /// is Dot: once a FormatArray is in play, each level's own LineDash governs
     /// its leader (an explicit None suppresses it) and the TocInfo-level
@@ -75,6 +89,7 @@ public sealed class LevelFormat
     /// can write <c>level.Margin.Left = 0</c> on a fresh instance.</summary>
     public MarginInfo Margin { get; set; } = new MarginInfo();
 
+    /// <summary>Gets or sets the extra indent in points for the second and later lines of a wrapped TOC entry at this level. Defaults to 0.</summary>
     public float SubsequentLinesIndent { get; set; }
 
     /// <summary>Text state for this level's TOC entry. Auto-initialized so
@@ -86,7 +101,7 @@ public sealed class LevelFormat
 /// Represents a TOC heading entry that links to a destination page.
 /// Added to a page's Paragraphs collection.
 /// </summary>
-public class Heading : BaseParagraph
+public partial class Heading : BaseParagraph
 {
     /// <summary>Heading level (1-based).</summary>
     public int Level { get; set; }
@@ -115,6 +130,11 @@ public class Heading : BaseParagraph
     /// <summary>Whether the heading is inserted into the TOC list.</summary>
     public bool IsInList { get; set; }
 
+    /// <summary>For an entry an authored tagged document asked for (HeaderElement.AddEntryToTocPage):
+    /// the header it stands for and the TOC item that carries it in the structure tree; the drawn
+    /// entry is then marked content and a link the structure wiring ties to that item.</summary>
+    internal (LogicalStructure.StructureElement Header, LogicalStructure.StructureElement Item)? TaggedEntry { get; set; }
+
     /// <summary>Whether the heading number is auto-incremented.</summary>
     public bool IsAutoSequence { get; set; }
 
@@ -134,6 +154,7 @@ public class Heading : BaseParagraph
         }
     }
 
+    /// <summary>Creates a heading at the given 1-based level.</summary>
     public Heading(int level) => Level = level;
 
     /// <summary>Heading auto-sequence start number. Stored only.</summary>
@@ -215,8 +236,9 @@ public class Heading : BaseParagraph
     internal (byte[] content, double height) Build(Page page, double x, double y,
         string fontName, string numberPrefix)
     {
-        var builder = new Content.ContentStreamBuilder();
-        var totalText = string.Join("", Segments.Select(s => s.Text));
+        var tb = new TocBuildState();
+        tb.builder = new Content.ContentStreamBuilder();
+        tb.totalText = string.Join("", Segments.Select(s => s.Text));
         // Real Helvetica advances for the wrap: the crude half-em estimate
         // under-fills typical lines (breaking ~10 chars early); each line
         // must fill to the real measured width.
@@ -231,89 +253,74 @@ public class Heading : BaseParagraph
             }
             return w;
         }
-        // The heading's OWN TextState wins when the caller set it (a content
-        // heading with TextState.FontSize = 12 renders 12 pt even though its
-        // segment was created at the 10 pt default); an explicitly-sized
-        // segment comes next; the legacy segment fallback stays for untouched
-        // headings so their metrics don't shift.
-        double fontSize = TextState.FontSizeTouched ? TextState.FontSize
+        tb.fontSize = TextState.FontSizeTouched ? TextState.FontSize
             : Segments.FirstOrDefault(s => s.TextState.FontSizeTouched)?.TextState.FontSize
             ?? (Segments.Count > 0 ? Segments[1].TextState.FontSize : 12);
-        var lineSpacing = Segments.Count > 0 && Segments[1].TextState.LineSpacing > 0
+        tb.lineSpacing = Segments.Count > 0 && Segments[1].TextState.LineSpacing > 0
             ? Segments[1].TextState.LineSpacing
-            : fontSize * 1.2;
+            : tb.fontSize * 1.2;
 
-        // Word-wrap the text to fit page width, filling each line to the REAL
-        // measured width ("…under the plan onaccount" /
-        // "of each allowed" break exactly where the Helvetica advances run out).
-        var availWidth = page.Width - x - 72; // right margin
+        tb.availWidth = page.Width - x - 72; // right margin
 
-        var lines = new List<string>();
-        var cur = new System.Text.StringBuilder();
-        foreach (var word in totalText.Split(' '))
+        tb.lines = new List<string>();
+        tb.cur = new System.Text.StringBuilder();
+        foreach (var word in tb.totalText.Split(' '))
         {
-            var trial = cur.Length == 0 ? word : cur + " " + word;
-            if (MeasureHelv(trial, fontSize) <= availWidth || cur.Length == 0)
+            var trial = tb.cur.Length == 0 ? word : tb.cur + " " + word;
+            if (MeasureHelv(trial, tb.fontSize) <= tb.availWidth || tb.cur.Length == 0)
             {
-                if (cur.Length > 0) cur.Append(' ');
-                cur.Append(word);
+                if (tb.cur.Length > 0) tb.cur.Append(' ');
+                tb.cur.Append(word);
             }
             else
             {
-                lines.Add(cur.ToString());
-                cur.Clear();
-                cur.Append(word);
+                tb.lines.Add(tb.cur.ToString());
+                tb.cur.Clear();
+                tb.cur.Append(word);
             }
         }
-        if (cur.Length > 0 || lines.Count == 0) lines.Add(cur.ToString());
+        if (tb.cur.Length > 0 || tb.lines.Count == 0) tb.lines.Add(tb.cur.ToString());
 
-        // First baseline drops by the cap-height ascent from the band top (the
-        // same placement the flow's plain-fragment writer uses), so a heading
-        // line chains bottoms with its neighbours by exactly its own font size
-        // — stepping 758 → 748 → … → next heading at −12.
-        var capHeight = Aspose.Pdf.Text.Standard14Fonts.GetCapHeight("Helvetica");
-        var ascent = capHeight > 0 ? capHeight / 1000.0 * fontSize : fontSize * 0.7;
-        var baseline = y - ascent;
+        tb.capHeight = Aspose.Pdf.Text.Standard14Fonts.GetCapHeight("Helvetica");
+        tb.ascent = tb.capHeight > 0 ? tb.capHeight / 1000.0 * tb.fontSize : tb.fontSize * 0.7;
+        tb.baseline = y - tb.ascent;
 
         // Every content heading opens with an EMPTY text show at
         // the line start in the auto-created first segment's own size (so
         // extraction reports an empty 10 pt fragment before a 12 pt heading).
         if (Segments.Count > 1 && string.IsNullOrEmpty(Segments[0].Text))
-            builder.BeginText().SetFont(fontName, Segments[0].TextState.FontSize > 0
+            tb.builder.BeginText().SetFont(fontName, Segments[0].TextState.FontSize > 0
                     ? (double)Segments[0].TextState.FontSize : 10)
                 .SetFillColor(0, 0, 0)
-                .MoveTextPosition(x, baseline).ShowText(string.Empty).EndText();
+                .MoveTextPosition(x, tb.baseline).ShowText(string.Empty).EndText();
 
-        // The auto-sequence number is its OWN show at the margin and the
-        // heading text starts at a fixed 20 pt tab stop after it
-        // ("1  " at x=40, "Heading 0" at x=60 regardless of the number width).
-        var textX = x;
+        tb.textX = x;
         if (numberPrefix.Length > 0)
         {
-            builder.BeginText().SetFont(fontName, fontSize).SetFillColor(0, 0, 0)
-                .MoveTextPosition(x, baseline).ShowText(numberPrefix).EndText();
-            textX = x + 20;
+            tb.builder.BeginText().SetFont(fontName, tb.fontSize).SetFillColor(0, 0, 0)
+                .MoveTextPosition(x, tb.baseline).ShowText(numberPrefix).EndText();
+            tb.textX = x + 20;
         }
 
-        builder.BeginText();
-        builder.SetFont(fontName, fontSize);
-        builder.SetFillColor(0, 0, 0);
-        builder.MoveTextPosition(textX, baseline);
+        tb.builder.BeginText();
+        tb.builder.SetFont(fontName, tb.fontSize);
+        tb.builder.SetFillColor(0, 0, 0);
+        tb.builder.MoveTextPosition(tb.textX, tb.baseline);
 
-        for (var i = 0; i < lines.Count; i++)
+        for (var i = 0; i < tb.lines.Count; i++)
         {
             // Continuation lines return to the heading's left edge (the
             // number-tab indent applies to the FIRST line only —
             // "b.a  the value…" wraps back to the margin).
             if (i == 1)
-                builder.MoveTextPosition(x - textX, -lineSpacing);
+                tb.builder.MoveTextPosition(x - tb.textX, -tb.lineSpacing);
             else if (i > 1)
-                builder.MoveTextPosition(0, -lineSpacing);
-            builder.ShowText(lines[i]);
+                tb.builder.MoveTextPosition(0, -tb.lineSpacing);
+            tb.builder.ShowText(tb.lines[i]);
         }
-        builder.EndText();
+        tb.builder.EndText();
 
-        var height = fontSize + (lines.Count - 1) * lineSpacing;
-        return (builder.Build(), height);
+        tb.height = tb.fontSize + (tb.lines.Count - 1) * tb.lineSpacing;
+        return (tb.builder.Build(), tb.height);
     }
 }

@@ -8,6 +8,9 @@ namespace Aspose.Pdf.LogicalStructure;
 /// content through this state — values are stored only.</summary>
 public sealed class StructureTextState
 {
+    /// <summary>Creates a text state with its default values (12-point font size, no styling).</summary>
+    public StructureTextState() { }
+
     /// <summary>Font name applied to the run.</summary>
     public string? FontName { get; set; }
     /// <summary>Font size in points.</summary>
@@ -38,7 +41,7 @@ public sealed class StructureTextState
     public float WordSpacing { get; set; }
 
     /// <summary>Layout margin for the element the state is applied to. An
-    /// alternative to <see cref="Aspose.Pdf.Tagged.StructureElement.AdjustPosition"/>
+    /// alternative to <c>StructureElement.AdjustPosition</c>
     /// for positioning an authored block; consumed by the tagged-content renderer.</summary>
     public Aspose.Pdf.MarginInfo? MarginInfo { get; set; }
 }

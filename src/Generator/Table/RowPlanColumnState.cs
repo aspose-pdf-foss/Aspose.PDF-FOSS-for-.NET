@@ -57,6 +57,8 @@ private sealed class RowPlanColumnState
     // because the body leaves through a dozen different `continue`s.
     public int paraLineStart;
     public double paraLeading;
+    // …and the line box it declared, stamped alongside its leading.
+    public (double AscentEm, double DescentEm) paraLineBox;
     // CSS line-box mode: a cell whose lines carry mixed font sizes (styled HTML
     // paragraphs) stacks each line as its own box (1.2 × em) with the baseline at
     // ascent + half-leading — the uniform LineHeight grid can't express this.

@@ -13,29 +13,27 @@ internal static class CmsParser
 
     /// <summary>
     /// Parse a CMS ContentInfo and return the first SignerInfo's digest- and
-    /// signature-algorithm OIDs (dotted). Returns false on any parse failure or
+    /// signature-algorithm OIDs (dotted). Returns null on any parse failure or
     /// when the structure carries no signers.
     /// </summary>
-    public static bool TryGetSignerAlgorithms(byte[] cms, out string digestOid, out string signatureOid)
+    public static (string digestOid, string signatureOid)? TryGetSignerAlgorithms(byte[] cms)
     {
-        digestOid = string.Empty;
-        signatureOid = string.Empty;
         try
         {
             var signerInfos = ReadSignerInfos(cms);
-            if (signerInfos is null || !signerInfos.HasData) return false;
+            if (signerInfos is null || !signerInfos.HasData) return null;
 
             var signer = signerInfos.ReadSequence();
-            signer.ReadInteger();                            // version
-            signer.Skip();                                   // sid (issuerAndSerial | [0] subjectKeyId)
-            digestOid = signer.ReadSequence().ReadOid();     // digestAlgorithm
-            signer.TryReadContextConstructed(0);             // signedAttrs [0] IMPLICIT (optional)
-            signatureOid = signer.ReadSequence().ReadOid();  // signatureAlgorithm
-            return true;
+            signer.ReadInteger();                                // version
+            signer.Skip();                                       // sid (issuerAndSerial | [0] subjectKeyId)
+            var digestOid = signer.ReadSequence().ReadOid();     // digestAlgorithm
+            signer.TryReadContextConstructed(0);                 // signedAttrs [0] IMPLICIT (optional)
+            var signatureOid = signer.ReadSequence().ReadOid();  // signatureAlgorithm
+            return (digestOid, signatureOid);
         }
         catch
         {
-            return false;
+            return null;
         }
     }
 

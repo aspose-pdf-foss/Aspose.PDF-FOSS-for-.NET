@@ -4,6 +4,7 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Annotations;
 
+/// <summary>A text annotation: a sticky note shown as an icon on the page, whose text opens in a pop-up.</summary>
 public partial class TextAnnotation : MarkupAnnotation
 {
     internal TextAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
@@ -16,6 +17,7 @@ public partial class TextAnnotation : MarkupAnnotation
         Dict.Set("Subtype", new PdfName("Text"));
     }
 
+    /// <summary>Gets or sets whether the note is initially shown open (/Open). Defaults to false.</summary>
     public bool Open
     {
         get => Dict.Get("Open") is PdfBoolean b ? b.Value : Dict.GetInt("Open") != 0;

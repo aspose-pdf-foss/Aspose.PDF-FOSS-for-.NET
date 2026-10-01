@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net48;net10.0</TargetFrameworks>
     <LangVersion>12</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -20,5 +20,23 @@
   <ItemGroup>
     <ProjectReference Include="..\src\Aspose.Pdf.Foss.csproj" />
   </ItemGroup>
+
+  <!-- net48 mirrors the library's own old-target setup. As a friend assembly the tests already see
+       the library's internal copy of the polyfill sources, so only the language-feature generator is added here;
+       C# 13 matches the library, and nullable flow warnings are off against the unannotated BCL.
+       CS1685: the library shadows RuntimeHelpers on that target (src/Compat) and this friend
+       assembly sees both copies. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <PackageReference Include="PolySharp" Version="1.16.0" PrivateAssets="all" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.IO.Compression" />
+    <!-- The polyfill extension methods live in this namespace; the package adds the global using only where it is referenced. -->
+    <Using Include="Polyfills" />
+  </ItemGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net48'">
+    <LangVersion>13</LangVersion>
+    <Nullable>annotations</Nullable>
+    <NoWarn>$(NoWarn);CS1685</NoWarn>
+  </PropertyGroup>
 
 </Project>

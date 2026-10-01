@@ -34,149 +34,96 @@ public sealed partial class TextReplacer
     /// is unambiguous (1 byte/char simple encoding or 2 bytes/char CID). Returns null
     /// when the match isn't found or the boundaries can't be mapped to bytes.
     /// </summary>
-    private TjSplitPlan? ComputeTjSplit(PdfArray arr, string search,
-        Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, double fontSize,
-        double tc, double tw, PdfReader reader)
+    private TjSplitPlan? ComputeTjSplit(PdfArray arr, string search, Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, double fontSize, double tc, double tw, PdfReader reader)
     {
-        if (fontDict is null || fontSize <= 0 || string.IsNullOrEmpty(search)) return null;
-        FontMetrics? metrics;
-        try { metrics = FontMetrics.FromFontDict(fontDict, reader); } catch { return null; }
-        if (metrics is null) return null;
-        bool isCid = metrics.IsCid;
+        var js = new TjSplitComputeState();
+        js.arr = arr;
+        js.search = search;
+        js.toUnicode = toUnicode;
+        js.fontDict = fontDict;
+        js.fontSize = fontSize;
+        js.tc = tc;
+        js.tw = tw;
+        js.reader = reader;
+        if (js.fontDict is null || js.fontSize <= 0 || string.IsNullOrEmpty(js.search)) return null;
+        try { js.metrics = FontMetrics.FromFontDict(js.fontDict, js.reader); } catch { return null; }
+        if (js.metrics is null) return null;
+        js.isCid = js.metrics.IsCid;
 
-        // Advance of a byte run as originally drawn: glyph widths plus per-glyph Tc
-        // and, for single-byte encodings, per-space (byte 0x20) Tw — the PDF text
-        // state contributions FontMetrics doesn't know about.
-        double AdvOf(byte[] bytes)
+        js.charStart = new int[js.arr.Count];
+        js.localXBefore = new double[js.arr.Count];
+        js.decoded = new string?[js.arr.Count];
+        js.sb = new StringBuilder();
+        js.tjRule = TjBreakRuleOf(js.arr, js.toUnicode, js.fontDict, js.reader);
+        js.localX = 0;
+        for (int i = 0; i < js.arr.Count; i++)
         {
-            if (bytes.Length == 0) return 0;
-            double w = metrics!.MeasureString(bytes, fontSize);
-            int glyphs = isCid ? bytes.Length / 2 : bytes.Length;
-            w += glyphs * tc;
-            if (!isCid && tw != 0)
-                foreach (var b in bytes)
-                    if (b == 0x20) w += tw;
-            return w;
-        }
-
-        // Per-element char-start in the concatenated text (mirroring ConcatenateTJText's
-        // synthetic-space rule) and the pen advance before each element (kern-aware).
-        var charStart = new int[arr.Count];
-        var localXBefore = new double[arr.Count];
-        var decoded = new string?[arr.Count];
-        var sb = new StringBuilder();
-        var tjRule = TjBreakRuleOf(arr, toUnicode, fontDict, reader);
-        double localX = 0;
-        for (int i = 0; i < arr.Count; i++)
-        {
-            charStart[i] = sb.Length; localXBefore[i] = localX;
-            if (arr[i] is PdfString s)
+            js.charStart[i] = js.sb.Length; js.localXBefore[i] = js.localX;
+            if (js.arr[i] is PdfString s)
             {
-                var dec = DecodeString(s.Value, toUnicode, fontDict, reader);
-                decoded[i] = dec;
-                sb.Append(dec);
-                try { localX += AdvOf(s.Value); } catch { return null; }
+                var dec = DecodeString(s.Value, js.toUnicode, js.fontDict, js.reader);
+                js.decoded[i] = dec;
+                js.sb.Append(dec);
+                try { js.localX += AdvOf(js, s.Value); } catch { return null; }
             }
             else
             {
-                double v = arr[i] is PdfInteger ai ? ai.Value : arr[i] is PdfReal ar2 ? ar2.Value : 0;
-                if (tjRule.Breaks(v) && sb.Length > 0 && sb[^1] != ' ') sb.Append(' ');
-                localX += -v * fontSize / 1000.0;
+                double v = js.arr[i] is PdfInteger ai ? ai.Value : js.arr[i] is PdfReal ar2 ? ar2.Value : 0;
+                if (js.tjRule.Breaks(v) && js.sb.Length > 0 && js.sb[^1] != ' ') js.sb.Append(' ');
+                js.localX += -v * js.fontSize / 1000.0;
             }
         }
-        var concat = sb.ToString();
-        int matchStart = concat.IndexOf(search, StringComparison.Ordinal);
-        int matchEnd;
-        if (matchStart >= 0)
-            matchEnd = matchStart + search.Length;
+        js.concat = js.sb.ToString();
+        js.matchStart = js.concat.IndexOf(js.search, StringComparison.Ordinal);
+        if (js.matchStart >= 0)
+            js.matchEnd = js.matchStart + js.search.Length;
         else
         {
             // Normalized fallback (Arabic presentation forms): offsets aren't
             // byte-mappable in general, so only the match-at-start shape is kept
             // (pre-existing behaviour).
-            var nn = NormalizeForSearch(concat);
-            if (nn.IndexOf(NormalizeForSearch(search), StringComparison.Ordinal) != 0) return null;
-            matchStart = 0;
-            matchEnd = Math.Min(search.Length, concat.Length);
+            var nn = NormalizeForSearch(js.concat);
+            if (nn.IndexOf(NormalizeForSearch(js.search), StringComparison.Ordinal) != 0) return null;
+            js.matchStart = 0;
+            js.matchEnd = Math.Min(js.search.Length, js.concat.Length);
         }
 
-        // Byte offset of a char offset within element i; -1 when the mapping is
-        // ambiguous (decoded length doesn't line up with the byte count).
-        int ByteOff(int i, int charOff)
-        {
-            var dec = decoded[i]!;
-            var bytes = ((PdfString)arr[i]).Value;
-            if (charOff == 0) return 0;
-            if (charOff == dec.Length) return bytes.Length;
-            if (bytes.Length == dec.Length) return charOff;          // 1 byte/char
-            if (bytes.Length == dec.Length * 2) return charOff * 2;  // 2-byte CID
-            return -1;
-        }
+        if (!MapTjMatchToElements(js)) return null;
 
-        // Locate the elements containing the match start/end. A boundary that
-        // falls exactly between elements belongs to the LATER element for the
-        // start (offset 0) and the EARLIER one for the end (offset = length),
-        // so partial slices stay minimal.
-        int startEl = -1, endEl = -1, startOff = 0, endOff = 0;
-        for (int i = 0; i < arr.Count; i++)
-        {
-            if (arr[i] is not PdfString || decoded[i] is null) continue;
-            int len = decoded[i]!.Length;
-            if (startEl < 0 && matchStart >= charStart[i] && matchStart < charStart[i] + len)
-            { startEl = i; startOff = matchStart - charStart[i]; }
-            if (matchEnd > charStart[i] && matchEnd <= charStart[i] + len)
-            { endEl = i; endOff = matchEnd - charStart[i]; }
-        }
-        if (startEl < 0) return null;
-        if (endEl < 0)
-        {
-            // Match ends at/after the last text — trailing run is empty only if
-            // it really ends past every string element.
-            for (int i = arr.Count - 1; i >= 0; i--)
-                if (arr[i] is PdfString && decoded[i] is not null)
-                {
-                    if (matchEnd < charStart[i] + decoded[i]!.Length) return null;
-                    endEl = i; endOff = decoded[i]!.Length;
-                    break;
-                }
-            if (endEl < 0) return null;
-        }
+        js.startByte = ByteOff(js, js.startEl, js.startOff);
+        js.endByte = ByteOff(js, js.endEl, js.endOff);
+        if (js.startByte < 0 || js.endByte < 0) return null;
 
-        int startByte = ByteOff(startEl, startOff);
-        int endByte = ByteOff(endEl, endOff);
-        if (startByte < 0 || endByte < 0) return null;
-
-        var plan = new TjSplitPlan();
-        foreach (var el in arr)
-            if (el is PdfString ps0) { plan.IsHex = ps0.IsHex; break; }
+        js.plan = new TjSplitPlan();
+        foreach (var el in js.arr)
+            if (el is PdfString ps0) { js.plan.IsHex = ps0.IsHex; break; }
 
         // Head: whole elements before the match plus the pre-match slice.
-        for (int i = 0; i < startEl; i++) plan.Head.Add(arr[i]);
-        if (startByte > 0)
-            plan.Head.Add(new PdfString(((PdfString)arr[startEl]).Value[..startByte], plan.IsHex));
+        for (int i = 0; i < js.startEl; i++) js.plan.Head.Add(js.arr[i]);
+        if (js.startByte > 0)
+            js.plan.Head.Add(new PdfString(((PdfString)js.arr[js.startEl]).Value[..js.startByte], js.plan.IsHex));
 
-        // Suffix: the post-match slice plus the whole elements after it.
-        var endBytes = ((PdfString)arr[endEl]).Value;
-        if (endByte < endBytes.Length)
-            plan.Suffix.Add(new PdfString(endBytes[endByte..], plan.IsHex));
-        for (int i = endEl + 1; i < arr.Count; i++) plan.Suffix.Add(arr[i]);
+        js.endBytes = ((PdfString)js.arr[js.endEl]).Value;
+        if (js.endByte < js.endBytes.Length)
+            js.plan.Suffix.Add(new PdfString(js.endBytes[js.endByte..], js.plan.IsHex));
+        for (int i = js.endEl + 1; i < js.arr.Count; i++) js.plan.Suffix.Add(js.arr[i]);
 
-        plan.SuffixAdvX = localXBefore[endEl] + AdvOf(endBytes[..endByte]);
+        js.plan.SuffixAdvX = js.localXBefore[js.endEl] + AdvOf(js, js.endBytes[..js.endByte]);
 
         // Fold the suffix's LEADING kerns into the anchor advance: the re-anchor Tm
         // must sit at the first trailing GLYPH's position. A kern left at the array
         // head would displace the pen after the Tm, and consumers that take a
         // fragment's origin from the operation start would report the pre-kern
         // position instead of where the trailing text actually is.
-        while (plan.Suffix.Count > 0 && plan.Suffix[0] is not PdfString)
+        while (js.plan.Suffix.Count > 0 && js.plan.Suffix[0] is not PdfString)
         {
-            double kv = plan.Suffix[0] is PdfInteger ki2 ? ki2.Value
-                : plan.Suffix[0] is PdfReal kr2 ? kr2.Value : 0;
-            plan.LeadingGap += -kv * fontSize / 1000.0;
-            plan.Suffix.RemoveAt(0);
+            double kv = js.plan.Suffix[0] is PdfInteger ki2 ? ki2.Value
+                : js.plan.Suffix[0] is PdfReal kr2 ? kr2.Value : 0;
+            js.plan.LeadingGap += -kv * js.fontSize / 1000.0;
+            js.plan.Suffix.RemoveAt(0);
         }
-        plan.SuffixAdvX += plan.LeadingGap;
-        return plan;
+        js.plan.SuffixAdvX += js.plan.LeadingGap;
+        return js.plan;
     }
 
     /// <summary>Emit the suffix run re-anchored at its original absolute position:
@@ -278,7 +225,7 @@ public sealed partial class TextReplacer
         // Font-switched replacement for the matched run (drawn at the current pen).
         var fs = fontSize.ToString("0.####", CultureInfo.InvariantCulture);
         result.Write(Encoding.ASCII.GetBytes($"/{c.resName} {fs} Tf <"));
-        result.Write(Encoding.ASCII.GetBytes(Convert.ToHexString(c.hexIds)));
+        result.Write(Encoding.ASCII.GetBytes(Compat.ToHexString(c.hexIds)));
         result.Write(Encoding.ASCII.GetBytes("> Tj "));
 
         // Trailing run back in the original font, re-anchored at its original
@@ -311,7 +258,7 @@ public sealed partial class TextReplacer
             if (cid is { } c)
             {
                 result.Write(Encoding.ASCII.GetBytes($"/{c.resName} {fs} Tf <"));
-                result.Write(Encoding.ASCII.GetBytes(Convert.ToHexString(c.hexIds)));
+                result.Write(Encoding.ASCII.GetBytes(Compat.ToHexString(c.hexIds)));
                 result.Write(Encoding.ASCII.GetBytes($"> {showOp} /{currentFontName} {fs} Tf"));
                 return;
             }
@@ -325,7 +272,7 @@ public sealed partial class TextReplacer
             if (times is { } t)
             {
                 result.Write(Encoding.ASCII.GetBytes($"/{t.resName} {fs} Tf <"));
-                result.Write(Encoding.ASCII.GetBytes(Convert.ToHexString(t.hexIds)));
+                result.Write(Encoding.ASCII.GetBytes(Compat.ToHexString(t.hexIds)));
                 result.Write(Encoding.ASCII.GetBytes($"> {showOp} /{currentFontName} {fs} Tf"));
                 return;
             }
@@ -343,7 +290,7 @@ public sealed partial class TextReplacer
         if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_REPLDEBUG") == "1")
             Console.Error.WriteLine($"[fallback-emit] newText='{newText}' font={currentFontName} fs={fs}");
         result.Write(Encoding.ASCII.GetBytes($"/{fallbackFont} {fs} Tf "));
-        var latin = Encoding.Latin1.GetBytes(newText);
+        var latin = Compat.Latin1.GetBytes(newText);
         WriteStringOperand(result, latin, false);
         result.Write(Encoding.ASCII.GetBytes($" {showOp} /{currentFontName} {fs} Tf"));
     }

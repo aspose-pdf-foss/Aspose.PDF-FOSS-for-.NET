@@ -220,6 +220,75 @@ public class TextAbsorberEncodingTests
     }
 
     [Fact]
+    public void GlyphNameToUnicode_AdobeGlyphList2_0_FullyLoaded()
+    {
+        var glyph = TextAbsorber.GlyphNameToUnicode;
+
+        // The combined resource (Adobe's 2.0 list plus its own 1.2 supplement)
+        // resolves to 4,200 single-codepoint names, plus the 16 PDF/ZapfDingbats
+        // names the list itself does not carry.
+        Assert.Equal(4200 + 16, glyph.Count);
+
+        // Names the list does not carry.
+        Assert.Equal("\uFFFD", glyph[".notdef"]);
+        Assert.Equal("\uFFFD", glyph["notdef"]);
+        Assert.Equal("\u0000", glyph["null"]);
+        Assert.Equal("\u000D", glyph["CR"]);
+        Assert.Equal("\u25A1", glyph["square"]);
+        Assert.Equal("\u2701", glyph["a1"]);
+        Assert.Equal("\u261E", glyph["a11"]);
+
+        // The 1.2 supplement, appended after the 2.0 list, gives "Delta" and
+        // "Omega" the Greek letters rather than the 2.0 list's own increment
+        // and ohm-sign answer for those names -- see LoadGlyphNames.
+        Assert.Equal("\u0394", glyph["Delta"]);
+        Assert.Equal("\u03A9", glyph["Omega"]);
+        // "mu" is pinned to the 2.0 list's own answer, the micro sign, rather
+        // than letting the 1.2 supplement's Greek mu win.
+        Assert.Equal("\u00B5", glyph["mu"]);
+
+        // The 2.0 list's own separate, disambiguated entries are untouched.
+        Assert.Equal("\u2206", glyph["increment"]);
+        Assert.Equal("\u2126", glyph["Ohm"]);
+        Assert.Equal("\u03A9", glyph["Omegagreek"]);
+
+        // Names the earlier hand-written table never carried.
+        Assert.Equal("\u0431", glyph["becyrillic"]);
+        Assert.Equal("\u05D3", glyph["dalethebrew"]);
+        Assert.Equal("\u0641", glyph["feharabic"]);
+    }
+
+    [Fact]
+    public void UnicodeToGlyphName_ReverseLookupBuilt()
+    {
+        var reverse = TextAbsorber.UnicodeToGlyphName;
+
+        Assert.Equal("space", reverse[0x0020]);
+        Assert.Equal("Delta", reverse[0x0394]);
+        Assert.Equal("Omega", reverse[0x03A9]);
+        Assert.Equal("mu", reverse[0x00B5]);
+        Assert.Equal("mu", reverse[0x03BC]);
+    }
+
+    [Fact]
+    public void AdobeGlyphOnlyTables_ExcludeTheNonAdobeExtras()
+    {
+        // Adobe's own list resolves to 4,200 single-codepoint names and 3,680
+        // distinct codepoints (some names are synonyms for the same one) --
+        // a caller reporting or reading from Adobe's own list uses
+        // AdobeGlyphNameToUnicode/AdobeUnicodeToGlyphName rather than
+        // GlyphNameToUnicode/UnicodeToGlyphName, which also carry the 16
+        // PDF-synthetic names this engine keeps beside it.
+        Assert.Equal(4200, TextAbsorber.AdobeGlyphNameToUnicode.Count);
+        Assert.Equal(3680, TextAbsorber.AdobeUnicodeToGlyphName.Count);
+        Assert.Equal(4200 + 16, TextAbsorber.GlyphNameToUnicode.Count);
+
+        Assert.False(TextAbsorber.AdobeGlyphNameToUnicode.ContainsKey(".notdef"));
+        Assert.False(TextAbsorber.AdobeUnicodeToGlyphName.ContainsKey(0xFFFD));
+        Assert.Equal("µ", TextAbsorber.AdobeGlyphNameToUnicode["mu"]);
+    }
+
+    [Fact]
     public void WinAnsiEncoding_AsciiRange_Unchanged()
     {
         // ASCII bytes should pass through unchanged with WinAnsiEncoding

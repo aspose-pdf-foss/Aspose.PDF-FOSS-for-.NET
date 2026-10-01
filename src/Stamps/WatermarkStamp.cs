@@ -1,6 +1,6 @@
 using Aspose.Pdf.Content;
 
-namespace Aspose.Pdf.Stamps;
+namespace Aspose.Pdf;
 
 /// <summary>
 /// A watermark stamp that draws diagonal text across the page.

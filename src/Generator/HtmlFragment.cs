@@ -106,6 +106,7 @@ public class HtmlFragment : BaseParagraph
 /// </summary>
 public sealed class HtmlLoadOptions : LoadOptions
 {
+    /// <summary>Creates HTML load options with default settings and no base path for relative URLs.</summary>
     public HtmlLoadOptions() { }
 
     /// <summary>
@@ -125,8 +126,13 @@ public sealed class HtmlLoadOptions : LoadOptions
     /// context only.</summary>
     internal bool BasePathAutoDerived { get; set; }
 
-    /// <summary>Whether to embed fonts used in the HTML.</summary>
-    public bool IsEmbedFonts { get; set; }
+    /// <summary>Whether to embed fonts used in the HTML (on by default, as the engine does).</summary>
+    public bool IsEmbedFonts { get => _isEmbedFonts ?? true; set => _isEmbedFonts = value; }
+    private bool? _isEmbedFonts;
+
+    /// <summary>Whether the caller set IsEmbedFonts at all: the header stamper binds a
+    /// fragment's CSS face to a real program only on an explicit request.</summary>
+    internal bool IsEmbedFontsSet => _isEmbedFonts.HasValue;
 
     /// <summary>Render the entire HTML onto a single PDF page (canonical option).</summary>
     public bool IsRenderToSinglePage { get; set; }

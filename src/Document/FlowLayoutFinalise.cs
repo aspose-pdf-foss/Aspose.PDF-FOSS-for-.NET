@@ -43,7 +43,7 @@ public sealed partial class Document
             if (_overflowBuffer is null) _startPage.AddImage(data, rect);
             else
             {
-                _pendingImages.Add((_currentSlot, data, rect));
+                _pendingImages.Add((_currentSlot, data, rect, false));
                 // An overflow page is materialised from its CONTENT buffer, and a queued
                 // image is not content — without a block here the buffer looks empty, the
                 // slot never becomes a page, and the image binds nowhere.
@@ -53,6 +53,56 @@ public sealed partial class Document
             _lastBodyBaseline = null;
             _colDeepestY = Math.Min(_colDeepestY, _curY);
             RecordSlotBottom(_colLefts is not null ? _colDeepestY : _curY);
+        }
+
+        /// <summary>Draw a picture a block laid at the cursor (a table cell's) on the region
+        /// the flow is in: at once on the start page, queued against the slot once the flow
+        /// has overflowed -- and, while the flow defers its text, in the deferred queue at its
+        /// place, so a cell background written after it in the block does not cover it.</summary>
+        public void PlaceBlockPicture(byte[] data, Rectangle rect)
+        {
+            if (_forceDeferredWrites)
+            {
+                _pendingRenderPictures[_pendingEmbeddedRenders.Count] = (data, rect);
+                QueueDeferredPlaceholder();
+                return;
+            }
+            if (_overflowBuffer is null) _startPage.AddImage(data, rect);
+            else _pendingImages.Add((_currentSlot, data, rect, false));
+        }
+
+        /// <summary>Content a block laid at the cursor while the flow defers its text: it
+        /// waits in the deferred queue at its place, so the page's stream keeps flow order.</summary>
+        private void QueueDeferredContent(byte[] content)
+        {
+            _pendingRenderOps[_pendingEmbeddedRenders.Count] = content;
+            QueueDeferredPlaceholder();
+        }
+
+        /// <summary>The queue entry a deferred block's content or picture stands behind: no
+        /// text of its own, on the current slot, whose buffer it marks non-empty.</summary>
+        private void QueueDeferredPlaceholder()
+        {
+            _pendingEmbeddedRenders.Add((_currentSlot, 0, _curY, string.Empty, new Text.TextState(), 0, null));
+            if (_overflowBuffer is not null) _overflowBuffer.Add(Array.Empty<byte>());
+        }
+
+        /// <summary>Draw an image frame, and the paint that goes under it, on the
+        /// region the flow is in: on the start page directly, else queued against
+        /// the current slot and bound when that slot becomes a page. The caller
+        /// has settled the rectangle and moves the cursor itself.</summary>
+        public void PlaceImageFrame(byte[] data, Rectangle rect, byte[] paint, bool blackWhite)
+        {
+            if (_overflowBuffer is null)
+            {
+                if (paint.Length > 0) _startPage.AddContentStream(paint);
+                _startPage.AddImage(data, rect, blackWhite);
+                return;
+            }
+            // A queued image is not content; the paint (or an empty block) keeps
+            // the slot's buffer non-empty so the slot becomes a page.
+            _overflowBuffer.Add(paint);
+            _pendingImages.Add((_currentSlot, data, rect, blackWhite));
         }
 
         /// <summary>Reserve a w×h block at the cursor for an annotation added
@@ -92,8 +142,7 @@ public sealed partial class Document
         {
             foreach (var (slot, ops) in _pendingRules)
             {
-                var target = slot < 0 ? _startPage :
-                    slot < overflowPageRefs.Count ? overflowPageRefs[slot] : null;
+                var target = SlotPage(slot, overflowPageRefs);
                 target?.AddContentStream(ops);
             }
         }
@@ -106,8 +155,7 @@ public sealed partial class Document
         public void FinaliseAnnotations(IList<Page> overflowPageRefs, int documentPageCount = int.MaxValue)
         {
             Page? PageOf(int slot) =>
-                slot < 0 ? _startPage :
-                slot < overflowPageRefs.Count ? overflowPageRefs[slot] : null;
+                SlotPage(slot, overflowPageRefs);
             _finalPageCount = documentPageCount;
 
             foreach (var (slot, rect, hyperlink) in _pendingLinks)
@@ -144,14 +192,12 @@ public sealed partial class Document
         {
             foreach (var (slot, field, rect) in _pendingFieldBlocks)
             {
-                var fpg = slot < 0 ? _startPage :
-                    slot < overflowPageRefs.Count ? overflowPageRefs[slot] : null;
+                var fpg = SlotPage(slot, overflowPageRefs);
                 if (fpg is null) continue;
                 field.PlaceGeneratorWidget(fpg, rect);
             }
             Page? PageOf(int slot) =>
-                slot < 0 ? _startPage :
-                slot < overflowPageRefs.Count ? overflowPageRefs[slot] : null;
+                SlotPage(slot, overflowPageRefs);
 
             foreach (var (slot, rect, checkedState) in _pendingFormFields)
             {
@@ -160,6 +206,7 @@ public sealed partial class Document
                 var checkbox = new Aspose.Pdf.Forms.CheckboxField(pg, rect) { Checked = checkedState };
                 doc.Form.Add(checkbox, pg.Number);
             }
+            FinaliseInlineRadios(overflowPageRefs, doc);
         }
 
         // Bind a flow-placed annotation to its final page: translate the authored
@@ -216,14 +263,21 @@ public sealed partial class Document
         public void FinaliseEmbeddedRenders(IList<Page> overflowPageRefs)
         {
             Page? PageOf(int slot) =>
-                slot < 0 ? _startPage :
-                slot < overflowPageRefs.Count ? overflowPageRefs[slot] : null;
+                SlotPage(slot, overflowPageRefs);
 
             for (var ri = 0; ri < _pendingEmbeddedRenders.Count; ri++)
             {
                 var (slot, x, y, text, textState, fontSize, baseline) = _pendingEmbeddedRenders[ri];
                 var target = PageOf(slot);
                 if (target is null) continue;
+                // A block's content or picture that waited in the queue keeps its place in it.
+                if (_pendingRenderOps.TryGetValue(ri, out var ops)) { target.AddContentStream(ops); continue; }
+                if (_pendingRenderPictures.TryGetValue(ri, out var picture))
+                {
+                    try { target.AddImage(picture.Data, picture.Rect); }
+                    catch (ArgumentException) { }
+                    continue;
+                }
                 var sub = new Text.TextFragment(text)
                 {
                     Position = new Text.Position(x, baseline ?? (y - fontSize))
@@ -231,6 +285,12 @@ public sealed partial class Document
                 if (_pendingRenderPitch.TryGetValue(ri, out var pitch))
                     sub.TextState.FlowLinePitch = pitch;
                 var clipped = _pendingRenderClip.TryGetValue(ri, out var clip);
+                // The reference paints a paragraph's underline BEFORE its clipped text
+                // ([q rule Q] q re W n BT ... ET Q), the rule under the glyphs rather than
+                // over their descenders; a test reads the rule's colour as the page's
+                // second live operator. The rule goes in AFTER the text is written (its
+                // extent is measured by the writer) at the slot recorded here.
+                var ruleSlot = target.ContentStreamCount;
                 if (clipped)
                 {
                     var cb = new Content.ContentStreamBuilder();
@@ -249,15 +309,40 @@ public sealed partial class Document
                 sub.TextState.ForegroundColor = textState.ForegroundColor;
                 sub.TextState.IsBold = textState.IsBold;
                 sub.TextState.IsItalic = textState.IsItalic;
+                // A stroke asked for by the render mode, or by a synthetic bold pen, rides too:
+                // the builder strokes a fill-then-stroke run with the pen it derives from the size.
+                sub.TextState.RenderingMode = textState.FormattingOptions is { SyntheticBoldPen: > 0 }
+                    && textState.RenderingMode == Text.TextRenderingMode.FillText
+                    ? Text.TextRenderingMode.FillThenStrokeText : textState.RenderingMode;
+                sub.TextState.StrokingColor = textState.StrokingColor;
+                if (textState.FormattingOptions is { SyntheticBoldPen: > 0 } bold) sub.TextState.LineWidth = (float)bold.SyntheticBoldPen;
+                else if (textState.LineWidth != 1.0) sub.TextState.LineWidth = textState.LineWidth;
                 // Underline must survive the deferred hop — TextBuilder draws it
                 // as a rectangle at save time from the fragment state.
                 sub.TextState.Underline = textState.Underline;
                 sub.TextState.IsStrikeOut = textState.IsStrikeOut;
                 // Rotation too: the highlight and the glyph run both turn with it.
                 sub.TextState.Rotation = textState.Rotation;
+                sub.TextState.TextRise = textState.TextRise;
+                sub.TextState.HorizontalScaling = textState.HorizontalScaling;
                 // Carry the leading so a multi-line chunk renders on the same pitch
                 // the paginator reserved (fontSize + LineSpacing), not a default 1.2x.
                 sub.TextState.LineSpacing = textState.LineSpacing;
+                // A synthetic slant or a skew shears the run's matrix as the flow's own writer shears it.
+                if (textState.FormattingOptions is { } shear)
+                {
+                    sub.TextState.FormattingOptions.Slope = shear.Slope;
+                    sub.TextState.FormattingOptions.Skew = shear.Skew;
+                    sub.TextState.FormattingOptions.SyntheticItalicLean = shear.SyntheticItalicLean;
+                }
+                // The spacing a line was stretched (or set) with rides its glyphs too.
+                sub.TextState.CharacterSpacing = textState.CharacterSpacing;
+                sub.TextState.WordSpacing = textState.WordSpacing;
+                if (_pendingRenderSpacing.TryGetValue(ri, out var spacing))
+                {
+                    sub.TextState.CharacterSpacing = (float)spacing.Tc;
+                    sub.TextState.WordSpacing = (float)spacing.Tw;
+                }
                 // Carry the highlight so TextBuilder draws the per-line background rectangle
                 // (the non-embedded path passes it through BuildWrappedTextStream; the embedded
                 // path must copy it here or the highlight is silently dropped).
@@ -268,6 +353,8 @@ public sealed partial class Document
                 sub.TextState.MarkedContentMcid = textState.MarkedContentMcid;
                 var tb = new Text.TextBuilder(target);
                 tb.AppendTextInline(sub);
+                if (target.TakeUnderlineBytes(sub) is { } rule)
+                    target.InsertContentStreamAt(ruleSlot, rule);
                 if (clipped)
                 {
                     var ce = new Content.ContentStreamBuilder();
@@ -284,8 +371,7 @@ public sealed partial class Document
         {
             if (!_logNotifications || _notificationsBySlot.Count == 0) return;
             Page? PageOf(int slot) =>
-                slot < 0 ? _startPage :
-                slot < overflowPageRefs.Count ? overflowPageRefs[slot] : null;
+                SlotPage(slot, overflowPageRefs);
             foreach (var kv in _notificationsBySlot)
             {
                 var page = PageOf(kv.Key);
@@ -338,12 +424,11 @@ public sealed partial class Document
         /// Runs before the deferred text so overlapping glyphs paint on top.</summary>
         public void FinaliseImages(IList<Page> overflowPageRefs)
         {
-            foreach (var (slot, data, rect) in _pendingImages)
+            foreach (var (slot, data, rect, blackWhite) in _pendingImages)
             {
-                var target = slot < 0 ? _startPage :
-                    slot < overflowPageRefs.Count ? overflowPageRefs[slot] : null;
+                var target = SlotPage(slot, overflowPageRefs);
                 if (target is null) continue;
-                try { target.AddImage(data, rect); }
+                try { target.AddImage(data, rect, blackWhite); }
                 catch (ArgumentException) { }
             }
         }

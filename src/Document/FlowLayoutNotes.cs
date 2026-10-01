@@ -135,132 +135,7 @@ public sealed partial class Document
                 if (paras[pi] is Table noteTbl) groups.Add(new List<BaseParagraph> { noteTbl });
             }
             if (groups.Count == 0 && e.Marker.Length > 0) groups.Add(new List<BaseParagraph>());
-            for (var gi = 0; gi < groups.Count; gi++)
-            {
-                var group = groups[gi];
-                var head = group.Count > 0 ? group[0] : null;
-                var runs = new List<StyledRun>();
-                if (gi == 0 && e.Marker.Length > 0)
-                    runs.Add(new StyledRun
-                    {
-                        Text = e.Marker, Size = e.ParentSize, NoteMark = true, Sup = true, Note = e.Note,
-                        State = new Text.TextState { ForegroundColor = e.Note.TextState?.ForegroundColor },
-                    });
-                double groupLs = 0, groupFs = 0;
-                // A table paragraph is the whole line: it renders as a grid from the
-                // band cursor (indented past the mark when it opens the note) and the
-                // line is as tall as the grid.
-                if (group.Count == 1 && group[0] is Table bandTable)
-                {
-                    var markW = 0.0;
-                    if (runs.Count > 0 && runs[0].NoteMark)
-                        markW = MeasureStyled(runs[0].Text, runs[0], StyledRunSize(runs[0]));
-                    var tblLeft = g.Left + markW;
-                    bandTable.FlowLeftOffset = tblLeft;
-                    bandTable.BuildMultiPage(_startPage, _startPageHeight - _marginTop,
-                        0, 0, measureOnly: true);
-                    var tblH = bandTable.LastRenderedHeight;
-                    var tblLine = new BandLine
-                    {
-                        Pitch = tblH, TextHeight = 0, HasText = false,
-                        NaturalWidth = markW, Note = e.Note,
-                        NoteFirst = gi == 0, ParaFirst = true, LastOfParagraph = true,
-                        Align = HorizontalAlignment.Left, Left = 0,
-                        TableBlock = bandTable, TableLeft = tblLeft,
-                    };
-                    foreach (var r in runs) tblLine.Cells.Add((0, r.Text, r, StyledRunSize(r)));
-                    lines.Add(tblLine);
-                    continue;
-                }
-                foreach (var member in group)
-                {
-                    if (member is Image gImg)
-                    {
-                        // A picture in a note band: laid at the band cursor after
-                        // whatever precedes it on the line, its own size (the flow
-                        // image rule), and giving the line no height of its own
-                        // while the line carries text.
-                        if (LoadFlowImage(gImg, g.Width, 0, out var giData, out var giW, out var giH))
-                            runs.Add(new StyledRun { ImageData = giData, ImageW = giW, ImageH = giH });
-                        continue;
-                    }
-                    if (member is not Text.TextFragment tf) continue;
-                    var parent = tf.TextState;
-                    var pfs = parent.FontSizeTouched ? (double)parent.FontSize : 0;
-                    if (parent.LineSpacing > groupLs) groupLs = parent.LineSpacing;
-                    foreach (var seg in tf.Segments)
-                    {
-                        var st = seg.TextState;
-                        if (st.LineSpacing > groupLs) groupLs = st.LineSpacing;
-                        if (string.IsNullOrEmpty(seg.Text)) continue;
-                        var size = st.FontSizeTouched ? (double)st.FontSize : pfs > 0 ? pfs : 10;
-                        if (size > groupFs) groupFs = size;
-                        var merged = new Text.TextState
-                        {
-                            ForegroundColor = st.ForegroundColor ?? parent.ForegroundColor,
-                            Underline = st.Underline || parent.Underline,
-                            IsBold = st.IsBold || parent.IsBold,
-                            IsItalic = st.IsItalic || parent.IsItalic,
-                        };
-                        var font = st.Font?.SourceFontData is not null ? st.Font
-                            : parent.Font?.SourceFontData is not null ? parent.Font : null;
-                        if (font is not null) merged.Font = font;
-                        if ((st.FontData ?? parent.FontData) is { } fd) merged.FontData = fd;
-                        var name = st.FontName ?? parent.FontName;
-                        if (!string.IsNullOrEmpty(name) && font is null) merged.FontName = name;
-                        runs.Add(new StyledRun
-                        {
-                            Text = seg.Text, Size = size, State = merged, Sup = st.Superscript,
-                            Link = seg.Hyperlink ?? tf.HyperlinkValue,
-                        });
-                    }
-                }
-                var headTf = head as Text.TextFragment;
-                var align = headTf is null ? HorizontalAlignment.Left
-                    : headTf.HorizontalAlignment != HorizontalAlignment.Left ? headTf.HorizontalAlignment
-                    : headTf.TextState.HorizontalAlignment;
-                // ⚠ TextFragment SHADOWS BaseParagraph.Margin with `new`, so reading it
-                // through the base-typed head returns the fragment's UNSET base object
-                // and a margined note paragraph loses its box.
-                var hm = headTf is not null ? headTf.Margin : head?.Margin;
-                double mTop = hm?.Top ?? 0, mBottom = hm?.Bottom ?? 0, mLeft = hm?.Left ?? 0, mRight = hm?.Right ?? 0;
-                var paintFromRule = mTop != 0 || mBottom != 0 || mLeft != 0 || mRight != 0;
-                var fullWidth = noteHead is Text.TextFragment { AutoNoteText: false };
-                var laid = LayoutStyledLines(runs, Math.Max(1, g.Width - mLeft - mRight));
-                for (var li = 0; li < laid.Count; li++)
-                {
-                    var (left, cells) = laid[li];
-                    double maxBase = 0, markSize = 0, width = 0, maxImage = 0;
-                    foreach (var (x, text, r) in cells)
-                    {
-                        var sz = StyledRunSize(r);
-                        if (r.ImageData is not null)
-                        {
-                            maxImage = Math.Max(maxImage, r.ImageH);
-                            width = Math.Max(width, x + r.ImageW);
-                            continue;
-                        }
-                        if (r.NoteMark) markSize = Math.Max(markSize, sz);
-                        else if (!r.Sup) maxBase = Math.Max(maxBase, r.Size);
-                        if (text.Length > 0) width = Math.Max(width, x + MeasureStyled(text, r, sz));
-                    }
-                    var hasText = maxBase > 0;
-                    var h = hasText ? maxBase
-                        : maxImage > 0 ? maxImage
-                        : li == 0 && groupFs > 0 ? groupFs : markSize > 0 ? markSize : 10;
-                    var bl = new BandLine
-                    {
-                        Pitch = hasText ? h + groupLs : h, TextHeight = hasText ? h : 0, HasText = hasText,
-                        NaturalWidth = width, Note = e.Note,
-                        NoteFirst = gi == 0 && li == 0, ParaFirst = li == 0, LastOfParagraph = li == laid.Count - 1,
-                        Align = align, Left = mLeft + left, FullWidthBox = fullWidth,
-                        MarginTop = li == 0 ? mTop : 0, MarginBottom = li == laid.Count - 1 ? mBottom : 0,
-                        ParaMarginTop = mTop, PaintFromRule = paintFromRule,
-                    };
-                    foreach (var (x, text, r) in cells) bl.Cells.Add((x, text, r, StyledRunSize(r)));
-                    lines.Add(bl);
-                }
-            }
+            LayoutNoteGroups(groups, lines, e, g, noteHead);
             if (closing is not null)
                 lines.Add(new BandLine
                 {
@@ -451,49 +326,9 @@ public sealed partial class Document
             else top = _startPageHeight - _marginTop - _lastTextLinePitch;
             var ruleY = top + g.MarginTop + 1;
             Trace($"draw slot={slot} H={H:F1} top={top:F1} hasBody={hasBody} footer={g.HasFooter} anchor={g.AnchorBottom:F1} prevHadBody={prevHadBody}");
-            if (hasBody || (!g.HasFooter && prevHadBody))
-            {
-                double maxW = 0; var full = false;
-                foreach (var l in lines)
-                {
-                    maxW = Math.Max(maxW, l.Left + l.NaturalWidth);
-                    full |= l.FullWidthBox;
-                }
-                var ruleRight = full ? g.Right : Math.Min(g.Left + maxW, g.Right);
-                EmitNoteRule(slot, ruleY, _marginLeft, ruleRight);
-            }
-            // A margined paragraph is clipped to its box — which is placed
-            // the rule gap plus the bottom margin above the paragraph's
-            // natural slot, so its text (painted higher still) shows only what
-            // reaches into the box. Pre-walk the cursor for each such box.
-            var clipBoxes = new Dictionary<int, Rectangle>();
-            {
-                var Tw = top; var paraStart = -1; double paraBoxH = 0, paraLeft = 0;
-                for (var li = 0; li < lines.Count; li++)
-                {
-                    var ln = lines[li];
-                    if (ln.ParaFirst)
-                    {
-                        paraStart = li; paraBoxH = 0; paraLeft = ln.Left;
-                        if (ln.NoteFirst)
-                            foreach (var (cx, ct, cr, cs) in ln.Cells)
-                                if (cr.NoteMark && ct.Length > 0) paraLeft = Math.Max(paraLeft, ln.Left + cx + MeasureStyled(ct, cr, cs));
-                    }
-                    Tw -= ln.MarginTop;
-                    Tw -= ln.Pitch;
-                    paraBoxH += ln.Pitch + HighlightBoxExtraEm * ln.TextHeight;
-                    if (ln.LastOfParagraph)
-                    {
-                        if (ln.PaintFromRule)
-                        {
-                            var shift = 1 + ln.MarginBottom;
-                            var box = new Rectangle(g.Left + paraLeft, Tw + shift, g.Right, Tw + shift + paraBoxH);
-                            for (var k = paraStart; k <= li; k++) clipBoxes[k] = box;
-                        }
-                        Tw -= ln.MarginBottom;
-                    }
-                }
-            }
+            if (hasBody || (!g.HasFooter && prevHadBody)) EmitBandRule(slot, lines, g, ruleY);
+
+            var clipBoxes = BandParagraphClipBoxes(lines, g, top);
             var T = top;
             double paraOffset = 0;
             for (var lineIdx = 0; lineIdx < lines.Count; lineIdx++)
@@ -509,43 +344,7 @@ public sealed partial class Document
                 var markerT = T;
                 T -= line.MarginTop;
                 var textT = line.PaintFromRule ? ruleY + 1 + line.ParaMarginTop - paraOffset : T;
-                var xs = CellXs(line, Math.Max(1, g.Width - line.Left));
-                Hyperlink? runLink = null; double linkX0 = 0, linkX1 = 0;
-                void FlushLink()
-                {
-                    if (runLink is not null && linkX1 > linkX0)
-                        _pendingLinks.Add((slot, new Rectangle(linkX0, textT - line.Pitch, linkX1, textT), runLink));
-                    runLink = null;
-                }
-                for (var ci = 0; ci < line.Cells.Count; ci++)
-                {
-                    var (_, text, r, size) = line.Cells[ci];
-                    if (r.ImageData is not null)
-                    {
-                        FlushLink();
-                        var ix = g.Left + line.Left + xs[ci];
-                        _pendingImages.Add((slot, r.ImageData,
-                            new Rectangle(ix, markerT - r.ImageH, ix + r.ImageW, markerT)));
-                        continue;
-                    }
-                    if (text.Length == 0) continue;
-                    var x = g.Left + line.Left + xs[ci];
-                    if (r.NoteMark)
-                    {
-                        FlushLink();
-                        var my = markerT - size + Std14Seat(r.State, size);
-                        _pendingEmbeddedRenders.Add((slot, x, my + size, text, r.State, size, my));
-                        continue;
-                    }
-                    var y = textT - line.Pitch + (r.Sup ? 0.33 * line.TextHeight : 0) + Std14Seat(r.State, size);
-                    _pendingEmbeddedRenders.Add((slot, x, y + size, text, r.State, size, y));
-                    if (lineClip is not null) _pendingRenderClip[_pendingEmbeddedRenders.Count - 1] = lineClip;
-                    var w = MeasureStyled(text, r, size);
-                    if (r.Link is null) { FlushLink(); continue; }
-                    if (!ReferenceEquals(runLink, r.Link)) { FlushLink(); runLink = r.Link; linkX0 = x; }
-                    linkX1 = x + w;
-                }
-                FlushLink();
+                DrawBandLineCells(slot, line, g, lineClip, markerT, textT);
                 if (line.TableBlock is { } bandTbl)
                     _pendingBandTables.Add((slot, bandTbl, line.TableLeft, T));
                 T -= line.Pitch;
@@ -553,6 +352,102 @@ public sealed partial class Document
                 T -= line.MarginBottom;
             }
         }
+
+        /// <summary>The separator rule over the band, reaching the widest line's natural right
+        /// edge — or the whole band width when some line declares a full-width box.</summary>
+        private void EmitBandRule(int slot, List<BandLine> lines, BandGeometry g, double ruleY)
+        {
+            double maxW = 0;
+            var full = false;
+            foreach (var l in lines)
+            {
+                maxW = Math.Max(maxW, l.Left + l.NaturalWidth);
+                full |= l.FullWidthBox;
+            }
+            var ruleRight = full ? g.Right : Math.Min(g.Left + maxW, g.Right);
+            EmitNoteRule(slot, ruleY, _marginLeft, ruleRight);
+        }
+
+        /// <summary>A margined paragraph is clipped to its box — which is placed the rule gap
+        /// plus the bottom margin above the paragraph's natural slot, so its text (painted higher
+        /// still) shows only what reaches into the box. Pre-walks the cursor for each such box
+        /// and returns the clip every line of it takes.</summary>
+        private static Dictionary<int, Rectangle> BandParagraphClipBoxes(List<BandLine> lines,
+            BandGeometry g, double top)
+        {
+            var clipBoxes = new Dictionary<int, Rectangle>();
+            var Tw = top;
+            var paraStart = -1;
+            double paraBoxH = 0, paraLeft = 0;
+            for (var li = 0; li < lines.Count; li++)
+            {
+                var ln = lines[li];
+                if (ln.ParaFirst)
+                {
+                    paraStart = li; paraBoxH = 0; paraLeft = ln.Left;
+                    if (ln.NoteFirst)
+                        foreach (var (cx, ct, cr, cs) in ln.Cells)
+                            if (cr.NoteMark && ct.Length > 0) paraLeft = Math.Max(paraLeft, ln.Left + cx + MeasureStyled(ct, cr, cs));
+                }
+                Tw -= ln.MarginTop;
+                Tw -= ln.Pitch;
+                paraBoxH += ln.Pitch + HighlightBoxExtraEm * ln.TextHeight;
+                if (!ln.LastOfParagraph) continue;
+                if (ln.PaintFromRule)
+                {
+                    var shift = 1 + ln.MarginBottom;
+                    var box = new Rectangle(g.Left + paraLeft, Tw + shift, g.Right, Tw + shift + paraBoxH);
+                    for (var k = paraStart; k <= li; k++) clipBoxes[k] = box;
+                }
+                Tw -= ln.MarginBottom;
+            }
+            return clipBoxes;
+        }
+
+        /// <summary>Queues one band line's cells: pictures and note marks against the band
+        /// cursor, text on the line's own seat, and one link rect per hyperlinked run.</summary>
+        private void DrawBandLineCells(int slot, BandLine line, BandGeometry g,
+            Rectangle? lineClip, double markerT, double textT)
+        {
+            var xs = CellXs(line, Math.Max(1, g.Width - line.Left));
+            Hyperlink? runLink = null; double linkX0 = 0, linkX1 = 0;
+            void FlushLink()
+            {
+                if (runLink is not null && linkX1 > linkX0)
+                    _pendingLinks.Add((slot, new Rectangle(linkX0, textT - line.Pitch, linkX1, textT), runLink));
+                runLink = null;
+            }
+            for (var ci = 0; ci < line.Cells.Count; ci++)
+            {
+                var (_, text, r, size) = line.Cells[ci];
+                if (r.ImageData is not null)
+                {
+                    FlushLink();
+                    var ix = g.Left + line.Left + xs[ci];
+                    _pendingImages.Add((slot, r.ImageData,
+                        new Rectangle(ix, markerT - r.ImageH, ix + r.ImageW, markerT), false));
+                    continue;
+                }
+                if (text.Length == 0) continue;
+                var x = g.Left + line.Left + xs[ci];
+                if (r.NoteMark)
+                {
+                    FlushLink();
+                    var my = markerT - size + Std14Seat(r.State, size);
+                    _pendingEmbeddedRenders.Add((slot, x, my + size, text, r.State, size, my));
+                    continue;
+                }
+                var y = textT - line.Pitch + (r.Sup ? 0.33 * line.TextHeight : 0) + Std14Seat(r.State, size);
+                _pendingEmbeddedRenders.Add((slot, x, y + size, text, r.State, size, y));
+                if (lineClip is not null) _pendingRenderClip[_pendingEmbeddedRenders.Count - 1] = lineClip;
+                var w = MeasureStyled(text, r, size);
+                if (r.Link is null) { FlushLink(); continue; }
+                if (!ReferenceEquals(runLink, r.Link)) { FlushLink(); runLink = r.Link; linkX0 = x; }
+                linkX1 = x + w;
+            }
+            FlushLink();
+        }
+
 
         /// <summary>The separator rule above a band, styled by the page's
         /// NoteLineStyle (default: solid black 1 pt), queued on the band's slot.</summary>

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -80,496 +80,38 @@ internal static partial class HtmlToPdfConverter
         public bool Mso;             // a pasted-Word bullet paragraph (special pitches)
     }
 
-    /// <summary>Render a fully-positioned DTP export (see the class comment).
-    /// Null when the document does not carry the dialect's fingerprint —
-    /// a flat set of pt-positioned id rules covering divs, text inputs and
-    /// images under a <c>&lt;body id="page"&gt;</c>.</summary>
-    private static Document? TryRenderPositionedDtp(string html, double pageW, double pageH)
-    {
-        if (!Regex.IsMatch(html, @"<body\b[^>]*\bid\s*=\s*[""']page[""']", RegexOptions.IgnoreCase))
-            return null;
-        var band = pageH - 2 * DtpVertMarginPt;
-        if (band <= 0) return null;
-
-        // ── stylesheet ─────────────────────────────────────────────────────
-        var styleText = new StringBuilder();
-        foreach (Match sm in Regex.Matches(html,
-                     @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
-            styleText.Append(sm.Groups[1].Value).Append('\n');
-        var styles = Regex.Replace(styleText.ToString(), @"/\*[\s\S]*?\*/", " ");
-
-        var idRules = new Dictionary<string, DtpIdRule>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in Regex.Matches(styles,
-                     @"(?:div|input|img)#([\w-]+)\s*\{([^}]*)\}", RegexOptions.IgnoreCase))
-        {
-            var body = m.Groups[2].Value;
-            if (!Regex.IsMatch(body, @"position\s*:\s*absolute", RegexOptions.IgnoreCase)) continue;
-            var rule = new DtpIdRule();
-            if (!TryDtpPt(body, "left", out rule.L) || !TryDtpPt(body, "top", out rule.T)
-                || !TryDtpPt(body, "width", out rule.W)) continue;
-            rule.HasH = TryDtpPt(body, "height", out rule.H);
-            var am = Regex.Match(body, @"text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase);
-            if (am.Success) rule.Align = am.Groups[1].Value.ToLowerInvariant();
-            idRules[m.Groups[1].Value] = rule;
-        }
-        var inputRuleCount = Regex.Matches(styles,
-            @"input#[\w-]+\s*\{[^}]*position\s*:\s*absolute", RegexOptions.IgnoreCase).Count;
-        if (idRules.Count < 10 || inputRuleCount == 0) return null;
-
-        var classRules = new Dictionary<string, DtpClassRule>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in Regex.Matches(styles, @"\.([\w-]+)\s*\{([^}]*)\}"))
-        {
-            var body = m.Groups[2].Value;
-            var cr = new DtpClassRule();
-            var fm = Regex.Match(body, @"font\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
-            if (fm.Success)
-            {
-                var shorthand = fm.Groups[1].Value;
-                cr.Bold = Regex.IsMatch(shorthand, @"\bbold\b", RegexOptions.IgnoreCase);
-                cr.Italic = Regex.IsMatch(shorthand, @"\bitalic\b", RegexOptions.IgnoreCase);
-                var szm = Regex.Match(shorthand, @"([\d.]+)\s*pt");
-                if (szm.Success) cr.SizePt = DtpNum(szm.Groups[1].Value);
-                var famM = Regex.Match(shorthand, @"pt\s+'([^']+)'|pt\s+""([^""]+)""|pt\s+([A-Za-z][\w -]*)");
-                if (famM.Success)
-                    cr.Family = (famM.Groups[1].Success ? famM.Groups[1].Value
-                        : famM.Groups[2].Success ? famM.Groups[2].Value : famM.Groups[3].Value).Trim();
-            }
-            var cm2 = Regex.Match(body, @"color\s*:\s*#([0-9a-fA-F]{6})");
-            if (cm2.Success) cr.Color = DtpHexColor(cm2.Groups[1].Value);
-            var am = Regex.Match(body, @"text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase);
-            if (am.Success) cr.Align = am.Groups[1].Value.ToLowerInvariant();
-            classRules[m.Groups[1].Value] = cr;
-        }
-
-        // ── body elements, document order ──────────────────────────────────
-        var bodyM = Regex.Match(html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
-        if (!bodyM.Success) return null;
-        var bodyHtml = html[(bodyM.Index + bodyM.Length)..];
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-
-        var doc = new Document();
-        var fontDict = new Core.PdfDictionary();
-        // Per-page op lists: raw content-stream text/vector ops and image
-        // stamps, interleaved in document order so later elements draw on top.
-        var pageOps = new List<List<object>>();
-        List<object> OpsFor(int p)
-        {
-            while (pageOps.Count <= p) pageOps.Add(new List<object>());
-            return pageOps[p];
-        }
-
-        void DrawText(int page, double x, double baselineInPage, DtpRun run, string text)
-        {
-            if (text.Length == 0) return;
-            var faceName = DtpFaceName(run);
-            var face = PosFace(faceName);
-            var drawn = text;
-            if (face.ttf is null)
-            {
-                // The face is unavailable (e.g. Symbol on a bare rig): draw the
-                // run in Arial — the advance model below still measured it in
-                // the declared face where possible, so following runs hold.
-                faceName = run.Bold ? "Arial Bold" : "Arial";
-                face = PosFace(faceName);
-                if (face.ttf is null) return;
-            }
-            else if (faceName == "Symbol")
-                drawn = DtpToSymbolPua(face.parser, text);
-            var (rn, hex) = Text.Type0FontEmbedder.Embed(fontDict, face.ttf, faceName, drawn,
-                stripSpacesInBaseFont: true);
-            OpsFor(page).Add(string.Create(inv,
-                $"BT {run.Color.R:F3} {run.Color.G:F3} {run.Color.B:F3} rg /{rn} {run.SizePt:F2} Tf 1 0 0 1 {x:F2} {pageH - baselineInPage:F2} Tm <{System.Convert.ToHexString(hex)}> Tj ET\n"));
-        }
-
-        void StrokeLine(int page, double x0, double x1, double yInPage, (double R, double G, double B) col)
-            => OpsFor(page).Add(string.Create(inv,
-                $"q {col.R:F3} {col.G:F3} {col.B:F3} RG 1 w {x0:F2} {pageH - yInPage:F2} m {x1:F2} {pageH - yInPage:F2} l S Q\n"));
-
-        // A positioned image: a boundary-crossing box draws on EVERY page whose
-        // band it intersects, shifted by the band height — unclipped, so the
-        // halves join seamlessly (measured on the fixture's p6/p7). A NESTED
-        // positioned image offsets by its positioned ancestor's (left, top).
-        void DrawDtpImage(string imgTag, DtpIdRule rule, double offL, double offT)
-        {
-            var src = DtpAttr(imgTag, "src");
-            if (src is null || !src.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return;
-            var comma = src.IndexOf(',');
-            if (comma < 0 || !rule.HasH) return;
-            byte[] bytes;
-            try { bytes = System.Convert.FromBase64String(src[(comma + 1)..]); }
-            catch { return; }
-            var top = offT + rule.T;
-            var p0 = (int)Math.Floor(top / band);
-            var p1 = (int)Math.Floor((top + rule.H - 1e-6) / band);
-            for (var p = Math.Max(p0, 0); p <= p1; p++)
-            {
-                var yTop = top - p * band + DtpVertMarginPt;
-                OpsFor(p).Add((bytes, DtpSideMarginPt + offL + rule.L, yTop, rule.W, rule.H));
-            }
-        }
-
-        var pos = 0;
-        var tagRx = new Regex(@"<(div|input|img)\b", RegexOptions.IgnoreCase);
-        while (true)
-        {
-            var tm = tagRx.Match(bodyHtml, pos);
-            if (!tm.Success) break;
-            var tagEnd = bodyHtml.IndexOf('>', tm.Index);
-            if (tagEnd < 0) break;
-            var openTag = bodyHtml[tm.Index..(tagEnd + 1)];
-            var tag = tm.Groups[1].Value.ToLowerInvariant();
-            var id = DtpAttr(openTag, "id");
-            if (id is null || !idRules.TryGetValue(id, out var rule))
-            {
-                pos = tagEnd + 1;
-                continue;
-            }
-            var cls = DtpAttr(openTag, "class");
-            var cr = cls is not null && classRules.TryGetValue(cls, out var c0) ? c0 : new DtpClassRule();
-
-            if (tag == "img")
-            {
-                pos = tagEnd + 1;
-                DrawDtpImage(openTag, rule, 0, 0);
-                continue;
-            }
-
-            if (tag == "input")
-            {
-                pos = tagEnd + 1;
-                var type = DtpAttr(openTag, "type");
-                if (type is not null && !type.Equals("text", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                var page = (int)Math.Floor(rule.T / band);
-                var yTop = rule.T - page * band + DtpVertMarginPt;
-                var h = rule.HasH ? rule.H : DtpInputDefaultHPt;
-                var bx = DtpSideMarginPt + rule.L;
-                // Chrome: 1 pt black stroke regardless of the authored border.
-                OpsFor(page).Add(string.Create(inv,
-                    $"q 0 0 0 RG 1 w {bx + DtpInputChromeInsetPt:F2} {pageH - (yTop - DtpInputChromeOutsetPt + h + 2 * DtpInputChromeOutsetPt):F2} {rule.W - 2 * DtpInputChromeInsetPt:F2} {h + 2 * DtpInputChromeOutsetPt:F2} re S Q\n"));
-                var value = DtpAttr(openTag, "value");
-                if (string.IsNullOrEmpty(value)) continue;
-                value = EdgarHtmlRenderer.DecodeEntities(value);
-                var run = new DtpRun { Bold = cr.Bold, SizePt = cr.SizePt, Color = cr.Color };
-                var faceName = DtpFaceName(run);
-                var w = MeasureFaceText(faceName, value, run.SizePt);
-                // center is honoured; the authored right-align is NOT (the
-                // itemization values render at the left inset).
-                var align = rule.Align ?? cr.Align;
-                var x = align == "center" ? bx + (rule.W - w) / 2 : bx + DtpInputPadPt;
-                var baseline = yTop + h / 2 + (run.Bold ? DtpInputSeatBoldPt : DtpInputSeatRegPt);
-                DrawText(page, x, baseline, run, value);
-                continue;
-            }
-
-            // div: capture the inner html up to the matching close.
-            var depth = 1;
-            var scan = tagEnd + 1;
-            var innerEnd = -1;
-            var divRx = new Regex(@"<(/?)div\b[^>]*>", RegexOptions.IgnoreCase);
-            while (depth > 0)
-            {
-                var dm = divRx.Match(bodyHtml, scan);
-                if (!dm.Success) break;
-                depth += dm.Groups[1].Value.Length > 0 ? -1 : 1;
-                if (depth == 0) innerEnd = dm.Index;
-                scan = dm.Index + dm.Length;
-            }
-            if (innerEnd < 0) { pos = tagEnd + 1; break; }
-            var inner = bodyHtml[(tagEnd + 1)..innerEnd];
-            pos = scan;
-
-            // Positioned images nested inside this container carry their own
-            // id rules with coordinates RELATIVE to the container's box (the
-            // contract's notice GIFs live 2900+ pt down a 792 pt-high parent).
-            foreach (Match nm in Regex.Matches(inner, @"<img\b[^>]*>", RegexOptions.IgnoreCase))
-            {
-                var nid = DtpAttr(nm.Value, "id");
-                if (nid is not null && idRules.TryGetValue(nid, out var nRule))
-                    DrawDtpImage(nm.Value, nRule, rule.L, rule.T);
-            }
-
-            var defaultAlign = rule.Align ?? cr.Align ?? "left";
-            var lines = DtpParseRichText(inner, cr, classRules, defaultAlign);
-            if (lines.Count == 0) continue;
-
-            // Line walker: wraps each logical line to the div width and lays
-            // physical lines down the canvas, breaking to the next page's top
-            // seat when a baseline would pass the band bottom.
-            var pageIdx = (int)Math.Floor(rule.T / band);
-            var yIn = rule.T - pageIdx * band + DtpVertMarginPt;
-            var bottom = pageH - DtpVertMarginPt;
-            var first = true;
-            var prevMso = false;
-            foreach (var ll in lines)
-            {
-                var maxSz = 10.0;
-                foreach (var r in ll.Runs) if (r.SizePt > maxSz && r.Text.Trim().Length > 0) maxSz = r.SizePt;
-                var wrapped = DtpWrap(ll, rule.W);
-                for (var wi = 0; wi < wrapped.Count; wi++)
-                {
-                    double pitch;
-                    if (first) pitch = 0;
-                    else if (ll.Mso && wi == 0) pitch = DtpMsoParaPitchPt;
-                    else if (ll.Mso) pitch = DtpMsoWrapPitchPt;
-                    else if (prevMso && wi == 0) pitch = DtpMsoParaPitchPt;
-                    else pitch = DtpLineFactor * maxSz;
-                    var seat = DtpSeat(maxSz);
-                    double baseline;
-                    if (first)
-                    {
-                        baseline = yIn + seat;
-                        first = false;
-                    }
-                    else baseline = yIn + pitch;
-                    if (baseline > bottom)
-                    {
-                        pageIdx++;
-                        baseline = DtpVertMarginPt + seat;
-                    }
-                    yIn = baseline;
-
-                    var lineRuns = wrapped[wi];
-                    double lineW = 0;
-                    foreach (var r in lineRuns) lineW += DtpMeasureRun(r);
-                    var indent = wi == 0 ? ll.FirstIndent : ll.HangIndent;
-                    var x = DtpSideMarginPt + rule.L + indent;
-                    if (ll.Align == "center") x = DtpSideMarginPt + rule.L + (rule.W - lineW) / 2;
-                    else if (ll.Align == "right") x = DtpSideMarginPt + rule.L + rule.W - lineW;
-                    foreach (var r in lineRuns)
-                    {
-                        DrawText(pageIdx, x, yIn, r, r.Text);
-                        if (r.Under)
-                        {
-                            // Underline per non-space segment (link underlines
-                            // gap at the spaces).
-                            var sx = x;
-                            var i2 = 0;
-                            while (i2 < r.Text.Length)
-                            {
-                                if (r.Text[i2] == ' ')
-                                {
-                                    sx += MeasureFaceText(DtpFaceName(r), " ", r.SizePt);
-                                    i2++;
-                                    continue;
-                                }
-                                var j = i2;
-                                while (j < r.Text.Length && r.Text[j] != ' ') j++;
-                                var segW = MeasureFaceText(DtpFaceName(r), r.Text[i2..j], r.SizePt);
-                                StrokeLine(pageIdx, sx, sx + segW, yIn + DtpUnderlineDropPt, r.Color);
-                                sx += segW;
-                                i2 = j;
-                            }
-                        }
-                        x += DtpMeasureRun(r);
-                    }
-                }
-                prevMso = ll.Mso;
-            }
-        }
-
-        if (pageOps.Count == 0) return null;
-        for (var p = 0; p < pageOps.Count; p++)
-        {
-            var page = doc.Pages.Add(pageW, pageH);
-            EnsureFonts(page, fontDict);
-            foreach (var op in pageOps[p])
-            {
-                if (op is string s)
-                    page.AddContentStream(Encoding.ASCII.GetBytes(s));
-                else if (op is ValueTuple<byte[], double, double, double, double> im)
-                {
-                    try
-                    {
-                        var stamp = ImageStamp.FromEncodedBytes(im.Item1);
-                        stamp.XIndent = im.Item2;
-                        stamp.YIndent = pageH - im.Item3 - im.Item5;
-                        stamp.DisplayWidth = im.Item4;
-                        stamp.DisplayHeight = im.Item5;
-                        stamp.ApplyTo(page);
-                    }
-                    catch { /* undecodable image: skip */ }
-                }
-            }
-        }
-        return doc;
-    }
-
     // ── rich text parsing ──────────────────────────────────────────────────
 
     /// <summary>Tokenize a positioned div's inner HTML into logical lines:
     /// inner div/p boundaries and &lt;br&gt; force breaks; strong/b/u/i/em/a
     /// set run styles; span inline styles override size/family; entities
     /// decode with nbsp preserved and other whitespace collapsed.</summary>
-    private static List<DtpLogicalLine> DtpParseRichText(string inner, DtpClassRule baseClass,
-        Dictionary<string, DtpClassRule> classRules, string defaultAlign)
+    private static List<DtpLogicalLine> DtpParseRichText(string inner, DtpClassRule baseClass, Dictionary<string, DtpClassRule> classRules, string defaultAlign)
     {
-        inner = Regex.Replace(inner, @"<!--[\s\S]*?-->", " ");
-        var lines = new List<DtpLogicalLine>();
-        DtpLogicalLine? cur = null;
-        var bold = 0; var ital = 0; var under = 0; var link = 0;
-        var alignStack = new Stack<string>();
-        alignStack.Push(defaultAlign);
-        // span style overrides nest; (size, face, color) frames.
-        var spanStack = new Stack<(double? Size, string? Face, (double, double, double)? Color)>();
-        double msoFirstIndent = 0, msoHangIndent = 0;
-        var inMso = false;
+        var rt = new DtpRichTextState();
+        rt.inner = inner;
+        rt.baseClass = baseClass;
+        rt.classRules = classRules;
+        rt.defaultAlign = defaultAlign;
+        rt.inner = Regex.Replace(rt.inner, @"<!--[\s\S]*?-->", " ");
+        rt.lines = new List<DtpLogicalLine>();
+        rt.cur = null;
+        rt.bold = 0; rt.ital = 0; rt.under = 0; rt.link = 0;
+        rt.alignStack = new Stack<string>();
+        rt.alignStack.Push(rt.defaultAlign);
+        rt.spanStack = new Stack<(double? Size, string? Face, (double, double, double)? Color)>();
+        rt.msoFirstIndent = 0;
+        rt.msoHangIndent = 0;
+        rt.inMso = false;
 
-        void Flush()
+        rt.idx = 0;
+        rt.tokRx = new Regex(@"<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:[^>'""]|'[^']*'|""[^""]*"")*)>");
+        while (rt.idx < rt.inner.Length)
         {
-            if (cur is null) return;
-            // Drop a line that is pure collapsible whitespace.
-            var any = false;
-            foreach (var r in cur.Runs) if (r.Text.Trim(' ').Length > 0) any = true;
-            if (any || cur.Runs.Count > 0 && cur.Runs[0].Text.Length > 0)
-                lines.Add(cur);
-            cur = null;
+            if (!DtpRichTextStep(rt)) break;
         }
-        DtpLogicalLine Cur()
-        {
-            if (cur is null)
-                cur = new DtpLogicalLine
-                {
-                    Align = alignStack.Peek(),
-                    Mso = inMso,
-                    FirstIndent = inMso ? msoFirstIndent : 0,
-                    HangIndent = inMso ? msoHangIndent : 0,
-                };
-            return cur;
-        }
-
-        var idx = 0;
-        var tokRx = new Regex(@"<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:[^>'""]|'[^']*'|""[^""]*"")*)>");
-        while (idx < inner.Length)
-        {
-            var tm = tokRx.Match(inner, idx);
-            var textEnd = tm.Success ? tm.Index : inner.Length;
-            if (textEnd > idx)
-            {
-                var raw = EdgarHtmlRenderer.DecodeEntities(inner[idx..textEnd]);
-                raw = Regex.Replace(raw, @"[ \t\r\n\f]+", " ");
-                if (raw.Length > 0 && raw != " " || raw == " " && cur is not null && cur.Runs.Count > 0)
-                {
-                    var line = Cur();
-                    // strip a collapsible leading space at line start
-                    if (line.Runs.Count == 0) raw = raw.TrimStart(' ');
-                    if (raw.Length > 0)
-                    {
-                        var (sz, face, color) = DtpEffective(baseClass, spanStack);
-                        line.Runs.Add(new DtpRun
-                        {
-                            Text = raw,
-                            Bold = bold > 0,
-                            Italic = ital > 0,
-                            Under = under > 0 || link > 0,
-                            SizePt = sz,
-                            Face = face,
-                            Color = link > 0 ? (0, 0, 1.0) : color,
-                        });
-                    }
-                }
-                idx = textEnd;
-                continue;
-            }
-            if (!tm.Success) break;
-            var close = tm.Groups[1].Value.Length > 0;
-            var name = tm.Groups[2].Value.ToLowerInvariant();
-            var attrs = tm.Groups[3].Value;
-            switch (name)
-            {
-                case "br":
-                    // A <br> on an empty line is a deliberate blank line (the
-                    // corpus separates paragraphs with <br><br>).
-                    if (cur is null) lines.Add(new DtpLogicalLine { Align = alignStack.Peek() });
-                    else Flush();
-                    break;
-                case "div":
-                case "p":
-                    Flush();
-                    if (!close)
-                    {
-                        var alM = Regex.Match(attrs, @"align\s*=\s*[""']?(left|center|right)",
-                            RegexOptions.IgnoreCase);
-                        alignStack.Push(alM.Success
-                            ? alM.Groups[1].Value.ToLowerInvariant() : alignStack.Peek());
-                        if (name == "p")
-                        {
-                            // Pasted Word bullet paragraph: indent = margin-left
-                            // + text-indent for the first line, margin-left for
-                            // continuations.
-                            var st = DtpAttr("<p " + attrs + ">", "style") ?? "";
-                            inMso = st.Contains("mso-list", StringComparison.OrdinalIgnoreCase)
-                                || attrs.Contains("MsoNormal", StringComparison.OrdinalIgnoreCase);
-                            // margin shorthand: top right bottom LEFT
-                            msoHangIndent = DtpStyleLen(st,
-                                    @"margin\s*:\s*\S+\s+\S+\s+\S+\s+([\-\d.]+(?:in|pt))")
-                                ?? DtpStyleLen(st, @"margin-left\s*:\s*([\-\d.]+(?:in|pt))") ?? 0;
-                            msoFirstIndent = msoHangIndent
-                                + (DtpStyleLen(st, @"text-indent\s*:\s*([\-\d.]+(?:in|pt))") ?? 0);
-                        }
-                    }
-                    else
-                    {
-                        if (alignStack.Count > 1) alignStack.Pop();
-                        inMso = false;
-                    }
-                    break;
-                case "strong":
-                case "b":
-                    bold += close ? -1 : 1;
-                    if (bold < 0) bold = 0;
-                    break;
-                case "u":
-                    under += close ? -1 : 1;
-                    if (under < 0) under = 0;
-                    break;
-                case "i":
-                case "em":
-                    ital += close ? -1 : 1;
-                    if (ital < 0) ital = 0;
-                    break;
-                case "a":
-                    link += close ? -1 : 1;
-                    if (link < 0) link = 0;
-                    break;
-                case "span":
-                    if (close)
-                    {
-                        if (spanStack.Count > 0) spanStack.Pop();
-                    }
-                    else
-                    {
-                        double? size = null;
-                        string? face = null;
-                        (double, double, double)? color = null;
-                        var clsA = DtpAttr("<span " + attrs + ">", "class");
-                        if (clsA is not null && classRules.TryGetValue(clsA, out var scr))
-                        {
-                            size = scr.SizePt;
-                            face = scr.Family;
-                            color = scr.Color;
-                        }
-                        var st = DtpAttr("<span " + attrs + ">", "style") ?? "";
-                        var fs = Regex.Match(st, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
-                        if (fs.Success) size = DtpNum(fs.Groups[1].Value);
-                        // `font: 7pt "Times New Roman"` shorthand
-                        var fsh = Regex.Match(st, @"font\s*:\s*([\d.]+)\s*pt\s+[""']?([^;""']+)",
-                            RegexOptions.IgnoreCase);
-                        if (fsh.Success)
-                        {
-                            size = DtpNum(fsh.Groups[1].Value);
-                            face = fsh.Groups[2].Value.Trim();
-                        }
-                        var ff = Regex.Match(st, @"font-family\s*:\s*[""']?([^;,""']+)", RegexOptions.IgnoreCase);
-                        if (ff.Success) face = ff.Groups[1].Value.Trim();
-                        spanStack.Push((size, face is null ? null : DtpNormalizeFace(face), color));
-                    }
-                    break;
-            }
-            idx = tm.Index + tm.Length;
-        }
-        Flush();
-        return lines;
+        FlushDtpLine(rt);
+        return rt.lines;
     }
 
     private static (double Size, string Face, (double, double, double) Color) DtpEffective(
@@ -716,13 +258,13 @@ internal static partial class HtmlToPdfConverter
         return sb.ToString();
     }
 
-    private static bool TryDtpPt(string css, string prop, out double value)
+    private static double? TryDtpPt(string css, string prop)
     {
-        value = 0;
+        double value = 0;
         var m = Regex.Match(css, prop + @"\s*:\s*([\-\d.]+)\s*pt", RegexOptions.IgnoreCase);
-        if (!m.Success) return false;
+        if (!m.Success) return null;
         value = DtpNum(m.Groups[1].Value);
-        return true;
+        return value;
     }
 
     private static double DtpNum(string s)

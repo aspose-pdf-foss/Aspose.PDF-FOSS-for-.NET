@@ -814,7 +814,7 @@ public sealed partial class Document : IDisposable
             if (value is null)
                 _reader.Catalog.Remove("Lang");
             else
-                _reader.Catalog.Set("Lang", new PdfString(Encoding.Latin1.GetBytes(value)));
+                _reader.Catalog.Set("Lang", new PdfString(Compat.Latin1.GetBytes(value)));
         }
     }
 
@@ -902,6 +902,7 @@ public sealed partial class Document : IDisposable
     /// Read the type-shadowed IsInNewPage flag. TextFragment and HtmlFragment redeclare it with
     /// <c>new</c>, so a BaseParagraph-typed read would miss the value the caller set on the
     /// concrete type (mirrors the IsInLineParagraph shadowing).
+    /// </summary>
     private static bool ParagraphIsInNewPage(BaseParagraph p) => p switch
     {
         Text.TextFragment tf => tf.IsInNewPage,
@@ -917,15 +918,6 @@ public sealed partial class Document : IDisposable
         _ => p.IsInLineParagraph,
     };
 
-    /// <summary>
-    /// <summary>
-    /// Shape a generator <see cref="Text.TextFragment"/> that carries Arabic/RTL text: replace
-    /// each segment's base letters with their contextual presentation forms in visual
-    /// right-to-left order, and route the fragment through an Arabic-capable embedded font
-    /// (Arial covers Arabic Presentation Forms-B). Without this the default Standard-14 font has
-    /// no Arabic glyphs and the renderer applies no OpenType shaping, so Arabic rendered as
-    /// disconnected isolated letters in left-to-right order (or missing glyphs).
-    /// </summary>
     /// <summary>Resolve a font family through the repository, swallowing lookup failures
     /// (an unknown family just yields null so the caller falls back to Standard-14).</summary>
     private static Text.Font? SafeFindFont(string family)

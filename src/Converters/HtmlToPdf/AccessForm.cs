@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -51,192 +51,48 @@ internal static partial class HtmlToPdfConverter
     private static Document? TryRenderAccessForm(string html, IReadOnlyDictionary<string,
         Dictionary<string, string>> css, double pageWidth, double pageHeight)
     {
-        if (!css.TryGetValue(".pageContainer", out var cardRule)
+        var af = new AccessFormState();
+        af.html = html;
+        af.css = css;
+        af.pageWidth = pageWidth;
+        af.pageHeight = pageHeight;
+        if (!af.css.TryGetValue(".pageContainer", out var cardRule)
             || !cardRule.ContainsKey("box-shadow")
-            || !css.TryGetValue(".questionContainer", out var qRule)
+            || !af.css.TryGetValue(".questionContainer", out var qRule)
             || !(qRule.TryGetValue("background-color", out var qbg)
                  && qbg.Contains("fafafa", StringComparison.OrdinalIgnoreCase))
-            || !html.Contains("section-rule", StringComparison.Ordinal))
+            || !af.html.Contains("section-rule", StringComparison.Ordinal))
             return null;
 
-        static string Flat(string s) => CollapseWs(DecodeEntities(
-            Regex.Replace(s, @"<[^>]+>", " "))).Trim();
-
-        var pageM = Regex.Match(html, @"class=['""]page['""]\s*>([\s\S]*)</div>\s*</div>\s*</body>",
+        af.pageM = Regex.Match(af.html, @"class=['""]page['""]\s*>([\s\S]*)</div>\s*</div>\s*</body>",
             RegexOptions.IgnoreCase);
-        if (!pageM.Success) return null;
-        var content = pageM.Groups[1].Value;
-        var titleM = Regex.Match(content, @"class=['""]header['""]\s*>([\s\S]*?)</div>",
+        if (!af.pageM.Success) return null;
+        af.content = af.pageM.Groups[1].Value;
+        af.titleM = Regex.Match(af.content, @"class=['""]header['""]\s*>([\s\S]*?)</div>",
             RegexOptions.IgnoreCase);
-        if (!titleM.Success) return null;
+        if (!af.titleM.Success) return null;
 
-        // The document as an ordered item stream: sections (heading + question
-        // boxes + loose pre answers) separated by rules.
-        var items = new List<(string Kind, string A, string B)>();
-        foreach (Match m in Regex.Matches(content,
-            @"<div class=['""](section|section-rule)['""]\s*>((?:(?!<div class=['""]section)[\s\S])*)",
-            RegexOptions.IgnoreCase))
-        {
-            if (m.Groups[1].Value.Equals("section-rule", StringComparison.OrdinalIgnoreCase))
-            {
-                items.Add(("hr", "", ""));
-                continue;
-            }
-            var body = m.Groups[2].Value;
-            var hM = Regex.Match(body, @"class=['""]header['""]\s*>([\s\S]*?)</div>", RegexOptions.IgnoreCase);
-            if (hM.Success) items.Add(("head", Flat(hM.Groups[1].Value), ""));
-            foreach (Match part in Regex.Matches(body,
-                @"<div class=['""]questionContainer['""]\s*>([\s\S]*?)</div>\s*</div>|<pre\b[^>]*>([\s\S]*?)</pre>",
-                RegexOptions.IgnoreCase))
-            {
-                if (part.Groups[2].Success)
-                {
-                    var lines = Regex.Replace(DecodeEntities(
-                        Regex.Replace(part.Groups[2].Value, @"<[^>]+>", "")), "\r", "").Split('\n');
-                    var real = new List<string>();
-                    foreach (var l in lines) if (l.Trim().Length > 0) real.Add(l.Trim());
-                    items.Add(("pre", real.Count > 0 ? real[0] : "",
-                        real.Count > 1 ? string.Join(" ", real.GetRange(1, real.Count - 1)) : ""));
-                    continue;
-                }
-                var qM = Regex.Match(part.Groups[1].Value, @"class=['""]question['""]\s*>([\s\S]*?)</div>",
-                    RegexOptions.IgnoreCase);
-                var aM = Regex.Match(part.Groups[1].Value, @"class=['""]answer['""]\s*>([\s\S]*?)$",
-                    RegexOptions.IgnoreCase);
-                items.Add(("qa", qM.Success ? Flat(qM.Groups[1].Value) : "",
-                    aM.Success ? Flat(aM.Groups[1].Value) : ""));
-            }
-            // an intro section holds a bare answer paragraph and no boxes
-            if (!hM.Success && !body.Contains("questionContainer", StringComparison.Ordinal)
-                && Regex.Match(body, @"<p>([\s\S]*?)</p>", RegexOptions.IgnoreCase) is { Success: true } pIntro)
-                items.Add(("intro", Flat(pIntro.Groups[1].Value), ""));
-        }
-        if (items.Count == 0) return null;
+        af.items = new List<(string Kind, string A, string B)>();
+        CollectAccessFormItems(af);
+        if (af.items.Count == 0) return null;
 
-        var doc = new Document();
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        string N(double v) => v.ToString("0.###", inv);
-        Page page = null!;
-        StringBuilder boxes = null!, runs = null!;
-        var firstPage = true;
+        af.doc = new Document();
+        af.inv = System.Globalization.CultureInfo.InvariantCulture;
+        af.page = null!;
+        af.boxes = null!;
+        af.runs = null!;
+        af.firstPage = true;
 
-        void FlushPage(double cardBottom, bool lastPage)
-        {
-            // ground + card behind everything already emitted for this page
-            var bg = new StringBuilder();
-            bg.AppendLine("0.961 0.961 0.961 rg");
-            bg.AppendLine($"{N(AfGroundLeft)} {N(pageHeight - AfGroundBottom)} {N(AfGroundRight - AfGroundLeft)} {N(AfGroundBottom - AfGroundTop)} re f");
-            var top = firstPage ? AfCardTop : AfGroundTop;
-            // the 10px box-shadow: a mid-grey rim under the card (the blur is
-            // approximated by a solid band carrying the same ink)
-            var shTop = firstPage ? top - AfShadowPt : top;
-            var shBottom = lastPage ? cardBottom + AfShadowPt : cardBottom;
-            bg.AppendLine("0.8 0.8 0.8 rg");
-            bg.AppendLine($"{N(AfCardLeft - AfShadowPt)} {N(pageHeight - shBottom)} {N(AfCardRight - AfCardLeft + 2 * AfShadowPt)} {N(shBottom - shTop)} re f");
-            bg.AppendLine("1 1 1 rg");
-            bg.AppendLine($"{N(AfCardLeft)} {N(pageHeight - cardBottom)} {N(AfCardRight - AfCardLeft)} {N(cardBottom - top)} re f");
-            // the rgba(0,0,0,.15) card edge, flattened on white
-            bg.AppendLine("0.85 0.85 0.85 RG 0.75 w");
-            bg.AppendLine($"{N(AfCardLeft + 0.38)} {N(pageHeight - cardBottom)} m {N(AfCardLeft + 0.38)} {N(pageHeight - top)} l S");
-            bg.AppendLine($"{N(AfCardRight - 0.38)} {N(pageHeight - cardBottom)} m {N(AfCardRight - 0.38)} {N(pageHeight - top)} l S");
-            if (firstPage)
-                bg.AppendLine($"{N(AfCardLeft)} {N(pageHeight - top - 0.38)} m {N(AfCardRight)} {N(pageHeight - top - 0.38)} l S");
-            if (lastPage)
-                bg.AppendLine($"{N(AfCardLeft)} {N(pageHeight - cardBottom + 0.38)} m {N(AfCardRight)} {N(pageHeight - cardBottom + 0.38)} l S");
-            page.AddContentStream(Encoding.ASCII.GetBytes(bg.ToString()));
-            page.AddContentStream(Encoding.ASCII.GetBytes(boxes.ToString()));
-            page.AddContentStream(Encoding.ASCII.GetBytes(runs.ToString()));
-        }
+        NewPage(af);
+        af.orange = "0.874 0.424 0";
+        af.gray = "0.396 0.396 0.396";
+        af.black = "0 0 0";
+        Emit(af, "F2", AfTitleFs, AfTitleX, AfTitleBl, Flat(af, af.titleM.Groups[1].Value), af.orange);
 
-        void NewPage()
-        {
-            page = doc.Pages.Add(pageWidth, pageHeight);
-            EnsureFonts(page);
-            boxes = new StringBuilder();
-            runs = new StringBuilder();
-        }
-
-        void Emit(string res, double fs, double x, double yTd, string text, string rgb)
-        {
-            runs.AppendLine($"BT {rgb} rg");
-            runs.Append($"/{res} {fs.ToString("F2", inv)} Tf ");
-            runs.Append($"1 0 0 1 {N(x)} {N(pageHeight - yTd)} Tm ");
-            runs.AppendLine($"({EscapePdfString(text)}) Tj ET");
-        }
-
-        void QuestionBox(double topTd)
-        {
-            boxes.AppendLine("0.98 0.98 0.98 rg");
-            boxes.AppendLine($"{N(AfBoxLeft)} {N(pageHeight - topTd - AfBoxH)} {N(AfBoxRight - AfBoxLeft)} {N(AfBoxH)} re f");
-            boxes.AppendLine("0.933 0.933 0.933 RG 0.75 w");
-            boxes.AppendLine($"{N(AfBoxLeft)} {N(pageHeight - topTd - AfBoxH + 0.38)} {N(AfBoxRight - AfBoxLeft)} {N(AfBoxH - 0.76)} re S");
-        }
-
-        void Rule(double yTd)
-        {
-            boxes.AppendLine("0.533 0.533 0.533 RG 0.75 w");
-            boxes.AppendLine($"{N(AfHrLeft)} {N(pageHeight - yTd)} m {N(AfHrRight)} {N(pageHeight - yTd)} l S");
-            boxes.AppendLine("0.867 0.867 0.867 RG");
-            boxes.AppendLine($"{N(AfHrLeft)} {N(pageHeight - yTd - 0.75)} m {N(AfHrRight)} {N(pageHeight - yTd - 0.75)} l S");
-        }
-
-        NewPage();
-        const string orange = "0.874 0.424 0";
-        const string gray = "0.396 0.396 0.396";
-        const string black = "0 0 0";
-        Emit("F2", AfTitleFs, AfTitleX, AfTitleBl, Flat(titleM.Groups[1].Value), orange);
-
-        var lastMark = AfTitleBl;      // the last baseline (text) or box bottom
-        var lastWasBox = false;
-        foreach (var (kind, a, b) in items)
-        {
-            switch (kind)
-            {
-                case "intro":
-                    lastMark = AfTitleBl + AfIntroBlOff;
-                    Emit("F1", AfBodyFs, AfIntroX, lastMark, a, gray);
-                    lastWasBox = false;
-                    break;
-                case "hr":
-                    lastMark += lastWasBox ? AfHrAfterBoxes : AfHrAfterIntro;
-                    Rule(lastMark);
-                    lastWasBox = false;
-                    break;
-                case "head":
-                    lastMark += AfSectionBlOff;
-                    Emit("F1", AfSectionFs, AfSectionX, lastMark, a, black);
-                    lastMark += AfFirstBoxOff;   // becomes the first box top
-                    lastWasBox = false;
-                    break;
-                case "pre":
-                    lastMark += AfVarBlOff;      // from the preceding box bottom
-                    Emit("F4", AfVarFs, AfVarX, lastMark, a, gray);
-                    if (b.Length > 0)
-                    {
-                        lastMark += AfVarPitch;
-                        Emit("F4", AfVarFs, AfVarContX, lastMark, b, gray);
-                    }
-                    lastMark += AfBoxAfterVar;   // becomes the next box top
-                    lastWasBox = false;
-                    break;
-                case "qa":
-                    var top = lastWasBox ? lastMark + AfBoxPitch - AfBoxH : lastMark;
-                    if (top + AfBoxH > AfGroundBottom)
-                    {
-                        FlushPage(AfGroundBottom, lastPage: false);
-                        firstPage = false;
-                        NewPage();
-                        top = AfGroundTop;
-                    }
-                    QuestionBox(top);
-                    Emit("F2", AfBodyFs, AfTextX, top + AfQBlOff, a, black);
-                    Emit("F1", AfBodyFs, AfTextX, top + AfABlOff, b, gray);
-                    lastMark = top + AfBoxH;     // the box bottom
-                    lastWasBox = true;
-                    break;
-            }
-        }
-        FlushPage(lastMark + AfCardTailAfterHr, lastPage: true);
-        return doc;
+        af.lastMark = AfTitleBl;      // the last baseline (text) or box bottom
+        af.lastWasBox = false;
+        EmitAccessFormItems(af);
+        FlushPage(af, af.lastMark + AfCardTailAfterHr, lastPage: true);
+        return af.doc;
     }
 }

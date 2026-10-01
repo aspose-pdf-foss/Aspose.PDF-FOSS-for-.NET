@@ -12,6 +12,24 @@ public partial class Annotation : BaseParagraph
     private readonly PdfDictionary _dict;
     private readonly PdfReader _reader;
     private int _dictObjNum = -1;
+
+    /// <summary>The object number of the annotation's dictionary: the one it was loaded
+    /// under, else the one the document finds for it, else -1 for an inline annotation.
+    /// A loader that knows the number sets it.</summary>
+    internal int ObjectNumber
+    {
+        get => _dictObjNum >= 0 ? _dictObjNum : _reader?.OwnerDocument?.FindObjectNumber(_dict) ?? -1;
+        set => _dictObjNum = value;
+    }
+
+    /// <summary>Registers the dictionary for the next incremental save, so a change made
+    /// through the annotation reaches the file. An inline annotation is written through
+    /// its parent instead and needs no registration.</summary>
+    internal void MarkDirty()
+    {
+        var number = ObjectNumber;
+        if (number >= 0) _reader?.OwnerDocument?.MarkDirty(number, _dict);
+    }
     private PdfDictionary? _pageDict;
     private Page? _ownerPage;
     private Page? _creationPage;
@@ -239,12 +257,7 @@ public partial class Annotation : BaseParagraph
             // appearance-state change — e.g. selecting a checkbox widget kid
             // via field[i].ActiveState. Inline (non-indirect) annotations have
             // no object number and are written via their parent instead.
-            var doc = _reader?.OwnerDocument;
-            if (doc is not null)
-            {
-                var objNum = doc.FindObjectNumber(_dict);
-                if (objNum >= 0) doc.MarkDirty(objNum, _dict);
-            }
+            MarkDirty();
         }
     }
 
@@ -308,6 +321,7 @@ public partial class Annotation : BaseParagraph
         {
             if (value is null) _dict.Remove("Contents");
             else _dict.Set("Contents", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            MarkDirty();
         }
     }
 
@@ -457,7 +471,7 @@ public partial class Annotation : BaseParagraph
     /// <summary>Fully-qualified annotation name. For most annotation types this is the
     /// unique /NM entry; for a widget annotation that is (part of) a form field it is the
     /// fully-qualified field name — the /T values from this dict up through /Parent joined
-    /// by '.', matching <see cref="Field.FullName"/>.</summary>
+    /// by '.', matching <c>Field.FullName</c>.</summary>
     public string? FullName
     {
         get
@@ -502,7 +516,7 @@ public partial class Annotation : BaseParagraph
         // Resolve through GetString so an indirect /M reference is followed
         // (a direct "_dict.Get as PdfString" would miss it and return default).
         get => ParsePdfDate(GetString("M"));
-        set => _dict.Set("M", new PdfString(System.Text.Encoding.Latin1.GetBytes(FormatPdfDate(value))));
+        set => _dict.Set("M", new PdfString(Compat.Latin1.GetBytes(FormatPdfDate(value))));
     }
 
     /// <summary>Parse a PDF date string (D:YYYYMMDDHHmmSS) into DateTime.</summary>
@@ -665,10 +679,10 @@ public partial class Annotation : BaseParagraph
     internal PdfDictionary Dict => _dict;
     internal PdfReader InternalReader => _reader;
 
-    /// <summary>Low-level view of the annotation's underlying PDF dictionary
-    /// (the corpus' <c>EngineDict</c> assert surface — HasKey / indexer /
-    /// ToDictionary / ToPdfString chains over what the file actually carries).</summary>
-    internal Forms.FieldDictionaryView EngineDict =>
+    /// <summary>Read-only view of the dictionary behind the annotation - what the file
+    /// actually carries, resolved: HasKey / indexer / ToDictionary / ToName / ToArray chains
+    /// over the stored entries.</summary>
+    internal Forms.FieldDictionaryView DictionaryView =>
         Forms.FieldDictionaryView.For(_dict, _reader ?? Aspose.Pdf.IO.PdfReader.Empty);
 
     private Characteristics? _characteristics;
@@ -712,7 +726,7 @@ public partial class Annotation : BaseParagraph
             "Screen" => new ScreenAnnotation(dict, reader),
             "RichMedia" => new RichMediaAnnotation(dict, reader),
             "3D" => new PDF3DAnnotation(dict, reader),
-            // "Watermark" has a separate non-Annotation class — keep as generic
+            "Watermark" => new WatermarkAnnotation(dict, reader),
             // Every other (un-modelled / vendor-specific) subtype, e.g. /BatesN,
             // falls back to GenericAnnotation so it stays castable and round-trips.
             _ => new GenericAnnotation(dict, reader),

@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
 {
@@ -21,6 +21,33 @@ namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
 
             // Trailing sentinel so a pending delete/insert run is always flushed at an equality.
             diffs.Add(new DiffOperation(Operation.Equal, string.Empty));
+            MergeAdjacentRuns(diffs);
+
+            if (diffs.Count != 0 && diffs[diffs.Count - 1].Text.Length == 0)
+                diffs.RemoveAt(diffs.Count - 1);
+        }
+
+        private IEnumerable<DiffOperation> BuildRun(string textDelete, string textInsert)
+        {
+            var del = textDelete.Length != 0 ? new DiffOperation(Operation.Delete, textDelete) : null;
+            var ins = textInsert.Length != 0 ? new DiffOperation(Operation.Insert, textInsert) : null;
+            if (_order == EditOperationsOrder.DeleteFirst)
+            {
+                if (del is not null) yield return del;
+                if (ins is not null) yield return ins;
+            }
+            else
+            {
+                if (ins is not null) yield return ins;
+                if (del is not null) yield return del;
+            }
+        }
+
+        /// <summary>The merge pass: adjacent delete/insert runs are gathered, their common
+        /// prefix and suffix are factored back out to the neighbouring equalities, and what is
+        /// left replaces the run in place.</summary>
+        private void MergeAdjacentRuns(List<DiffOperation> diffs)
+        {
             int pointer = 0, countDelete = 0, countInsert = 0;
             string textDelete = string.Empty, textInsert = string.Empty;
 
@@ -41,31 +68,7 @@ namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
                     default: // Equal — flush the accumulated run
                         if (countDelete + countInsert > 1)
                         {
-                            if (countDelete != 0 && countInsert != 0)
-                            {
-                                var prefix = DiffUtils.FindCommonStartParts(textInsert, textDelete);
-                                if (prefix.Length != 0)
-                                {
-                                    var x = pointer - countDelete - countInsert - 1;
-                                    if (x >= 0 && diffs[x].Operation == Operation.Equal)
-                                        diffs[x].Text += prefix;
-                                    else
-                                    {
-                                        diffs.Insert(0, new DiffOperation(Operation.Equal, prefix));
-                                        pointer++;
-                                    }
-                                    textInsert = textInsert.Substring(prefix.Length);
-                                    textDelete = textDelete.Substring(prefix.Length);
-                                }
-
-                                var suffix = DiffUtils.FindCommonEndParts(textInsert, textDelete, 0);
-                                if (suffix.Length != 0)
-                                {
-                                    diffs[pointer].Text = suffix + diffs[pointer].Text;
-                                    textInsert = textInsert.Substring(0, textInsert.Length - suffix.Length);
-                                    textDelete = textDelete.Substring(0, textDelete.Length - suffix.Length);
-                                }
-                            }
+                            FactorCommonAffixes(diffs, countDelete, countInsert, ref pointer, ref textDelete, ref textInsert);
 
                             var removeAt = pointer - countDelete - countInsert;
                             diffs.RemoveRange(removeAt, countDelete + countInsert);
@@ -93,24 +96,38 @@ namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
                         break;
                 }
             }
-
-            if (diffs.Count != 0 && diffs[diffs.Count - 1].Text.Length == 0)
-                diffs.RemoveAt(diffs.Count - 1);
         }
 
-        private IEnumerable<DiffOperation> BuildRun(string textDelete, string textInsert)
+        /// <summary>A run that deletes AND inserts shares a common prefix and suffix with its
+        /// neighbours; both are factored back out to the surrounding equalities so the run that
+        /// remains is the genuine difference.</summary>
+        private static void FactorCommonAffixes(List<DiffOperation> diffs, int countDelete, int countInsert,
+            ref int pointer, ref string textDelete, ref string textInsert)
         {
-            var del = textDelete.Length != 0 ? new DiffOperation(Operation.Delete, textDelete) : null;
-            var ins = textInsert.Length != 0 ? new DiffOperation(Operation.Insert, textInsert) : null;
-            if (_order == EditOperationsOrder.DeleteFirst)
+            if (countDelete != 0 && countInsert != 0)
             {
-                if (del is not null) yield return del;
-                if (ins is not null) yield return ins;
-            }
-            else
-            {
-                if (ins is not null) yield return ins;
-                if (del is not null) yield return del;
+                var prefix = DiffUtils.FindCommonStartParts(textInsert, textDelete);
+                if (prefix.Length != 0)
+                {
+                    var x = pointer - countDelete - countInsert - 1;
+                    if (x >= 0 && diffs[x].Operation == Operation.Equal)
+                        diffs[x].Text += prefix;
+                    else
+                    {
+                        diffs.Insert(0, new DiffOperation(Operation.Equal, prefix));
+                        pointer++;
+                    }
+                    textInsert = textInsert.Substring(prefix.Length);
+                    textDelete = textDelete.Substring(prefix.Length);
+                }
+
+                var suffix = DiffUtils.FindCommonEndParts(textInsert, textDelete, 0);
+                if (suffix.Length != 0)
+                {
+                    diffs[pointer].Text = suffix + diffs[pointer].Text;
+                    textInsert = textInsert.Substring(0, textInsert.Length - suffix.Length);
+                    textDelete = textDelete.Substring(0, textDelete.Length - suffix.Length);
+                }
             }
         }
     }

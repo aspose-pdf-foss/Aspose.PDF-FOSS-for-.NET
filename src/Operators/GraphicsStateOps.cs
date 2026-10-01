@@ -8,6 +8,8 @@ namespace Aspose.Pdf.Operators;
 /// <summary>q — Save graphics state.</summary>
 public sealed class GSave : Operator
 {
+    /// <summary>Creates a <c>q</c> operator, which saves the current graphics state on the graphics state stack.</summary>
+    public GSave() { }
     public override string ToPdf() => "q";
     public override string ToString() => ToPdf();
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -16,6 +18,8 @@ public sealed class GSave : Operator
 /// <summary>Q — Restore graphics state.</summary>
 public sealed class GRestore : Operator
 {
+    /// <summary>Creates a <c>Q</c> operator, which restores the graphics state most recently saved by <c>q</c>.</summary>
+    public GRestore() { }
     public override string ToPdf() => "Q";
     public override string ToString() => ToPdf();
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -31,6 +35,7 @@ public sealed class ConcatenateMatrix : Operator
     /// </summary>
     public Aspose.Pdf.Matrix Matrix { get; set; }
 
+    /// <summary>Creates a <c>cm</c> operator from the six matrix values [a b c d e f]; throws <c>ArgumentException</c> if the array does not have exactly six elements.</summary>
     public ConcatenateMatrix(double[] matrix)
     {
         if (matrix.Length != 6)
@@ -38,6 +43,7 @@ public sealed class ConcatenateMatrix : Operator
         Matrix = new Aspose.Pdf.Matrix(matrix);
     }
 
+    /// <summary>Creates a <c>cm</c> operator that multiplies the current transformation matrix by [a b c d e f]: <c>a</c> to <c>d</c> scale, rotate and skew, and <c>e</c> and <c>f</c> translate, in user space units.</summary>
     public ConcatenateMatrix(double a, double b, double c, double d, double e, double f)
         : this(new[] { a, b, c, d, e, f }) { }
 
@@ -55,7 +61,7 @@ public sealed class ConcatenateMatrix : Operator
 
     /// <summary>
     /// Format a <c>cm</c> operand. Differs from the shared 6-fraction-digit
-    /// <see cref="Operator.Fmt"/> in two ways specific to transformation
+    /// <c>Operator.Fmt</c> in two ways specific to transformation
     /// matrices:
     ///  - it preserves the value's full round-trip precision (an 8-significant-digit
     ///    scale such as <c>8.41314506</c> keeps all its digits instead of being
@@ -98,7 +104,9 @@ public enum LineJoin { MiterJoin = 0, RoundJoin = 1, BevelJoin = 2 }
 /// <summary>gs — Set parameters from named ExtGState resource.</summary>
 public sealed class GS : Operator
 {
+    /// <summary>Gets or sets the name of the ExtGState resource, without the leading slash.</summary>
     public string Name { get; set; }
+    /// <summary>Creates a <c>gs</c> operator that applies the parameters of the named ExtGState (graphics state parameter dictionary) resource, given without the leading slash.</summary>
     public GS(string name) { Name = name; }
     public override string ToPdf() => $"/{Name} gs";
     public override string ToString() => ToPdf();
@@ -108,9 +116,11 @@ public sealed class GS : Operator
 /// <summary>w — Set line width.</summary>
 public sealed class SetLineWidth : Operator
 {
+    /// <summary>Gets or sets the line width, in user space units (points by default).</summary>
     public double LineWidth { get; set; }
     /// <summary>Public-API-shape alias for <see cref="LineWidth"/>.</summary>
     public double Width { get => LineWidth; set => LineWidth = value; }
+    /// <summary>Creates a <c>w</c> operator that sets the line width used for stroking, in user space units (points by default).</summary>
     public SetLineWidth(double width) { LineWidth = width; }
     public override string ToPdf() => $"{Fmt(LineWidth)} w";
     public override string ToString() => ToPdf();
@@ -121,7 +131,9 @@ public sealed class SetLineWidth : Operator
 public sealed class SetLineCap : Operator
 {
     public LineCap Cap { get; set; }
+    /// <summary>Creates a <c>J</c> operator that sets the shape drawn at the ends of open stroked lines.</summary>
     public SetLineCap(LineCap cap) { Cap = cap; }
+    /// <summary>Creates a <c>J</c> operator from a numeric line cap style: 0 butt, 1 round, 2 projecting square.</summary>
     public SetLineCap(int cap) { Cap = (LineCap)cap; }
     public override string ToPdf() => $"{(int)Cap} J";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -130,9 +142,13 @@ public sealed class SetLineCap : Operator
 /// <summary>j — Set line join style.</summary>
 public sealed class SetLineJoin : Operator
 {
+    /// <summary>Gets or sets the line join style.</summary>
     public LineJoin Join { get; set; }
+    /// <summary>Creates a <c>j</c> operator with the miter join style.</summary>
     public SetLineJoin() { Join = LineJoin.MiterJoin; }
+    /// <summary>Creates a <c>j</c> operator that sets the shape drawn at the corners of stroked paths.</summary>
     public SetLineJoin(LineJoin join) { Join = join; }
+    /// <summary>Creates a <c>j</c> operator from a numeric line join style: 0 miter, 1 round, 2 bevel.</summary>
     public SetLineJoin(int join) { Join = (LineJoin)join; }
     public override string ToPdf() => $"{(int)Join} j";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -142,6 +158,7 @@ public sealed class SetLineJoin : Operator
 public sealed class SetMiterLimit : Operator
 {
     public double MiterLimit { get; set; }
+    /// <summary>Creates an <c>M</c> operator that sets the miter limit, which bounds how far a mitered corner may extend before it is drawn beveled instead.</summary>
     public SetMiterLimit(double miterLimit) { MiterLimit = miterLimit; }
     public override string ToPdf() => $"{Fmt(MiterLimit)} M";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
@@ -150,12 +167,15 @@ public sealed class SetMiterLimit : Operator
 /// <summary>d — Set dash pattern.</summary>
 public sealed class SetDash : Operator
 {
+    /// <summary>Gets or sets the alternating dash and gap lengths, in user space units; an empty array draws a solid line.</summary>
     public int[] DashArray { get; set; }
+    /// <summary>Gets or sets the distance into the dash pattern at which the dash starts, in user space units.</summary>
     public int DashPhase { get; set; }
     /// <summary>Public-API-shape alias for <see cref="DashArray"/>.</summary>
     public int[] Pattern { get => DashArray; set => DashArray = value; }
     /// <summary>Public-API-shape alias for <see cref="DashPhase"/>.</summary>
     public int Phase { get => DashPhase; set => DashPhase = value; }
+    /// <summary>Creates a <c>d</c> operator that sets the dash pattern: alternating dash and gap lengths, and the phase at which the pattern starts, in user space units. A null array draws a solid line.</summary>
     public SetDash(int[] pattern, int phase)
     { DashArray = pattern ?? Array.Empty<int>(); DashPhase = phase; }
     public override string ToPdf()
@@ -177,6 +197,7 @@ public sealed class SetDash : Operator
 public sealed class SetFlat : Operator
 {
     public double Flatness { get; set; }
+    /// <summary>Creates an <c>i</c> operator that sets the flatness tolerance: the maximum distance, in device pixels, allowed between a curve and the line segments that approximate it.</summary>
     public SetFlat(double flatness) { Flatness = flatness; }
     public override string ToPdf() => $"{Fmt(Flatness)} i";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);

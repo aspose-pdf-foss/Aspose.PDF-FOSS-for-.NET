@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -8,7 +8,7 @@ namespace Aspose.Pdf;
 /// <summary>
 /// Helper for layer content stream operations (delete, flatten, extract).
 /// </summary>
-internal static class LayerHelper
+internal static partial class LayerHelper
 {
     /// <summary>
     /// Get the page content stream as a single byte array.
@@ -84,13 +84,13 @@ internal static class LayerHelper
     /// </summary>
     private static void SplitContentIntoOperators(byte[] data, List<byte[]> results)
     {
-        var text = Encoding.Latin1.GetString(data);
+        var text = Compat.Latin1.GetString(data);
         var lines = text.Split('\n');
         foreach (var line in lines)
         {
             var trimmed = line.Trim('\r', ' ', '\t');
             if (trimmed.Length > 0)
-                results.Add(Encoding.Latin1.GetBytes(trimmed));
+                results.Add(Compat.Latin1.GetBytes(trimmed));
         }
     }
 
@@ -143,7 +143,7 @@ internal static class LayerHelper
     internal static IReadOnlyList<byte[]> ExtractLayerContents(Page page, string layerId)
     {
         var contentBytes = GetPageContentBytes(page);
-        var text = Encoding.Latin1.GetString(contentBytes);
+        var text = Compat.Latin1.GetString(contentBytes);
         var results = new List<byte[]>();
 
         // Find all /OC /{layerId} BDC … EMC blocks
@@ -176,7 +176,7 @@ internal static class LayerHelper
                     {
                         var block = text.Substring(start, emcIdx - start).Trim();
                         if (block.Length > 0)
-                            results.Add(Encoding.Latin1.GetBytes(block));
+                            results.Add(Compat.Latin1.GetBytes(block));
                     }
                     pos = emcIdx + 3;
                 }
@@ -338,7 +338,7 @@ internal static class LayerHelper
 
         // Flatten all existing layers (remove BDC/EMC markers, keep content)
         var contentBytes = GetPageContentBytes(page);
-        var text = Encoding.Latin1.GetString(contentBytes);
+        var text = Compat.Latin1.GetString(contentBytes);
 
         foreach (var layer in layers)
         {
@@ -356,7 +356,7 @@ internal static class LayerHelper
         // Create a new OCG for the merged layer
         var ocgDict = new PdfDictionary();
         ocgDict.Set("Type", new PdfName("OCG"));
-        ocgDict.Set("Name", new PdfString(Encoding.Latin1.GetBytes(newLayerName)));
+        ocgDict.Set("Name", new PdfString(Compat.Latin1.GetBytes(newLayerName)));
 
         // Register in page Resources/Properties
         var resources = reader.ResolveDict(page.Dict.Get("Resources"));
@@ -376,7 +376,7 @@ internal static class LayerHelper
 
         // Wrap all content in new BDC/EMC
         var wrappedContent = $"/OC /{propName} BDC\n{text.Trim()}\nEMC\n";
-        page.SetContentStream(Encoding.Latin1.GetBytes(wrappedContent));
+        page.SetContentStream(Compat.Latin1.GetBytes(wrappedContent));
 
         // Add OCG to document OCProperties
         var catalog = reader.Catalog;
@@ -407,123 +407,30 @@ internal static class LayerHelper
     /// </summary>
     internal static List<OptionalContentGroup> GetPageLayers(Page page, PdfReader reader)
     {
-        var result = new List<OptionalContentGroup>();
+        var lh = new PageLayersState();
+        lh.page = page;
+        lh.reader = reader;
+        lh.result = new List<OptionalContentGroup>();
 
-        // Get document-level OCG properties so layers can persist state changes.
-        // Build a lookup from OCG dict → existing group instance so that changes
-        // to a page layer's DefaultState propagate to the document-level group.
-        var ocPropsDict = reader.ResolveDict(reader.Catalog.Get("OCProperties"));
-        var ocProps = ocPropsDict is not null ? new OptionalContentProperties(ocPropsDict, reader) : null;
-        var ocgLookup = new Dictionary<PdfDictionary, OptionalContentGroup>(ReferenceEqualityComparer.Instance);
-        if (ocProps is not null)
+        lh.ocPropsDict = lh.reader.ResolveDict(lh.reader.Catalog.Get("OCProperties"));
+        lh.ocProps = lh.ocPropsDict is not null ? new OptionalContentProperties(lh.ocPropsDict, lh.reader) : null;
+        lh.ocgLookup = new Dictionary<PdfDictionary, OptionalContentGroup>(ReferenceEqualityComparer.Instance);
+        if (lh.ocProps is not null)
         {
-            for (int i = 0; i < ocProps.Count; i++)
-                ocgLookup[ocProps[i].Dict] = ocProps[i];
+            for (int i = 0; i < lh.ocProps.Count; i++)
+                lh.ocgLookup[lh.ocProps[i].Dict] = lh.ocProps[i];
         }
 
-        var seen = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
-        var resources = reader.ResolveDict(page.Dict.Get("Resources"));
+        lh.seen = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        lh.resources = lh.reader.ResolveDict(lh.page.Dict.Get("Resources"));
 
         // 1. Check Resources/Properties for OCG references (BDC-style layers)
-        if (resources is not null)
+        if (lh.resources is not null)
         {
-            var props = reader.ResolveDict(resources.Get("Properties"));
-            if (props is not null)
-            {
-                foreach (var key in props.Keys)
-                {
-                    var propDict = reader.ResolveDict(props.Get(key));
-                    if (propDict is null) continue;
-
-                    var type = propDict.GetName("Type");
-                    if (type != "OCG") continue;
-                    if (!seen.Add(propDict)) continue;
-
-                    // Reuse the document-level group instance so state changes propagate
-                    OptionalContentGroup ocg;
-                    if (ocgLookup.TryGetValue(propDict, out var existing))
-                    {
-                        ocg = existing;
-                        ocg.Id = key;
-                        ocg._page = page;
-                    }
-                    else
-                    {
-                        ocg = new OptionalContentGroup(propDict) { Id = key, _page = page };
-                        ocg.SetRegisteredReader(reader);
-                        ApplyDocLevelState(ocg, propDict, reader);
-                    }
-                    result.Add(ocg);
-                }
-            }
-
-            // 2. Check XObject resources for /OC references (XForm-level layers)
-            var xobjects = reader.ResolveDict(resources.Get("XObject"));
-            if (xobjects is not null)
-            {
-                foreach (var key in xobjects.Keys)
-                {
-                    var xobj = reader.ResolveStream(xobjects.Get(key));
-                    if (xobj is null) continue;
-
-                    var ocRef = xobj.Dict.Get("OC");
-                    if (ocRef is null) continue;
-
-                    var ocDict = reader.ResolveDict(ocRef);
-                    if (ocDict is null) continue;
-
-                    // /OC can point directly to an OCG dict or to an OCMD
-                    var ocType = ocDict.GetName("Type");
-                    PdfDictionary? actualOcgDict = null;
-                    string? propId = null;
-
-                    if (ocType == "OCG")
-                    {
-                        actualOcgDict = ocDict;
-                    }
-                    else if (ocType == "OCMD")
-                    {
-                        // OCMD — resolve the first OCG in its /OCGs
-                        var ocmdOcgs = reader.Resolve(ocDict.Get("OCGs"));
-                        if (ocmdOcgs is PdfArray arr && arr.Count > 0)
-                            actualOcgDict = reader.ResolveDict(arr[0]);
-                        else if (ocmdOcgs is PdfDictionary d)
-                            actualOcgDict = d;
-                    }
-                    else
-                    {
-                        // No /Type — assume it's an OCG
-                        actualOcgDict = ocDict;
-                    }
-
-                    if (actualOcgDict is null) continue;
-
-                    // Don't dedup XObject-level layers — each XObject with /OC
-                    // is a separate layer entry (matches the public behavior).
-                    propId = key;
-                    // XObject layers: always create new instances since multiple
-                    // XObjects may share the same OCG but need separate Id/page refs.
-                    // Copy visibility state from the document-level group if available.
-                    var ocg = new OptionalContentGroup(actualOcgDict) { Id = propId, _page = page };
-                    ocg.SetRegisteredReader(reader);
-                    if (ocgLookup.TryGetValue(actualOcgDict, out var docGroup))
-                    {
-                        ocg.IsVisible = docGroup.IsVisible;
-                        ocg.IsLocked = docGroup.IsLocked;
-                        ocg.SetOwner(ocProps!);
-                        ocg._docTwin = docGroup;
-                    }
-                    else
-                    {
-                        ApplyDocLevelState(ocg, actualOcgDict, reader);
-                    }
-                    result.Add(ocg);
-                }
-
-            }
+            CollectResourceLayers(lh);
         }
 
-        return result;
+        return lh.result;
     }
 
     private static void ApplyDocLevelState(OptionalContentGroup ocg, PdfDictionary ocgDict, PdfReader reader)
@@ -608,15 +515,7 @@ internal static class LayerHelper
                     if (depth == 0)
                     {
                         emcEnd = emcIdx + 3;
-                        if (keepContent)
-                        {
-                            var content = text.Substring(start, emcIdx - start).Trim();
-                            if (content.Length > 0)
-                            {
-                                sb.Append(content);
-                                sb.Append('\n');
-                            }
-                        }
+                        if (keepContent) AppendKeptContent(sb, text, start, emcIdx);
                     }
                     pos = emcIdx + 3;
                 }
@@ -630,6 +529,18 @@ internal static class LayerHelper
             sb.Append(text, lastEnd, text.Length - lastEnd);
 
         return sb.ToString();
+    }
+
+    /// <summary>Keep the marked content itself when its OC markers are stripped: the trimmed
+    /// span between the BDC and its EMC, followed by a newline.</summary>
+    private static void AppendKeptContent(StringBuilder sb, string text, int start, int emcIdx)
+    {
+        var content = text.Substring(start, emcIdx - start).Trim();
+        if (content.Length > 0)
+        {
+            sb.Append(content);
+            sb.Append('\n');
+        }
     }
 
     private static int FindOperator(string text, string op, int startPos)
@@ -835,7 +746,7 @@ internal static class LayerHelper
         if (defaultConfig is null)
         {
             defaultConfig = new PdfDictionary();
-            defaultConfig.Set("Name", new PdfString(System.Text.Encoding.Latin1.GetBytes("Default")));
+            defaultConfig.Set("Name", new PdfString(Compat.Latin1.GetBytes("Default")));
             ocProps.Set("D", defaultConfig);
         }
 

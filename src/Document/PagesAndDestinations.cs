@@ -144,7 +144,7 @@ public sealed partial class Document
             namesArray = new PdfArray();
         }
 
-        namesArray.Add(new PdfString(Encoding.Latin1.GetBytes(name)));
+        namesArray.Add(new PdfString(Compat.Latin1.GetBytes(name)));
         namesArray.Add(destination.Array);
         destsTree.Set("Names", namesArray);
     }
@@ -253,18 +253,18 @@ public sealed partial class Document
     /// footnote-free, Standard-14 TextFragment, or an HtmlFragment whose content
     /// strips to plain single-line text (no tables, images or vector markup) —
     /// that one renders in the serif HTML body face.</summary>
-    private static bool InlineJoinable(BaseParagraph p, out string text, out bool serif)
+    private static (string text, bool serif)? InlineJoinable(BaseParagraph p)
     {
-        text = string.Empty;
-        serif = false;
+        var text = string.Empty;
+        var serif = false;
         if (p is Text.TextFragment f)
         {
-            if (f.HasExplicitPosition || f.FootNote is not null) return false;
+            if (f.HasExplicitPosition || f.FootNote is not null) return null;
             if (f.TextState.FontData is not null || f.TextState.Font?.SourceFontData is not null)
-                return false;
-            if (f.HyperlinkValue is not null) return false;
+                return null;
+            if (f.HyperlinkValue is not null) return null;
             text = f.Text ?? string.Empty;
-            return text.Length > 0 && text.IndexOf('\n') < 0 && text.IndexOf('\r') < 0;
+            return (text.Length > 0 && text.IndexOf('\n') < 0 && text.IndexOf('\r') < 0) ? (text, serif) : null;
         }
         if (p is HtmlFragment h)
         {
@@ -273,12 +273,12 @@ public sealed partial class Document
                 || content.IndexOf("<img", StringComparison.OrdinalIgnoreCase) >= 0
                 || content.IndexOf("<svg", StringComparison.OrdinalIgnoreCase) >= 0
                 || content.IndexOf("<br", StringComparison.OrdinalIgnoreCase) >= 0)
-                return false;
+                return null;
             text = HtmlFragment.StripHtmlTags(content).Trim();
             serif = true;
-            return text.Length > 0 && text.IndexOf('\n') < 0;
+            return (text.Length > 0 && text.IndexOf('\n') < 0) ? (text, serif) : null;
         }
-        return false;
+        return null;
     }
 
     /// <summary>TJ adjustment array (thousandths of text space; positive pulls the following

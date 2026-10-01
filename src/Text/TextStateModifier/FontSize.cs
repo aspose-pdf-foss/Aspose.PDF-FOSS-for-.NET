@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -11,13 +11,25 @@ internal sealed partial class TextStateModifier
     /// Change the font size of the Tf operator that immediately precedes the first
     /// occurrence of <paramref name="text"/> in the page's content stream(s).
     /// </summary>
-    public void ModifyFontSize(Page page, string text, double oldSize, double newSize, bool allowCollateral = true)
+    /// <param name="page">The page whose content (and form XObjects) is rewritten.</param>
+    /// <param name="text">The decoded text of the run to resize.</param>
+    /// <param name="oldSize">The run's current effective font size; only shows at this size match.</param>
+    /// <param name="newSize">The desired effective font size.</param>
+    /// <param name="allowCollateral">When false, a Tf that also governs shows outside the match
+    /// is not resized; the match gets its own Tf instead.</param>
+    /// <param name="reseat">Line geometry used to re-seat the rest of the line after the resize, or null.</param>
+    /// <param name="splitSubRun">Whether a match that is PART of one show may split that show
+    /// around itself. A fragment whose face was explicitly reassigned is re-encoded by the
+    /// text replacement that follows, which carries the size with it and needs the show it
+    /// absorbed left intact; such a caller passes false and the sub-run resize is left to it.</param>
+    public void ModifyFontSize(Page page, string text, double oldSize, double newSize, bool allowCollateral = true,
+        LineReseat? reseat = null, bool splitSubRun = true)
     {
         var reader = page.Reader;
         if (reader is null) return;
 
         // First try Form XObjects (text is often inside XObjects, not page content directly)
-        if (ModifyInFormXObjects(page.Dict, reader, text, oldSize, newSize, allowCollateral))
+        if (ModifyInFormXObjects(page.Dict, reader, text, oldSize, newSize, allowCollateral, reseat, splitSubRun))
             return;
 
         // Then try the page's own content stream
@@ -25,15 +37,23 @@ internal sealed partial class TextStateModifier
         if (contentStreams.Count == 0) return;
 
         var combined = CombineStreams(contentStreams);
-        var modified = ModifyFontSizeInStream(combined, text, oldSize, newSize, page.Dict, reader, allowCollateral);
+        var modified = ModifyFontSizeInStream(combined, text, oldSize, newSize, page.Dict, reader, allowCollateral, reseat, splitSubRun);
         if (modified is not null)
         {
             page.SetContentStream(modified);
         }
     }
 
+    /// <summary>What a whole-show resize needs to re-seat the rest of its line (see
+    /// <see cref="ReseatLine"/>): the page's right edge, the face's measure, and the LIVE
+    /// page rectangle of every show in stream order (re-absorbed for each resize, because
+    /// earlier resizes moved shows the caller's absorbed fragments still place where they were).</summary>
+    internal readonly record struct LineReseat(double PageRight, Func<string, double, double> Measure,
+        Func<IReadOnlyList<(double llx, double urx, double lly)>?> ShowRects);
+
     private bool ModifyInFormXObjects(PdfDictionary dict, PdfReader reader,
-        string text, double oldSize, double newSize, bool allowCollateral)
+        string text, double oldSize, double newSize, bool allowCollateral, LineReseat? reseat = null,
+        bool splitSubRun = true)
     {
         var resources = reader.ResolveDict(dict.Get("Resources"));
         if (resources is null) return false;
@@ -47,7 +67,7 @@ internal sealed partial class TextStateModifier
             if (xobjStream.Dict.GetName("Subtype") != "Form") continue;
 
             var streamData = reader.DecodeStream(xobjStream);
-            var modified = ModifyFontSizeInStream(streamData, text, oldSize, newSize, xobjStream.Dict, reader, allowCollateral);
+            var modified = ModifyFontSizeInStream(streamData, text, oldSize, newSize, xobjStream.Dict, reader, allowCollateral, reseat, splitSubRun);
             if (modified is not null)
             {
                 xobjStream.Dict.Remove("Filter");
@@ -58,262 +78,10 @@ internal sealed partial class TextStateModifier
             }
 
             // Recurse into nested Form XObjects
-            if (ModifyInFormXObjects(xobjStream.Dict, reader, text, oldSize, newSize, allowCollateral))
+            if (ModifyInFormXObjects(xobjStream.Dict, reader, text, oldSize, newSize, allowCollateral, reseat, splitSubRun))
                 return true;
         }
         return false;
-    }
-
-    private byte[]? ModifyFontSizeInStream(byte[] streamBytes, string text, double oldSize,
-        double newSize, PdfDictionary pageDict, PdfReader reader, bool allowCollateral)
-    {
-        var fonts = TextAbsorber.ResolveFonts(pageDict, reader);
-        var lexer = new PdfLexer(streamBytes);
-        var operands = new List<(TokenKind kind, PdfObject obj, int startPos, int endPos)>();
-
-        // Track the position of the most recent Tf operator
-        int lastTfSizeStart = -1;
-        int lastTfSizeEnd = -1;
-        double lastTfSize = 0;
-        double tmScaleY = 1; // text matrix vertical scale factor
-        // The CTM scale in force, tracked through q/Q/cm. A producer that lays a page out in
-        // its own space — `0.8625 0 0 -0.8625 50 700 cm`, then `16 Tf` — draws text at an
-        // EFFECTIVE 13.8 pt, which is the size the absorber reports and therefore the size a
-        // caller passes as oldSize. Reading the raw 16 off the Tf made every such run fail the
-        // oldSize test, so the resize silently did nothing. The raw value written back is
-        // recovered through the same combined scale below, so it stays in the page's space.
-        double ctmScale = 1;
-        var ctmStack = new Stack<double>();
-        string? currentFontName = null;
-        Dictionary<int, string>? currentToUnicode = null;
-        // Every text show with the Tf that governs it. A fragment's phrase is
-        // often split over several consecutive shows, each re-issuing its own
-        // Tf (accented glyphs, kerned words), so the match must run over the
-        // concatenated show text and then patch EVERY Tf covering the match.
-        var shows = new List<(string decoded, int tfStart, int tfEnd, double effSize,
-            int showStart, int showEnd, string? fontRes)>();
-
-        while (true)
-        {
-            var startPos = (int)lexer.Position;
-            var token = lexer.NextToken();
-            if (token.Kind == TokenKind.Eof) break;
-            var endPos = (int)lexer.Position;
-
-            switch (token.Kind)
-            {
-                case TokenKind.Integer:
-                    operands.Add((token.Kind, new PdfInteger(token.IntValue), startPos, endPos));
-                    break;
-                case TokenKind.Real:
-                    operands.Add((token.Kind, new PdfReal(token.RealValue), startPos, endPos));
-                    break;
-                case TokenKind.LiteralString:
-                    operands.Add((token.Kind, new PdfString(token.BytesValue!), startPos, endPos));
-                    break;
-                case TokenKind.HexString:
-                    operands.Add((token.Kind, new PdfString(token.BytesValue!, isHex: true), startPos, endPos));
-                    break;
-                case TokenKind.Name:
-                    operands.Add((token.Kind, new PdfName(token.StringValue!), startPos, endPos));
-                    break;
-                case TokenKind.ArrayStart:
-                {
-                    // Collect array elements (for TJ operator)
-                    var arrTexts = new StringBuilder();
-                    int arrStringCount = 0;
-                    while (true)
-                    {
-                        var t = lexer.NextToken();
-                        if (t.Kind == TokenKind.Eof) goto done;
-                        if (t.Kind == TokenKind.ArrayEnd) break;
-                        if (t.Kind == TokenKind.LiteralString || t.Kind == TokenKind.HexString)
-                        {
-                            var strBytes = t.BytesValue;
-                            if (strBytes is not null)
-                            {
-                                arrTexts.Append(DecodeTextString(strBytes, currentToUnicode));
-                                arrStringCount++;
-                            }
-                        }
-                    }
-                    // Store the concatenated text from the array as an operand
-                    operands.Add((TokenKind.ArrayStart, new PdfString(
-                        Cp1252.GetBytes(arrTexts.ToString())), startPos, (int)lexer.Position));
-                    break;
-                }
-                case TokenKind.DictStart:
-                {
-                    int depth = 1;
-                    while (depth > 0)
-                    {
-                        var t = lexer.NextToken();
-                        if (t.Kind == TokenKind.Eof) goto done;
-                        if (t.Kind == TokenKind.DictStart) depth++;
-                        if (t.Kind == TokenKind.DictEnd) depth--;
-                    }
-                    operands.Clear();
-                    break;
-                }
-                case TokenKind.Keyword:
-                {
-                    var op = token.StringValue!;
-                    switch (op)
-                    {
-                        case "Tf":
-                            if (operands.Count >= 2)
-                            {
-                                if (operands[0].obj is PdfName fn)
-                                {
-                                    currentFontName = fn.Value;
-                                    if (fonts.TryGetValue(currentFontName, out var fontDict))
-                                        currentToUnicode = TextAbsorber.ParseToUnicodeFromDict(fontDict, reader);
-                                    else
-                                        currentToUnicode = null;
-                                }
-                                // Record position of the size operand
-                                lastTfSizeStart = operands[1].startPos;
-                                lastTfSizeEnd = operands[1].endPos;
-                                if (operands[1].obj is PdfInteger pi)
-                                    lastTfSize = pi.Value;
-                                else if (operands[1].obj is PdfReal pr)
-                                    lastTfSize = pr.Value;
-                            }
-                            break;
-
-                        case "Tm":
-                            // Tm: a b c d e f — text matrix; effective font size = Tf_size * sqrt(c² + d²)
-                            if (operands.Count >= 6)
-                            {
-                                double c = 0, d = 0;
-                                if (operands[2].obj is PdfReal cr2) c = cr2.Value;
-                                else if (operands[2].obj is PdfInteger ci2) c = ci2.Value;
-                                if (operands[3].obj is PdfReal dr2) d = dr2.Value;
-                                else if (operands[3].obj is PdfInteger di2) d = di2.Value;
-                                tmScaleY = Math.Sqrt(c * c + d * d);
-                                if (tmScaleY < 0.001) tmScaleY = 1;
-                            }
-                            break;
-
-                        case "q":
-                            ctmStack.Push(ctmScale);
-                            break;
-
-                        case "Q":
-                            if (ctmStack.Count > 0) ctmScale = ctmStack.Pop();
-                            break;
-
-                        case "cm":
-                            if (operands.Count >= 6)
-                            {
-                                static double Num((TokenKind kind, PdfObject obj, int startPos, int endPos) o)
-                                    => o.obj is PdfReal r ? r.Value : o.obj is PdfInteger i ? i.Value : 0;
-                                var det = Math.Abs(Num(operands[0]) * Num(operands[3])
-                                    - Num(operands[1]) * Num(operands[2]));
-                                if (det > 1e-9) ctmScale *= Math.Sqrt(det);
-                            }
-                            break;
-
-                        case "Tj":
-                        case "'":
-                        case "\"":
-                            if (operands.Count >= 1 && operands[^1].obj is PdfString textStr)
-                            {
-                                var decoded = DecodeTextString(textStr.Value, currentToUnicode);
-                                if (decoded.Length > 0 && lastTfSizeStart >= 0)
-                                    shows.Add((decoded, lastTfSizeStart, lastTfSizeEnd,
-                                        lastTfSize * tmScaleY * ctmScale,
-                                        operands[^1].startPos, endPos, currentFontName));
-                            }
-                            break;
-
-                        case "TJ":
-                            // TJ array: text was decoded during array parsing
-                            if (operands.Count >= 1 && operands[^1].obj is PdfString tjText)
-                            {
-                                var decoded = DecodeTextString(tjText.Value, currentToUnicode);
-                                if (decoded.Length > 0 && lastTfSizeStart >= 0)
-                                    shows.Add((decoded, lastTfSizeStart, lastTfSizeEnd,
-                                        lastTfSize * tmScaleY * ctmScale,
-                                        operands[^1].startPos, endPos, currentFontName));
-                            }
-                            break;
-                    }
-                    operands.Clear();
-                    break;
-                }
-                default:
-                    operands.Clear();
-                    break;
-            }
-        }
-        done:
-        // Match the phrase over the concatenated show text, then patch every
-        // Tf site (with the expected old size) that governs a show overlapping
-        // the first match. Single-show matches reduce to one patch; phrases
-        // split across shows/Tf re-issues patch each covering Tf once.
-        if (shows.Count == 0) return null;
-        var concat = new StringBuilder();
-        var spans = new (int start, int end)[shows.Count];
-        for (var si = 0; si < shows.Count; si++)
-        {
-            spans[si] = (concat.Length, concat.Length + shows[si].decoded.Length);
-            concat.Append(shows[si].decoded);
-        }
-        // Walk occurrences until one is drawn at the expected old size — the
-        // same text can appear elsewhere at other sizes (the caller resizes a
-        // specific absorbed fragment, identified by its size).
-        var concatStr = concat.ToString();
-
-        var patches = new SortedDictionary<int, (int end, double newTf)>();
-        for (var idx = concatStr.IndexOf(text, StringComparison.Ordinal); idx >= 0;
-             idx = concatStr.IndexOf(text, idx + 1, StringComparison.Ordinal))
-        {
-            var matchEnd = idx + text.Length;
-            var sizeMatched = false;
-            var collateral = false;
-            for (var si = 0; si < shows.Count; si++)
-            {
-                if (spans[si].end <= idx || spans[si].start >= matchEnd) continue;
-                var s = shows[si];
-                if (Math.Abs(s.effSize - oldSize) >= 0.5) continue;
-                sizeMatched = true;
-                // A Tf may be shared with shows OUTSIDE the match (e.g. the
-                // whole paragraph under one Tf): patching it would resize
-                // unrelated text. Resize only when every show governed by the
-                // candidate Tf lies inside the match — otherwise the scoped
-                // insertion below gives the match its own Tf instead.
-                for (var sj = 0; allowCollateral == false && sj < shows.Count; sj++)
-                {
-                    if (shows[sj].tfStart != s.tfStart) continue;
-                    if (spans[sj].start < idx || spans[sj].end > matchEnd) { collateral = true; break; }
-                }
-                if (collateral) break;
-                // newSize is the desired effective size; recover the raw Tf value
-                // through the same Tm scale that produced this show's effective size.
-                var tmScale = s.effSize / Math.Max(0.0001, RawTfFor(streamBytes, s));
-                patches[s.tfStart] = (s.tfEnd, newSize / Math.Max(0.0001, tmScale));
-            }
-            if (sizeMatched && !collateral && patches.Count > 0) break;
-            patches.Clear();
-            // The covering Tf also governs text outside the match, so it cannot be
-            // rewritten in place. Give the match its OWN Tf instead: open the new size
-            // just before its first show and restore the old one just after its last.
-            // That is the expected shape — a resized replacement carries
-            // its own Tf rather than resizing the line it sits on. Only for a run of
-            // shows that lies WHOLLY inside the match and is contiguous in the stream,
-            // so nothing outside the match can fall inside the new scope.
-            if (sizeMatched && collateral
-                && ScopedTfInsertion(streamBytes, shows, spans, idx, matchEnd, oldSize, newSize)
-                    is { } scoped)
-                return scoped;
-        }
-        if (patches.Count == 0) return null;
-
-        var result = streamBytes;
-        foreach (var kv in patches.Reverse())
-            result = PatchFontSize(result, kv.Key, kv.Value.end, kv.Value.newTf);
-        return result;
     }
 
     /// <summary>Wrap the shows covering a match in their OWN <c>Tf</c>, leaving the Tf that
@@ -394,17 +162,6 @@ internal sealed partial class TextStateModifier
         return result;
     }
 
-    /// <summary>
-    /// Rewrite the page (or a Form XObject) content so the text run matching
-    /// <paramref name="text"/> is shown with <paramref name="newFont"/>: a subset
-    /// of the new font is embedded into the document and the run's active Tf
-    /// operator is repointed at the freshly registered resource. Mirrors the
-    /// match-by-decoded-text approach used by ModifyFontSize / ModifyForegroundColor.
-    /// </summary>
-    /// <param name="segmentScoped">The caller is restyling ONE SEGMENT of a run, so
-    /// only those glyphs change font and the run is split around them. A
-    /// fragment-scoped change restyles the whole matched run by repointing its Tf,
-    /// which leaves the show operators intact for a text replacement that follows.</param>
     /// <summary>Geometry for the overflow re-lay a fragment-level font assignment can
     /// request (see <see cref="TextState.Font"/>): the line's baseline drops one
     /// re-flow band and the tail runs re-seat at the match x plus one source-face
@@ -428,7 +185,7 @@ internal sealed partial class TextStateModifier
     private static byte[] RelayOverflowLine(byte[] content, double matchX, double baselineY,
         OverflowRelay r)
     {
-        var s = Encoding.Latin1.GetString(content);
+        var s = Compat.Latin1.GetString(content);
         var newY = baselineY - r.Drop;
         var tailX = matchX + r.SourceSpaceW;
         static string Fmt(double v) => v.ToString("0.0###", CultureInfo.InvariantCulture);
@@ -443,6 +200,154 @@ internal sealed partial class TextStateModifier
                 return "1 0 0 1 " + Fmt(tailX) + " " + Fmt(newY) + " Tm";
             return m.Value;
         });
-        return Encoding.Latin1.GetBytes(patched);
+        return Compat.Latin1.GetBytes(patched);
+    }
+
+    /// <summary>Resize a match that covers PART of one show by splitting the show at the
+    /// match's code boundaries inside its own BT: the codes before the match stay under the
+    /// governing Tf, the match's codes are shown under their own <c>/F newSize Tf</c>, the
+    /// codes after it under a restoring <c>/F oldSize Tf</c>. Every piece keeps its kern
+    /// numbers, a kern belonging to the code that follows it, and the text cursor runs on
+    /// through the pieces, so the remainder re-seats itself by the growth of the resized
+    /// advance - the probed shape of a sub-run resize: the resized part starts at its own
+    /// origin on the same baseline, the rest of the line moves by the advance growth, and
+    /// nothing else on the baseline moves. Null when the match does not fall on code
+    /// boundaries of exactly one show, or the operand cannot be re-lexed.</summary>
+    private static byte[]? SplitShowScopedTf(FontSizeStreamState fz,
+        (string decoded, int tfStart, int tfEnd, double effSize, int showStart, int showEnd, string? fontRes) show,
+        int matchStart, int matchEnd, double oldSize, double newSize)
+    {
+        if (string.IsNullOrEmpty(show.fontRes) || Math.Abs(show.effSize - oldSize) >= 0.5) return null;
+        Dictionary<int, string>? toUnicode = null;
+        if (fz.fonts.TryGetValue(show.fontRes, out var fontDict))
+            toUnicode = TextAbsorber.ParseToUnicodeFromDict(fontDict, fz.reader);
+        var items = LexShowItems(fz.streamBytes, show.showStart, show.showEnd, toUnicode, out var opEnd);
+        if (items is null || opEnd <= 0) return null;
+        // Locate the code range [first, last] covering the match; the match must start and
+        // end exactly on code boundaries, else the resize would reach text the caller did not name.
+        int first = -1, last = -1, chars = 0;
+        for (var i = 0; i < items.Count; i++)
+        {
+            var it = items[i];
+            if (it.Kern is not null) continue;
+            var cs = chars;
+            var ce = chars + it.Text!.Length;
+            chars = ce;
+            if (ce <= matchStart || cs >= matchEnd) continue;
+            if (cs < matchStart || ce > matchEnd) return null;
+            if (first < 0) first = i;
+            last = i;
+        }
+        if (first < 0 || last < first || chars != show.decoded.Length) return null;
+        var rawOld = RawTfFor(fz.streamBytes, show);
+        var scale = show.effSize / Math.Max(0.0001, rawOld);
+        var rawNew = newSize / Math.Max(0.0001, scale);
+        // A kern ahead of the first matched code opens the matched group (it belongs to the
+        // code it precedes); the kerns after the last matched code open the tail group.
+        var preEnd = first;
+        while (preEnd > 0 && items[preEnd - 1].Kern is not null) preEnd--;
+        var postStart = last + 1;
+        var sb = new StringBuilder();
+        EmitShowGroup(sb, items, 0, preEnd);
+        AppendTf(sb, show.fontRes!, rawNew);
+        EmitShowGroup(sb, items, preEnd, postStart);
+        AppendTf(sb, show.fontRes!, rawOld);
+        EmitShowGroup(sb, items, postStart, items.Count);
+        var piece = Compat.Latin1.GetBytes(sb.ToString());
+        var result = new byte[fz.streamBytes.Length - (opEnd - show.showStart) + piece.Length];
+        Array.Copy(fz.streamBytes, 0, result, 0, show.showStart);
+        piece.CopyTo(result, show.showStart);
+        Array.Copy(fz.streamBytes, opEnd, result, show.showStart + piece.Length, fz.streamBytes.Length - opEnd);
+        return result;
+    }
+
+    private static void AppendTf(StringBuilder sb, string fontRes, double rawSize)
+        => sb.Append(" /").Append(fontRes).Append(' ')
+             .Append(rawSize.ToString("0.####", CultureInfo.InvariantCulture)).Append(" Tf ");
+
+    /// <summary>One item of a show operand: a code (its bytes and decoded text) or a kern
+    /// number (its raw spelling).</summary>
+    private readonly record struct ShowItem(byte[]? Code, string? Text, string? Kern);
+
+    /// <summary>Re-lex a Tj/TJ operand into codes and kern numbers. A string is cut into codes
+    /// the way the show's text was decoded: two-byte codes when every pair maps through the
+    /// ToUnicode CMap, else single bytes. <paramref name="opEnd"/> is the end of the show
+    /// operator (Tj or TJ); null when the operand holds anything else.</summary>
+    private static List<ShowItem>? LexShowItems(byte[] original, int start, int end,
+        Dictionary<int, string>? toUnicode, out int opEnd)
+    {
+        opEnd = 0;
+        var items = new List<ShowItem>();
+        var lexer = new PdfLexer(original) { Position = start };
+        var t = lexer.NextToken();
+        if (t.Kind is TokenKind.LiteralString or TokenKind.HexString)
+        {
+            if (t.BytesValue is null) return null;
+            AddCodes(items, t.BytesValue, toUnicode);
+        }
+        else if (t.Kind == TokenKind.ArrayStart)
+        {
+            while (true)
+            {
+                var itemStart = (int)lexer.Position;
+                var e = lexer.NextToken();
+                if (e.Kind == TokenKind.ArrayEnd) break;
+                var itemEnd = (int)lexer.Position;
+                if (itemEnd > end) return null;
+                switch (e.Kind)
+                {
+                    case TokenKind.LiteralString:
+                    case TokenKind.HexString:
+                        if (e.BytesValue is null) return null;
+                        AddCodes(items, e.BytesValue, toUnicode);
+                        break;
+                    case TokenKind.Integer:
+                    case TokenKind.Real:
+                        items.Add(new ShowItem(null, null,
+                            Compat.Latin1.GetString(original, itemStart, itemEnd - itemStart).Trim()));
+                        break;
+                    default:
+                        return null;
+                }
+            }
+        }
+        else return null;
+        var op = lexer.NextToken();
+        if (op.Kind != TokenKind.Keyword || op.StringValue is not ("Tj" or "TJ")) return null;
+        opEnd = (int)lexer.Position;
+        if (opEnd > end) return null;
+        return items.Count == 0 ? null : items;
+    }
+
+    /// <summary>Cut a shown string into its codes, each with the text it decodes to.</summary>
+    private static void AddCodes(List<ShowItem> items, byte[] bytes, Dictionary<int, string>? toUnicode)
+    {
+        if (bytes.Length == 0) return;
+        var twoByte = toUnicode is { Count: > 0 } && bytes.Length % 2 == 0;
+        if (twoByte)
+            for (var i = 0; i < bytes.Length; i += 2)
+                if (!toUnicode!.ContainsKey((bytes[i] << 8) | bytes[i + 1])) { twoByte = false; break; }
+        var step = twoByte ? 2 : 1;
+        for (var i = 0; i + step <= bytes.Length; i += step)
+        {
+            var code = bytes.AsSpan(i, step).ToArray();
+            items.Add(new ShowItem(code, DecodeTextString(code, toUnicode), null));
+        }
+    }
+
+    /// <summary>Write the items in [from, to) as one TJ, every code as a hex string.</summary>
+    private static void EmitShowGroup(StringBuilder sb, List<ShowItem> items, int from, int to)
+    {
+        if (from >= to) return;
+        sb.Append('[');
+        for (var i = from; i < to; i++)
+        {
+            var it = items[i];
+            if (it.Kern is not null) { sb.Append(it.Kern); continue; }
+            sb.Append('<');
+            foreach (var b in it.Code!) sb.Append(b.ToString("X2"));
+            sb.Append('>');
+        }
+        sb.Append("] TJ");
     }
 }

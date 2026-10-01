@@ -1,29 +1,33 @@
-namespace Aspose.Pdf.Devices;
+﻿namespace Aspose.Pdf.Devices;
 
 /// <summary>
 /// Renders PDF document pages into TIFF image format.
 /// Supports single-page and multi-page TIFF output.
 /// </summary>
-public sealed class TiffDevice : ImageDevice
+public sealed partial class TiffDevice : ImageDevice
 {
     /// <summary>TIFF encoding settings (color depth, compression).</summary>
     public TiffSettings Settings { get; }
 
+    /// <summary>Creates a TiffDevice that renders pages with the given <c>renderer</c> at the default resolution of 150 DPI. Uses the default TIFF settings.</summary>
     public TiffDevice(IPageRenderer renderer) : base(renderer)
     {
         Settings = new TiffSettings();
     }
 
+    /// <summary>Creates a TiffDevice that renders pages with the given <c>renderer</c> at the given resolution (150 DPI when <c>resolution</c> is null). Uses the default TIFF settings.</summary>
     public TiffDevice(IPageRenderer renderer, Resolution resolution) : base(renderer, resolution)
     {
         Settings = new TiffSettings();
     }
 
+    /// <summary>Creates a TiffDevice that renders pages with the built-in renderer at the default resolution of 150 DPI. Uses the default TIFF settings.</summary>
     public TiffDevice() : base()
     {
         Settings = new TiffSettings();
     }
 
+    /// <summary>Creates a TiffDevice that renders pages with the built-in renderer at the given resolution. Uses the default TIFF settings.</summary>
     public TiffDevice(Resolution resolution) : base(resolution)
     {
         Settings = new TiffSettings();
@@ -168,65 +172,119 @@ public sealed class TiffDevice : ImageDevice
         set => base.RenderingOptions = value;
     }
 
-    /// <summary>Adaptive Bradley/Roth threshold binarization. The FOSS image
-    /// pipeline doesn't expose a generic Bitmap I/O path; calling this throws
-    /// rather than silently producing wrong bytes.</summary>
+    /// <summary>Bradley's adaptive threshold: a pixel goes black when it is darker than the mean of the
+    /// window around it (a square an eighth of the width across) by more than <paramref name="threshold"/>,
+    /// a fraction of that mean - so a scan keeps its text under uneven lighting. The first page of the
+    /// TIFF is read with the library's own decoder and written back as a bilevel, LZW-compressed TIFF.</summary>
     public static void BinarizeBradley(Stream inputImageStream, Stream outputImageStream, double threshold)
     {
-        _ = inputImageStream; _ = outputImageStream; _ = threshold;
-        throw new NotImplementedException(
-            "TiffDevice.BinarizeBradley requires a generic Bitmap I/O path that the FOSS image pipeline does not implement.");
+        if (inputImageStream is null) throw new ArgumentNullException(nameof(inputImageStream));
+        if (outputImageStream is null) throw new ArgumentNullException(nameof(outputImageStream));
+        if (inputImageStream.CanSeek) inputImageStream.Position = 0;
+        using var input = new MemoryStream();
+        inputImageStream.CopyTo(input);
+        var frames = IO.TiffDecoder.DecodeFramesAsPng(input.ToArray());
+        if (frames is null || frames.Count == 0)
+            throw new ArgumentException("The input is not a TIFF this library reads.", nameof(inputImageStream));
+        var (pixels, w, h, hasAlpha) = Facades.PdfFileMend.DecodePng(frames[0]);
+        var comps = hasAlpha ? 4 : 3;
+        var gray = new int[w * h];
+        for (var i = 0; i < gray.Length; i++)
+            gray[i] = (pixels[i * comps] * 299 + pixels[i * comps + 1] * 587 + pixels[i * comps + 2] * 114) / 1000;
+        var black = BradleyBlack(gray, w, h, threshold);
+        var rgba = new byte[w * h * 4];
+        for (var i = 0; i < gray.Length; i++)
+        {
+            var level = black[i] ? (byte)0 : (byte)255;
+            rgba[i * 4] = level; rgba[i * 4 + 1] = level; rgba[i * 4 + 2] = level; rgba[i * 4 + 3] = 255;
+        }
+        EncodeBilevelImage(rgba, w, h, outputImageStream, CompressionType.LZW);
     }
 
-    // Supersample factor used for bilevel output: render at N× then area-average
-    // the luminance of each N×N source block before thresholding. A hard threshold
-    // on AA'd 1× rendering leaves ragged glyph edges and random "dust" pixels in
-    // the 1bpp output — area-averaging the supersampled luminance produces the
-    // clean glyph silhouettes GDI+ writes when downsampling to bilevel. 2× is the
-    // sweet spot: 3×+ doesn't visibly improve and grows the render buffer to 9×.
-    private const int BilevelSupersample = 2;
+    /// <summary>Which pixels Bradley's rule paints black: those darker than the mean of their window by more
+    /// than the given fraction of it. The window sums come from an integral image, so each pixel costs the same
+    /// whatever the window's size.</summary>
+    private static bool[] BradleyBlack(int[] gray, int w, int h, double threshold)
+    {
+        var integral = new long[(w + 1) * (h + 1)];
+        for (var y = 1; y <= h; y++)
+        {
+            long row = 0;
+            for (var x = 1; x <= w; x++)
+            {
+                row += gray[(y - 1) * w + x - 1];
+                integral[y * (w + 1) + x] = integral[(y - 1) * (w + 1) + x] + row;
+            }
+        }
+        var half = Math.Max(1, w / 8) / 2;
+        var black = new bool[w * h];
+        for (var y = 0; y < h; y++)
+        {
+            var top = Math.Max(0, y - half);
+            var bottom = Math.Min(h - 1, y + half);
+            for (var x = 0; x < w; x++)
+            {
+                var left = Math.Max(0, x - half);
+                var right = Math.Min(w - 1, x + half);
+                var count = (right - left + 1) * (bottom - top + 1);
+                var sum = integral[(bottom + 1) * (w + 1) + right + 1] - integral[top * (w + 1) + right + 1]
+                        - integral[(bottom + 1) * (w + 1) + left] + integral[top * (w + 1) + left];
+                black[y * w + x] = gray[y * w + x] * count <= sum * (1.0 - threshold);
+            }
+        }
+        return black;
+    }
+
+    /// <summary>A black-and-white picture (every pixel pure black or pure white) as a one-page bilevel TIFF.</summary>
+    internal static void EncodeBilevelImage(byte[] rgba, int w, int h, Stream output, CompressionType compression)
+    {
+        var dev = new TiffDevice(new TiffSettings { Compression = compression, Depth = ColorDepth.Format1bpp });
+        dev.EncodeTiff(new[] { (rgba, w, h) }, output, compression);
+    }
+
+    // The default-brightness bilevel output is a three-zone halftone of the plain render,
+    // judged per pixel on the mean of its three channels:
+    // under 85 goes solid black, from 85 up to 170 renders as a 50 % checkerboard
+    // (black on odd x+y parity), and 170 or lighter goes paper white. Measured
+    // 2026-09-06 against six reference fax outputs (the reference's own 300-dpi render
+    // alongside each 1-bit TIFF): the fitted zone edges sit at 84..92 and 164..180
+    // with the middle band 88 levels wide on every page, agreeing on 99.0-100 % of
+    // pixels; the channel MEAN is the metric because an orange (243,147,9) halftones
+    // while its luminance would read as paper, and a cyan (2,175,235) halftones while
+    // its darkest channel would read as ink. The one thing the reference does that this
+    // does not: it drops a 0.25 pt rule whose single pixel of ink straddles two rows,
+    // which both of our sample grids keep as a dotted rule.
+    private const int BilevelBlackBelow = 85;
+    private const int BilevelHalftoneBelow = 170;
+
+    // Brightness at or under this keeps the halftone; above it the output is a plain
+    // luminance threshold at BilevelCutoff.
+    private const float HalftoneBrightnessMax = 0.5f;
+
+    private bool UsesHalftone => Settings.Brightness <= HalftoneBrightnessMax;
 
     /// <inheritdoc />
     public override void Process(Page page, Stream output)
     {
-        var rgba = RenderForOutput(page, out var super);
+        var rgba = RenderForOutput(page);
         if (output.CanSeek)
         {
-            EncodeTiff(new[] { (rgba.Data, rgba.Width, rgba.Height) }, output, Settings.Compression, super);
+            EncodeTiff(new[] { (rgba.Data, rgba.Width, rgba.Height) }, output, Settings.Compression);
         }
         else
         {
             using var ms = new MemoryStream();
-            EncodeTiff(new[] { (rgba.Data, rgba.Width, rgba.Height) }, ms, Settings.Compression, super);
+            EncodeTiff(new[] { (rgba.Data, rgba.Width, rgba.Height) }, ms, Settings.Compression);
             ms.Position = 0;
             ms.CopyTo(output);
         }
     }
 
-    // Picks the render path that matches the requested depth. Bilevel paths
-    // get a 2×-supersampled buffer; the packer area-averages luminance before
-    // thresholding. Other depths get the normal RenderPage output.
-    private RgbaBuffer RenderForOutput(Page page, out int superFactor)
+    // The ordinary render, turned to the requested frame shape. A bilevel depth packs
+    // it per pixel later (see BilevelBlackBelow and BilevelCutoff).
+    private RgbaBuffer RenderForOutput(Page page)
     {
-        RgbaBuffer buf;
-        if (EffectiveDepth(Settings) == ColorDepth.Format1bpp)
-        {
-            // Raised Brightness (> 0.5) reproduces the expected bilevel output: a PLAIN
-            // render thresholded per pixel at the measured linear cutoff (see
-            // BilevelCutoff). Supersampled area-averaging must not run there — on a
-            // scan whose paper tone sits at the cutoff it flips whole regions that
-            // per-pixel thresholding leaves alone (measured at Brightness 0.8: the
-            // per-pixel threshold of the plain render matches the expected bilevel
-            // to 0.05%). The default-brightness path keeps the supersampled
-            // three-zone halftone packing unchanged.
-            superFactor = Settings.Brightness > 0.5f ? 1 : BilevelSupersample;
-            buf = superFactor > 1 ? RenderSupersampled(page, superFactor) : RenderPage(page);
-        }
-        else
-        {
-            superFactor = 1;
-            buf = RenderPage(page);
-        }
+        var buf = RenderPage(page);
         // TiffSettings.Shape forces the frame orientation: Landscape rotates a
         // portrait render 90° (and Portrait the reverse) so every frame comes
         // out in the requested aspect.
@@ -236,6 +294,7 @@ public sealed class TiffDevice : ImageDevice
             buf = Rotate90(buf);
         return buf;
     }
+
 
     /// <summary>Rotate 90° clockwise (top of the source becomes the right edge).</summary>
     private static RgbaBuffer Rotate90(RgbaBuffer src)
@@ -257,43 +316,6 @@ public sealed class TiffDevice : ImageDevice
         return new RgbaBuffer(dst, h, w);
     }
 
-    // Render at superFactor × the natural output pixel size. When the caller
-    // pinned a target size (e.g. SaveAsTIFF(file, 200, 250, …) routes through
-    // the (int,int,…) TiffDevice constructor), the natural output is TargetWidth
-    // × TargetHeight — render at super × that and downsample. Otherwise scale
-    // the DPI by super and let the renderer derive the pixel grid from the page
-    // box. Either way the resulting buffer is super × the final output bitmap.
-    private RgbaBuffer RenderSupersampled(Page page, int superFactor)
-    {
-        // Tell a GDI+ renderer it is drawing an INTERMEDIATE this many times the output
-        // size, so scale-dependent rules (the image sample grid) judge the output scale.
-        if (OperatingSystem.IsWindows() && Renderer is GdiPlusPageRenderer marked)
-            marked.OutputSupersample = superFactor;
-        try
-        {
-            if (TargetWidth > 0 && TargetHeight > 0)
-            {
-                if (Renderer is SoftwarePageRenderer swDirect)
-                    return swDirect.RenderPageAtPixelSize(page, TargetWidth * superFactor, TargetHeight * superFactor);
-                if (OperatingSystem.IsWindows() && Renderer is GdiPlusPageRenderer gdiDirect)
-                    return gdiDirect.RenderPageAtPixelSize(page, TargetWidth * superFactor, TargetHeight * superFactor);
-            }
-
-            var xDpi = Resolution.X * superFactor;
-            var yDpi = Resolution.Y * superFactor;
-            if (Renderer is SoftwarePageRenderer sw)
-                return sw.RenderPage(page, xDpi, yDpi);
-            if (OperatingSystem.IsWindows() && Renderer is GdiPlusPageRenderer gdi)
-                return gdi.RenderPage(page, (int)xDpi, (int)yDpi, superFactor);
-            return Renderer.RenderPage(page.Reader.RawData, page.Number, xDpi);
-        }
-        finally
-        {
-            if (OperatingSystem.IsWindows() && Renderer is GdiPlusPageRenderer done)
-                done.OutputSupersample = 1;
-        }
-    }
-
     // CCITT3/CCITT4 are bilevel-only fax encodings, so they imply 1-bit depth even
     // when the caller leaves Settings.Depth at the (24bpp) default:
     // requesting CCITT compression produces a 1bpp TIFF.
@@ -307,23 +329,18 @@ public sealed class TiffDevice : ImageDevice
     private static ColorDepth EffectiveDepth(TiffSettings s)
         => IsBilevelRequested(s) ? ColorDepth.Format1bpp : s.Depth;
 
-    // Maps TiffSettings.Brightness (0..1) to the 0..255 bilevel cutoff used by both
-    // 1bpp packers: a pixel is black when its lightness (min RGB channel) is below the
-    // cutoff. Measured on the expected CCITT output of a 300-dpi scanned
-    // page across six Brightness points: the cutoff is LINEAR at 235×Brightness + 20
-    // (0.5 → 138, 0.6 → 161, 0.8 → 208, 0.85 → 220, 0.95 → 243, each within one grey
-    // level of the empirical best-fit threshold). Below 0.5 the expected output is
-    // no longer a pure threshold (a plain-threshold fit leaves a 1.4% residual — it
-    // dithers the mid band), which the supersampled three-zone halftone packing
-    // approximates; that default path keeps its calibrated 128 cutoff. The previous
-    // max(128, 255×B) mapping sat 4 levels low at 0.8, which on a scan whose paper
-    // tone straddles the cutoff flipped whole regions (the bank-logo band of the
-    // regression fixture binarised black where it is expected white).
+    // Maps a raised TiffSettings.Brightness (above HalftoneBrightnessMax) to the 0..255
+    // luminance cutoff of the plain threshold. Measured on the expected CCITT output of
+    // a 300-dpi scanned page across six Brightness points: the cutoff is LINEAR at
+    // 235×Brightness + 20 (0.5 → 138, 0.6 → 161, 0.8 → 208, 0.85 → 220, 0.95 → 243,
+    // each within one grey level of the empirical best-fit threshold). At and below
+    // 0.5 the expected output is no longer a pure threshold (a plain-threshold fit
+    // leaves a 1.4% residual — it dithers the mid band): that is the halftone path.
+    // The previous max(128, 255×B) mapping sat 4 levels low at 0.8, which on a scan
+    // whose paper tone straddles the cutoff flipped whole regions (the bank-logo band
+    // of the regression fixture binarised black where it is expected white).
     private static int BilevelCutoff(float brightness)
     {
-        // Brightness ≤ 0.5 (the default is 0.33) keeps the legacy 128 cutoff that
-        // the supersampled three-zone halftone packing is calibrated around.
-        if (brightness <= 0.5f) return 128;
         var t = (int)System.Math.Round(brightness * 235f + 20f);
         return t > 255 ? 255 : t;
     }
@@ -345,56 +362,25 @@ public sealed class TiffDevice : ImageDevice
         }
     }
 
-    // Downsample a supersampled RGBA buffer to 1bpp bilevel bits packed MSB-first.
-    // Each output bit is derived from the area-averaged ink coverage (255 − min
-    // channel) of the corresponding (super × super) source block — identical to a
-    // luminance metric for grey content but keeping coloured ink (e.g. a CMYK cyan
-    // heading) black instead of dropping it. Output uses the WhiteIsZero convention
-    // (bit set ⇒ black) to match the IFD's Photometric=0 below.
-    //
-    // At the default mid-grey cutoff the block value quantises to THREE levels, not
-    // two: dark thirds go solid black, light thirds solid white, and the middle
-    // third renders as a 50%-coverage checkerboard (black on odd x+y parity). A
-    // mid-grey fill in a fax/bilevel conversion thus keeps its tone as a halftone
-    // instead of vanishing to paper white, while light greys still threshold
-    // cleanly to white and dark greys to black. A raised Brightness cutoff keeps
-    // the plain two-level threshold — its calibration expects strictly more black,
-    // never a halftone.
-    private static byte[] PackSupersampledRgbaToBilevel(byte[] rgba, int srcW, int srcH, int super,
-                                                       int cutoff, out int dstW, out int dstH)
+    // Pack a rendered RGBA buffer to 1bpp bilevel bits (MSB-first, WhiteIsZero: bit set
+    // ⇒ black, matching the IFD's Photometric=0 below) through the three-zone luminance
+    // halftone described at BilevelBlackBelow.
+    private static byte[] PackRgbaToHalftoneBilevel(byte[] rgba, int width, int height)
     {
-        dstW = srcW / super;
-        dstH = srcH / super;
-        var bytesPerRow = (dstW + 7) / 8;
-        var output = new byte[bytesPerRow * dstH];
-        var samplesPerBlock = super * super;
-        var useHalftone = cutoff == 128;
-        var blackBelow = (useHalftone ? 85 : cutoff) * samplesPerBlock;
-        var whiteFrom = (useHalftone ? 170 : cutoff) * samplesPerBlock;
-        var stride = srcW * 4;
-        for (var dy = 0; dy < dstH; dy++)
+        var bytesPerRow = (width + 7) / 8;
+        var output = new byte[bytesPerRow * height];
+        for (var y = 0; y < height; y++)
         {
-            var rowDst = dy * bytesPerRow;
-            var sy0 = dy * super;
-            for (var dx = 0; dx < dstW; dx++)
+            var rowDst = y * bytesPerRow;
+            var rowSrc = y * width * 4;
+            for (var x = 0; x < width; x++)
             {
-                var sx0 = dx * super;
-                var sum = 0;
-                for (var oy = 0; oy < super; oy++)
-                {
-                    var rowSrc = (sy0 + oy) * stride;
-                    for (var ox = 0; ox < super; ox++)
-                    {
-                        var si = rowSrc + (sx0 + ox) * 4;
-                        // Per-pixel lightness as the minimum channel (255 − ink coverage):
-                        // white only when every channel is light, so coloured ink stays dark.
-                        sum += System.Math.Min(rgba[si], System.Math.Min(rgba[si + 1], rgba[si + 2]));
-                    }
-                }
-                var black = sum < blackBelow
-                            || (sum < whiteFrom && ((dx + dy) & 1) == 1);
+                var si = rowSrc + x * 4;
+                var grey = (rgba[si] + rgba[si + 1] + rgba[si + 2]) / 3;
+                var black = grey < BilevelBlackBelow
+                            || (grey < BilevelHalftoneBelow && ((x + y) & 1) == 1);
                 if (black)
-                    output[rowDst + (dx >> 3)] |= (byte)(0x80 >> (dx & 7));
+                    output[rowDst + (x >> 3)] |= (byte)(0x80 >> (x & 7));
             }
         }
         return output;
@@ -410,12 +396,11 @@ public sealed class TiffDevice : ImageDevice
     {
         if (endPage <= 0) endPage = document.PageCount;
         var pages = new List<(byte[] rgba, int w, int h)>();
-        var super = 1;
 
         for (var i = startPage; i <= endPage; i++)
         {
             var page = document.Pages.At(i);
-            var rgba = RenderForOutput(page, out super);
+            var rgba = RenderForOutput(page);
             if (Settings.SkipBlankPages && IsBlankRaster(rgba.Data))
                 continue;
             pages.Add((rgba.Data, rgba.Width, rgba.Height));
@@ -428,13 +413,13 @@ public sealed class TiffDevice : ImageDevice
             for (var i = startPage; i <= endPage; i++)
             {
                 var page = document.Pages.At(i);
-                var rgba = RenderForOutput(page, out super);
+                var rgba = RenderForOutput(page);
                 pages.Add((rgba.Data, rgba.Width, rgba.Height));
             }
         }
 
         using var ms = new MemoryStream();
-        EncodeTiff(pages.ToArray(), ms, Settings.Compression, super);
+        EncodeTiff(pages.ToArray(), ms, Settings.Compression);
         return ms.ToArray();
     }
 
@@ -486,10 +471,10 @@ public sealed class TiffDevice : ImageDevice
         for (var i = startPage; i <= endPage; i++)
         {
             var page = document.Pages.At(i);
-            var rgba = RenderForOutput(page, out var super);
+            var rgba = RenderForOutput(page);
             if (Settings.SkipBlankPages && IsBlankRaster(rgba.Data))
                 continue;
-            ifdOffsetPos = WriteTiffPage(bw, output, rgba.Data, rgba.Width, rgba.Height, ifdOffsetPos, Settings.Compression, EffectiveDepth(Settings), super);
+            ifdOffsetPos = WriteTiffPage(bw, output, rgba.Data, rgba.Width, rgba.Height, ifdOffsetPos, Settings.Compression, EffectiveDepth(Settings));
             written++;
         }
 
@@ -498,8 +483,8 @@ public sealed class TiffDevice : ImageDevice
         if (written == 0)
         {
             var page = document.Pages.At(startPage);
-            var rgba = RenderForOutput(page, out var super);
-            WriteTiffPage(bw, output, rgba.Data, rgba.Width, rgba.Height, ifdOffsetPos, Settings.Compression, EffectiveDepth(Settings), super);
+            var rgba = RenderForOutput(page);
+            WriteTiffPage(bw, output, rgba.Data, rgba.Width, rgba.Height, ifdOffsetPos, Settings.Compression, EffectiveDepth(Settings));
         }
         bw.Flush();
     }
@@ -547,12 +532,16 @@ public sealed class TiffDevice : ImageDevice
     /// <see cref="Aspose.Pdf.XImage.Save(System.IO.Stream, Aspose.Pdf.Drawing.ImageFormat)"/>).
     /// Default colour depth keeps full 24-bit RGB unless a bilevel compression is requested.</summary>
     internal static void EncodeRgbaImage(byte[] rgba, int w, int h, Stream output, CompressionType compression)
+        => EncodeRgbaImages(new[] { (rgba, w, h) }, output, compression);
+
+    /// <summary>RGBA pictures as the pages of one TIFF, in order (PdfConverter.MergeImagesAsTiff without GDI+).</summary>
+    internal static void EncodeRgbaImages((byte[] rgba, int w, int h)[] pages, Stream output, CompressionType compression)
     {
         var dev = new TiffDevice(new TiffSettings { Compression = compression, Depth = ColorDepth.Default });
-        dev.EncodeTiff(new[] { (rgba, w, h) }, output, compression);
+        dev.EncodeTiff(pages, output, compression);
     }
 
-    private void EncodeTiff((byte[] rgba, int w, int h)[] pages, Stream output, CompressionType compression, int superFactor = 1)
+    private void EncodeTiff((byte[] rgba, int w, int h)[] pages, Stream output, CompressionType compression)
     {
         // Requires a seekable stream because IFD offsets are back-patched.
         var bw = new BinaryWriter(output);
@@ -568,7 +557,7 @@ public sealed class TiffDevice : ImageDevice
 
         foreach (var (rgba, w, h) in pages)
         {
-            ifdOffsetPos = WriteTiffPage(bw, output, rgba, w, h, ifdOffsetPos, compression, EffectiveDepth(Settings), superFactor);
+            ifdOffsetPos = WriteTiffPage(bw, output, rgba, w, h, ifdOffsetPos, compression, EffectiveDepth(Settings));
         }
 
         bw.Flush();
@@ -582,169 +571,27 @@ public sealed class TiffDevice : ImageDevice
     // Input is the rendered RGBA buffer (4 bytes/pixel). The strip layout is
     // selected per ColorDepth so the same upstream pixels can land as 1bpp
     // bilevel, 8bpp palette, 24bpp RGB, or 32bpp RGBA without re-rendering.
-    private long WriteTiffPage(BinaryWriter bw, Stream output,
-                               byte[] rgba, int w, int h, long ifdOffsetPos,
-                               CompressionType compression, ColorDepth depth, int superFactor = 1)
+    private long WriteTiffPage(BinaryWriter bw, Stream output, byte[] rgba, int w, int h, long ifdOffsetPos, CompressionType compression, ColorDepth depth)
     {
-        var isPalette = depth == ColorDepth.Format8bpp;
-        var is4bpp = depth == ColorDepth.Format4bpp;
-        var isBilevel = depth == ColorDepth.Format1bpp;
-        // Default depth keeps the source alpha channel — emits 32bpp RGBA. Explicit
-        // Format24bpp drops alpha. The default is 32bpp ARGB; it reads
-        // back as PixelFormat.Format32bppArgb.
-        var isAlpha = depth == ColorDepth.Default;
+        var tp = new TiffPageWriteState();
+        tp.bw = bw;
+        tp.output = output;
+        tp.rgba = rgba;
+        tp.w = w;
+        tp.h = h;
+        tp.ifdOffsetPos = ifdOffsetPos;
+        tp.compression = compression;
+        tp.depth = depth;
+        tp.isPalette = tp.depth == ColorDepth.Format8bpp;
+        tp.is4bpp = tp.depth == ColorDepth.Format4bpp;
+        tp.isBilevel = tp.depth == ColorDepth.Format1bpp;
+        tp.isAlpha = tp.depth == ColorDepth.Default;
 
-        // Pick the strip layout per requested depth:
-        //   1bpp: 1 packed bit per pixel, MSB-first, /Photometric=WhiteIsZero so
-        //         CCITT-style templates and our output share the same convention.
-        //         When superFactor > 1 the bilevel packer area-averages each
-        //         super × super source block to grayscale, then thresholds — output
-        //         dimensions become w/super × h/super.
-        //   8bpp: indexed palette — adaptive (≤256 unique colours, lossless)
-        //         falling back to 3-3-2 uniform.
-        //   4bpp: indexed palette — adaptive ≤16 colours (lossless) else the
-        //         16 most frequent, packed 2 indices/byte (high nibble first).
-        //  32bpp: RGBA straight through with ExtraSamples=2 (unassociated alpha).
-        //   else: 24-bit RGB (alpha stripped).
-        byte[] stripInput;
-        ushort[]? colorMap = null;
-        if (isAlpha)
-        {
-            stripInput = rgba;
-        }
-        else if (isBilevel)
-        {
-            var cutoff = BilevelCutoff(Settings.Brightness);
-            if (superFactor > 1)
-            {
-                stripInput = PackSupersampledRgbaToBilevel(rgba, w, h, superFactor, cutoff, out var bw1, out var bh1);
-                w = bw1;
-                h = bh1;
-            }
-            else
-            {
-                var rgb = RgbaToRgb(rgba, w, h);
-                ThresholdToBlackAndWhite(rgb, cutoff);
-                stripInput = PackRgbToBilevel(rgb, w, h);
-            }
-        }
-        else if (isPalette)
-        {
-            var rgb = RgbaToRgb(rgba, w, h);
-            var adaptive = TiffPaletteQuantizer.TryQuantizeAdaptive(rgb, w, h);
-            if (adaptive is { } a)
-            {
-                stripInput = a.indexed;
-                colorMap = a.colorMap;
-            }
-            else
-            {
-                stripInput = TiffPaletteQuantizer.QuantizeRgbTo8bpp(rgb, w, h);
-                colorMap = TiffPaletteQuantizer.BuildColorMap332();
-            }
-        }
-        else if (is4bpp)
-        {
-            var rgb = RgbaToRgb(rgba, w, h);
-            var (indices, map) = TiffPaletteQuantizer.QuantizeTo4bpp(rgb, w, h);
-            stripInput = Pack4bpp(indices, w, h);
-            colorMap = map;
-        }
-        else
-        {
-            stripInput = RgbaToRgb(rgba, w, h);
-        }
+        tp.colorMap = null;
+        PackTiffRows(tp);
 
-        var (strip, compressionTag) = EncodeStrip(stripInput, compression);
-        var stripSize = strip.Length;
-
-        // Write strip data first
-        var stripOffset = (uint)output.Position;
-        bw.Write(strip);
-
-        // Align to word boundary
-        if (output.Position % 2 != 0) bw.Write((byte)0);
-
-        // Auxiliary payloads referenced from IFD tags by offset:
-        // BitsPerSample array (RGB/RGBA only), ColorMap (palette-only),
-        // ExtraSamples (RGBA-only).
-        uint bpsOffset = 0;
-        if (!isPalette && !is4bpp && !isBilevel)
-        {
-            bpsOffset = (uint)output.Position;
-            bw.Write((ushort)8);
-            bw.Write((ushort)8);
-            bw.Write((ushort)8);
-            if (isAlpha) bw.Write((ushort)8);
-        }
-
-        uint colorMapOffset = 0;
-        if (isPalette || is4bpp)
-        {
-            colorMapOffset = (uint)output.Position;
-            foreach (var s in colorMap!) bw.Write(s);
-        }
-
-        // RATIONAL payloads for X/YResolution. TIFF tag 282/283 stores the resolution
-        // as a fraction (numerator/denominator, both u32) at an out-of-line offset.
-        // ResolutionUnit (296) = 2 means inches, so DPI/1 expresses N dots per inch
-        // exactly. Without these tags, readers (System.Drawing, ImageSharp) fall back
-        // to a hard-coded 96 DPI, which broke any test that asserted on the saved DPI.
-        uint xResOffset = (uint)output.Position;
-        bw.Write((uint)Resolution.X);
-        bw.Write((uint)1);
-        uint yResOffset = (uint)output.Position;
-        bw.Write((uint)Resolution.Y);
-        bw.Write((uint)1);
-
-        // Patch previous IFD offset to point here
-        var ifdOffset = (uint)output.Position;
-        var currentPos = output.Position;
-        output.Position = ifdOffsetPos;
-        bw.Write(ifdOffset);
-        output.Position = currentPos;
-
-        // IFD tag count: base 13 (RGB/bilevel/RGBA without extras), +1 for palette
-        // ColorMap, +1 for RGBA ExtraSamples.
-        ushort tagCount = (ushort)(13 + (isPalette || is4bpp ? 1 : 0) + (isAlpha ? 1 : 0));
-        bw.Write(tagCount);
-
-        // Tags MUST be written in ascending tag-number order per the TIFF 6.0 spec.
-        WriteTag(bw, 256, 3, 1, (uint)w);                               // ImageWidth
-        WriteTag(bw, 257, 3, 1, (uint)h);                               // ImageLength
-        if (isPalette)
-            WriteTag(bw, 258, 3, 1, 8);                                 // BitsPerSample = 8 (inline)
-        else if (is4bpp)
-            WriteTag(bw, 258, 3, 1, 4);                                 // BitsPerSample = 4 (inline)
-        else if (isBilevel)
-            WriteTag(bw, 258, 3, 1, 1);                                 // BitsPerSample = 1 (inline)
-        else
-            WriteTag(bw, 258, 3, isAlpha ? 4u : 3u, bpsOffset);         // BitsPerSample offset → [8,8,8(,8)]
-        WriteTag(bw, 259, 3, 1, compressionTag);                        // Compression
-        // Photometric: 0=WhiteIsZero (bilevel min-is-white), 2=RGB(/RGBA), 3=Palette.
-        var photometric = (isPalette || is4bpp) ? 3u : isBilevel ? 0u : 2u;
-        WriteTag(bw, 262, 3, 1, photometric);                            // PhotometricInterpretation
-        WriteTag(bw, 273, 4, 1, stripOffset);                           // StripOffsets
-        var samplesPerPixel = (isPalette || is4bpp || isBilevel) ? 1u : isAlpha ? 4u : 3u;
-        WriteTag(bw, 277, 3, 1, samplesPerPixel);                        // SamplesPerPixel
-        WriteTag(bw, 278, 3, 1, (uint)h);                               // RowsPerStrip
-        WriteTag(bw, 279, 4, 1, (uint)stripSize);                       // StripByteCounts
-        WriteTag(bw, 282, 5, 1, xResOffset);                            // XResolution (RATIONAL)
-        WriteTag(bw, 283, 5, 1, yResOffset);                            // YResolution (RATIONAL)
-        WriteTag(bw, 284, 3, 1, 1);                                     // PlanarConfiguration = Chunky
-        WriteTag(bw, 296, 3, 1, 2);                                     // ResolutionUnit = 2 (inches)
-        if (isPalette)
-            WriteTag(bw, 320, 3, 3 * 256, colorMapOffset);              // ColorMap (768 shorts)
-        else if (is4bpp)
-            WriteTag(bw, 320, 3, 3 * 16, colorMapOffset);               // ColorMap (48 shorts)
-        if (isAlpha)
-            WriteTag(bw, 338, 3, 1, 2);                                 // ExtraSamples = 2 (unassociated alpha, inline)
-
-        // Next IFD offset placeholder (0 for last page; caller patches when
-        // writing the next page).
-        var nextIfdPos = output.Position;
-        bw.Write((uint)0);
-        return nextIfdPos;
+        WriteTiffStripAndDirectory(tp);
+        return tp.nextIfdPos;
     }
 
     // Pack a thresholded RGB buffer into 1bpp MSB-first bytes with

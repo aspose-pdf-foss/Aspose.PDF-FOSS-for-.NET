@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.IO.Filters;
 
@@ -77,11 +77,31 @@ internal static class StreamFilter
             // JPEG2000 images are stored as complete JP2 codestreams
             "JPXDecode" or "JPX" => data,
             "JBIG2Decode" => DecodeJbig2(data, parms),
+            "BrotliDecode" => DecodeBrotli(data, parms),
             // Crypt filter: Identity means no encryption; actual decryption is
             // handled by PdfReader before filter pipeline runs
             "Crypt" => data,
             _ => data, // Unknown filters: pass through rather than throw
         };
+    }
+
+    /// <summary>
+    /// BrotliDecode (an ISO 32000-2 extension): the managed decoder, with the stream named by /D
+    /// in the parameters as a dictionary the data may reach back into. Data that does not decode
+    /// passes through, as for the other codecs.
+    /// </summary>
+    private static byte[] DecodeBrotli(byte[] data, PdfDictionary? parms)
+    {
+        try
+        {
+            var options = new Brotli.BrotliDecoder.Options();
+            if (parms?.Get("D") is PdfStream dictionary) options.Dictionary.Add(Decode(dictionary.RawData, dictionary.Dict));
+            return Brotli.BrotliDecoder.Decode(data, options);
+        }
+        catch (Brotli.BrotliDecodeException)
+        {
+            return data;
+        }
     }
 
     private static byte[] DecodeJbig2(byte[] data, PdfDictionary? parms)

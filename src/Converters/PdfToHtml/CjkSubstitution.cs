@@ -144,15 +144,16 @@ public sealed partial class PdfToHtmlConverter
     /// the substitute face's glyphs behind the font's ToUnicode destinations
     /// (multi-char destinations contribute each component). Null when the font
     /// is not a substitute case or nothing maps.</summary>
-    private static byte[]? BuildCjkSubstituteSubset(PdfDictionary font, PdfReader reader, out string? family)
+    private static (byte[]? result, string? family) BuildCjkSubstituteSubset(PdfDictionary font, PdfReader reader)
     {
+        string? family = default;
         family = null;
         var subName = CjkSubstituteFamily(font, reader);
-        if (subName is null) return null;
+        if (subName is null) return (null, family);
         var parser = ResolveSubstituteParser(subName);
-        if (parser is null) return null;
+        if (parser is null) return (null, family);
         var codeToUni = SubstituteCodeToUnicode(font, reader);
-        if (codeToUni is null) return null;
+        if (codeToUni is null) return (null, family);
         var uniToGid = new Dictionary<int, int>();
         foreach (var uni in codeToUni.Values)
             if (uni <= 0xFFFF && !uniToGid.ContainsKey(uni)
@@ -160,9 +161,9 @@ public sealed partial class PdfToHtmlConverter
                 uniToGid[uni] = g;
         if (parser.CMap.TryGetValue(' ', out var gSp) && gSp > 0) uniToGid.TryAdd(' ', gSp);
         var ttf = Text.CffToTrueType.BuildSubset(parser, uniToGid);
-        if (ttf is null) return null;
+        if (ttf is null) return (null, family);
         family = SubstituteTag(font.GetName("BaseFont") ?? "font") + "+" + subName;
-        return ttf;
+        return (ttf, family);
     }
 
     /// <summary>Any right-to-left-script codepoint (Hebrew/Arabic blocks and their

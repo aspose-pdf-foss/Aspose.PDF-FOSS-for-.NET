@@ -67,12 +67,13 @@ foreach (var r in results)
 other.Form.ImportFromJson("fields.json");
 ```
 
-The JSON records each widget's appearance stream; image XObjects referenced by
-an appearance (a barcode field's bars, for example) are captured as
-`FieldExportingData.AppearanceImageData` entries (`Name`, `Width`, `Height`,
-`BitsPerComponent`, `ColorSpace`, base64 `Data`) so the import redraws them.
-Only device colour spaces are captured; an appearance image with an ICC or
-indexed space is skipped.
+The JSON records each widget's appearance streams (`FieldExportingData.Appearances`,
+one `AppearanceEntry` per state); image XObjects referenced by an appearance (a
+barcode field's bars, for example) are captured in `AppearanceEntry.Images` as
+`AppearanceImageData` entries (`Name`, `Width`, `Height`, `BitsPerComponent`,
+`ColorSpace`, base64 `Data`) so the import redraws them. Only device colour
+spaces are captured; an appearance image with an ICC or indexed space is
+skipped.
 
 ## Field types
 
@@ -88,7 +89,8 @@ indexed space is skipped.
 | `Button`          | `ButtonField`     | Push button                          |
 | `Signature`       | `SignatureField`  | Digital-signature field              |
 | `Text`            | `DateField`       | Date input (a `TextBoxField` with a date format and calendar script) |
-| `Text`            | `BarcodeField`    | Barcode (a `TextBoxField` whose appearance draws the bars) |
+| `Text`            | `BarcodeField`    | Paper barcode (a `TextBoxField` whose widget carries a `/PMD` dictionary) |
+| `Text`            | `FileSelectBoxField` | File-path input (a `TextBoxField` with the FileSelect flag) |
 | `Text`            | `RichTextBoxField`| Rich-text input (a `TextBoxField` subclass) |
 
 `ChoiceField` is the shared base of `ComboBoxField` and `ListBoxField`; a
@@ -96,11 +98,20 @@ concrete choice field reports `FieldType.ComboBox` or `FieldType.ListBox` (never
 a bare `Choice`). `Field.Type` is derived from the field dictionary's `/FT` and
 flags, so the `TextBoxField` subclasses report `FieldType.Text`; the enum's
 `Barcode`, `Numeric`, `DateTime`, `Radio` (alias of `RadioButton`), and
-`Unknown` members exist for facade and export use.
+`Unknown` members exist for facade and export use. Loading a form hands back a
+`BarcodeField` for a text field whose widget carries a `/PMD` dictionary (read
+its parameters through `Symbology` — `PDF417`, `QRCode` or `DataMatrix` —
+`Caption`, `ECC`, `XSymWidth`, `XSymHeight` and `Resolution`) and a
+`FileSelectBoxField` for a text field with the FileSelect flag set; both can also
+be constructed on a page and added with `doc.Form.Add(field, pageNumber)`.
 
 Signing through a `SignatureField` estimates the signature size by default;
 with `Signature.AvoidEstimatingSignatureLength` set, a signature larger than the
-fixed reservation raises `SignatureLengthMismatchException`.
+fixed reservation raises `SignatureLengthMismatchException`. `SignatureField.Sign`
+also takes an `ExternalSignature` built from an `X509Certificate2` (an OS store,
+smartcard or HSM certificate); when the key is not available to the process, set
+its `CustomSignHash` to a `SignHash` delegate that signs the digest (see
+[Security and Encryption](security-and-encryption.md)).
 
 ### Text fields
 
@@ -335,7 +346,7 @@ round-trips as an XFA form (`IsXfa`/`HasXfa` report `true` after save):
 ```csharp
 using System.Xml;
 
-XmlDocument xfa = source.Form.XFA.XDP;   // the XDP packet from another form
+XmlDocument xfa = source.Form.XFA!.XDP!;   // the XDP packet from another form
 target.Form.AssignXfa(xfa);
 target.Save("with-xfa.pdf");
 ```

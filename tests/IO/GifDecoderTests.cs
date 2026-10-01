@@ -42,7 +42,9 @@ public class GifDecoderTests
     [Fact]
     public void TryDecode_ReadsPaletteAndPixels()
     {
-        Assert.True(GifDecoder.TryDecode(Fixture(), out var rgb, out _, out var w, out var h));
+        var frame = GifDecoder.TryDecode(Fixture());
+        Assert.NotNull(frame);
+        var (rgb, _, w, h) = frame.Value;
         Assert.Equal(4, w);
         Assert.Equal(3, h);
 
@@ -62,7 +64,9 @@ public class GifDecoderTests
     {
         // The encoder set a transparent index (252) that no pixel actually uses, which is
         // a perfectly ordinary thing for it to do - nothing may come back transparent.
-        Assert.True(GifDecoder.TryDecode(Fixture(), out _, out var alpha, out _, out _));
+        var frame = GifDecoder.TryDecode(Fixture());
+        Assert.NotNull(frame);
+        var alpha = frame.Value.alpha;
         Assert.All(alpha, a => Assert.Equal(255, a));
     }
 
@@ -73,7 +77,9 @@ public class GifDecoderTests
         // really use, and exactly those three pixels must come back fully transparent.
         var gif = Fixture();
         gif[TransparentIndexOffset] = 210;
-        Assert.True(GifDecoder.TryDecode(gif, out _, out var alpha, out _, out _));
+        var frame = GifDecoder.TryDecode(gif);
+        Assert.NotNull(frame);
+        var alpha = frame.Value.alpha;
         Assert.Equal(new byte[]
         {
             0, 255, 255, 255,
@@ -85,9 +91,7 @@ public class GifDecoderTests
     [Fact]
     public void TryDecode_RejectsWhatIsNotAGif()
     {
-        Assert.False(GifDecoder.TryDecode(
-            System.Text.Encoding.ASCII.GetBytes("not an image at all"), out _, out _, out var w, out _));
-        Assert.Equal(0, w);
+        Assert.Null(GifDecoder.TryDecode(System.Text.Encoding.ASCII.GetBytes("not an image at all")));
     }
 
     [Fact]
@@ -95,6 +99,6 @@ public class GifDecoderTests
     {
         // Signature and screen descriptor only: there is no image descriptor to decode,
         // and the caller must be told so rather than handed a blank raster.
-        Assert.False(GifDecoder.TryDecode(Fixture()[..13], out _, out _, out _, out _));
+        Assert.Null(GifDecoder.TryDecode(Fixture()[..13]));
     }
 }

@@ -8,12 +8,10 @@ public partial class TextFragment : BaseParagraph
     private string _text;
     private readonly TextSegmentCollection _segments;
 
-    /// <summary>
-    /// Create a text fragment with tab stops. Text is set via Segments.
-    /// </summary>
     /// <summary>Create an empty text fragment.</summary>
     public TextFragment() : this("") { }
 
+    /// <summary>Creates an empty text fragment that aligns its tab characters to the given tab stops; the text is added later through <c>Segments</c> or <c>Text</c>.</summary>
     public TextFragment(TabStops tabStops) : this("")
     {
         TabStops = tabStops;
@@ -50,6 +48,8 @@ public partial class TextFragment : BaseParagraph
     // Designers</b>'): the segments in order, each drawn in its own face variant
     // by the table renderer. Null for uniformly-styled lines.
     internal System.Collections.Generic.List<(string Text, bool Bold)>? FormGridRuns;
+    /// <summary>A list item's marker: drawn in its own size and face, hanging before the fragment's first line.</summary>
+    internal (string Text, double Size, string? Family, double BoxPt)? HtmlListMarker;
 
     private TextEditOptions? _textEditOptions;
 
@@ -66,6 +66,7 @@ public partial class TextFragment : BaseParagraph
 
     public new VerticalAlignment VerticalAlignment { get; set; } = VerticalAlignment.Top;
 
+    /// <summary>Creates a text fragment with the given text, an optional bounding rectangle (in points) and an optional text state whose settings are copied onto the fragment.</summary>
     public TextFragment(string text, Rectangle? rectangle = null, TextState? textState = null)
     {
         _text = text;

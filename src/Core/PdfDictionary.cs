@@ -3,7 +3,7 @@ using System.Globalization;
 using System.Text;
 namespace Aspose.Pdf.Core;
 
-internal sealed class PdfDictionary : PdfObject
+internal sealed partial class PdfDictionary : PdfObject
 {
     private readonly Dictionary<string, PdfObject> _entries = new(StringComparer.Ordinal);
 

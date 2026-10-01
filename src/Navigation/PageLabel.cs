@@ -275,7 +275,7 @@ public sealed class PageLabelCollection : IEnumerable<PageLabel>
             };
             if (styleStr is not null) dict.Set("S", new PdfName(styleStr));
             if (label.Prefix is not null)
-                dict.Set("P", new PdfString(System.Text.Encoding.Latin1.GetBytes(label.Prefix)));
+                dict.Set("P", new PdfString(Compat.Latin1.GetBytes(label.Prefix)));
             if (label.Start != 1) dict.Set("St", new PdfInteger(label.Start));
             nums.Add(dict);
         }
@@ -417,7 +417,7 @@ public sealed class PageLabelBuilder
             if (styleStr is not null)
                 dict.Set("S", new PdfName(styleStr));
             if (label.Prefix is not null)
-                dict.Set("P", new PdfString(System.Text.Encoding.Latin1.GetBytes(label.Prefix)));
+                dict.Set("P", new PdfString(Compat.Latin1.GetBytes(label.Prefix)));
             if (label.Start != 1)
                 dict.Set("St", new PdfInteger(label.Start));
 

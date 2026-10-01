@@ -110,7 +110,7 @@ public partial class TextFragment
         return widest;
     }
 
-    /// <summary>Greedy word-wrap of <paramref name="text"/> to <paramref name="maxWidth"/>
+    /// <summary>Greedy word-wrap of <c>text</c> to <c>maxWidth</c>
     /// using the font's real advance metrics at <paramref name="fs"/>. When
     /// <paramref name="trailingSpace"/> is set, each candidate line is measured WITH a
     /// trailing space (reserving one space width past each line, so lines break slightly

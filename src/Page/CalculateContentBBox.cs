@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.Text;
 
@@ -12,7 +12,21 @@ public sealed partial class Page
     /// recursively through Form XObjects).
     /// Returns the MediaBox if the page is blank.
     /// </summary>
-    public Rectangle CalculateContentBBox()
+    public Rectangle CalculateContentBBox() => GeometricContentBBox();
+
+    /// <summary>The ascent and descent, in em, of the box the reference gives every text
+    /// run whatever its face (probed across five documents: an embedded Corbel run's box
+    /// is 0.905 em above and 0.212 em below its baseline, the same as an Arial run's).</summary>
+    private const double TextBoxAscentEm = 0.905;
+    private const double TextBoxDescentEm = 0.212;
+
+    /// <summary>The geometric extent of everything the page shows: the glyph-bearing
+    /// text runs in the reference's constant-metric box, the drawn annotations' rects,
+    /// paths, images and form XObjects, whether or not they end up visible. A run's box
+    /// stops at its last glyph-bearing piece (a whitespace-only string element of a TJ
+    /// array does not widen it, a space inside a piece does) and a run of nothing but
+    /// spaces adds nothing.</summary>
+    private Rectangle GeometricContentBBox()
     {
         var acc = new BBoxAccumulator();
 
@@ -22,16 +36,46 @@ public sealed partial class Page
         tfa.Visit(this);
         foreach (var frag in tfa.TextFragments)
         {
-            acc.Include(frag.Rectangle);
+            foreach (var seg in frag.Segments) IncludeTextSegmentBox(seg, acc);
             ExtendFlippedTextLineBox(frag, acc);
         }
+        foreach (var annotation in Annotations)
+            if (IsDrawnAnnotation(annotation)) acc.Include(annotation.Rect);
 
-        // Vector paths, images, inline images, Form-XObject recursion.
+        // Vector paths, images, inline images, Form-XObject recursion. A page's
+        // content array is ONE content stream split at token boundaries: a q or a cm
+        // in one part governs the paths of the next, so the parts walk as a whole
+        // (walked apart, a logo drawn under a scaling cm in a later part landed at
+        // its raw thousand-unit coordinates and put the content box off the page).
         var contents = ResolveContentStreams(_dict, _reader);
-        foreach (var stream in contents)
-            WalkContentForBBox(stream, _dict, _reader, Cm.Identity, acc, depth: 0);
+        WalkContentForBBox(ConcatenateContent(contents), _dict, _reader, Cm.Identity, acc, depth: 0);
 
         return acc.HasAny ? acc.ToRectangle() : MediaBox;
+    }
+
+    /// <summary>The reference's box for one text segment: the segment's glyph-bearing
+    /// advance box for its x-extent and the constant ascent/descent band about its
+    /// baseline for its y-extent. A segment without glyphs adds nothing; a run the
+    /// absorber could not seat, or a rotated one, keeps its plain box.</summary>
+    private static void IncludeTextSegmentBox(Text.TextSegment seg, BBoxAccumulator acc)
+    {
+        var ink = seg.InkRectangle;
+        if (ink is null) return;
+        var fs = seg.TextState?.FontSize ?? 0;
+        var upright = seg.BaselineY is not null && fs > 0;
+        if (!upright) { acc.Include(ink); return; }
+        var baseline = seg.BaselineY!.Value;
+        acc.IncludePoint(ink.LLX, baseline - TextBoxDescentEm * fs);
+        acc.IncludePoint(ink.URX, baseline + TextBoxAscentEm * fs);
+    }
+
+    /// <summary>An annotation the page shows: not hidden, and not one of the kinds that
+    /// draw nothing of their own (a link's hot area, a pop-up window).</summary>
+    private static bool IsDrawnAnnotation(Aspose.Pdf.Annotations.Annotation annotation)
+    {
+        if (annotation is Aspose.Pdf.Annotations.LinkAnnotation or Aspose.Pdf.Annotations.PopupAnnotation) return false;
+        if ((annotation.Flags & (Aspose.Pdf.Annotations.AnnotationFlags.Hidden | Aspose.Pdf.Annotations.AnnotationFlags.NoView)) != 0) return false;
+        return annotation.Rect is { IsEmpty: false };
     }
 
     /// <summary>
@@ -127,6 +171,23 @@ public sealed partial class Page
         public Rectangle ToRectangle() => new(_minX, _minY, _maxX, _maxY);
     }
 
+    /// <summary>The parts of a page's content array joined with a newline between them.</summary>
+    private static byte[] ConcatenateContent(List<byte[]> parts)
+    {
+        if (parts.Count == 1) return parts[0];
+        var total = 0;
+        foreach (var part in parts) total += part.Length + 1;
+        var joined = new byte[total];
+        var at = 0;
+        foreach (var part in parts)
+        {
+            Buffer.BlockCopy(part, 0, joined, at, part.Length);
+            at += part.Length;
+            joined[at++] = (byte)'\n';
+        }
+        return joined;
+    }
+
     private static List<byte[]> ResolveContentStreams(PdfDictionary pageDict, PdfReader reader)
     {
         var result = new List<byte[]>();
@@ -149,299 +210,64 @@ public sealed partial class Page
     {
         if (depth > 6) return; // guard against pathological Form-XObject recursion
 
-        var lexer = new PdfLexer(streamBytes);
-        var operands = new List<PdfObject>();
-        var ctm = inheritedCtm;
-        var ctmStack = new Stack<Cm>();
+        var bw = new BBoxWalkState();
+        bw.lexer = new PdfLexer(streamBytes);
+        bw.operands = new List<PdfObject>();
+        bw.ctm = inheritedCtm;
+        bw.ctmStack = new Stack<Cm>();
 
-        // Active clip in page space — the bbox of the union of clip paths
-        // accumulated by W/W* operators. Painted content is intersected with
-        // this on emit. Saved/restored by q/Q (graphics state).
-        double clipMinX = double.NegativeInfinity, clipMinY = double.NegativeInfinity;
-        double clipMaxX = double.PositiveInfinity, clipMaxY = double.PositiveInfinity;
-        var clipStack = new Stack<(double, double, double, double)>();
+        bw.clipMinX = double.NegativeInfinity;
+        bw.clipMinY = double.NegativeInfinity;
+        bw.clipMaxX = double.PositiveInfinity;
+        bw.clipMaxY = double.PositiveInfinity;
+        bw.clipStack = new Stack<(double, double, double, double)>();
 
-        // Current path bbox (user-space pre-CTM, so we can apply the active CTM
-        // at paint time). Reset on n/S/s/f/F/f*/B/B*/b/b*.
-        bool pathStarted = false;
-        double pminX = 0, pminY = 0, pmaxX = 0, pmaxY = 0;
-        double curX = 0, curY = 0;
-        bool inText = false;
-        bool clipPending = false; // W/W* seen — intersect path bbox with active clip on next path-end op
-
-        void ResetPath()
-        {
-            pathStarted = false;
-            pminX = pminY = pmaxX = pmaxY = 0;
-        }
-
-        void IncludePathPoint(double x, double y)
-        {
-            if (!pathStarted)
-            {
-                pminX = pmaxX = x;
-                pminY = pmaxY = y;
-                pathStarted = true;
-                return;
-            }
-            if (x < pminX) pminX = x;
-            if (y < pminY) pminY = y;
-            if (x > pmaxX) pmaxX = x;
-            if (y > pmaxY) pmaxY = y;
-        }
-
-        // Project the user-space path bbox to page space and return axis-aligned
-        // page-space bounds.
-        (double minX, double minY, double maxX, double maxY) ProjectPathBBox()
-        {
-            var (x1, y1) = ctm.Apply(pminX, pminY);
-            var (x2, y2) = ctm.Apply(pmaxX, pminY);
-            var (x3, y3) = ctm.Apply(pmaxX, pmaxY);
-            var (x4, y4) = ctm.Apply(pminX, pmaxY);
-            return (Math.Min(Math.Min(x1, x2), Math.Min(x3, x4)),
-                    Math.Min(Math.Min(y1, y2), Math.Min(y3, y4)),
-                    Math.Max(Math.Max(x1, x2), Math.Max(x3, x4)),
-                    Math.Max(Math.Max(y1, y2), Math.Max(y3, y4)));
-        }
-
-        void EmitPathBBox()
-        {
-            if (!pathStarted) return;
-            var (mnx, mny, mxx, mxy) = ProjectPathBBox();
-            // Intersect with active clip — content outside the clip is not painted.
-            mnx = Math.Max(mnx, clipMinX);
-            mny = Math.Max(mny, clipMinY);
-            mxx = Math.Min(mxx, clipMaxX);
-            mxy = Math.Min(mxy, clipMaxY);
-            if (mnx <= mxx && mny <= mxy)
-            {
-                acc.IncludePoint(mnx, mny);
-                acc.IncludePoint(mxx, mxy);
-            }
-            ResetPath();
-            clipPending = false;
-        }
-
-        // Tighten the active clip with the current path bbox (page space).
-        void ApplyPendingClip()
-        {
-            if (!clipPending || !pathStarted) { clipPending = false; return; }
-            var (mnx, mny, mxx, mxy) = ProjectPathBBox();
-            clipMinX = Math.Max(clipMinX, mnx);
-            clipMinY = Math.Max(clipMinY, mny);
-            clipMaxX = Math.Min(clipMaxX, mxx);
-            clipMaxY = Math.Min(clipMaxY, mxy);
-            clipPending = false;
-        }
+        bw.pathStarted = false;
+        bw.pminX = 0;
+        bw.pminY = 0;
+        bw.pmaxX = 0;
+        bw.pmaxY = 0;
+        bw.curX = 0;
+        bw.curY = 0;
+        bw.inText = false;
+        bw.clipPending = false;
 
         while (true)
         {
-            var t = lexer.NextToken();
+            var t = bw.lexer.NextToken();
             if (t.Kind == TokenKind.Eof) break;
 
             switch (t.Kind)
             {
-                case TokenKind.Integer: operands.Add(new PdfInteger(t.IntValue)); break;
-                case TokenKind.Real: operands.Add(new PdfReal(t.RealValue)); break;
-                case TokenKind.LiteralString: operands.Add(new PdfString(t.BytesValue!)); break;
-                case TokenKind.HexString: operands.Add(new PdfString(t.BytesValue!, isHex: true)); break;
-                case TokenKind.Name: operands.Add(new PdfName(t.StringValue!)); break;
-                case TokenKind.ArrayStart: operands.Add(ParseArrayForBBox(lexer)); break;
+                case TokenKind.Integer: bw.operands.Add(new PdfInteger(t.IntValue)); break;
+                case TokenKind.Real: bw.operands.Add(new PdfReal(t.RealValue)); break;
+                case TokenKind.LiteralString: bw.operands.Add(new PdfString(t.BytesValue!)); break;
+                case TokenKind.HexString: bw.operands.Add(new PdfString(t.BytesValue!, isHex: true)); break;
+                case TokenKind.Name: bw.operands.Add(new PdfName(t.StringValue!)); break;
+                case TokenKind.ArrayStart: bw.operands.Add(ParseArrayForBBox(bw.lexer)); break;
                 case TokenKind.Keyword:
                 {
                     var op = t.StringValue!;
                     switch (op)
                     {
-                        case "q":
-                            ctmStack.Push(ctm);
-                            clipStack.Push((clipMinX, clipMinY, clipMaxX, clipMaxY));
+                        case "q": case "Q": case "W": case "W*": case "cm": case "BT": case "ET":
+                            if (WalkStateOperator(bw, op)) return;
                             break;
-                        case "Q":
-                            if (ctmStack.Count > 0) ctm = ctmStack.Pop();
-                            if (clipStack.Count > 0)
-                                (clipMinX, clipMinY, clipMaxX, clipMaxY) = clipStack.Pop();
+                        case "m": case "l": case "c": case "v": case "y": case "re": case "h":
+                            if (WalkPathOperator(bw, op)) return;
                             break;
-                        case "W" or "W*":
-                            clipPending = true;
+                        case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n":
+                            if (WalkPaintOperator(bw, acc, op)) return;
                             break;
-                        case "cm" when operands.Count >= 6:
-                            ctm = new Cm(
-                                Num(operands[0]), Num(operands[1]),
-                                Num(operands[2]), Num(operands[3]),
-                                Num(operands[4]), Num(operands[5])).Multiply(ctm);
+                        case "Do": case "BI":
+                            if (WalkXObjectOperator(bw, acc, ownerDict, reader, depth, op)) return;
                             break;
-
-                        case "BT": inText = true; ResetPath(); break;
-                        case "ET": inText = false; break;
-
-                        // Path-construction operators (skip while inside BT/ET — those
-                        // operands are text positioning, not path geometry).
-                        case "m" when !inText && operands.Count >= 2:
-                            curX = Num(operands[0]); curY = Num(operands[1]);
-                            IncludePathPoint(curX, curY);
-                            break;
-                        case "l" when !inText && operands.Count >= 2:
-                            curX = Num(operands[0]); curY = Num(operands[1]);
-                            IncludePathPoint(curX, curY);
-                            break;
-                        case "c" when !inText && operands.Count >= 6:
-                        {
-                            // Cubic Bézier from current point through (x1,y1) and
-                            // (x2,y2) to (x3,y3). Use exact extrema rather than the
-                            // convex hull — control points can be placed far outside
-                            // the actual curve (common for thin-stroke shapes), and
-                            // including them would inflate the bbox dramatically.
-                            var x1 = Num(operands[0]); var y1 = Num(operands[1]);
-                            var x2 = Num(operands[2]); var y2 = Num(operands[3]);
-                            var x3 = Num(operands[4]); var y3 = Num(operands[5]);
-                            CubicExtremaInclude(IncludePathPoint, curX, curY, x1, y1, x2, y2, x3, y3);
-                            curX = x3; curY = y3;
-                            break;
-                        }
-                        case "v" when !inText && operands.Count >= 4:
-                        {
-                            // First control = current point.
-                            var x2 = Num(operands[0]); var y2 = Num(operands[1]);
-                            var x3 = Num(operands[2]); var y3 = Num(operands[3]);
-                            CubicExtremaInclude(IncludePathPoint, curX, curY, curX, curY, x2, y2, x3, y3);
-                            curX = x3; curY = y3;
-                            break;
-                        }
-                        case "y" when !inText && operands.Count >= 4:
-                        {
-                            // Second control = endpoint.
-                            var x1 = Num(operands[0]); var y1 = Num(operands[1]);
-                            var x3 = Num(operands[2]); var y3 = Num(operands[3]);
-                            CubicExtremaInclude(IncludePathPoint, curX, curY, x1, y1, x3, y3, x3, y3);
-                            curX = x3; curY = y3;
-                            break;
-                        }
-                        case "re" when !inText && operands.Count >= 4:
-                        {
-                            var x = Num(operands[0]);
-                            var y = Num(operands[1]);
-                            var w = Num(operands[2]);
-                            var h = Num(operands[3]);
-                            IncludePathPoint(x, y);
-                            IncludePathPoint(x + w, y + h);
-                            curX = x; curY = y;
-                            break;
-                        }
-                        case "h": /* close: no new point */ break;
-
-                        // Painting operators — apply pending clip THEN emit bbox.
-                        case "S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*":
-                            ApplyPendingClip();
-                            EmitPathBBox();
-                            break;
-                        case "n":
-                            // No-op end-of-path. Apply pending clip first, then drop the path.
-                            ApplyPendingClip();
-                            ResetPath();
-                            break;
-
-                        // External XObject reference.
-                        case "Do" when operands.Count >= 1 && operands[0] is PdfName doName:
-                        {
-                            var xobjs = TextAbsorber.ResolveXObjects(ownerDict, reader);
-                            if (xobjs is not null)
-                            {
-                                var xstr = reader.ResolveStream(xobjs.Get(doName.Value));
-                                if (xstr is not null)
-                                {
-                                    var subtype = xstr.Dict.GetName("Subtype");
-                                    if (subtype == "Image")
-                                    {
-                                        // Images are painted into the unit square (0,0)-(1,1)
-                                        // pre-CTM; transform that square's corners.
-                                        var (ix1, iy1) = ctm.Apply(0, 0);
-                                        var (ix2, iy2) = ctm.Apply(1, 0);
-                                        var (ix3, iy3) = ctm.Apply(1, 1);
-                                        var (ix4, iy4) = ctm.Apply(0, 1);
-                                        acc.IncludePoint(Math.Min(Math.Min(ix1, ix2), Math.Min(ix3, ix4)),
-                                                         Math.Min(Math.Min(iy1, iy2), Math.Min(iy3, iy4)));
-                                        acc.IncludePoint(Math.Max(Math.Max(ix1, ix2), Math.Max(ix3, ix4)),
-                                                         Math.Max(Math.Max(iy1, iy2), Math.Max(iy3, iy4)));
-                                    }
-                                    else if (subtype == "Form")
-                                    {
-                                        // Form XObjects carry their own /Matrix and /BBox.
-                                        // Compose Matrix into the CTM, recurse with the form's content,
-                                        // then clip the form's contribution to its /BBox in form-space
-                                        // (the spec requires content outside /BBox to be clipped).
-                                        var formCtm = ctm;
-                                        if (xstr.Dict.Get("Matrix") is PdfArray mArr && mArr.Count >= 6)
-                                        {
-                                            formCtm = new Cm(
-                                                NumOf(mArr[0]), NumOf(mArr[1]),
-                                                NumOf(mArr[2]), NumOf(mArr[3]),
-                                                NumOf(mArr[4]), NumOf(mArr[5])).Multiply(ctm);
-                                        }
-                                        var xbytes = reader.DecodeStream(xstr);
-
-                                        // Build a per-form accumulator so we can clip its
-                                        // contribution to /BBox before merging into the outer acc.
-                                        var formAcc = new BBoxAccumulator();
-                                        WalkContentForBBox(xbytes, xstr.Dict, reader, formCtm, formAcc, depth + 1);
-                                        if (formAcc.HasAny)
-                                        {
-                                            // Translate /BBox to page-space using formCtm and intersect.
-                                            var bboxArr = xstr.Dict.Get("BBox") as PdfArray;
-                                            if (bboxArr is not null && bboxArr.Count >= 4)
-                                            {
-                                                var bx1 = NumOf(bboxArr[0]); var by1 = NumOf(bboxArr[1]);
-                                                var bx2 = NumOf(bboxArr[2]); var by2 = NumOf(bboxArr[3]);
-                                                var (px1, py1) = formCtm.Apply(bx1, by1);
-                                                var (px2, py2) = formCtm.Apply(bx2, by1);
-                                                var (px3, py3) = formCtm.Apply(bx2, by2);
-                                                var (px4, py4) = formCtm.Apply(bx1, by2);
-                                                var bboxMinX = Math.Min(Math.Min(px1, px2), Math.Min(px3, px4));
-                                                var bboxMaxX = Math.Max(Math.Max(px1, px2), Math.Max(px3, px4));
-                                                var bboxMinY = Math.Min(Math.Min(py1, py2), Math.Min(py3, py4));
-                                                var bboxMaxY = Math.Max(Math.Max(py1, py2), Math.Max(py3, py4));
-                                                var ix1 = Math.Max(formAcc.MinX, bboxMinX);
-                                                var iy1 = Math.Max(formAcc.MinY, bboxMinY);
-                                                var ix2 = Math.Min(formAcc.MaxX, bboxMaxX);
-                                                var iy2 = Math.Min(formAcc.MaxY, bboxMaxY);
-                                                if (ix1 <= ix2 && iy1 <= iy2)
-                                                {
-                                                    acc.IncludePoint(ix1, iy1);
-                                                    acc.IncludePoint(ix2, iy2);
-                                                }
-                                            }
-                                            else
-                                            {
-                                                acc.IncludePoint(formAcc.MinX, formAcc.MinY);
-                                                acc.IncludePoint(formAcc.MaxX, formAcc.MaxY);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            break;
-                        }
-
-                        // Inline images — BI..ID..EI. The image is painted into the
-                        // unit square pre-CTM, same as Do/Image.
-                        case "BI":
-                        {
-                            SkipInlineImageBody(lexer);
-                            var (ix1, iy1) = ctm.Apply(0, 0);
-                            var (ix2, iy2) = ctm.Apply(1, 0);
-                            var (ix3, iy3) = ctm.Apply(1, 1);
-                            var (ix4, iy4) = ctm.Apply(0, 1);
-                            acc.IncludePoint(Math.Min(Math.Min(ix1, ix2), Math.Min(ix3, ix4)),
-                                             Math.Min(Math.Min(iy1, iy2), Math.Min(iy3, iy4)));
-                            acc.IncludePoint(Math.Max(Math.Max(ix1, ix2), Math.Max(ix3, ix4)),
-                                             Math.Max(Math.Max(iy1, iy2), Math.Max(iy3, iy4)));
-                            break;
-                        }
                     }
-                    operands.Clear();
+                    bw.operands.Clear();
                     break;
                 }
                 default:
-                    operands.Clear();
+                    bw.operands.Clear();
                     break;
             }
         }

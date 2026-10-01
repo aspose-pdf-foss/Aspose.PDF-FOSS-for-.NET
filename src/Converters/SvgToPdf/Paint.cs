@@ -198,7 +198,7 @@ internal static partial class SvgToPdfConverter
         foreach (var v in m) matArr.Add(new PdfReal(v));
         patDict.Set("Matrix", matArr);
 
-        var contentBytes = Encoding.Latin1.GetBytes(contentPrefix + patSurface.Sb);
+        var contentBytes = Compat.Latin1.GetBytes(contentPrefix + patSurface.Sb);
         patDict.Set("Length", new PdfInteger(contentBytes.Length));
         var stream = new PdfStream(patDict, contentBytes);
 
@@ -285,6 +285,34 @@ internal static partial class SvgToPdfConverter
         return name;
     }
 
+    /// <summary>The alpha levels of an 8-bit ExtGState value: the reference writes an opacity as a
+    /// whole number of them, truncated, and an opacity at the top level as no state at all.</summary>
+    private const int AlphaLevels = 255;
+
+    /// <summary>The ExtGState for one paint's opacity, allocated as the reference allocates it: one
+    /// dictionary per alpha VALUE per page, created by the first paint that asks for the value and
+    /// carrying only that paint's key - /CA for a stroke, /ca for a fill - then reused by every later
+    /// paint of the same value, stroke or fill alike. So a stroke at alpha 0 drawn after a fill at
+    /// alpha 0 reuses a state without /CA and is drawn OPAQUE. That is what the reference draws
+    /// (probed 2026-09-17, 33 cases: a dashboard chart's five stroke-opacity:0 grid lines, its bar outline and
+    /// its icon are all solid in the reference because a fill-opacity:0 rect allocated the alpha-0
+    /// state first; drawn alone, each of those strokes is invisible). Null for an opaque paint.</summary>
+    private static string? AlphaGsFor(Ctx ctx, double alpha, bool stroke)
+    {
+        var level = (int)Math.Floor(Compat.Clamp(alpha, 0, 1) * AlphaLevels);
+        if (level >= AlphaLevels) return null;
+        if (ctx.AlphaGsByLevel.TryGetValue(level, out var existing)) return existing;
+        var gsRes = GetOrCreate(ctx.Surface.Resources, "ExtGState");
+        var name = $"GSa{ctx.GsCounter++}";
+        while (gsRes.ContainsKey(name)) name = $"GSa{ctx.GsCounter++}";
+        var gs = new PdfDictionary();
+        gs.Set("Type", new PdfName("ExtGState"));
+        gs.Set(stroke ? "CA" : "ca", new PdfReal((double)level / AlphaLevels));
+        gsRes.Set(name, gs);
+        ctx.AlphaGsByLevel[level] = name;
+        return name;
+    }
+
     private static string RegisterAlphaGs(Ctx ctx, double fillAlpha, double strokeAlpha)
     {
         var gsRes = GetOrCreate(ctx.Surface.Resources, "ExtGState");
@@ -292,8 +320,8 @@ internal static partial class SvgToPdfConverter
         while (gsRes.ContainsKey(name)) name = $"GSa{ctx.GsCounter++}";
         var gs = new PdfDictionary();
         gs.Set("Type", new PdfName("ExtGState"));
-        gs.Set("ca", new PdfReal(Math.Clamp(fillAlpha, 0, 1)));
-        gs.Set("CA", new PdfReal(Math.Clamp(strokeAlpha, 0, 1)));
+        gs.Set("ca", new PdfReal(Compat.Clamp(fillAlpha, 0, 1)));
+        gs.Set("CA", new PdfReal(Compat.Clamp(strokeAlpha, 0, 1)));
         gsRes.Set(name, gs);
         return name;
     }
@@ -325,7 +353,7 @@ internal static partial class SvgToPdfConverter
         if (string.IsNullOrEmpty(v)) return 1.0;
         if (v.EndsWith("%")) v = v[..^1];
         return double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var o)
-            ? Math.Clamp(v.Length > 0 && o > 1 ? o / 100.0 : o, 0, 1)
+            ? Compat.Clamp(v.Length > 0 && o > 1 ? o / 100.0 : o, 0, 1)
             : 1.0;
     }
 }

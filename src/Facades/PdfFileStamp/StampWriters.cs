@@ -1,6 +1,5 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 
 namespace Aspose.Pdf.Facades;
 
@@ -69,150 +68,50 @@ public sealed partial class PdfFileStamp
 
     private static void ApplyTextStamp(Page page, Stamp stamp)
     {
-        var text = stamp.LogoText!;
-        var ts = stamp.TextState;
-        var fontName = string.IsNullOrEmpty(text.FontName) ? "Helvetica" : text.FontName;
+        var ta = new TextStampApplyState();
+        ta.page = page;
+        ta.stamp = stamp;
+        ta.text = ta.stamp.LogoText!;
+        ta.ts = ta.stamp.TextState;
+        ta.fontName = string.IsNullOrEmpty(ta.text.FontName) ? "Helvetica" : ta.text.FontName;
 
-        // Stamp bounds in page space. The logo box is TextWidth wide and ~1.1·FontSize tall
-        // (a single line at default leading); a 90°/270° rotation swaps those dimensions. The
-        // box is anchored at the stamp origin and grows +x/+y, per the GetStamps contract.
-        double fontSize = text.FontSize;
-        double boxW = text.TextWidth;
-        double boxH = fontSize * 1.1;
-        double rot = ((stamp.Rotation % 360f) + 360f) % 360f;
-        bool quarterTurn = rot is 90f or 270f;
-        double rectW = quarterTurn ? boxH : boxW;
-        double rectH = quarterTurn ? boxW : boxH;
-        double ox = stamp.XOrigin, oy = stamp.YOrigin;
+        ta.fontSize = ta.text.FontSize;
+        ta.boxW = ta.text.TextWidth;
+        ta.boxH = ta.fontSize * 1.1;
+        ta.rot = ((ta.stamp.Rotation % 360f) + 360f) % 360f;
+        ta.quarterTurn = ta.rot is 90f or 270f;
+        ta.rectW = ta.quarterTurn ? ta.boxH : ta.boxW;
+        ta.rectH = ta.quarterTurn ? ta.boxW : ta.boxH;
+        ta.ox = ta.stamp.XOrigin;
+        ta.oy = ta.stamp.YOrigin;
 
-        // Every line of the (possibly multi-line) FormattedText; .Text is only the first.
-        var lines = new System.Collections.Generic.List<string>();
-        foreach (var line in text.Lines) lines.Add(line.Text);
-        if (lines.Count == 0) lines.Add(text.Text);
+        ta.lines = new System.Collections.Generic.List<string>();
+        foreach (var line in ta.text.Lines) ta.lines.Add(line.Text);
+        if (ta.lines.Count == 0) ta.lines.Add(ta.text.Text);
 
-        // The stamp's drawing operators in local coordinates, first baseline at the
-        // origin: an optional background box, the fill/stroke colour + render mode,
-        // then one Tj per line. Shared by both the Form-XObject and inline paths.
-        string DrawOps(string fontRes)
-        {
-            var b = new StringBuilder();
-            if (!text.BackgroundColor.IsEmpty)
-            {
-                double descent = (Aspose.Pdf.Text.Standard14Fonts.IsStandard14(fontName)
-                    ? Aspose.Pdf.Text.Standard14Fonts.GetDescent(fontName) : -207) * text.FontSize / 1000.0;
-                b.Append($"{NormColor(text.BackgroundColor.R)} {NormColor(text.BackgroundColor.G)} {NormColor(text.BackgroundColor.B)} rg\n");
-                b.Append($"0 {Format(descent)} {Format(text.TextWidth)} {Format(text.FontSize - descent)} re f\n");
-            }
-            if (ts?.ForegroundColor is { } fg)
-                b.Append($"{NormColor(fg.R)} {NormColor(fg.G)} {NormColor(fg.B)} rg\n");
-            else
-                b.Append($"{NormColor(text.ForegroundColor.R)} {NormColor(text.ForegroundColor.G)} {NormColor(text.ForegroundColor.B)} rg\n");
-            if (ts?.StrokingColor is { } sc)
-                b.Append($"{NormColor(sc.R)} {NormColor(sc.G)} {NormColor(sc.B)} RG\n");
-            if (ts is not null && (int)ts.RenderingMode != 0)
-                b.Append($"{(int)ts.RenderingMode} Tr\n");
-            b.Append($"BT /{fontRes} {Format(text.FontSize)} Tf 0 0 Td ");
-            for (int i = 0; i < lines.Count; i++)
-            {
-                if (i > 0) b.Append($"0 {Format(-fontSize)} Td ");
-                b.Append($"({EscapePdfString(lines[i])}) Tj ");
-            }
-            b.Append("ET\n");
-            return b.ToString();
-        }
-
-        var sb = new StringBuilder();
-        sb.Append($"%StampId={stamp.StampId}\n");
-        sb.Append($"%StampRect={Format(ox)} {Format(oy)} {Format(ox + rectW)} {Format(oy + rectH)}\n");
-        sb.Append("q\n");
-        if (rot == 0f)
+        ta.sb = new StringBuilder();
+        ta.sb.Append($"%StampId={ta.stamp.StampId}\n");
+        ta.sb.Append($"%StampRect={Format(ta.ox)} {Format(ta.oy)} {Format(ta.ox + ta.rectW)} {Format(ta.oy + ta.rectH)}\n");
+        ta.sb.Append("q\n");
+        if (ta.rot == 0f)
         {
             // Upright stamp: draw into a Form XObject so the text lands in
             // Resources.Forms; a Do at 1 0 0 1 ox oy is
             // pixel-identical to drawing there directly.
-            var fmName = AddTextStampForm(page, DrawOps("F0"), fontName, boxW, fontSize, lines.Count);
-            sb.Append($"1 0 0 1 {Format(ox)} {Format(oy)} cm\n");
-            sb.Append($"/{fmName} Do\n");
+            var fmName = AddTextStampForm(ta.page, DrawOps(ta, "F0"), ta.fontName, ta.boxW, ta.fontSize, ta.lines.Count);
+            ta.sb.Append($"1 0 0 1 {Format(ta.ox)} {Format(ta.oy)} cm\n");
+            ta.sb.Append($"/{fmName} Do\n");
         }
-        else if (!stamp.IsBackground)
+        else if (!ta.stamp.IsBackground)
         {
-            // Rotated FOREGROUND stamp: the exact operator sequence of the historical
-            // inline placement — the rotation cm followed by the text ops — wrapped in
-            // a Form XObject invoked at IDENTITY, so the stamp lands in Resources.Forms
-            // (the public-API shape) while the renderer walks an identical operator
-            // stream and the era-calibrated placement stays pixel-exact. The BBox spans
-            // the page so nothing the inline form drew is clipped away.
-            double radInline = rot * Math.PI / 180.0;
-            double cosInline = Math.Cos(radInline), sinInline = Math.Sin(radInline);
-            var inner = new StringBuilder();
-            inner.Append($"{Format(cosInline)} {Format(sinInline)} {Format(-sinInline)} {Format(cosInline)} {Format(ox)} {Format(oy)} cm\n");
-            inner.Append(DrawOps("F0"));
-            var mboxFg = page.MediaBox;
-            var fmNameFg = AddTextStampFormCore(page, inner.ToString(), fontName,
-                mboxFg.LLX, mboxFg.LLY, mboxFg.URX, mboxFg.URY);
-            sb.Append($"/{fmNameFg} Do\n");
+            PlaceRotatedTextStamp(ta);
         }
         else
         {
-            // Rotated BACKGROUND stamp: it is drawn through an UNROTATED
-            // Form XObject whose BBox spans [0 0 max(TextWidth, pageWidth) pageHeight],
-            // TextWidth being the real system-face advance sum (unrounded hmtx units,
-            // e.g. Windows Arial for "Arial" — not the rounded Standard-14 AFM). The
-            // rotation lives in the page-level cm, translated so the rotated block
-            // rect [0,W]×[0,(N+0.1)·S] stays in the first quadrant, and the text
-            // baseline inside the form is lifted by the font descent.
-            double realW = 0;
-            foreach (var line in lines)
-                realW = Math.Max(realW, MeasureSystemFaceWidth(line, text, fontSize));
-            var mbox = page.MediaBox;
-            double bboxW = Math.Max(realW, mbox.Width);
-            double bboxH = mbox.Height;
-
-            var descent = Aspose.Pdf.Text.Standard14Fonts.IsStandard14(fontName)
-                ? Aspose.Pdf.Text.Standard14Fonts.GetDescent(fontName)
-                : Aspose.Pdf.Text.Standard14Fonts.GetDescent("Helvetica");
-            var lift = (descent < 0 ? -descent : 207) * fontSize / 1000.0;
-
-            var fg = ts?.ForegroundColor ?? text.ForegroundColor;
-            var fb = new StringBuilder();
-            fb.Append("q\n0 0 0 0 re\n0 0 0 rg\n0 0 0 RG\nf*\nq\n");
-            fb.Append($"BT\n/F0 {Format(fontSize)} Tf\n");
-            fb.Append($"{NormColor(fg.R)} {NormColor(fg.G)} {NormColor(fg.B)} rg\n");
-            if (ts?.StrokingColor is { } strokeCol)
-                fb.Append($"{NormColor(strokeCol.R)} {NormColor(strokeCol.G)} {NormColor(strokeCol.B)} RG\n");
-            if (ts is not null && (int)ts.RenderingMode != 0)
-                fb.Append($"{(int)ts.RenderingMode} Tr\n");
-            for (int i = 0; i < lines.Count; i++)
-            {
-                var lineY = lift + (lines.Count - 1 - i) * fontSize;
-                fb.Append($"1 0 0 1 0 {Format(lineY)} Tm\n({EscapePdfString(lines[i])}) Tj\n");
-            }
-            fb.Append("0 g\n1 0 0 1 0 0 Tm\nET\nQ\nQ\n");
-
-            var fmName = AddTextStampFormWithBBox(page, fb.ToString(), fontName, bboxW, bboxH);
-
-            double rad = rot * Math.PI / 180.0;
-            double cos = Math.Cos(rad), sin = Math.Sin(rad);
-            // Shift the rotated block rect into the first quadrant: e/f undo the
-            // most-negative rotated corner of [0,realW]×[0,blockH].
-            double blockH = (lines.Count + 0.1) * fontSize;
-            double minX = Math.Min(Math.Min(0, realW * cos),
-                          Math.Min(-blockH * sin, realW * cos - blockH * sin));
-            double minY = Math.Min(Math.Min(0, realW * sin),
-                          Math.Min(blockH * cos, realW * sin + blockH * cos));
-            if (stamp.Opacity < 1f)
-            {
-                var gsName = page.AddExtGState(new Content.ExtGState
-                {
-                    FillAlpha = stamp.Opacity,
-                });
-                sb.Append($"/{gsName} gs\n");
-            }
-            sb.Append($"{Format(cos)} {Format(sin)} {Format(-sin)} {Format(cos)} {Format(ox - minX)} {Format(oy - minY)} cm\n");
-            sb.Append($"/{fmName} Do\n");
+            PlaceRotatedBackgroundTextStamp(ta);
         }
-        sb.Append("Q\n");
-        AppendContent(page, Encoding.ASCII.GetBytes(sb.ToString()));
+        ta.sb.Append("Q\n");
+        AppendContent(ta.page, Encoding.ASCII.GetBytes(ta.sb.ToString()));
     }
 
     /// <summary>Advance width of <paramref name="line"/> at <paramref name="fontSize"/>
@@ -455,7 +354,7 @@ public sealed partial class PdfFileStamp
             imgStamp = ImageStamp.FromJpeg(imageData);
         else if (isPng)
             imgStamp = ImageStamp.FromPngData(imageData);
-        else if (((OperatingSystem.IsWindows() ? ImageStamp.TryFromGdiPlusDecoder(imageData) : null)
+        else if (((Compat.IsWindows() ? ImageStamp.TryFromGdiPlusDecoder(imageData) : null)
                  ?? ImageStamp.TryFromManagedDecoder(imageData)) is { } gdiStamp)
         {
             // GIF / TIFF / EMF / WMF / ICO via System.Drawing, falling back to the

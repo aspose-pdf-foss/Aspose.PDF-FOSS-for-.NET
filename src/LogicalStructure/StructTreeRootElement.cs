@@ -16,5 +16,23 @@ public sealed class StructTreeRootElement : StructureElement
 
     /// <summary>Flat list of every structure element below the root,
     /// produced by a depth-first walk of <see cref="StructureElement.ChildElements"/>.</summary>
-    public IReadOnlyList<StructureElement> AllElements => FindElements<StructureElement>(recursive: true);
+    public IReadOnlyList<StructureElement> AllElements
+    {
+        get
+        {
+            // Every element of the tree, marked-content and object references included
+            // (a FindElements query for StructureElement leaves those out).
+            var all = new List<StructureElement>();
+            void Walk(StructureElement el)
+            {
+                foreach (var child in el.ChildElements)
+                {
+                    all.Add(child);
+                    if (child is not (MCRElement or OBJRElement)) Walk(child);
+                }
+            }
+            Walk(this);
+            return all;
+        }
+    }
 }

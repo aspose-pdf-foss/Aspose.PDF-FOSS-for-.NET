@@ -36,7 +36,7 @@ public sealed partial class PdfFileEditor
     }
 
     /// <summary>
-    /// Copy every source page into <paramref name="destination"/>, splitting any
+    /// Copy every source page into <c>destination</c>, splitting any
     /// source page that is referenced by one or more <see cref="PageBreak"/>
     /// entries into separate destination pages whose MediaBoxes describe the
     /// horizontal band each page occupies in the original. Pages without a

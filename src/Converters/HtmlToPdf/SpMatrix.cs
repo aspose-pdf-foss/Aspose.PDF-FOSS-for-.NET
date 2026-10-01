@@ -68,7 +68,7 @@ internal static partial class HtmlToPdfConverter
         var svgM = Regex.Match(tableHtml, @"inline-svg:(\d+)");
         if (svgM.Success && int.TryParse(svgM.Groups[1].Value, out var si)
             && si >= 0 && si < inlineSvgs.Count
-            && ImageRasterizer.RasterizeSvg(inlineSvgs[si], out _, out _) is { } png)
+            && ImageRasterizer.RasterizeSvg(inlineSvgs[si]) is { } png)
             page.AddImage(png, new Rectangle(
                 mL + SpChartInset, pageHeight - SpChartTop - SpChartH,
                 mL + SpChartInset + SpChartW, pageHeight - SpChartTop));

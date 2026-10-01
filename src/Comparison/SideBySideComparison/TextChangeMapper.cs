@@ -25,7 +25,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
             List<DiffOperation> diffOperations, Operation operation, Dictionary<int, int> diffsIDs)
         {
             var containers = new List<EditContainer>();
-            var starts = BuildFragmentOffsets(fragments, out var totalLength);
+            (var starts, var totalLength) = BuildFragmentOffsets(fragments);
 
             var position = 0;
             for (var i = 0; i < diffOperations.Count; i++)
@@ -60,8 +60,9 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
             return containers;
         }
 
-        private static int[] BuildFragmentOffsets(List<Fragment> fragments, out int totalLength)
+        private static (int[] result, int totalLength) BuildFragmentOffsets(List<Fragment> fragments)
         {
+            int totalLength = default;
             var starts = new int[fragments.Count];
             var offset = 0;
             for (var i = 0; i < fragments.Count; i++)
@@ -70,7 +71,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
                 offset += fragments[i].Text.Length;
             }
             totalLength = offset;
-            return starts;
+            return (starts, totalLength);
         }
 
         /// <summary>Union the character rectangles of text span [start, start+length) into
@@ -91,7 +92,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
                 var inFragment = pos - starts[fragmentIndex];
                 if (inFragment >= fragment.Text.Length) continue;
                 var ch = fragment.Text[inFragment];
-                if (ch == '\n' || ch == '\r') { Flush(ref current, rects); continue; }
+                if (ch == '\n' || ch == '\r') { AddIfAny(current, rects); current = null; continue; }
 
                 var rect = fragment.FindCharRect(inFragment);
                 if (rect.IsTrivial) continue;
@@ -113,17 +114,16 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
                 }
                 else
                 {
-                    Flush(ref current, rects);
+                    AddIfAny(current, rects);
                     current = (Rectangle)rect.Clone();
                 }
             }
-            Flush(ref current, rects);
+            AddIfAny(current, rects);
         }
 
-        private static void Flush(ref Rectangle? current, List<Rectangle> rects)
+        private static void AddIfAny(Rectangle? current, List<Rectangle> rects)
         {
             if (current is not null) rects.Add(current);
-            current = null;
         }
 
         private static Rectangle? CharRectAt(List<Fragment> fragments, int[] starts,

@@ -1,6 +1,5 @@
 using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
-using Aspose.Pdf.Stamps;
 using System.Globalization;
 
 namespace Aspose.Pdf.Text;
@@ -99,8 +98,8 @@ public sealed partial class TextParagraph
             // hyphenation breaks it: the longest prefix that fits with a hyphen, else
             // one bare character per line; the remainder starts the next line.
             if (MeasureText(currentLine, font, fontSize) > maxWidth)
-                HyphenateWord(currentLine, font, fontSize, maxWidth, hyphenWidth, result,
-                    hyphen, out currentLine, out _);
+                (currentLine, _) = HyphenateWord(currentLine, font, fontSize, maxWidth, hyphenWidth, result,
+                    hyphen);
         }
         if (currentLine.Length > 0) result.Add(currentLine);
     }
@@ -127,7 +126,7 @@ public sealed partial class TextParagraph
             }
             else if (currentLine.Length == 0)
             {
-                HyphenateWord(word, font, fontSize, maxWidth, hyphenWidth, result, hyphen, out currentLine, out currentWidth);
+                (currentLine, currentWidth) = HyphenateWord(word, font, fontSize, maxWidth, hyphenWidth, result, hyphen);
             }
             else
             {
@@ -148,14 +147,14 @@ public sealed partial class TextParagraph
                     {
                         currentLine = "";
                         currentWidth = 0;
-                        HyphenateWord(remainder, font, fontSize, maxWidth, hyphenWidth, result, hyphen, out currentLine, out currentWidth);
+                        (currentLine, currentWidth) = HyphenateWord(remainder, font, fontSize, maxWidth, hyphenWidth, result, hyphen);
                     }
                 }
                 else
                 {
                     result.Add(currentLine);
                     if (wordWidth <= maxWidth) { currentLine = word; currentWidth = wordWidth; }
-                    else HyphenateWord(word, font, fontSize, maxWidth, hyphenWidth, result, hyphen, out currentLine, out currentWidth);
+                    else (currentLine, currentWidth) = HyphenateWord(word, font, fontSize, maxWidth, hyphenWidth, result, hyphen);
                 }
             }
         }
@@ -174,16 +173,16 @@ public sealed partial class TextParagraph
         return best;
     }
 
-    private static void HyphenateWord(string word, FontInfo? font, double fontSize,
-        double maxWidth, double hyphenWidth, List<string> result, string hyphen,
-        out string remainingLine, out double remainingWidth)
+    private static (string remainingLine, double remainingWidth) HyphenateWord(string word, FontInfo? font, double fontSize, double maxWidth, double hyphenWidth, List<string> result, string hyphen)
     {
+        string? remainingLine = default;
+        double remainingWidth = default;
         var pos = 0;
         while (pos < word.Length)
         {
             var remaining = word[pos..];
             var remainW = MeasureText(remaining, font, fontSize);
-            if (remainW <= maxWidth) { remainingLine = remaining; remainingWidth = remainW; return; }
+            if (remainW <= maxWidth) { remainingLine = remaining; remainingWidth = remainW; return (remainingLine, remainingWidth); }
             int fitChars = FindHyphenBreak(remaining, font, fontSize, maxWidth, hyphenWidth);
             // When not even one character plus a hyphen fits, the line takes one
             // bare character — no hyphen (a 6 pt column of 30 pt text shows
@@ -194,6 +193,7 @@ public sealed partial class TextParagraph
         }
         remainingLine = "";
         remainingWidth = 0;
+        return (remainingLine, remainingWidth);
     }
 
     /// <summary>

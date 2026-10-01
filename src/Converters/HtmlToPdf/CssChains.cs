@@ -44,6 +44,9 @@ internal static partial class HtmlToPdfConverter
         public Dictionary<string, string> Decls = null!;
         public int Spec;      // id 100 / class 10 / tag 1, summed
         public int Order;     // source order, ties broken towards later rules
+        // True for a DESCENDANT CELL rule the flat map cannot express either (`.bluesheet td { … }`):
+        // those are admitted only for a sheet that states no other tree-addressed rule.
+        public bool CellRule;
     }
 
     /// <summary>An open inline-box run during the cell token walk: a chain-matched
@@ -98,15 +101,14 @@ internal static partial class HtmlToPdfConverter
             // platform - the same decoder ImageStamp trusts - so the fill no
             // longer vanishes off Windows. Other tile formats keep the GDI+
             // decode below, Windows-only by the repo-wide convention.
-            if (IO.GifDecoder.TryDecode(bytes, out var gifRgb, out var gifAlpha,
-                    out var gifW, out var gifH))
+            if (IO.GifDecoder.TryDecode(bytes) is (var gifRgb, var gifAlpha, var gifW, var gifH))
             {
                 if (gifW > MaxUniformTilePx || gifH > MaxUniformTilePx) return null;
                 var ci = (gifH / 2) * gifW + gifW / 2;
                 if (gifAlpha.Length > ci && gifAlpha[ci] < 32) return null;
                 return Color.FromRgbBytes(gifRgb[ci * 3], gifRgb[ci * 3 + 1], gifRgb[ci * 3 + 2]);
             }
-            if (!OperatingSystem.IsWindows()) return null;
+            if (!Compat.IsWindows()) return null;
 #pragma warning disable CA1416
             using var ms = new System.IO.MemoryStream(bytes);
             using var bmp = new System.Drawing.Bitmap(ms);
@@ -157,11 +159,14 @@ internal static partial class HtmlToPdfConverter
         return sb.ToString();
     }
 
-    private static List<CssChainSeg>? ParseChainSelector(string sel, out int spec, out bool chainOnly)
+    private static (List<CssChainSeg>? result, int spec, bool chainOnly, bool cellRule) ParseChainSelector(string sel)
     {
-        spec = 0; chainOnly = false;
+        int spec = default;
+        bool chainOnly = default;
+        bool cellRule = default;
+        spec = 0; chainOnly = false; cellRule = false;
         sel = sel.Trim();
-        if (sel.Length == 0 || sel.IndexOfAny(new[] { '+', '~', ':', '[', '*', '@' }) >= 0) return null;
+        if (sel.Length == 0 || sel.IndexOfAny(new[] { '+', '~', ':', '[', '*', '@' }) >= 0) return (null, spec, chainOnly, cellRule);
         var segs = new List<CssChainSeg>();
         var child = false; var hadChild = false; var parts = 0; var hasId = false;
         var hadDrop = false; var dropAllChild = true;
@@ -171,7 +176,7 @@ internal static partial class HtmlToPdfConverter
             if (string.IsNullOrEmpty(t)) continue;
             if (t == ">") { child = true; hadChild = true; continue; }
             var m = Regex.Match(t, @"^([a-zA-Z][\w-]*)?((?:[.#][\w-]+)+)?$");
-            if (!m.Success || (m.Groups[1].Length == 0 && m.Groups[2].Length == 0)) return null;
+            if (!m.Success || (m.Groups[1].Length == 0 && m.Groups[2].Length == 0)) return (null, spec, chainOnly, cellRule);
             parts++;
             var seg = new CssChainSeg
             {
@@ -203,16 +208,117 @@ internal static partial class HtmlToPdfConverter
             segs.Add(seg);
         }
         chainOnly = hasId || hadChild || parts > 2;
-        return segs.Count > 0 ? segs : null;
+        // A two-part DESCENDANT CELL rule (`.bluesheet td { padding-left: 5px }`) addresses the cells
+        // of every grid under a container the flat class map cannot reach either: the cascade has to
+        // walk the ancestors to know which cells it dresses. It is reported apart from the rules above
+        // because a sheet that already has one of those was calibrated with its own cascade, and adding
+        // to it changes documents this rule has nothing to say about.
+        // …and it must still be TWO segments after the structural containers collapse:  is a
+        // plain cell rule the flat map expresses perfectly well, and admitting it here dresses the cells
+        // of a document that never asked for a cascade.
+        cellRule = parts == 2 && segs.Count == 2
+            && segs[^1].Tag is "td" or "th" && segs[^1].Classes is null && segs[^1].Id is null
+            && (segs[0].Id is not null || segs[0].Classes is not null);
+        return (segs.Count > 0 ? segs : null, spec, chainOnly, cellRule);
+    }
+
+    /// <summary>A cell rule addressed through its LEFT SIBLING
+    /// (<c>.label + td { padding-left: .5em }</c>): the cell that closed immediately
+    /// before this one decides whether the declarations apply. The relation is not an
+    /// ancestor one, so <see cref="CssChainRule"/> cannot carry it — the report family's
+    /// label/value grids state their value inset this way and nothing else in the
+    /// corpus addresses a cell by its sibling.</summary>
+    internal sealed class CssSiblingCellRule
+    {
+        /// <summary>What the cell to the LEFT must be.</summary>
+        public CssChainSeg Left = null!;
+        /// <summary>What THIS cell must be — always a td/th, so the rule reaches cells only.</summary>
+        public CssChainSeg Right = null!;
+        public Dictionary<string, string> Decls = null!;
+        public int Spec;      // class 10 / tag 1, summed over both sides
+        public int Order;     // source order, ties broken towards later rules
+    }
+
+    /// <summary>The one simple selector of a sibling pair: a tag with optional class
+    /// hooks, no id and no nested combinator. Null when the text is anything else.</summary>
+    private static CssChainSeg? ParseSimpleSeg(string raw, ref int spec)
+    {
+        var t = raw.Trim();
+        var m = Regex.Match(t, @"^([a-zA-Z][\w-]*)?((?:\.[\w-]+)+)?$");
+        if (!m.Success || (m.Groups[1].Length == 0 && m.Groups[2].Length == 0)) return null;
+        var seg = new CssChainSeg { Tag = m.Groups[1].Length > 0 ? m.Groups[1].Value.ToLowerInvariant() : null };
+        if (seg.Tag is not null) spec += 1;
+        foreach (Match h in Regex.Matches(m.Groups[2].Value, @"\.[\w-]+"))
+        {
+            (seg.Classes ??= new List<string>()).Add(h.Value[1..]);
+            spec += 10;
+        }
+        return seg;
+    }
+
+    /// <summary>Parse every style block's adjacent-sibling CELL rules (see
+    /// <see cref="CssSiblingCellRule"/>). Only the two-part form whose right side is a
+    /// td/th is kept, so a sheet that reaches cells through an ancestor as well
+    /// (<c>.basicTable th + th</c>) is left to the flat map exactly as before.
+    /// Returns null when the document declares none.</summary>
+    internal static List<CssSiblingCellRule>? ParseSiblingCellRules(string html)
+    {
+        List<CssSiblingCellRule>? rules = null;
+        var order = 0;
+        foreach (Match block in Regex.Matches(html, @"<style\b([^>]*)>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
+        {
+            var cssText = FlattenMediaBlocks(Regex.Replace(block.Groups[2].Value, @"/\*[\s\S]*?\*/", ""));
+            foreach (Match rule in Regex.Matches(cssText, @"([^{}]+)\{([^{}]*)\}"))
+            {
+                Dictionary<string, string>? decls = null;
+                foreach (Match d in StyleDeclRx.Matches(rule.Groups[2].Value))
+                    (decls ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase))
+                        [d.Groups[1].Value.Trim().ToLowerInvariant()] = d.Groups[2].Value.Trim();
+                if (decls is null) continue;
+                foreach (var selRaw in rule.Groups[1].Value.Split(','))
+                {
+                    var plus = selRaw.Split('+');
+                    if (plus.Length != 2) continue;
+                    var spec = 0;
+                    if (ParseSimpleSeg(plus[0], ref spec) is not { } left) continue;
+                    if (ParseSimpleSeg(plus[1], ref spec) is not { } right) continue;
+                    if (right.Tag is not ("td" or "th")) continue;
+                    (rules ??= new List<CssSiblingCellRule>()).Add(new CssSiblingCellRule
+                    { Left = left, Right = right, Decls = decls, Spec = spec, Order = order++ });
+                }
+            }
+        }
+        return rules;
+    }
+
+    /// <summary>Merged declarations of every sibling-cell rule that matches this cell
+    /// beside its left neighbour — lower specificity first, source order breaking ties.
+    /// Null when nothing matches.</summary>
+    internal static Dictionary<string, string>? MatchSiblingCellDecls(
+        List<CssSiblingCellRule>? rules, CssElem left, CssElem right)
+    {
+        if (rules is null) return null;
+        List<CssSiblingCellRule>? hits = null;
+        foreach (var r in rules)
+            if (ChainSegMatches(r.Left, left) && ChainSegMatches(r.Right, right))
+                (hits ??= new List<CssSiblingCellRule>()).Add(r);
+        if (hits is null) return null;
+        hits.Sort((a, b) => a.Spec != b.Spec ? a.Spec.CompareTo(b.Spec) : a.Order.CompareTo(b.Order));
+        var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in hits)
+            foreach (var kv in r.Decls) merged[kv.Key] = kv.Value;
+        return merged;
     }
 
     /// <summary>Parse every style block into full-chain rules (see
     /// <see cref="CssChainRule"/>). Screen-only blocks — the media attribute an
     /// inlined &lt;link&gt; carries, or an @media group — are excluded. Returns null
     /// when the document has no rule the flat map could not express.</summary>
-    internal static List<CssChainRule>? ParseChainRules(string html)
+    internal static List<CssChainRule>? ParseChainRules(string html, out bool cellRulesOnly)
     {
         List<CssChainRule>? rules = null;
+        List<CssChainRule>? cellRules = null;
+        cellRulesOnly = false;
         var order = 0;
         foreach (Match block in Regex.Matches(html, @"<style\b([^>]*)>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
         {
@@ -235,14 +341,62 @@ internal static partial class HtmlToPdfConverter
                 if (decls is null) continue;
                 foreach (var selRaw in rule.Groups[1].Value.Split(','))
                 {
-                    var segs = ParseChainSelector(selRaw, out var spec, out var chainOnly);
-                    if (segs is null || !chainOnly) continue;
-                    (rules ??= new List<CssChainRule>()).Add(new CssChainRule
-                    { Segs = segs, Decls = decls, Spec = spec, Order = order++ });
+                    (var segs, var spec, var chainOnly, var cellRule) = ParseChainSelector(selRaw);
+                    if (segs is null || !(chainOnly || cellRule)) continue;
+                    var parsed = new CssChainRule
+                    { Segs = segs, Decls = decls, Spec = spec, Order = order++, CellRule = cellRule };
+                    if (chainOnly) (rules ??= new List<CssChainRule>()).Add(parsed);
+                    // …and a cell rule earns the cascade only by stating the cells' BOX: one that only
+                    // dresses them has nothing the flat map cannot do, and turning the cascade on for it
+                    // moves a document that never needed it.
+                    else if (DeclaresCellBox(decls)) (cellRules ??= new List<CssChainRule>()).Add(parsed);
                 }
             }
         }
-        return rules;
+        // A sheet that already states a rule the flat map cannot express was calibrated with that
+        // cascade, and its descendant CELL rules stay out of it. A sheet whose only such rule is a
+        // cell rule is a document the flat map never dressed at all, and it gets them.
+        cellRulesOnly = rules is null && cellRules is not null;
+        return rules ?? cellRules;
+    }
+
+    /// <summary>True when the sheet states a DESCENDANT CELL rule that declares the cells' own box
+    /// (<c>.bluesheet td { padding-left: 5px; padding-right: 5px }</c>). A sheet that sizes its cells this
+    /// way leaves no UA padding pair for the legacy slack to stand in for, and its grids measure on the
+    /// declared box instead.</summary>
+    /// <summary>The declarations state a cell's own horizontal box: the shorthand, or both longhands.
+    /// The legacy slack stands in for the UA's padding PAIR, so one side is not a replacement for it.</summary>
+    private static bool DeclaresCellBox(Dictionary<string, string> decls)
+        => decls.ContainsKey("padding")
+            || (decls.ContainsKey("padding-left") && decls.ContainsKey("padding-right"));
+
+    internal static bool SheetDeclaresCellBox(List<CssChainRule>? rules)
+    {
+        if (rules is null) return false;
+        foreach (var r in rules)
+        {
+            if (!r.CellRule || r.Segs.Count != 2) continue;
+            var last = r.Segs[1];
+            if (last.Tag is not ("td" or "th") || last.Classes is not null || last.Id is not null) continue;
+            if (DeclaresCellBox(r.Decls)) return true;
+        }
+        return false;
+    }
+
+    private static readonly char[] FontFamilyQuotes = { '"', (char)39 };
+
+    /// <summary>The first INSTALLED family the sheet's <c>body</c> rule names, null when it names
+    /// none (or none is installed): the face a quirks grid draws and pitches in.</summary>
+    internal static string? SheetBodyFace(IReadOnlyDictionary<string, Dictionary<string, string>> css)
+    {
+        if (!css.TryGetValue("body", out var bodyDecls)
+            || !bodyDecls.TryGetValue("font-family", out var fams)) return null;
+        foreach (var fam in fams.Split(','))
+        {
+            var f = fam.Trim().Trim(FontFamilyQuotes);
+            if (f.Length > 0 && WinMetricsFor(f) is not null) return f;
+        }
+        return null;
     }
 
     private static bool ChainSegMatches(CssChainSeg s, CssElem e)
@@ -333,6 +487,49 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>Chain element for an open tag: its name plus the id/classes a
     /// selector can address.</summary>
+    /// <summary>The container elements still OPEN after <paramref name="html"/>, appended to
+    /// <paramref name="open"/>: the ancestor chain a grid further on stands inside. The block
+    /// builder advances one stack across a fragment's segments, so a table carries the divs open
+    /// above it into its own build and the sheet's scoped cell rules reach its cells.</summary>
+    private static void AdvanceOpenContainerChain(List<CssElem> open, string html)
+    {
+        foreach (Match m in ContainerTagRx.Matches(html))
+        {
+            var tag = m.Groups["tag"].Value.ToLowerInvariant();
+            // the framed-wrapper marker stands for the div it renamed
+            if (tag == FrameDivTag) tag = "div";
+            if (m.Groups["close"].Length > 0)
+            {
+                for (var i = open.Count - 1; i >= 0; i--)
+                    if (string.Equals(open[i].Tag, tag, StringComparison.Ordinal))
+                    { open.RemoveRange(i, open.Count - i); break; }
+                continue;
+            }
+            if (m.Value.EndsWith("/>", StringComparison.Ordinal)) continue;
+            var e = new CssElem { Tag = tag };
+            if (Regex.Match(m.Value, @"\bid\s*=\s*(?:[""']([^""']*)[""']|([\w-]+))",
+                    RegexOptions.IgnoreCase) is { Success: true } im)
+            {
+                var v = (im.Groups[1].Success ? im.Groups[1].Value : im.Groups[2].Value).Trim();
+                if (v.Length > 0) e.Id = v;
+            }
+            if (Regex.Match(m.Value, @"\bclass\s*=\s*(?:[""']([^""']*)[""']|([\w-]+))",
+                    RegexOptions.IgnoreCase) is { Success: true } cm)
+            {
+                var v = cm.Groups[1].Success ? cm.Groups[1].Value : cm.Groups[2].Value;
+                var cls = v.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (cls.Length > 0) e.Classes = cls;
+            }
+            open.Add(e);
+        }
+    }
+
+    /// <summary>The container elements the open-chain scan tracks: the block wrappers a
+    /// stylesheet scopes its grids through, all of which carry an explicit close tag.</summary>
+    private static readonly Regex ContainerTagRx = new Regex(
+        @"<(?<close>/?)(?<tag>div|" + FrameDivTag + @"|section|article|aside|header|footer|main|nav|form|fieldset|blockquote|center)\b[^>]*>",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private static CssElem ChainTokElem(string tag, Dictionary<string, string>? attrs)
     {
         var e = new CssElem { Tag = tag };

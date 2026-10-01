@@ -30,26 +30,31 @@ public sealed partial class SoftwarePageRenderer
 
     private static void DrawText(RenderContext ctx, string text, byte[] rawBytes, GraphicsState state)
     {
-        if (state.RenderingMode == 3) return; // invisible
+        var dt = new TextDrawState();
+        dt.ctx = ctx;
+        dt.text = text;
+        dt.rawBytes = rawBytes;
+        dt.state = state;
+        if (dt.state.RenderingMode == 3) return; // invisible
         // Tr 4-7 (PDF 32000 §9.3.6) add the glyph shapes to the CLIPPING path; 4/5/6 paint
         // as well, 7 paints nothing and clips only. Opening the accumulator here routes the
         // glyph coverage into it (see BlitAlphaMask); EndTextClip installs it at ET.
         // Ignoring these modes is not a cosmetic miss: the usual idiom is "clip to the text,
         // then Do a full-page image", so a missing clip lets that image flood the page and
         // erase everything already drawn.
-        if (state.RenderingMode >= 4)
+        if (dt.state.RenderingMode >= 4)
         {
-            ctx.TextClipAccum ??= new byte[ctx.PixelW * ctx.PixelH];
-            ctx.TextClipPaints = state.RenderingMode != 7;
+            dt.ctx.TextClipAccum ??= new byte[dt.ctx.PixelW * dt.ctx.PixelH];
+            dt.ctx.TextClipPaints = dt.state.RenderingMode != 7;
         }
         if (PageRenderFlags.SuppressText) return; // HTML PNG-background: graphics only
         // An empty decoded string with non-empty rawBytes can still happen for CID fonts whose
         // ToUnicode CMap is missing — we must still walk rawBytes to advance the cursor.
-        if (string.IsNullOrEmpty(text) && (rawBytes is null || rawBytes.Length == 0)) return;
+        if (string.IsNullOrEmpty(dt.text) && (dt.rawBytes is null || dt.rawBytes.Length == 0)) return;
 
         // Inherit the active blend mode for glyph blits.
-        ctx.CurrentBlendMode = state.BlendMode;
-        ctx.SoftMaskAlpha = state.SoftMask is { } sm__ ? ResolveSoftMaskAlpha(ctx, sm__) : null;
+        dt.ctx.CurrentBlendMode = dt.state.BlendMode;
+        dt.ctx.SoftMaskAlpha = dt.state.SoftMask is { } sm__ ? ResolveSoftMaskAlpha(dt.ctx, sm__) : null;
 
         // Type 3 fonts (PDF 32000 §9.6.5) define each glyph as its own PDF content
         // stream stored under /CharProcs. They show up most often in old dot-matrix
@@ -57,122 +62,22 @@ public sealed partial class SoftwarePageRenderer
         // for the addresses, invoice numbers, table rows. Detect and route before
         // the CID/simple-font dispatch — Type 3 has no embedded TTF/Type 1 outlines
         // for our glyph rasteriser to consume.
-        if (rawBytes is not null && rawBytes.Length > 0
-            && state.FontName is { } fname
-            && ctx.FontDicts is not null
-            && ctx.FontDicts.TryGetValue(fname, out var fdict)
-            && fdict.GetName("Subtype") == "Type3")
-        {
-            DrawType3Text(ctx, rawBytes, state, fdict);
-            return;
-        }
+        if (TryDrawType3Text(dt)) return;
 
-        var tm = state.TextMatrix;
-        var ctm = state.Ctm;
-        var trm = GraphicsState.MultiplyMatrices(tm, ctm);
+        dt.tm = dt.state.TextMatrix;
+        dt.ctm = dt.state.Ctm;
+        dt.trm = GraphicsState.MultiplyMatrices(dt.tm, dt.ctm);
 
-        // PDF allows a negative /Tf font size — the text matrix encodes the direction
-        // (e.g. mirrored text in some XFA-derived forms). Use |fontSize|
-        // for the rasterizer's pixel-size budget; horizontal direction is already
-        // baked into the text matrix via Tm × CTM.
-        var fontSize = Math.Abs(state.FontSize);
-        var effectiveSize = fontSize * Math.Sqrt(trm[1] * trm[1] + trm[3] * trm[3]);
-        if (effectiveSize < 0.5) return;
+        dt.fontSize = Math.Abs(dt.state.FontSize);
+        dt.effectiveSize = dt.fontSize * Math.Sqrt(dt.trm[1] * dt.trm[1] + dt.trm[3] * dt.trm[3]);
+        if (dt.effectiveSize < 0.5) return;
 
-        // The glyph size above is the text matrix's VERTICAL magnitude. A matrix that
-        // scales the two axes differently - a stamp squeezed to fit its box writes
-        // `0.163 0 0 10 cm` - then draws the glyphs at their vertical size in both
-        // directions, so a band of crushed text came out as inch-high letters running off
-        // the page. Carry the ratio of the two axes as a horizontal factor; the rotated
-        // path below builds its own matrix from trm and already has it.
-        var trmXLen = Math.Sqrt(trm[0] * trm[0] + trm[2] * trm[2]);
-        var trmYLen = Math.Sqrt(trm[1] * trm[1] + trm[3] * trm[3]);
-        var anisotropy = trmYLen > 1e-12 ? trmXLen / trmYLen : 1.0;
+        ComputeTextPen(dt);
+        dt.thSign = dt.state.HorizontalScaling < 0 ? -1.0 : 1.0;
+        dt.fsSign = dt.state.FontSize < 0 ? -1.0 : 1.0;
+        SetGlyphEmMatrix(dt);
 
-        var x = trm[4];
-        var y = trm[5];
-
-        // Convert to pixel coords
-        var px = (double)((x - ctx.MediaBox.LLX) * ctx.Scale);
-        var py = (double)(ctx.PixelH - (y - ctx.MediaBox.LLY) * ctx.Scale);
-
-        var r = (byte)(state.FillR * 255);
-        var g = (byte)(state.FillG * 255);
-        var b = (byte)(state.FillB * 255);
-        var a = (byte)(state.FillAlpha * 255);
-
-        var hScale = 1.0;
-        GetGlyphParser(ctx, state.FontName, out hScale);
-        // PDF 32000 §9.4.4: the horizontal scaling Th stretches the glyphs AND every
-        // horizontal displacement - the advance, Tc and Tw all carry the same factor. The
-        // renderer already folded Th's SIGN into the glyph axes but deliberately left its
-        // magnitude out, so a run set to 150% or 66% drew at 100% and three lines that
-        // differ only in Tz came out the same width. The font's own horizontal scale is the
-        // one factor every glyph and advance is already multiplied by, so Th rides with it.
-        var textHScale = Math.Abs(state.HorizontalScaling) / 100.0;
-        hScale *= textHScale;
-        // A text matrix that rotates or skews cannot be drawn by the axis-aligned glyph
-        // path: it rasterises upright and steps the pen along the raster’s x, so rotated
-        // text came out as diagonal smears of upright glyphs. Hand the run its own
-        // font-unit-to-device map and let the pen travel along the real baseline.
-        // Also when the run is MIRRORED. A 180-degree page turn leaves trm axis-aligned but
-        // with both diagonals negative, and the upright rasteriser can express neither: it
-        // drew the glyphs the right way up and walked the pen rightwards, so the line landed
-        // one full text-width away from where it belongs and read forwards instead of back.
-        // PDF 32000 §9.4.4: the text rendering matrix is [Tfs·Th, 0; 0, Tfs] × Tm × CTM, so a
-        // NEGATIVE /Tf size flips BOTH glyph axes and a negative Tz flips the x axis. Those
-        // signs are NOT in trm (which is only Tm × CTM), and using |Tfs| threw them away: a
-        // generator that writes "1 0 0 -1 0 H cm" for top-down coordinates and cancels it with
-        // "-10 Tf" / "-100 Tz" then rendered its whole page upside down and mirrored.
-        // Only the SIGNS are folded in here — Th's magnitude stays out, as before, so the
-        // calibrated advance/spacing behaviour of every other document is untouched.
-        var thSign = state.HorizontalScaling < 0 ? -1.0 : 1.0;
-        var fsSign = state.FontSize < 0 ? -1.0 : 1.0;
-        if (Math.Abs(trm[1]) > 1e-9 || Math.Abs(trm[2]) > 1e-9 || trm[0] < 0 || trm[3] < 0
-            || fsSign < 0 || thSign < 0)
-        {
-            var kx = fontSize * fsSign * thSign * ctx.Scale;
-            var ky = fontSize * fsSign * ctx.Scale;
-            ctx.GlyphEmMatrix = new[]
-            {
-                kx * hScale * trm[0], -kx * hScale * trm[1],
-                ky * trm[2], -ky * trm[3],
-            };
-            // The pen direction is the text-space x axis in device pixels, normalised: the
-            // advances the draw loops accumulate are already in device pixels along it. It
-            // follows the SIGNED x scale, so a mirrored run walks the other way.
-            var penSign = kx < 0 ? -1.0 : 1.0;
-            var bx0 = penSign * trm[0] * ctx.Scale;
-            var by0 = -penSign * trm[1] * ctx.Scale;
-            var blen = Math.Sqrt(bx0 * bx0 + by0 * by0);
-            ctx.BaselineUx = blen > 1e-12 ? bx0 / blen : 1;
-            ctx.BaselineUy = blen > 1e-12 ? by0 / blen : 0;
-            ctx.GlyphOriginX = px;
-            ctx.GlyphOriginY = py;
-        }
-        else
-        {
-            ctx.GlyphEmMatrix = null;
-        }
-
-        var parser = GetGlyphParser(ctx, state.FontName, out hScale);
-        hScale *= textHScale;
-        if (ctx.GlyphEmMatrix is null) hScale *= anisotropy;
-        var fontMetrics = GetFontMetrics(ctx, state.FontName);
-        var cidInfo = GetCidFontInfo(ctx, state.FontName);
-
-        // Two code paths: CID (Type0 with 2-byte encoding) walks rawBytes to produce CIDs and
-        // resolves GIDs via /CIDToGIDMap; simple fonts use the decoded Unicode string and the
-        // TTF's own cmap. Subset CID fonts routinely strip their TTF cmap, so going via the
-        // CID→GID map is the only path that produces correct glyphs.
-        // Tc/Tw are in unscaled text-space units (PDF 32000 §9.3.3). They get multiplied by
-        // the full text-to-device chain: |Tm × CTM| to land in PDF points, then × ctx.Scale
-        // for pixels. Multiplying only by ctx.Scale (as before) over-counted by 1/|CTM| and
-        // produced huge inter-word gaps on content streams with a sub-unit `cm` scaling
-        // (ACORD forms use `0.12 cm`, making the over-count 8× too wide).
-        var textSpaceScale = Math.Sqrt(trm[0] * trm[0] + trm[2] * trm[2]);
-        var charSpacingPx = state.CharSpacing * textSpaceScale * ctx.Scale * textHScale;
-        var wordSpacingPx = state.WordSpacing * textSpaceScale * ctx.Scale * textHScale;
+        ResolveTextFont(dt);
         // A Type0 font with a 1-byte custom CMap (codespace <00> <FF>) still shows
         // CIDs, not byte-encoded characters. The simple-font path resolves glyphs
         // through the program's cmap, which a CID-keyed program (bare CFF, or a
@@ -182,29 +87,7 @@ public sealed partial class SoftwarePageRenderer
         // A mixed-width CMap (a UTF-8 one declares 1- to 4-byte ranges) cannot be
         // walked at a constant step and keeps the simple routing, as does a
         // CMap-less 1-byte Type0 with a TrueType descendant.
-        if (cidInfo is not null && rawBytes is not null
-            && (cidInfo.IsTwoByteEncoding || (cidInfo.CMapCodeToCid is not null && cidInfo.HasFixedSingleByteCMap)
-                || parser is CffGlyphSource { IsCidKeyed: true }))
-        {
-            DrawCidText(ctx, rawBytes, cidInfo, parser, fontMetrics,
-                ref px, py, effectiveSize, hScale, charSpacingPx, wordSpacingPx, r, g, b, a);
-        }
-        else
-        {
-            // A simple-font run whose own program cannot be resolved leaves every glyph id
-            // at 0 and draws NOTHING - the advances still walk, so the line silently
-            // disappears. Substitute a host face (the /BaseFont's own name, else Arial) and
-            // look the glyphs up by Unicode, which is what the GDI+ rasteriser does. A run
-            // whose font was re-assigned on a live document, whose program only materialises
-            // when the document is saved, is the case that needs it. A /Differences map is
-            // for the ORIGINAL program's glyph ids, so it is dropped with the program.
-            var simpleParser = parser ?? ResolveSimpleFallback(ctx, state.FontName);
-            var substituted = parser is null && simpleParser is not null;
-            DrawSimpleText(ctx, text, rawBytes, simpleParser, fontMetrics,
-                substituted ? null : GetEncodingGidMap(ctx, state.FontName, parser),
-                ref px, py, effectiveSize, hScale, charSpacingPx, wordSpacingPx, r, g, b, a,
-                substituted);
-        }
+        DrawTextRuns(dt);
     }
 
     /// <summary>
@@ -222,6 +105,48 @@ public sealed partial class SoftwarePageRenderer
         if (ctx.EncodingGidMaps.TryGetValue(fd, out var cached)) return cached;
         var map = BuildEncodingGidMap(ctx.FontDicts, ctx.Reader, fontName, parser);
         ctx.EncodingGidMaps[fd] = map;
+        return map;
+    }
+
+    /// <summary>How many codes a simple font's encoding covers.</summary>
+    private const int SimpleFontCodeCount = 256;
+
+    /// <summary>The codes this run's font blanks (see <see cref="BuildUndefinedCodes"/>),
+    /// cached per font dict like the byte→GID map.</summary>
+    private static bool[]? GetUndefinedCodes(RenderContext ctx, string? fontName)
+    {
+        if (fontName is null || ctx.FontDicts is null || !ctx.FontDicts.TryGetValue(fontName, out var fd)) return null;
+        if (ctx.UndefinedCodeMaps.TryGetValue(fd, out var cached)) return cached;
+        var map = BuildUndefinedCodes(fd, ctx.Reader);
+        ctx.UndefinedCodeMaps[fd] = map;
+        return map;
+    }
+
+    /// <summary>Shared by both renderers: the codes an explicit /Differences array names
+    /// /.notdef. Such a code shows nothing at all (PDF 32000 §9.6.6.1), whatever a
+    /// substituted face would make of the byte. Only a code the array ITSELF names counts:
+    /// a code the array leaves alone keeps whatever the base encoding gives it, and an
+    /// encoding with no /BaseEncoding resolves those to .notdef in the name table while the
+    /// font still shows its own glyph there - a /Differences that renames a dozen accents
+    /// must not blank every letter it never mentioned. Null when nothing is blanked.</summary>
+    internal static bool[]? BuildUndefinedCodes(PdfDictionary fontDict, IO.PdfReader reader)
+    {
+        if (reader.ResolveDict(fontDict.Get("Encoding")) is not { } enc || enc.Get("Differences") is not PdfArray diffs)
+            return null;
+        bool[]? map = null;
+        var code = 0;
+        foreach (var item in diffs)
+        {
+            if (item is PdfInteger start) { code = (int)start.Value; continue; }
+            if (item is not PdfName name) continue;
+            if (name.Value == ".notdef" && code >= 0 && code < SimpleFontCodeCount)
+            {
+                map ??= new bool[SimpleFontCodeCount];
+                map[code] = true;
+            }
+            code++;
+        }
+
         return map;
     }
 
@@ -307,143 +232,57 @@ public sealed partial class SoftwarePageRenderer
         catch { return null; }
     }
 
-    private static void DrawCidText(RenderContext ctx, byte[] rawBytes, CidFontInfo cidInfo,
-        IGlyphOutlineSource? parser, FontMetrics? fontMetrics,
-        ref double px, double py, double effectiveSize, double hScale,
-        double charSpacingPx, double wordSpacingPx,
-        byte r, byte g, byte b, byte a)
+    /// <returns>The pen after the run.</returns>
+    private static double DrawCidText(RenderContext ctx, byte[] rawBytes, CidFontInfo cidInfo, IGlyphOutlineSource? parser, FontMetrics? fontMetrics, double px, double py, double effectiveSize, double hScale, double charSpacingPx, double wordSpacingPx, byte r, byte g, byte b, byte a)
     {
+        var ct = new CidTextDrawState();
+        ct.ctx = ctx;
+        ct.rawBytes = rawBytes;
+        ct.cidInfo = cidInfo;
+        ct.parser = parser;
+        ct.fontMetrics = fontMetrics;
+        ct.py = py;
+        ct.effectiveSize = effectiveSize;
+        ct.hScale = hScale;
+        ct.charSpacingPx = charSpacingPx;
+        ct.wordSpacingPx = wordSpacingPx;
+        ct.r = r;
+        ct.g = g;
+        ct.b = b;
+        ct.a = a;
         // Predefined legacy national CMaps (GBK-EUC-H, ETen-B5-H, 90ms-RKSJ-H, …)
         // encode their show-strings in a national multi-byte charset, not as Adobe
         // CIDs. Decode the whole run to Unicode and render through the resolved
         // system font / CJK fallback. Handled separately because the charset is
         // mixed-width (1-byte ASCII + 2-byte CJK), unlike the 2-byte CID path below.
-        if (cidInfo.LegacyCodepage != 0)
+        if (ct.cidInfo.LegacyCodepage != 0)
         {
-            DrawLegacyCjkText(ctx, rawBytes, cidInfo, parser, fontMetrics, ref px, py, effectiveSize,
-                hScale, charSpacingPx, wordSpacingPx, r, g, b, a);
-            return;
+            return DrawLegacyCjkText(ct.ctx, ct.rawBytes, ct.cidInfo, ct.parser, ct.fontMetrics, px, ct.py, ct.effectiveSize,
+                ct.hScale, ct.charSpacingPx, ct.wordSpacingPx, ct.r, ct.g, ct.b, ct.a);
         }
 
-        // Non-embedded predefined CJK fonts (HYGoThic, STSong, KozMin, etc.)
-        // have no /FontFile*, so parser is null. PDF 32000 §9.6.6 says the
-        // reader should supply a system font that matches /CIDSystemInfo.
-        // CjkFallbackFont loads a broad-coverage TTF (Arial Unicode on macOS,
-        // Noto CJK on Linux, etc.) once per process and reroutes glyph
-        // resolution via CID → Unicode (Adobe tables) → fallback cmap.
-        IGlyphOutlineSource? fallback = null;
-        if (parser is null)
+        ct.fallback = null;
+        if (ct.parser is null)
         {
-            var canFallback = cidInfo.IsUnicodeEncoding
-                              || (cidInfo.Ordering is not null && cidInfo.Ordering != "Identity");
+            var canFallback = ct.cidInfo.IsUnicodeEncoding
+                              || (ct.cidInfo.Ordering is not null && ct.cidInfo.Ordering != "Identity");
             // Resolve a system font by the CID ordering/base name (Korea1 -> Malgun,
             // GB1 -> SimSun, Japan1 -> MS Mincho), not the single generic broad-coverage
             // font: that one covers Han but not Hangul, so non-embedded Korean text
             // (UniKS-UTF16-H) was dropped while Chinese on the same page rendered.
             // ResolveNamed falls back to the generic font itself.
-            if (canFallback) fallback = CjkFallbackFont.ResolveNamed(cidInfo.CjkBaseFont, cidInfo.Ordering);
+            if (canFallback) ct.fallback = CjkFallbackFont.ResolveNamed(ct.cidInfo.CjkBaseFont, ct.cidInfo.Ordering);
         }
 
-        // A "-V" CMap stacks glyphs DOWN a column instead of along x (PDF 32000 §9.7.4.3).
-        // Only the legacy national-charset path handled this; the main CID path always
-        // advanced px, so every vertical run smeared sideways and columns overlapped.
-        var vertical = cidInfo.IsVertical;
-        var penY = py;
-        // 1-byte custom CMaps (codespace <00> <FF>) show one CID per byte.
-        var step = cidInfo.IsTwoByteEncoding ? 2 : 1;
-        for (var i = 0; i + step <= rawBytes.Length; i += step)
+        ct.vertical = ct.cidInfo.IsVertical;
+        ct.penY = ct.py;
+        ct.step = ct.cidInfo.IsTwoByteEncoding ? 2 : 1;
+        ct.px = px;
+        for (var i = 0; i + ct.step <= ct.rawBytes.Length; i += ct.step)
         {
-            var code = step == 2 ? (rawBytes[i] << 8) | rawBytes[i + 1] : rawBytes[i];
-            // Custom CMaps (non-Identity-H) map byte-codes to CIDs via cidchar/
-            // cidrange blocks. Predefined Identity-H/V CMaps are pass-through.
-            var cid = cidInfo.CodeToCid(code);
-
-            // The advance width is needed BEFORE the draw in vertical mode: the default
-            // position vector v is (w0/2, /DW2[0]).
-            var swWidthKey = cid;
-            if (cidInfo.IsUnicodeEncoding && cidInfo.Ordering is not null && cidInfo.Ordering != "Identity"
-                && AdobeCidTables.UnicodeToCid(cidInfo.Ordering, cid) is int swRealCid)
-                swWidthKey = swRealCid;
-            var charWidth = fontMetrics?.GetWidth(swWidthKey) ?? 1000;
-
-            // In vertical mode the pen sits on the VERTICAL origin, so the glyph's own
-            // (horizontal) origin is the pen minus the position vector v. Text space has y
-            // up and the raster has y down, so -vy in text space is +vy in device pixels.
-            var drawX = px;
-            var drawY = py;
-            var vAdvancePx = 0.0;
-            if (vertical)
-            {
-                var (w1y, vx, vy) = cidInfo.VerticalMetrics(swWidthKey, charWidth);
-                var em = effectiveSize * ctx.Scale / 1000.0;
-                drawX = px - vx * em * hScale;
-                drawY = penY + vy * em;
-                vAdvancePx = Math.Abs(w1y) * em;
-            }
-
-            if (parser is not null)
-            {
-                // CID-keyed CFF subsets renumber glyphs (GID 1..N following the Charset
-                // order) and the descendant CIDFontType0 dict has no /CIDToGIDMap.
-                // Resolve through the CFF's own charset in that case.
-                var gid = parser is CffGlyphSource cff && cff.IsCidKeyed
-                    ? cff.CidToGid(cid)
-                    : cidInfo.ResolveGid(cid);
-                // Out-of-charset CID with a constant high byte over a small identity
-                // charset: paint the low-byte glyph instead (see the GDI+
-                // renderer's DrawCidText for the full note).
-                if (gid == 0 && cid > 0xFF && parser is CffGlyphSource cffLow && cffLow.IsCidKeyed)
-                    gid = cffLow.CidToGid(cid & 0xFF);
-                if (gid > 0)
-                {
-                    var outline = parser.GetOutline(gid);
-                    if (outline is not null)
-                    {
-                        BlitGlyph(ctx, outline, parser.UnitsPerEm, effectiveSize, hScale,
-                            drawX, drawY, r, g, b, a);
-                    }
-                }
-            }
-            else if (fallback is not null)
-            {
-                // Two paths into the fallback font's cmap:
-                // - Uni*-UCS2-* / Uni*-UTF16-* encodings: the 2-byte input is
-                //   already a Unicode codepoint. Look up directly.
-                // - Identity-H/V or bytecode-CMaps: input is an Adobe CID.
-                //   Adobe-table → Unicode → fallback cmap.
-                int fallbackGid;
-                if (cidInfo.IsUnicodeEncoding)
-                {
-                    fallback.CMap.TryGetValue(cid, out fallbackGid);
-                }
-                else
-                {
-                    fallbackGid = CjkFallbackFont.ResolveFallbackGid(cidInfo.Ordering, cid, fallback);
-                }
-                if (fallbackGid > 0)
-                {
-                    var outline = fallback.GetOutline(fallbackGid);
-                    if (outline is not null)
-                    {
-                        BlitGlyph(ctx, outline, fallback.UnitsPerEm, effectiveSize, hScale,
-                            drawX, drawY, r, g, b, a);
-                    }
-                }
-            }
-
-            // Advance. Horizontal: /W width + Tc, with Tw only for the SINGLE-BYTE
-            // code 32 (PDF 32000 §9.3.3) - a 2-byte <0020> in a UTF16/UCS2 CMap never takes
-            // it. Vertical: step DOWN the column by the /W2 (or /DW2) displacement.
-            if (vertical)
-            {
-                penY += vAdvancePx + charSpacingPx;
-            }
-            else
-            {
-                px += charWidth / 1000.0 * effectiveSize * ctx.Scale * hScale + charSpacingPx;
-                if (step == 1 && cid == 32) px += wordSpacingPx;
-            }
+            if (!DrawCidGlyph(ct, i)) break;
         }
+        return ct.px;
     }
 
     /// <summary>
@@ -456,8 +295,9 @@ public sealed partial class SoftwarePageRenderer
     /// CIDs we never resolve, and its /DW is commonly 500 (half-width), which would
     /// crush full-width CJK.
     /// </summary>
-    private static void DrawLegacyCjkText(RenderContext ctx, byte[] rawBytes, CidFontInfo cidInfo,
-        IGlyphOutlineSource? parser, FontMetrics? fontMetrics, ref double px, double py,
+    /// <returns>The pen after the run.</returns>
+    private static double DrawLegacyCjkText(RenderContext ctx, byte[] rawBytes, CidFontInfo cidInfo,
+        IGlyphOutlineSource? parser, FontMetrics? fontMetrics, double px, double py,
         double effectiveSize, double hScale,
         double charSpacingPx, double wordSpacingPx, byte r, byte g, byte b, byte a)
     {
@@ -509,6 +349,7 @@ public sealed partial class SoftwarePageRenderer
                 if (uni == ' ') px += wordSpacingPx;
             }
         }
+        return px;
     }
 
     /// <summary>
@@ -582,7 +423,10 @@ public sealed partial class SoftwarePageRenderer
                     // The CharProc may have its own /Resources too; merge with the
                     // font's resources (the page renderer will fall back to ctx's
                     // own font/extgstate dicts for unresolved names).
-                    RenderContent(cpBytes, ctx, glyphExtGStates, glyphCtm);
+                    // The glyph paints inside whatever clips the text, in the text's
+                    // colour - a char proc does not start from a blank state.
+                    RenderContent(cpBytes, ctx, glyphExtGStates, glyphCtm,
+                        initialClipMask: state.ClipMask, inheritState: state);
                 }
             }
 
@@ -707,11 +551,12 @@ public sealed partial class SoftwarePageRenderer
         return parser;
     }
 
-    private static void DrawSimpleText(RenderContext ctx, string text, byte[]? rawBytes,
+    /// <returns>The pen after the run.</returns>
+    private static double DrawSimpleText(RenderContext ctx, string text, byte[]? rawBytes,
         IGlyphOutlineSource? parser, FontMetrics? fontMetrics, int[]? encGidMap,
-        ref double px, double py, double effectiveSize, double hScale,
+        double px, double py, double effectiveSize, double hScale,
         double charSpacingPx, double wordSpacingPx,
-        byte r, byte g, byte b, byte a, bool substituted = false)
+        byte r, byte g, byte b, byte a, bool substituted = false, bool[]? undefinedCodes = null)
     {
         // When rawBytes is 1:1 with text (typical for simple TT fonts), each char position
         // also corresponds to a single byte. Subset TT fonts embedded in PDFs commonly
@@ -747,7 +592,10 @@ public sealed partial class SoftwarePageRenderer
                     else gid = 0;
                 }
             }
-            if (parser is not null && gid > 0)
+            // A code the font's own /Differences names /.notdef shows nothing (it still advances).
+            var blank = undefinedCodes is not null && rawBytes is not null && i < rawBytes.Length
+                && rawBytes[i] < undefinedCodes.Length && undefinedCodes[rawBytes[i]];
+            if (parser is not null && gid > 0 && !blank)
             {
                 // parser.CMap (TTF cmap) maps Unicode → GID for embedded simple TrueType fonts.
                 var outline = parser.GetOutline(gid);
@@ -769,11 +617,17 @@ public sealed partial class SoftwarePageRenderer
             // the chars would all advance by 500 and visibly overlap (or, for subset
             // fonts, render with huge gaps between letters).
             int charWidth = 500;
-            if (useBytesFallback && fontMetrics is not null)
-                charWidth = fontMetrics.GetWidth(rawBytes![i]);
-            else if (fontMetrics is not null)
-                charWidth = fontMetrics.GetWidth(ch);
-            if ((charWidth == 0 || (ch > 0xFF && (charWidth == 500 || charWidth <= 0)))
+            int widthCode = useBytesFallback ? rawBytes![i] : ch;
+            if (fontMetrics is not null)
+                charWidth = fontMetrics.GetWidth(widthCode);
+            // A code the font dict gives no width - no /Widths entry, or one of 0, which
+            // FontMetrics answers with its default - advances by the glyph that draws it,
+            // as does a run drawn in a substitute face with no metrics at all. Without it
+            // a broken /Widths of 0 stepped a narrow face by a whole em and opened a gap
+            // after the glyph. Same rule as the GDI+ renderer's.
+            if ((charWidth == 0 || (ch > 0xFF && (charWidth == 500 || charWidth <= 0))
+                 || (substituted && fontMetrics is null)
+                 || (fontMetrics is not null && !fontMetrics.HasExplicitWidth(widthCode)))
                 && parser is not null && gid > 0)
             {
                 var hmtxAdvance = parser.GetAdvanceWidth(gid);
@@ -783,6 +637,7 @@ public sealed partial class SoftwarePageRenderer
             px += charWidth / 1000.0 * effectiveSize * ctx.Scale * hScale + charSpacingPx;
             if (ch == ' ') px += wordSpacingPx;
         }
+        return px;
     }
 
     private static CidFontInfo? GetCidFontInfo(RenderContext ctx, string? fontName)

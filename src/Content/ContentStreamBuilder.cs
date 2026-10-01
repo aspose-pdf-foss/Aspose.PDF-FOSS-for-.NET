@@ -10,6 +10,36 @@ public sealed class ContentStreamBuilder
 {
     private readonly StringBuilder _sb = new();
 
+    /// <summary>How far the caller has already taken this away.</summary>
+    private int _drained;
+
+    /// <summary>
+    /// How a real is spelled here.
+    ///
+    /// The format does not settle it, so a caller that has to match another
+    /// producer's bytes says which spelling it means. Left alone it is this
+    /// library's own.
+    /// </summary>
+    public RealSpelling Spelling { get; set; } = RealSpelling.Default;
+
+    /// <summary>
+    /// What has been written since this was last asked.
+    ///
+    /// For a caller that puts the operators somewhere as they are made rather
+    /// than collecting a page of them: asking twice never hands the same
+    /// operator over twice, and what has been taken is not held here again.
+    ///
+    /// ⚠ Not the same as Build, which hands back the WHOLE stream every time
+    /// and leaves this untouched. A caller uses one or the other.
+    /// </summary>
+    public string Drain()
+    {
+        if (_drained >= _sb.Length) return string.Empty;
+        var made = _sb.ToString(_drained, _sb.Length - _drained);
+        _drained = _sb.Length;
+        return made;
+    }
+
     // Baseline bookkeeping for a caller that bounds a text block AFTER drawing it (the
     // generator's per-cell text clip): every non-empty Tj records the baseline the
     // text matrix seated it at and its font size, from the last ResetTextExtent on.
@@ -27,7 +57,21 @@ public sealed class ContentStreamBuilder
     /// <see cref="ResetTextExtent"/>.</summary>
     internal IReadOnlyList<(double Y, double Size)> TextShows => _shows;
 
-    internal void ResetTextExtent() => _shows.Clear();
+    /// <summary>The boxes drawn among the text since the last
+    /// <see cref="ResetTextExtent"/> -- a picture standing on a line's baseline --
+    /// by bottom and top edge, which a bound over the text has to reach as well.</summary>
+    internal IReadOnlyList<(double Bottom, double Top)> InlineBoxes => _inlineBoxes;
+
+    private readonly List<(double Bottom, double Top)> _inlineBoxes = new();
+
+    /// <summary>Records a box drawn among the text, by its bottom and top edges.</summary>
+    internal void RecordInlineBox(double bottom, double top) => _inlineBoxes.Add((bottom, top));
+
+    internal void ResetTextExtent()
+    {
+        _shows.Clear();
+        _inlineBoxes.Clear();
+    }
 
     private void RecordShow(bool nonEmpty)
     {
@@ -79,6 +123,20 @@ public sealed class ContentStreamBuilder
     }
 
     // Line width
+    /// <summary>Fill in the four-component subtractive space (<c>k</c>).</summary>
+    public ContentStreamBuilder SetFillCmyk(double c, double m, double y, double k)
+    {
+        _sb.Append($"{Fc(c)} {Fc(m)} {Fc(y)} {Fc(k)} k\n");
+        return this;
+    }
+
+    /// <summary>Stroke in the four-component subtractive space (<c>K</c>).</summary>
+    public ContentStreamBuilder SetStrokeCmyk(double c, double m, double y, double k)
+    {
+        _sb.Append($"{Fc(c)} {Fc(m)} {Fc(y)} {Fc(k)} K\n");
+        return this;
+    }
+
     public ContentStreamBuilder SetLineWidth(double width)
     {
         _sb.Append($"{F(width)} w\n");
@@ -106,6 +164,30 @@ public sealed class ContentStreamBuilder
     }
 
     // Line join style (0=miter, 1=round, 2=bevel)
+    /// <summary>How far a sharp corner may extend before it is cut off
+    /// (<c>M</c>).</summary>
+    public ContentStreamBuilder SetMiterLimit(double limit)
+    {
+        _sb.Append($"{F(limit)} M\n");
+        return this;
+    }
+
+    /// <summary>How closely a curve is followed when it is flattened into lines
+    /// (<c>i</c>). Zero means the device decides.</summary>
+    public ContentStreamBuilder SetFlatness(double tolerance)
+    {
+        _sb.Append($"{F(tolerance)} i\n");
+        return this;
+    }
+
+    /// <summary>Which way a colour outside the device's range is brought into it
+    /// (<c>ri</c>).</summary>
+    public ContentStreamBuilder SetRenderingIntent(string intent)
+    {
+        _sb.Append($"/{intent} ri\n");
+        return this;
+    }
+
     public ContentStreamBuilder SetLineJoin(int join)
     {
         _sb.Append($"{join} j\n");
@@ -131,6 +213,26 @@ public sealed class ContentStreamBuilder
         return this;
     }
 
+    /// <summary>
+    /// A cubic curve whose FIRST control point is the current point (<c>v</c>).
+    ///
+    /// The shorthand for a curve leaving the current point in the direction it
+    /// arrived, which is four numbers instead of six.
+    /// </summary>
+    public ContentStreamBuilder CurveToV(double x2, double y2, double x3, double y3)
+    {
+        _sb.Append($"{F(x2)} {F(y2)} {F(x3)} {F(y3)} v\n");
+        return this;
+    }
+
+    /// <summary>A cubic curve whose SECOND control point is its end point
+    /// (<c>y</c>).</summary>
+    public ContentStreamBuilder CurveToY(double x1, double y1, double x3, double y3)
+    {
+        _sb.Append($"{F(x1)} {F(y1)} {F(x3)} {F(y3)} y\n");
+        return this;
+    }
+
     public ContentStreamBuilder Rectangle(double x, double y, double width, double height)
     {
         _sb.Append($"{F(x)} {F(y)} {F(width)} {F(height)} re\n");
@@ -146,11 +248,37 @@ public sealed class ContentStreamBuilder
     public ContentStreamBuilder FillAndStroke() { _sb.Append("B\n"); return this; }
     public ContentStreamBuilder FillAndStrokeEvenOdd() { _sb.Append("B*\n"); return this; }
     public ContentStreamBuilder CloseAndStroke() { _sb.Append("s\n"); return this; }
+    /// <summary>Close the path, then fill and stroke it (<c>b</c>).</summary>
+    public ContentStreamBuilder CloseFillAndStroke() { _sb.Append("b\n"); return this; }
+    /// <summary>Close, then fill by the even-odd rule and stroke (<c>b*</c>).</summary>
+    public ContentStreamBuilder CloseFillAndStrokeEvenOdd() { _sb.Append("b*\n"); return this; }
     public ContentStreamBuilder EndPath() { _sb.Append("n\n"); return this; }
 
     // Clipping
+    /// <summary>
+    /// Narrow what may be painted to the path being built, and end it by
+    /// painting nothing (<c>W n</c>).
+    ///
+    /// The commonest pairing, and a convenience: <c>W</c> alone does not end a
+    /// path, and a caller that wants the path painted as well as used for
+    /// clipping says so with ClipPath and its own painting operator.
+    /// </summary>
     public ContentStreamBuilder Clip() { _sb.Append("W n\n"); return this; }
+
+    /// <summary>The same by the even-odd rule (<c>W* n</c>).</summary>
     public ContentStreamBuilder ClipEvenOdd() { _sb.Append("W* n\n"); return this; }
+
+    /// <summary>
+    /// Narrow what may be painted to the path being built (<c>W</c>), and
+    /// nothing else.
+    ///
+    /// The path stays open: whatever painting operator comes next both ends it
+    /// and decides whether the shape is also drawn.
+    /// </summary>
+    public ContentStreamBuilder ClipPath() { _sb.Append("W\n"); return this; }
+
+    /// <summary>The same by the even-odd rule (<c>W*</c>).</summary>
+    public ContentStreamBuilder ClipPathEvenOdd() { _sb.Append("W*\n"); return this; }
 
     // Text
     public ContentStreamBuilder BeginText() { _sb.Append("BT\n"); _textX = _textY = 0; return this; }
@@ -167,6 +295,21 @@ public sealed class ContentStreamBuilder
     {
         _sb.Append($"{F(tx)} {F(ty)} Td\n");
         _textX += tx; _textY += ty;
+        return this;
+    }
+
+    /// <summary>
+    /// Move to the next line AND set the leading to the negative of the vertical
+    /// move (<c>TD</c>).
+    ///
+    /// ⚠ It changes the leading as a side effect, which is the whole difference
+    /// from Td and the reason both exist.
+    /// </summary>
+    public ContentStreamBuilder MoveTextPositionWithLeading(double tx, double ty)
+    {
+        _sb.Append($"{F(tx)} {F(ty)} TD\n");
+        _textX += tx;
+        _textY += ty;
         return this;
     }
 
@@ -220,6 +363,33 @@ public sealed class ContentStreamBuilder
         return this;
     }
 
+    /// <summary>
+    /// Show a string the caller has ALREADY written, brackets and all (<c>Tj</c>).
+    ///
+    /// For a caller whose font decides both how a character becomes bytes and
+    /// whether the result is written between brackets or as hex digits. A
+    /// composite font writes two bytes per glyph and a simple one writes one,
+    /// and neither is something this can work out from the text.
+    ///
+    /// ⚠ The token is placed verbatim. It must already be a complete string
+    /// object -- the escaping inside it is the writer's, not this one's.
+    /// </summary>
+    public ContentStreamBuilder ShowTextToken(string token)
+    {
+        _sb.Append(token).Append("Tj\n");
+        RecordShow(token.Length > 2);
+        return this;
+    }
+
+    /// <summary>Move to the next line and show a written string, as one
+    /// instruction (<c>'</c>).</summary>
+    public ContentStreamBuilder NextLineShowTextToken(string token)
+    {
+        _sb.Append(token).Append("'\n");
+        RecordShow(token.Length > 2);
+        return this;
+    }
+
     public ContentStreamBuilder ShowText(string text)
     {
         Span<char> one = stackalloc char[1];
@@ -236,7 +406,7 @@ public sealed class ContentStreamBuilder
             if (ch > 0xFF)
             {
                 one[0] = ch;
-                Encoding.Latin1.GetBytes(one, oneB);
+                Compat.Latin1.GetBytes(one, oneB);
                 ch = (char)oneB[0];
             }
             if (ch is '(' or ')' or '\\')
@@ -304,7 +474,8 @@ public sealed class ContentStreamBuilder
     /// <summary>Show hex-encoded 2-byte glyph ids as a TJ array with inter-glyph
     /// adjustments. <paramref name="adjustments"/>[i] (thousandths of text space,
     /// TJ convention: positive moves the following glyphs left) is inserted between
-    /// glyph i and glyph i+1; zero entries merge into one hex run.</summary>
+    /// glyph i and glyph i+1; zero entries merge into one hex run. An entry for the
+    /// LAST glyph, when given, follows it and moves the text position on.</summary>
     public ContentStreamBuilder ShowTextHexKerned(byte[] glyphIds, double[] adjustments)
     {
         var n = glyphIds.Length / 2;
@@ -325,6 +496,8 @@ public sealed class ContentStreamBuilder
             _sb.Append(adjustments[i].ToString("0.######", CultureInfo.InvariantCulture));
         }
         Flush(n);
+        if (n > 0 && adjustments.Length >= n && adjustments[n - 1] != 0)
+            _sb.Append(adjustments[n - 1].ToString("0.######", CultureInfo.InvariantCulture));
         _sb.Append("] TJ\n");
         RecordShow(glyphIds.Length > 0);
         return this;
@@ -404,7 +577,7 @@ public sealed class ContentStreamBuilder
     /// in a literal string — those callers must use ShowTextHex with a CID
     /// font, or pre-map via /Differences before reaching the builder.
     /// </remarks>
-    public byte[] Build() => Encoding.Latin1.GetBytes(_sb.ToString());
+    public byte[] Build() => Compat.Latin1.GetBytes(_sb.ToString());
 
     /// <summary>Splice an already-built content stream in at this point, inside its own
     /// q/Q so its graphics state cannot leak. Used to keep a nested grid's operators in
@@ -414,7 +587,7 @@ public sealed class ContentStreamBuilder
     {
         if (bytes is { Length: > 0 })
         {
-            _sb.Append("q\n").Append(Encoding.Latin1.GetString(bytes));
+            _sb.Append("q\n").Append(Compat.Latin1.GetString(bytes));
             if (_sb.Length > 0 && _sb[^1] != '\n') _sb.Append('\n');
             _sb.Append("Q\n");
         }
@@ -426,27 +599,9 @@ public sealed class ContentStreamBuilder
     /// </summary>
     public override string ToString() => _sb.ToString();
 
-    // PDF content streams accept only plain decimal real numbers; the "G" format
-    // emits scientific notation (e.g. 6.1E-05) for very small or very large
-    // magnitudes, which a conforming reader rejects and the operator is dropped.
-    // Use a fixed-decimal format that never produces an exponent, trimming
-    // trailing zeros so common integer-valued coordinates stay compact.
-    private static string F(double v)
-    {
-        if (double.IsNaN(v) || double.IsInfinity(v)) return "0";
-        var s = v.ToString("0.######", CultureInfo.InvariantCulture);
-        // "-0" can result from a tiny negative rounding to zero; normalise it.
-        return s == "-0" ? "0" : s;
-    }
+    // How a real is spelled is the SPELLING's business - see RealSpelling, which
+    // says why it is a choice at all and what this library's own answer is.
+    private string F(double v) => Spelling.Geometry(v);
 
-    // Colour components (rg/RG/g/G operands) keep more precision than geometry:
-    // e.g. 119/255 is written as "0.4666666667" (10 fractional digits), and
-    // an exact-string check on the parsed operator needs that form.
-    // 10 digits, no exponent, trailing zeros trimmed.
-    private static string Fc(double v)
-    {
-        if (double.IsNaN(v) || double.IsInfinity(v)) return "0";
-        var s = v.ToString("0.##########", CultureInfo.InvariantCulture);
-        return s == "-0" ? "0" : s;
-    }
+    private string Fc(double v) => Spelling.Colour(v);
 }

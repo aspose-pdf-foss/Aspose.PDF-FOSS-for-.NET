@@ -45,6 +45,7 @@ public enum ValidationStatus
 /// ValidationOptions, out ValidationResult).</summary>
 public sealed class ValidationOptions
 {
+    /// <summary>Creates validation options with the default policy.</summary>
     public ValidationOptions() { }
 
     /// <summary>Walk the certificate chain back to a trusted root in

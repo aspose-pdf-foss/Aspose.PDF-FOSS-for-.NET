@@ -38,7 +38,7 @@ internal static class GrayscaleConverter
     /// grayscale equivalents.</summary>
     private static byte[] ConvertContentBytes(byte[] content)
     {
-        var s = Encoding.Latin1.GetString(content);
+        var s = Compat.Latin1.GetString(content);
         s = Regex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}rg(?![A-Za-z])", m => Emit(RgbToGray(m), "g"));
         s = Regex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}RG(?![A-Za-z])", m => Emit(RgbToGray(m), "G"));
         s = Regex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}{Num}{Ws}k(?![A-Za-z])", m => Emit(CmykToGray(m), "g"));
@@ -53,7 +53,7 @@ internal static class GrayscaleConverter
             m => Emit(CmykToGray(m), m.Groups[5].Value));
         s = Regex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}(scn|sc|SCN|SC)(?![A-Za-z])",
             m => Emit(RgbToGray(m), m.Groups[4].Value));
-        return Encoding.Latin1.GetBytes(s);
+        return Compat.Latin1.GetBytes(s);
     }
 
     private static double RgbToGray(Match m) =>

@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Content;
@@ -102,11 +102,14 @@ internal static partial class MarkdownToPdfConverter
         var margin = BodyMargin;
         var marginTop = BodyMargin;
         var marginBottom = BodyMargin;
+        // The page margin is the paper's; the body margin stays inside it, as in the
+        // HTML model this converter mirrors. The reference render of a default PageInfo
+        // (90/72 pt) seats its text at 96 pt from the left and 78 pt from the top.
         if (options?.PageInfo?.Margin is { } mi)
         {
-            margin = mi.Left;
-            marginTop = mi.Top;
-            marginBottom = mi.Bottom;
+            margin = mi.Left + BodyMargin;
+            marginTop = mi.Top + BodyMargin;
+            marginBottom = mi.Bottom + BodyMargin;
         }
 
         // A <style> block in the source never renders as text; when the caller set
@@ -117,7 +120,7 @@ internal static partial class MarkdownToPdfConverter
         {
             mdText = mdText.Remove(styleMatch.Index, styleMatch.Length);
             if (options?.IsPriorityCssPageRule == true
-                && TryReadCssPage(styleMatch.Groups[1].Value, out var cssW, out var cssH, out var cssMargin))
+                && TryReadCssPage(styleMatch.Groups[1].Value) is (var cssW, var cssH, var cssMargin))
             {
                 pageWidth = cssW;
                 pageHeight = cssH;
@@ -134,191 +137,16 @@ internal static partial class MarkdownToPdfConverter
 
     private static List<Blk> ParseBlocks(string[] lines)
     {
-        var blocks = new List<Blk>();
-        var i = 0;
-        // An `<p align="center">` opener and its content can sit in separate HTML
-        // chunks (a blank line between them); the alignment carries until its `</p>`.
-        var pendingCenter = false;
-        while (i < lines.Length)
+        var mb = new MarkdownBlocksState();
+        mb.lines = lines;
+        mb.blocks = new List<Blk>();
+        mb.i = 0;
+        mb.pendingCenter = false;
+        while (mb.i < mb.lines.Length)
         {
-            var line = lines[i].TrimEnd('\r');
-            if (string.IsNullOrWhiteSpace(line)) { i++; continue; }
-            var trimmed = line.Trim();
-
-            // Fenced code.
-            if (trimmed.StartsWith("```", StringComparison.Ordinal))
-            {
-                var code = new List<string>();
-                i++;
-                while (i < lines.Length && !lines[i].TrimEnd('\r').TrimStart().StartsWith("```", StringComparison.Ordinal))
-                    code.Add(lines[i++].TrimEnd('\r').TrimEnd());
-                i++; // closing fence
-                blocks.Add(new CodeBlk(code, CodeBlockSize));
-                continue;
-            }
-
-            // Thematic break: 3+ of the same * - _ character, spaces allowed between.
-            if (Regex.IsMatch(line, @"^\s*([-*_])(\s*\1){2,}\s*$"))
-            {
-                blocks.Add(new HrBlk());
-                i++;
-                continue;
-            }
-
-            // Pipe table: a cell row directly above a divider row of dashes.
-            if (line.Contains('|') && i + 1 < lines.Length
-                && IsTableDividerLine(lines[i + 1].TrimEnd('\r')))
-            {
-                var rows = new List<List<List<Run>>> { SplitTableRow(line) };
-                var j = i + 2;
-                for (; j < lines.Length; j++)
-                {
-                    var rowLine = lines[j].TrimEnd('\r');
-                    if (string.IsNullOrWhiteSpace(rowLine) || !rowLine.Contains('|')) break;
-                    rows.Add(SplitTableRow(rowLine));
-                }
-                blocks.Add(new TableBlk(rows));
-                i = j;
-                continue;
-            }
-
-            // Setext heading: a plain text line underlined by a run of = (H1) or - (H2).
-            if (!IsBlockLine(line) && i + 1 < lines.Length)
-            {
-                var next = lines[i + 1].TrimEnd('\r').Trim();
-                if (next.Length > 0 && (next.All(c => c == '=') || next.All(c => c == '-')))
-                {
-                    blocks.Add(new HeadBlk(next[0] == '=' ? 1 : 2, ParseInline(trimmed)));
-                    i += 2;
-                    continue;
-                }
-            }
-
-            // ATX heading.
-            var headingMatch = Regex.Match(line, @"^(#{1,6})\s+(.+)$");
-            if (headingMatch.Success)
-            {
-                blocks.Add(new HeadBlk(headingMatch.Groups[1].Value.Length,
-                    ParseInline(headingMatch.Groups[2].Value.Trim())));
-                i++;
-                continue;
-            }
-
-            // Block quote.
-            if (line.StartsWith(">", StringComparison.Ordinal))
-            {
-                var quoteLines = new List<List<Run>>();
-                while (i < lines.Length)
-                {
-                    var q = lines[i].TrimEnd('\r');
-                    if (!q.StartsWith(">", StringComparison.Ordinal)) break;
-                    while (q.StartsWith(">", StringComparison.Ordinal)) q = q.TrimStart('>').TrimStart();
-                    quoteLines.Add(ParseInline(q.TrimEnd()));
-                    i++;
-                }
-                blocks.Add(new QuoteBlk(quoteLines));
-                continue;
-            }
-
-            // List (unordered or ordered): consecutive item lines form one block.
-            var ulMatch = Regex.Match(line, @"^(\s*)[*+\-]\s+(.+)$");
-            var olMatch = Regex.Match(line, @"^(\s*)(\d+)[.)]\s+(.+)$");
-            if (ulMatch.Success || olMatch.Success)
-            {
-                var items = new List<(string, List<Run>)>();
-                var num = 1;
-                while (i < lines.Length)
-                {
-                    var l2 = lines[i].TrimEnd('\r');
-                    var u2 = Regex.Match(l2, @"^(\s*)[*+\-]\s+(.+)$");
-                    var o2 = Regex.Match(l2, @"^(\s*)(\d+)[.)]\s+(.+)$");
-                    if (u2.Success && !Regex.IsMatch(l2, @"^\s*([-*_])(\s*\1){2,}\s*$"))
-                        items.Add(("\u2022", ParseInline(u2.Groups[2].Value.TrimEnd())));
-                    else if (o2.Success)
-                        items.Add((num++ + ".", ParseInline(o2.Groups[3].Value.TrimEnd())));
-                    else break;
-                    i++;
-                }
-                blocks.Add(new ListBlk(items));
-                continue;
-            }
-
-            // Indented code (4 spaces or a tab).
-            if (line.StartsWith("    ", StringComparison.Ordinal) || line.StartsWith("\t", StringComparison.Ordinal))
-            {
-                var code = new List<string>();
-                while (i < lines.Length)
-                {
-                    var c = lines[i].TrimEnd('\r');
-                    if (!(c.StartsWith("    ", StringComparison.Ordinal) || c.StartsWith("\t", StringComparison.Ordinal))) break;
-                    code.Add(c.Trim());
-                    i++;
-                }
-                blocks.Add(new CodeBlk(code, CodeBlockSize));
-                continue;
-            }
-
-            // A whole line wrapped in single backticks = inline code.
-            if (trimmed.Length >= 2 && trimmed.StartsWith("`", StringComparison.Ordinal)
-                && trimmed.EndsWith("`", StringComparison.Ordinal))
-            {
-                blocks.Add(new CodeBlk(new List<string> { trimmed.Substring(1, trimmed.Length - 2) }, InlineCodeSize));
-                i++;
-                continue;
-            }
-
-            // HTML block: runs to the next blank line. An <img> inside becomes an image
-            // block (centred under align="center"); everything else is dropped.
-            if (trimmed.StartsWith("<", StringComparison.Ordinal))
-            {
-                var html = new StringBuilder();
-                while (i < lines.Length && !string.IsNullOrWhiteSpace(lines[i]))
-                    html.Append(lines[i++].TrimEnd('\r')).Append('\n');
-                var h = html.ToString();
-                if (Regex.IsMatch(h, "align\\s*=\\s*[\"']center[\"']", RegexOptions.IgnoreCase))
-                    pendingCenter = true;
-                var img = Regex.Match(h, "<img[^>]*src=[\"']([^\"']+)[\"']", RegexOptions.IgnoreCase);
-                if (img.Success && LoadImage(img.Groups[1].Value) is { } data
-                    && TryReadPngSize(data, out var pw, out var ph))
-                {
-                    blocks.Add(new ImgBlk(data, pw * PxToPt, ph * PxToPt, pendingCenter));
-                }
-                if (h.Contains("</p>", StringComparison.OrdinalIgnoreCase))
-                    pendingCenter = false;
-                continue;
-            }
-
-            // Paragraph: consecutive plain lines; a line ending in 2+ spaces keeps a hard break.
-            var hardLines = new List<List<Run>>();
-            var buf = new StringBuilder();
-            while (i < lines.Length)
-            {
-                var p = lines[i].TrimEnd('\r');
-                if (string.IsNullOrWhiteSpace(p) || IsBlockLine(p)
-                    || p.TrimStart().StartsWith("<", StringComparison.Ordinal)) break;
-                // A table interrupts the paragraph only when its divider row follows.
-                if (p.Contains('|') && i + 1 < lines.Length
-                    && IsTableDividerLine(lines[i + 1].TrimEnd('\r'))) break;
-                if (i + 1 < lines.Length)
-                {
-                    var nx = lines[i + 1].TrimEnd('\r').Trim();
-                    if (nx.Length > 0 && (nx.All(c => c == '=') || nx.All(c => c == '-'))) break;
-                }
-                var hard = p.EndsWith("  ", StringComparison.Ordinal);
-                if (buf.Length > 0) buf.Append(' ');
-                buf.Append(p.Trim());
-                if (hard)
-                {
-                    hardLines.Add(ParseInline(buf.ToString()));
-                    buf.Clear();
-                }
-                i++;
-            }
-            if (buf.Length > 0) hardLines.Add(ParseInline(buf.ToString()));
-            if (hardLines.Count > 0) blocks.Add(new ParaBlk(hardLines));
-            else i++;
+            if (!ParseMarkdownBlock(mb)) break;
         }
-        return blocks;
+        return mb.blocks;
     }
 
     /// <summary>Whether a line opens a non-paragraph block construct.</summary>
@@ -344,6 +172,7 @@ internal static partial class MarkdownToPdfConverter
         var runs = new List<Run>();
         text = Regex.Replace(text, "<[^>]+>", "");
         text = System.Net.WebUtility.HtmlDecode(text).Replace('\u00A0', ' ');
+        text = HideBackslashEscapes(text);
 
         var pattern = new Regex(
             @"(\*\*\*(?<bi>.+?)\*\*\*)|(___(?<bi2>.+?)___)"
@@ -357,21 +186,54 @@ internal static partial class MarkdownToPdfConverter
         var pos = 0;
         foreach (Match m in pattern.Matches(text))
         {
-            if (m.Index > pos) runs.Add(new Run(text.Substring(pos, m.Index - pos), 0, null));
-            if (m.Groups["bi"].Success) runs.Add(new Run(m.Groups["bi"].Value, 3, null));
-            else if (m.Groups["bi2"].Success) runs.Add(new Run(m.Groups["bi2"].Value, 3, null));
-            else if (m.Groups["b"].Success) runs.Add(new Run(m.Groups["b"].Value, 1, null));
-            else if (m.Groups["b2"].Success) runs.Add(new Run(m.Groups["b2"].Value, 1, null));
-            else if (m.Groups["i"].Success) runs.Add(new Run(m.Groups["i"].Value, 2, null));
-            else if (m.Groups["i2"].Success) runs.Add(new Run(m.Groups["i2"].Value, 2, null));
-            else if (m.Groups["c"].Success) runs.Add(new Run(m.Groups["c"].Value, 4, null));
-            else if (m.Groups["s"].Success) runs.Add(new Run(m.Groups["s"].Value, 0, null));
-            else if (m.Groups["ia"].Success || m.Groups["iu"].Success) runs.Add(new Run(m.Groups["ia"].Value, 0, null));
-            else if (m.Groups["lt"].Success) runs.Add(new Run(m.Groups["lt"].Value, 0, m.Groups["lu"].Value.Trim()));
+            if (m.Index > pos) runs.Add(Plain(text.Substring(pos, m.Index - pos)));
+            if (m.Groups["bi"].Success) runs.Add(Styled(m.Groups["bi"].Value, 3));
+            else if (m.Groups["bi2"].Success) runs.Add(Styled(m.Groups["bi2"].Value, 3));
+            else if (m.Groups["b"].Success) runs.Add(Styled(m.Groups["b"].Value, 1));
+            else if (m.Groups["b2"].Success) runs.Add(Styled(m.Groups["b2"].Value, 1));
+            else if (m.Groups["i"].Success) runs.Add(Styled(m.Groups["i"].Value, 2));
+            else if (m.Groups["i2"].Success) runs.Add(Styled(m.Groups["i2"].Value, 2));
+            else if (m.Groups["c"].Success) runs.Add(Styled(m.Groups["c"].Value, 4));
+            else if (m.Groups["s"].Success) runs.Add(Plain(m.Groups["s"].Value));
+            else if (m.Groups["ia"].Success || m.Groups["iu"].Success) runs.Add(Plain(m.Groups["ia"].Value));
+            else if (m.Groups["lt"].Success)
+                runs.Add(new Run(RestoreBackslashEscapes(m.Groups["lt"].Value), 0,
+                    RestoreBackslashEscapes(m.Groups["lu"].Value.Trim())));
             pos = m.Index + m.Length;
         }
-        if (pos < text.Length) runs.Add(new Run(text.Substring(pos), 0, null));
+        if (pos < text.Length) runs.Add(Plain(text.Substring(pos)));
         return runs;
+
+        static Run Plain(string s) => new Run(RestoreBackslashEscapes(s), 0, null);
+        static Run Styled(string s, byte style) => new Run(RestoreBackslashEscapes(s), style, null);
+    }
+
+    // CommonMark backslash escapes: a backslash before ASCII punctuation makes that one
+    // character literal. Each pair is hidden from the tokeniser as a single private-use
+    // character (the punctuation's code point moved up into U+E000..), so an escaped '*'
+    // or '_' can never open emphasis, and every run puts the character back on the way out.
+    private const int EscapedPunctuationBase = 0xE000;
+    private static readonly Regex BackslashEscape = new(@"\\([!-/:-@\[-`{-~])", RegexOptions.Compiled);
+
+    private static string HideBackslashEscapes(string text) =>
+        text.IndexOf('\\') < 0
+            ? text
+            : BackslashEscape.Replace(text, m => ((char)(EscapedPunctuationBase + m.Groups[1].Value[0])).ToString());
+
+    private static string RestoreBackslashEscapes(string text)
+    {
+        var chars = text.ToCharArray();
+        var changed = false;
+        for (int i = 0; i < chars.Length; i++)
+        {
+            var c = chars[i];
+            if (c >= (char)(EscapedPunctuationBase + '!') && c <= (char)(EscapedPunctuationBase + '~'))
+            {
+                chars[i] = (char)(c - EscapedPunctuationBase);
+                changed = true;
+            }
+        }
+        return changed ? new string(chars) : text;
     }
 
     /// <summary>A table divider row: only pipes, colons, dashes and spaces,
@@ -409,13 +271,15 @@ internal static partial class MarkdownToPdfConverter
         catch { return null; }
     }
 
-    private static bool TryReadPngSize(byte[] data, out int w, out int h)
+    private static (int w, int h)? TryReadPngSize(byte[] data)
     {
+        int w = default;
+        int h = default;
         w = h = 0;
-        if (data.Length < 24 || data[0] != 0x89 || data[1] != (byte)'P') return false;
+        if (data.Length < 24 || data[0] != 0x89 || data[1] != (byte)'P') return null;
         w = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19];
         h = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | data[23];
-        return w > 0 && h > 0;
+        return (w > 0 && h > 0) ? (w, h) : null;
     }
 
     // ── Layout ───────────────────────────────────────────────────────────────────
@@ -440,16 +304,16 @@ internal static partial class MarkdownToPdfConverter
     /// <summary>Read a CSS <c>@page { size: …; margin: … }</c> rule. Supports named sizes
     /// with an optional <c>landscape</c>/<c>portrait</c> keyword, an explicit length pair,
     /// and a single-value margin. Lengths accept pt/px/mm/cm/in.</summary>
-    private static bool TryReadCssPage(string css, out double width, out double height, out double? margin)
+    private static (double width, double height, double? margin)? TryReadCssPage(string css)
     {
-        width = height = 0;
-        margin = null;
+        double width = 0, height = 0;
+        double? margin = null;
         var page = Regex.Match(css, @"@page[^{]*\{([^}]*)\}", RegexOptions.IgnoreCase);
-        if (!page.Success) return false;
+        if (!page.Success) return null;
         var body = page.Groups[1].Value;
 
         var size = Regex.Match(body, @"size\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
-        if (!size.Success) return false;
+        if (!size.Success) return null;
         var parts = size.Groups[1].Value.Trim()
             .Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
 
@@ -460,30 +324,30 @@ internal static partial class MarkdownToPdfConverter
             if (part.Equals("landscape", StringComparison.OrdinalIgnoreCase)) landscape = true;
             else if (part.Equals("portrait", StringComparison.OrdinalIgnoreCase)) { }
             else if (CssPageSizes.TryGetValue(part, out var named)) (w, h) = named;
-            else if (TryParseCssLength(part, out var len))
+            else if (TryParseCssLength(part) is { } len)
             {
                 if (w is null) w = len;
                 else h = len;
             }
         }
-        if (w is null) return false;
+        if (w is null) return null;
         width = w.Value;
         height = h ?? w.Value;
         if (landscape && height > width) (width, height) = (height, width);
 
         var m = Regex.Match(body, @"margin\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
-        if (m.Success && TryParseCssLength(m.Groups[1].Value.Trim().Split(' ')[0], out var mv))
+        if (m.Success && TryParseCssLength(m.Groups[1].Value.Trim().Split(' ')[0]) is { } mv)
             margin = mv;
-        return true;
+        return (width, height, margin);
     }
 
-    private static bool TryParseCssLength(string s, out double points)
+    private static double? TryParseCssLength(string s)
     {
-        points = 0;
+        double points = 0;
         var m = Regex.Match(s.Trim(), @"^(-?[\d.]+)(pt|px|mm|cm|in)?$", RegexOptions.IgnoreCase);
-        if (!m.Success) return false;
+        if (!m.Success) return null;
         if (!double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
-            return false;
+            return null;
         points = m.Groups[2].Value.ToLowerInvariant() switch
         {
             "px" => v * 72.0 / 96.0,
@@ -492,7 +356,7 @@ internal static partial class MarkdownToPdfConverter
             "in" => v * 72.0,
             _ => v,
         };
-        return true;
+        return points;
     }
 
     // ── Low-level emission ───────────────────────────────────────────────────────
@@ -508,15 +372,11 @@ internal static partial class MarkdownToPdfConverter
             else if (ch < 127) sb.Append(ch);
             else
             {
-                byte code;
-                try
-                {
-                    var bytes = Encoding.GetEncoding(1252,
-                        System.Text.EncoderFallback.ReplacementFallback,
-                        System.Text.DecoderFallback.ReplacementFallback).GetBytes(ch.ToString());
-                    code = bytes.Length > 0 ? bytes[0] : (byte)'?';
-                }
-                catch { code = (byte)'?'; }
+                // The engine's own WinAnsi table: the BCL code page 1252 exists on .NET (Core)
+                // only once a code-pages provider is registered, and without it every
+                // non-ASCII character (bullets, accents, curly quotes) fell back to '?'.
+                var mapped = Content.ContentStreamBuilder.ToWinAnsi(ch);
+                var code = mapped <= 0xFF ? (byte)mapped : (byte)'?';
                 sb.Append('\\').Append(System.Convert.ToString(code, 8).PadLeft(3, '0'));
             }
         }

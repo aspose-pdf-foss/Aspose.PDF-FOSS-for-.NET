@@ -9,7 +9,7 @@ namespace Aspose.Pdf.LogicalStructure;
 /// /StructElem and /S = role); property reads/writes pass through to
 /// the dict so the in-memory tree round-trips to the saved file.
 /// </summary>
-public class StructureElement : Element, ITextElement
+public partial class StructureElement : Element, ITextElement
 {
     internal readonly PdfDictionary _dict;
     internal PdfReader? _reader;
@@ -60,9 +60,27 @@ public class StructureElement : Element, ITextElement
     /// organised by owner. For an element read from an existing document the
     /// set is populated from the element's /A entry on first access.</summary>
     public StructureElementAttributes Attributes
-        => _attributes ??= _reader is not null
-            ? new StructureElementAttributes(_dict, _reader)
-            : new StructureElementAttributes();
+        => _attributes ??= new StructureElementAttributes(_dict, _reader);
+
+    /// <summary>A table span this element states (/ColSpan or /RowSpan under the /Table
+    /// owner); one when it states none.</summary>
+    internal int TableSpan(AttributeKey key)
+        => Attributes.GetAttributes(AttributeOwnerStandard.Table).GetAttribute(key)?.GetNumberValue()
+            is { } stated && stated >= 1 ? (int)stated : 1;
+
+    /// <summary>State a table span. One is the default and is stated as nothing.</summary>
+    internal void SetTableSpan(AttributeKey key, int span)
+    {
+        var table = Attributes.GetAttributes(AttributeOwnerStandard.Table);
+        if (span <= 1)
+        {
+            table.Remove(key);
+            return;
+        }
+        var attribute = new StructureAttribute(key);
+        attribute.SetNumberValue(span);
+        table.SetAttribute(attribute);
+    }
 
     /// <summary>The PDF structure-type role tag as written to /S
     /// (e.g. "P", "Span", or a custom tag after <see cref="SetTag"/>).</summary>
@@ -81,7 +99,7 @@ public class StructureElement : Element, ITextElement
             {
                 var std = StructureTypeStandard.FromTag(role);
                 if (std is not null) return std;
-                if (_roleMap is not null && _roleMap.TryGet(role, out var mapped))
+                if (_roleMap is not null && _roleMap.TryGet(role) is { } mapped)
                     return StructureTypeStandard.FromTag(mapped);
             }
             return StructureTypeStandard.FromTag(_standardType);
@@ -317,7 +335,7 @@ public class StructureElement : Element, ITextElement
         var std = _standardType;
         if (_roleMap is not null)
         {
-            if (_roleMap.TryGet(tag, out var existing) && existing != std)
+            if (_roleMap.TryGet(tag) is { } existing && existing != std)
                 throw new Aspose.Pdf.Tagged.TaggedException(
                     $"Non-standard structure type {tag} has already mapped on standard type {existing}");
             _roleMap.Set(tag, std);
@@ -365,7 +383,7 @@ public class StructureElement : Element, ITextElement
                 foreach (var item in arr)
                 {
                     if (_reader.Resolve(item) is PdfDictionary kd
-                        && kd.GetName("Type") is null or "StructElem")
+                        && kd.GetName("Type") is null or "StructElem" or "MCR" or "OBJR")
                     {
                         var child = MaterializeChild(kd);
                         Adopt(child);
@@ -374,7 +392,7 @@ public class StructureElement : Element, ITextElement
                 }
                 break;
             case PdfDictionary single
-                when single.GetName("Type") is null or "StructElem":
+                when single.GetName("Type") is null or "StructElem" or "MCR" or "OBJR":
                 {
                     var child = MaterializeChild(single);
                     Adopt(child);
@@ -386,7 +404,7 @@ public class StructureElement : Element, ITextElement
 
     /// <summary>Recursively find descendant elements of type T.
     /// FOSS-extra mirroring the same-named helper on
-    /// <see cref="Aspose.Pdf.Tagged.StructureElement"/>.</summary>
+    /// <c>StructureElement</c>.</summary>
     public List<T> FindElements<T>(bool recursive = false) where T : class
     {
         var results = new List<T>();
@@ -400,6 +418,13 @@ public class StructureElement : Element, ITextElement
         EnsureChildrenLoaded();
         foreach (var child in _children!)
         {
+            // A marked-content or object reference is not a structure element of its own: it
+            // is found when asked for by its type, never as a StructureElement (or a base).
+            if (child is MCRElement or OBJRElement)
+            {
+                if (child is T reference && child.GetType() == typeof(T)) results.Add(reference);
+                continue;
+            }
             if (child is T typed) results.Add(typed);
             if (recursive) child.FindElementsInternal(results, recursive);
         }
@@ -407,7 +432,7 @@ public class StructureElement : Element, ITextElement
 
     /// <summary>Append <paramref name="child"/> with an optional
     /// validation pass. FOSS-extra matching the
-    /// <see cref="Aspose.Pdf.Tagged.StructureElement.AppendChild(Aspose.Pdf.Tagged.StructureElement, bool)"/>
+    /// <c>StructureElement.AppendChild</c>
     /// overload — validate=false skips the containment rules.</summary>
     public void AppendChild(StructureElement child, bool validate)
         => AppendChildCore(child, validate);
@@ -452,24 +477,17 @@ public class StructureElement : Element, ITextElement
     internal bool _posInline;
 
     /// <summary>Capture the requested layout position for an authored structure
-    /// element. The settings object is an <c>Aspose.Pdf.Tagged.PositionSettings</c>
-    /// exposing Margin / IsInNewPage / IsInLineParagraph.
-    /// The values are stored so the tagged-content renderer can place the block
-    /// (Left/Right indent the column, Top/Bottom add space around it, IsInNewPage
-    /// breaks the page, IsInLineParagraph flows the element inline).</summary>
-    public void AdjustPosition(object settings)
+    /// element: Margin, IsInNewPage and IsInLineParagraph are stored so the
+    /// tagged-content renderer can place the block (Left/Right indent the column,
+    /// Top/Bottom add space around it, IsInNewPage breaks the page,
+    /// IsInLineParagraph flows the element inline).</summary>
+    public void AdjustPosition(Aspose.Pdf.Tagged.PositionSettings settings)
     {
         if (settings is null) return;
-        // Both the Tagged-side and LogicalStructure PositionSettings expose these
-        // properties; read them structurally so we don't hard-depend on either
-        // concrete type here.
-        var t = settings.GetType();
-        if (t.GetProperty("Margin")?.GetValue(settings) is MarginInfo margin)
-            _positionMargin = margin;
-        if (t.GetProperty("IsInNewPage")?.GetValue(settings) is bool newPage)
-            _posInNewPage = newPage;
-        if (t.GetProperty("IsInLineParagraph")?.GetValue(settings) is bool inline)
-            _posInline = inline;
+        if (settings.Margin is not null)
+            _positionMargin = settings.Margin;
+        _posInNewPage = settings.IsInNewPage;
+        _posInline = settings.IsInLineParagraph;
     }
 
     /// <summary>Move this element under <paramref name="newParent"/>.
@@ -556,6 +574,12 @@ public class StructureElement : Element, ITextElement
 
     private StructureElement MaterializeChild(PdfDictionary dict)
     {
+        // A marked-content or object reference in /K is a child of its own kind.
+        switch (dict.GetName("Type"))
+        {
+            case "MCR": return new MCRElement(dict, _reader);
+            case "OBJR": return new OBJRElement(dict, _reader);
+        }
         var role = dict.GetName("S") ?? string.Empty;
         StructureElement el = role switch
         {

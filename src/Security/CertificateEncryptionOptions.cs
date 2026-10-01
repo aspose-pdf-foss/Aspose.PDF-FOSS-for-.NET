@@ -28,6 +28,8 @@ public sealed class CertificateEncryptionOptions
     /// <summary>Windows certificate store location.</summary>
     public StoreLocation? StoreLocation { get; }
 
+    /// <summary>Creates options from a recipient certificate and a PFX file (with its password) that holds the
+    /// matching private key.</summary>
     public CertificateEncryptionOptions(X509Certificate2 publicCertificate, string pfxPath, string pfxPassword)
     {
         PublicCertificate = publicCertificate ?? throw new System.ArgumentNullException(nameof(publicCertificate));
@@ -35,6 +37,8 @@ public sealed class CertificateEncryptionOptions
         PfxPassword = pfxPassword;
     }
 
+    /// <summary>Creates options from a recipient certificate whose private key is looked up in the given Windows
+    /// certificate store.</summary>
     public CertificateEncryptionOptions(X509Certificate2 publicCertificate, StoreName storeName, StoreLocation storeLocation)
     {
         PublicCertificate = publicCertificate ?? throw new System.ArgumentNullException(nameof(publicCertificate));
@@ -42,20 +46,20 @@ public sealed class CertificateEncryptionOptions
         StoreLocation = storeLocation;
     }
 
+    /// <summary>Creates options by loading the recipient certificate from a file, with the private key taken from
+    /// a PFX file and its password.</summary>
     public CertificateEncryptionOptions(string publicCertificatePath, string pfxPath, string pfxPassword)
     {
-#pragma warning disable SYSLIB0057
-        PublicCertificate = new X509Certificate2(publicCertificatePath);
-#pragma warning restore SYSLIB0057
+        PublicCertificate = Compat.LoadCertificateFromFile(publicCertificatePath);
         PfxPath = pfxPath;
         PfxPassword = pfxPassword;
     }
 
+    /// <summary>Creates options by loading the recipient certificate from a file, with the private key looked up
+    /// in the given Windows certificate store.</summary>
     public CertificateEncryptionOptions(string publicCertificatePath, StoreName storeName, StoreLocation storeLocation)
     {
-#pragma warning disable SYSLIB0057
-        PublicCertificate = new X509Certificate2(publicCertificatePath);
-#pragma warning restore SYSLIB0057
+        PublicCertificate = Compat.LoadCertificateFromFile(publicCertificatePath);
         StoreName = storeName;
         StoreLocation = storeLocation;
     }

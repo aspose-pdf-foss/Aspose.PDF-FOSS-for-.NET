@@ -224,6 +224,29 @@ page.Annotations.AddRedactAnnotation(
     overlayText: "REDACTED");
 ```
 
+A redaction annotation only marks the area until it is applied. `Redact()` on the
+`RedactionAnnotation` removes for good what the page paints under its rectangle —
+the glyphs whose middle lies there (their advance is kept, so the rest of the line
+stays put), the parts of paths inside it, and the image pixels there — then paints
+`FillColor` over the area and writes `OverlayText` as real page text. It also
+removes the form fields whose widgets lie under the area and every other
+annotation touching it (with its popup and replies), drops the text restating the
+removed content (`ActualText`, `Alt`, `E`) from the marked content and structure
+elements that held it, and discards the page thumbnail and private application
+data. A redacted document is always saved whole, never as an incremental update
+that would keep the removed content in an earlier revision.
+
+```csharp
+var redaction = new RedactionAnnotation(page, new Rectangle(100, 400, 300, 420))
+{
+    FillColor   = Color.Black,
+    OverlayText = "REDACTED",
+};
+page.Annotations.Add(redaction);
+redaction.Redact();
+doc.Save("redacted.pdf");
+```
+
 ## Watermark annotations
 
 Watermarks are constructed separately and added via
@@ -285,6 +308,10 @@ editor.FlatteningAnnotations();
 editor.Save("flat.pdf");
 ```
 
+`Flatten()` on a `RedactionAnnotation` does nothing — call `Redact()` to apply it.
+The facade's `FlatteningAnnotations()` applies every pending redaction annotation
+(removing the content under it) before flattening the rest.
+
 ## Using `PdfAnnotationEditor`
 
 ```csharp
@@ -313,11 +340,12 @@ editor.Save("edited.pdf");
 ```
 
 `RedactArea` also accepts the colour as `(r, g, b)` integers or a
-`System.Drawing.Color`. It paints a filled rectangle over the area, overwrites
-the pixels of any image XObject that intersects it (so the original samples are
-gone, not merely covered), and removes form-field widgets inside the area. This
-works on every platform; Windows decodes the images through GDI+, other hosts
-through the managed decoder.
+`System.Drawing.Color` (white when the `double[]` is shorter than three values).
+It removes the same content `RedactionAnnotation.Redact()` does — glyphs, path
+segments and image pixels under the area (image samples are overwritten with the
+fill colour, so the originals are gone, not merely covered), the form-field
+widgets there and the other annotations touching it — then paints a filled
+rectangle over the area. It works the same on every platform.
 
 The editor further offers `ExtractAnnotations(start, end, AnnotationType[])`,
 `FlatteningAnnotations(start, end, AnnotationType[])` for a page range and

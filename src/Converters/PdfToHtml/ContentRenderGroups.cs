@@ -155,292 +155,46 @@ public sealed partial class PdfToHtmlConverter
 
     private static void FlushGroup(ContentRenderState ct, StringBuilder sb, double pageHeight, double pageWidth, bool textOnly, StyleRegistry? styleReg, ClassNamer classNamer, List<LinkTarget>? linkTargets, RotationRegistry? rotReg, double pageLLX, double yTopRef, ZCounter? zCounter, bool pageTurnedOver, bool emCompensation)
     {
+        var fg = new GroupFlushState();
+        fg.ct = ct;
+        fg.sb = sb;
+        fg.pageHeight = pageHeight;
+        fg.pageWidth = pageWidth;
+        fg.textOnly = textOnly;
+        fg.styleReg = styleReg;
+        fg.classNamer = classNamer;
+        fg.linkTargets = linkTargets;
+        fg.rotReg = rotReg;
+        fg.pageLLX = pageLLX;
+        fg.yTopRef = yTopRef;
+        fg.zCounter = zCounter;
+        fg.pageTurnedOver = pageTurnedOver;
+        fg.emCompensation = emCompensation;
         // A line closed for real gives up its park slot, so it cannot be
         // emitted a second time when the page's remaining lines are closed.
-        if (ct.groupActive && ct.activePark is { } closing) ct.parkedLines.Remove(closing);
-        ct.activePark = null;
-        var groupText = new StringBuilder(JoinGroupSegments(ct, textOnly));
-        if (ct.groupActive && groupText.Length > 0 && TrySolveStlLine(ct, sb, pageHeight, pageWidth, emCompensation, styleReg, classNamer, linkTargets, pageLLX, yTopRef, zCounter, pageTurnedOver))
+        if (fg.ct.groupActive && fg.ct.activePark is { } closing) fg.ct.parkedLines.Remove(closing);
+        fg.ct.activePark = null;
+        fg.groupText = new StringBuilder(JoinGroupSegments(fg.ct, fg.textOnly));
+        if (fg.ct.groupActive && fg.groupText.Length > 0 && TrySolveStlLine(fg.ct, fg.sb, fg.pageHeight, fg.pageWidth, fg.emCompensation, fg.styleReg, fg.classNamer, fg.linkTargets, fg.pageLLX, fg.yTopRef, fg.zCounter, fg.pageTurnedOver))
         {
             // Solved and emitted by the stl_ line solver.
         }
-        else if (ct.groupActive && groupText.Length > 0)
+        else if (fg.ct.groupActive && fg.groupText.Length > 0)
         {
-            if (styleReg is not null && string.IsNullOrWhiteSpace(groupText.ToString()))
-            {
-                // Whitespace-only group (re-drawn word-gap space glyphs over an
-                // already-shown line, a positioned space show between columns, or
-                // a stray trailing space glyph past the text): dropped in BOTH
-                // stl_ dialects — a lone space div
-                // must not grow the re-imported page width, and its font class
-                // must not burn a class number.
-            }
-            else if (styleReg is not null)
-            {
-                // stl_ shape: a positioned stl_01 div wrapping the group's text.
-                // Both stl_ dialects emit one span per word-anchored SEGMENT,
-                // each letter/word-spacing-pinned so the measured boxes reach
-                // their device anchors (external SVG-text saves
-                // pin exactly like the PNG-background overlay); a group whose
-                // face cannot resolve keeps the single whole-line span with the
-                // plain Tc/TJ letter-spacing and the face's natural metric flow.
-                // Channel bytes TRUNCATE (0.994118 -> 253 #FD) when forming
-                // the emitted class colors.
-                var color = ct.groupTransparent
-                    ? TransparentTextColor
-                    : $"#{(int)(Math.Clamp(ct.groupR, 0, 1) * 255):X2}{(int)(Math.Clamp(ct.groupG, 0, 1) * 255):X2}{(int)(Math.Clamp(ct.groupB, 0, 1) * 255):X2}";
-                var fontNum = styleReg.Font(ct.groupCssFamily, ct.groupFontSize / 12.0, color, null);
-                // Line-height is the font's hhea (asc+|desc|)/upm when a program
-                // is available (1.117188 for Arial), the
-                // generic 1.2 fallback otherwise.
-                var lhNum = styleReg.LineHeight(ct.groupLineHeight > 0 ? Math.Round(ct.groupLineHeight, 6) : 1.2);
-                var fs = Math.Max(0.01, ct.groupFontSize);
-                var textAll = groupText.ToString();
-                var face = ct.groupPinned && ct.groupEndX > ct.groupX + 0.01
-                    && !string.IsNullOrWhiteSpace(textAll)
-                    ? HtmlToPdfConverter.ResolveStlFace(ct.groupFamily) : null;
-
-                // Fixed-layout geometry: x is measured from the MediaBox left
-                // edge, the page top reference is LLY + floor(height), and the
-                // run's visual top sits ascent×size above the baseline (the
-                // font's usWinAscent fraction, not a full em).
-                var yTop = double.IsNaN(yTopRef) ? pageHeight : yTopRef;
-                var left = (ct.groupX - pageLLX) / 12.0;
-                var top = (yTop - ct.groupY - ct.groupAscent * ct.groupFontSize) / 12.0;
-                if (pageTurnedOver) { left -= pageWidth / 12.0; top -= pageHeight / 12.0; }
-                // A rotated run carries a document-wide rotation class next to
-                // stl_01 (vendor-prefixed transform block in the stylesheet).
-                var divCls = ct.groupAngle != 0
-                    ? $"{classNamer.Cls("01")} {classNamer.Cls(styleReg.Rotation(Math.Round(ct.groupAngle, 2)))}"
-                    : classNamer.Cls("01");
-                var zStyle = zCounter is not null && ct.groupZ > 0 ? $"z-index:{ct.groupZ};" : "";
-                sb.Append($"<div class=\"{divCls}\" style=\"left:{Em4T(left)}em;top:{Em4T(top)}em;{zStyle}\">");
-                // A text run inside a link annotation's rect renders as an anchor
-                // wrapping the span(s) (div > a > span), carrying the link with
-                // the text itself rather than only as an invisible overlay.
-                // Containment is judged by OVERLAP, not the group origin: a rect
-                // is fitted to the link's visible text with a little padding, so
-                // the NEXT run's leading space can start inside the rect's right
-                // padding without being the link's text.
-                var link = ct.groupIsType3
-                    ? null : FindLinkTarget(linkTargets, ct.groupX, ct.groupPenX, ct.groupY);
-                var popupItems = link?.PopupItems;
-                var linkOpen = link is null || popupItems is not null
-                    ? null
-                    : $"<a href=\"{EscapeHtml(link.Uri)}\"" +
-                        (link.Uri.StartsWith('#') ? ">" : " target=\"_blank\">");
-                // The single-span path opens the anchor around its one span here;
-                // the pinned multi-segment path wraps EACH span in its own anchor.
-                // Wrapped is set only where an anchor is really written: it is what
-                // suppresses the click-surface overlay.
-                if (linkOpen is not null && face is null)
-                {
-                    sb.Append(linkOpen);
-                    if (link is not null) link.Wrapped = true;
-                }
-
-                // A page-menu widget wraps the caption span in a relative
-                // hover box; its drop-up list class allocates after the
-                // caption's own classes.
-                var popupBoxNum = 0;
-                if (popupItems is not null)
-                {
-                    popupBoxNum = styleReg.PopupBox();
-                    sb.Append($"<div class=\"{classNamer.Cls(popupBoxNum)}\">");
-                }
-
-                if (face is not null)
-                {
-                    // Overlay segments in visual order; re-drawn whitespace-only
-                    // overlap segments are dropped.
-                    var ordered = new List<(double X, StringBuilder Text, double PenEnd, double GlyphEnd)>(ct.groupSegs);
-                    ordered.Sort((a, b) => a.X.CompareTo(b.X));
-                    var emit = new List<(string text, double startX, double glyphEnd)>();
-                    double coveredTo = double.MinValue;
-                    foreach (var seg in ordered)
-                    {
-                        var st = seg.Text.ToString();
-                        if (st.Length == 0) continue;
-                        if (string.IsNullOrWhiteSpace(st) && seg.X < coveredTo - 0.5) continue;
-                        emit.Add((st, seg.X, seg.GlyphEnd));
-                        coveredTo = Math.Max(coveredTo, seg.GlyphEnd);
-                    }
-                    // Re-cut segment boundaries at word boundaries: a span is
-                    // never split inside a word, but a justified line's
-                    // raw shows often break mid-word ("laborat" + "ory"). A
-                    // segment's leading word fragment moves into the previous
-                    // span, and the following span starts at the fragment's
-                    // measured end past its old device anchor.
-                    var spaceAdv = HtmlToPdfConverter.MeasureStlExactText(face, " ", fs);
-                    for (var si = 0; si + 1 < emit.Count; si++)
-                    {
-                        var cur = emit[si];
-                        var nxt = emit[si + 1];
-                        if (cur.text.Length == 0 || nxt.text.Length == 0) continue;
-                        if (char.IsWhiteSpace(cur.text[^1]) || char.IsWhiteSpace(nxt.text[0])) continue;
-                        // Only ABUTTING segments are a split word: a device gap
-                        // approaching a space width at the boundary is a word
-                        // gap (separately positioned words carry no space
-                        // glyph), and those segments stay separate so the
-                        // emission below writes the gap as a real space.
-                        if (nxt.startX - cur.glyphEnd > 0.5 * spaceAdv) continue;
-                        var cut = 0;
-                        while (cut < nxt.text.Length && !char.IsWhiteSpace(nxt.text[cut])) cut++;
-                        var headText = nxt.text[..cut];
-                        if (cut == nxt.text.Length)
-                        {
-                            // The whole next segment is the word's tail: absorb it
-                            // and re-examine the merged span's new right boundary.
-                            emit[si] = (cur.text + headText, cur.startX, nxt.glyphEnd);
-                            emit.RemoveAt(si + 1);
-                            si--;
-                        }
-                        else
-                        {
-                            emit[si] = (cur.text + headText, cur.startX, cur.glyphEnd);
-                            emit[si + 1] = (nxt.text[cut..],
-                                nxt.startX + HtmlToPdfConverter.MeasureStlExactText(face, headText, fs),
-                                nxt.glyphEnd);
-                        }
-                    }
-                    var lastLsNum = 0;
-                    for (var si = 0; si < emit.Count; si++)
-                    {
-                        var (segText, segX, segGlyphEnd) = emit[si];
-                        // Interior segments pin the span box to the NEXT
-                        // segment's device anchor so every word lands at its PDF
-                        // position; the LAST segment pins to its width-only glyph
-                        // edge - the line-width budget - and the
-                        // sentinel &nbsp; dangles beyond it.
-                        // A segment born from REPOSITIONING (each word its own Tj)
-                        // carries no space glyph before the next word; the word
-                        // gap is still written as a real space
-                        // inside the span - its ws slot absorbs the pin residual -
-                        // so the extracted text keeps its word boundaries.
-                        if (si + 1 < emit.Count && !char.IsWhiteSpace(segText[^1])
-                            && !char.IsWhiteSpace(emit[si + 1].text[0]))
-                            segText += " ";
-                        var target = (si + 1 < emit.Count ? emit[si + 1].startX : segGlyphEnd) - segX;
-                        var natural = HtmlToPdfConverter.MeasureStlExactText(face, segText, fs);
-                        var lsEm = Math.Round((target - natural) / (segText.Length * fs), 4);
-                        var resid = target - natural - lsEm * segText.Length * fs;
-                        var spaces = 0;
-                        foreach (var ch in segText) if (ch == ' ') spaces++;
-                        var wsEm = spaces > 0 ? Math.Round(resid / (spaces * fs), 4) : 0;
-                        var lsNum = styleReg.LetterSpacing(lsEm);
-                        // A ten-thousandth-scale residue is letter-spacing
-                        // rounding noise, not a word gap worth
-                        // bridging — no inline style for it.
-                        // A bold/italic face carries its weight inline: the emitted
-                        // font class names the FAMILY only, so a viewer that falls
-                        // back to a system face would otherwise render the run regular.
-                        var weightCss = StlWeightStyleCss(ct.groupFauxBold, ct.groupDeclStyle);
-                        var wsCss = Math.Abs(wsEm) >= 0.001
-                            ? $"word-spacing:{wsEm.ToString("0.####", CultureInfo.InvariantCulture)}em;"
-                            : "";
-                        var wsAttr = weightCss.Length + wsCss.Length > 0
-                            ? $" style=\"{weightCss}{wsCss}\""
-                            : "";
-                        lastLsNum = lsNum;
-                        // Each segment resolves its own target from its own extent
-                        // (see the solver): a row of per-word hotspots gives each
-                        // word its own href.
-                        var segLink = popupItems is null && !ct.groupIsType3
-                            ? FindLinkTarget(linkTargets, segX, segGlyphEnd, ct.groupY)
-                            : null;
-                        var segOpen = segLink is null
-                            ? null
-                            : $"<a href=\"{EscapeHtml(segLink.Uri)}\"" +
-                                (segLink.Uri.StartsWith('#') ? ">" : " target=\"_blank\">");
-                        if (segOpen is not null)
-                        {
-                            sb.Append(segOpen);
-                            segLink!.Wrapped = true;
-                        }
-                        sb.Append($"<span class=\"{classNamer.Attr(fontNum, lhNum, lsNum)}\"{wsAttr}>");
-                        var stlSeg = EscapeHtml(segText);
-                        if (ct.groupRawRise > RiseThreshold) stlSeg = $"<sup>{stlSeg}</sup>";
-                        else if (ct.groupRawRise < -RiseThreshold) stlSeg = $"<sub>{stlSeg}</sub>";
-                        sb.Append(stlSeg);
-                        // The line-end sentinel is a SPACE then the nbsp, as in the
-                        // solved line path: the space belongs to the line, the nbsp
-                        // hangs past it and stays outside the width budget.
-                        if (si == emit.Count - 1 && popupItems is null) sb.Append(" &nbsp;");
-                        sb.Append("</span>");
-                        if (segOpen is not null) sb.Append("</a>");
-                    }
-                    if (popupItems is not null)
-                    {
-                        var listNum = styleReg.PopupList(popupBoxNum);
-                        sb.Append($"<div class=\"{classNamer.Cls(listNum)}\">");
-                        foreach (var (label, href) in popupItems)
-                            sb.Append($"<a href=\"{href}\" class=\"{classNamer.Cls(fontNum)} " +
-                                $"{classNamer.Cls(lhNum)}  {classNamer.Cls(lastLsNum)}\">{EscapeHtml(label)}</a>");
-                        sb.Append("</div></div>");
-                    }
-                    sb.Append("</div>\n");
-                }
-                else
-                {
-                    var lsEm = ct.charSpacing / Math.Max(0.01, ct.groupFontSize)
-                        - ct.groupTjNum / (1000.0 * Math.Max(1, ct.groupChars));
-                    var lsNum = styleReg.LetterSpacing(System.Math.Round(lsEm, 4));
-                    // A same-colour hairline under (or through) the baseline that
-                    // covers the run start becomes CSS text-decoration; a
-                    // decorated span carries the inline style and drops the
-                    // trailing &nbsp;.
-                    var decoration = FindDecoration(ct.rules, ct.groupX, ct.groupY, ct.groupFontSize,
-                        ct.groupR, ct.groupG, ct.groupB);
-                    sb.Append($"<span class=\"{classNamer.Attr(fontNum, lhNum, lsNum)}\"");
-                    var groupWeightCss = StlWeightStyleCss(ct.groupFauxBold, ct.groupDeclStyle);
-                    if (decoration is not null)
-                        sb.Append($" style=\"{groupWeightCss}text-decoration:{decoration};word-spacing:0em;\"");
-                    else if (groupWeightCss.Length > 0)
-                        sb.Append($" style=\"{groupWeightCss}\"");
-                    sb.Append('>');
-                    // A non-trivial text rise marks a superscript/subscript run:
-                    // wrap it in <sup>/<sub> so the markup carries the semantics
-                    // (the .stl_ sup/sub CSS rules already position them). The
-                    // rise is baked into `top`, so the tags are purely semantic -
-                    // see EmitSpan for the non-stl_ counterpart.
-                    var stlInner = EscapeHtml(groupText.ToString());
-                    if (ct.groupRawRise > RiseThreshold) stlInner = $"<sup>{stlInner}</sup>";
-                    else if (ct.groupRawRise < -RiseThreshold) stlInner = $"<sub>{stlInner}</sub>";
-                    sb.Append(stlInner)
-                        .Append(decoration is not null || popupItems is not null ? "</span>" : " &nbsp;</span>");
-                    if (popupItems is not null)
-                    {
-                        var listNum = styleReg.PopupList(popupBoxNum);
-                        sb.Append($"<div class=\"{classNamer.Cls(listNum)}\">");
-                        foreach (var (label, href) in popupItems)
-                            sb.Append($"<a href=\"{href}\" class=\"{classNamer.Cls(fontNum)} " +
-                                $"{classNamer.Cls(lhNum)}  {classNamer.Cls(lsNum)}\">{EscapeHtml(label)}</a>");
-                        sb.Append("</div></div>");
-                    }
-                    sb.Append(linkOpen is not null ? "</a></div>\n" : "</div>\n");
-                }
-            }
-            else
-            {
-                EmitSpan(sb, groupText.ToString(), ct.groupX, ct.groupY, ct.groupFontSize,
-                    ct.groupFamily, ct.groupWeight, ct.groupStyle, ct.groupR, ct.groupG, ct.groupB, pageHeight,
-                    ct.groupRise, transparentText: textOnly,
-                    rotationClass: ct.groupAngle != 0 && rotReg is not null
-                        ? rotReg.Class(ct.groupAngle) : null);
-            }
+            FlushTextGroup(fg);
         }
-        ct.groupSegs.Clear();
-        ct.groupActive = false;
-        ct.groupTjNum = 0;
-        ct.groupChars = 0;
-        ct.groupPinned = true;
-        ct.groupEndX = 0;
-        ct.groupPenX = 0;
-        ct.groupTextPenX = 0;
-        ct.lineGlyphs?.Clear();
-        ct.lineOk = true;
-        ct.lineStyleIdx = -1;
-        ct.groupLastShowText = "";
+        fg.ct.groupSegs.Clear();
+        fg.ct.groupActive = false;
+        fg.ct.groupTjNum = 0;
+        fg.ct.groupChars = 0;
+        fg.ct.groupPinned = true;
+        fg.ct.groupEndX = 0;
+        fg.ct.groupPenX = 0;
+        fg.ct.groupTextPenX = 0;
+        fg.ct.lineGlyphs?.Clear();
+        fg.ct.lineOk = true;
+        fg.ct.lineStyleIdx = -1;
+        fg.ct.groupLastShowText = "";
     }
 
     private static void FlushParkedLines(ContentRenderState ct, StyleRegistry? styleReg, StringBuilder sb, double pageHeight, double pageWidth, bool textOnly, ClassNamer classNamer, List<LinkTarget>? linkTargets, RotationRegistry? rotReg, double pageLLX, double yTopRef, ZCounter? zCounter, bool pageTurnedOver, bool emCompensation)

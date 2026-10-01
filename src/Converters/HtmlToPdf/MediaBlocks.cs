@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Text;
 
@@ -11,9 +11,13 @@ internal static partial class HtmlToPdfConverter
     // page-1 calibration — it bakes in the UA body inset and the first line's
     // ascent — so reusing it on every later page starts each one 6.2 pt low.
     /// <summary>Top of a continuation page for the flow.</summary>
-    private static double FreshPageTopY(bool escapedAttrDoc, double pageHeight, double marginTop)
-        => escapedAttrDoc
+    private static double FreshPageTopY(HtmlDocProfile profile, double pageHeight, double marginTop)
+        => profile.escapedAttrDoc
         ? pageHeight - 72 - 0.9 * 12
+        // The Word export's continuation page starts at the page margin: the UA body inset is the
+        // body's, spent once at the document top (probed: page 2's first baseline 84.73 = 72 + 0.905 x 14).
+        : profile.wordExportDoc
+        ? pageHeight - (marginTop - UaBodyMarginPt)
         : pageHeight - marginTop;
 
     // Shared control placement: the AcroForm field plus its visible box at
@@ -68,6 +72,17 @@ internal static partial class HtmlToPdfConverter
             if (ctl.InputDrawValue)
                 DrawBox(flow.page, lx + 0.5, baseY + above - cH + 0.5, cW - 1, cH - 1,
                     border: Color.Black, borderWidth: 1.0, fill: null);
+            // the UA text input beside a label column draws its black border
+            else if (ctl.InputInColumn)
+                DrawBox(flow.page, lx + UaInputBorderPt / 2, baseY + above - cH + UaInputBorderPt / 2,
+                    cW - UaInputBorderPt, cH - UaInputBorderPt,
+                    border: Color.Black, borderWidth: UaInputBorderPt, fill: null);
+            // A textarea's UA border is the same 1 pt black stroke half a point inside its
+            // widget rect that the control-box dialect draws (probed: 96.5..218.52 x
+            // 77.75..103.75 around a 96..219.02 x 77.25..104.25 widget).
+            else if (ctl.InputMultiline)
+                DrawBox(flow.page, lx + 0.5, baseY + above - cH + 0.5, cW - 1, cH - 1,
+                    border: Color.Black, borderWidth: 1.0, fill: null);
             else
                 DrawBox(flow.page, lx, baseY + above - cH, cW, cH,
                     border: Color.FromArgb(130, 130, 130), borderWidth: 0.75, fill: null);
@@ -90,7 +105,7 @@ internal static partial class HtmlToPdfConverter
                 var (rn, hex) = Text.Type0FontEmbedder.Embed(srFd, srTtf, baseName,
                     text, stripSpacesInBaseFont: true);
                 flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
-                    $"BT /{rn} {pt:0.##} Tf 1 0 0 1 {x:0.##} {baseY:0.##} Tm <{System.Convert.ToHexString(hex)}> Tj ET\n")));
+                    $"BT /{rn} {pt:0.##} Tf 1 0 0 1 {x:0.##} {baseY:0.##} Tm {KernedTj(srTtf, hex)}ET\n")));
             }
             else
                 flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
@@ -100,155 +115,50 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Lays out one input-field or inline-items block and advances the flow past it.</summary>
     /// <remarks>Lifted verbatim out of the block-dispatch loop in
     /// <see cref="ConvertFromHtml"/>.</remarks>
-    private static void LayoutInputFieldBlock(
-        Block block, HtmlFlowCursor flow, HtmlDocProfile profile, Document doc, Core.PdfDictionary docFontDict, double marginBottom, double marginLeft, double marginTop, double pageHeight, double pageWidth, double blockFontSize, double lineHeight)
+    private static void LayoutInputFieldBlock(Block block, HtmlFlowCursor flow, HtmlDocProfile profile, Document doc, Core.PdfDictionary docFontDict, double marginBottom, double marginLeft, double marginTop, double pageHeight, double pageWidth, double blockFontSize, double lineHeight)
     {
-            // An inline run: label text and controls share wrapping line boxes
-            // with a pen, so label|input|label|select rows stay inline.
-            if (block.InlineItems is { Count: > 0 } runItems)
-            {
-                // Directly under a section rule the run drops extra so its
-                // control boxes clear the rule (baseline rule+17.2, not +11.9).
-                if (flow.afterEscapedRule) { flow.y -= RuleToRunExtraPt; flow.afterEscapedRule = false; }
-                var lineLeft = marginLeft;
-                var lineRight = marginLeft + flow.contentWidth;
-                // Assemble the wrapped lines first. A control is an atomic word
-                // whose pen advance is its box width; text splits into tokens that
-                // carry their trailing spaces, measured in the serif face.
-                var runLines = new List<(List<(Block? Ctl, string? Txt, double X, double FontPt, string Res)> Items, bool HasText, double MaxAdv, double MaxAbove)>();
-                var curItems = new List<(Block? Ctl, string? Txt, double X, double FontPt, string Res)>();
-                var pen = lineLeft; var curHasText = false; double curMaxAdv = 0, curMaxAbove = 0;
-                void EndRunLine()
-                {
-                    if (curItems.Count == 0) return;
-                    runLines.Add((curItems, curHasText, curMaxAdv, curMaxAbove));
-                    curItems = new List<(Block? Ctl, string? Txt, double X, double FontPt, string Res)>();
-                    pen = lineLeft; curHasText = false; curMaxAdv = 0; curMaxAbove = 0;
-                }
-                foreach (var it in runItems)
-                {
-                    if (it.IsInputField)
-                    {
-                        var cW = it.InputWidth > 0
-                            ? System.Math.Min(it.InputWidth, flow.contentWidth) : flow.contentWidth;
-                        var penW = cW + (it.IsSelectBox ? 2 * SelectSideBearingPt : 0);
-                        if (curItems.Count > 0 && pen + penW > lineRight + 1e-6) EndRunLine();
-                        // A tall control MID-LINE anchors its box BOTTOM at the
-                        // baseline and grows UP: it advances the flow like a
-                        // one-row control, but its line drops extra so the box
-                        // top clears the content above.
-                        var midLineTall = curItems.Count > 0 && it.InputMultiline;
-                        curItems.Add((it, null, pen, 0, ""));
-                        curMaxAdv = System.Math.Max(curMaxAdv, midLineTall
-                            ? ControlFirstRowAdvancePt
-                            : it.InputAdvance > 0 ? it.InputAdvance : ControlFirstRowAdvancePt);
-                        if (midLineTall && it.InputHeight > 0)
-                            curMaxAbove = System.Math.Max(curMaxAbove, it.InputHeight - TextareaBottomHangPt);
-                        pen += penW;
-                    }
-                    else if (!string.IsNullOrEmpty(it.Text))
-                    {
-                        var fpt = it.FontSize > 0 ? it.FontSize : EscapedBodyFontPt;
-                        var res = it.FontRes == "F2" ? "F6" : it.FontRes == "F3" ? "F7" : "F5";
-                        var face = res == "F6" ? "Times-Bold"
-                            : res == "F7" ? "Times-Italic" : "Times-Roman";
-                        int p = 0;
-                        while (p < it.Text.Length)
-                        {
-                            var sp = it.Text.IndexOf(' ', p);
-                            var wordEnd = sp < 0 ? it.Text.Length : sp + 1;
-                            while (wordEnd < it.Text.Length && it.Text[wordEnd] == ' ') wordEnd++;
-                            var token = it.Text.Substring(p, wordEnd - p);
-                            p = wordEnd;
-                            var wTrim = MeasureStd14(face, token.TrimEnd(' '), fpt);
-                            if (curItems.Count > 0 && pen + wTrim > lineRight + 1e-6) EndRunLine();
-                            // The space a wrap breaks at vanishes at the fresh line's start.
-                            var draw = curItems.Count == 0 ? token.TrimStart(' ') : token;
-                            if (draw.Length == 0) continue;
-                            curItems.Add((null, draw, pen, fpt, res));
-                            curHasText = true;
-                            pen += MeasureStd14(face, draw, fpt);
-                        }
-                    }
-                }
-                EndRunLine();
-                // A run stays TOGETHER over a page boundary: a
-                // question whose control box no longer fits takes its label lines
-                // with it to the fresh page (a run taller than a page still
-                // paginates line by line).
-                // The room a run needs on this page: every line's pre-drop and
-                // advance, except that a LAST line whose box is bottom-anchored
-                // only needs descent room under its baseline (such a line sits
-                // 2.7 pt above the margin).
-                double runTotalAdv = 0;
-                for (var rl = 0; rl < runLines.Count; rl++)
-                {
-                    var (_, rlHasText, rlMaxAdv, rlMaxAbove) = runLines[rl];
-                    var rlAdv = rlMaxAdv > 0
-                        ? rlMaxAdv + (rlHasText ? InlineMixedExtraPt : 0)
-                        : NormalLineHeightPt(blockFontSize > 0 ? blockFontSize : EscapedBodyFontPt);
-                    runTotalAdv += System.Math.Max(0, rlMaxAbove - InputBoxAboveBaselinePt)
-                        + (rl == runLines.Count - 1 && rlMaxAbove > InputBoxAboveBaselinePt
-                            ? SerifDescentRoomPt : rlAdv);
-                }
-                if (flow.y - runTotalAdv < marginBottom
-                    && runTotalAdv <= FreshPageTopY(profile.escapedAttrDoc, pageHeight, marginTop) - marginBottom
-                    && flow.y < FreshPageTopY(profile.escapedAttrDoc, pageHeight, marginTop) - 1e-3)
-                {
-                    flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                    EnsureFonts(flow.page, docFontDict);
-                    flow.y = FreshPageTopY(profile.escapedAttrDoc, pageHeight, marginTop); flow.pendingTopDrop = profile.hasZeroTopMargin;
-                }
-                foreach (var (items, hasText, maxAdv, maxAbove) in runLines)
-                {
-                    // A line with a mid-line TALL control drops extra first so
-                    // the box top clears the content above it.
-                    if (maxAbove > InputBoxAboveBaselinePt)
-                        flow.y -= maxAbove - InputBoxAboveBaselinePt;
-                    // A control line advances by the control's flow cost; carrying
-                    // body text beside it adds the descent clearance. Text-only
-                    // (wrap remainder) lines keep the normal line box.
-                    var adv = maxAdv > 0 ? maxAdv + (hasText ? InlineMixedExtraPt : 0)
-                        : NormalLineHeightPt(blockFontSize > 0 ? blockFontSize : EscapedBodyFontPt);
-                    if (flow.y - (maxAbove > InputBoxAboveBaselinePt ? SerifDescentRoomPt : adv) < marginBottom)
-                    {
-                        flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                        EnsureFonts(flow.page, docFontDict);
-                        flow.y = FreshPageTopY(profile.escapedAttrDoc, pageHeight, marginTop); flow.pendingTopDrop = profile.hasZeroTopMargin;
-                    }
-                    foreach (var (ctl, txt, x, fpt, res) in items)
-                    {
-                        if (ctl is not null)
-                            EmitControlAt(ctl, x, flow.y, flow, doc, lineHeight,
-                                aboveOverride: ctl.InputMultiline && x > lineLeft + 1e-6
-                                    && ctl.InputHeight > 0
-                                    ? ctl.InputHeight - TextareaBottomHangPt : null);
-                        else if (!string.IsNullOrEmpty(txt))
-                            EmitSerifRun(txt, res, fpt, x, flow.y, flow);
-                    }
-                    flow.contentPage = flow.page;
-                    flow.y -= adv;
-                }
-                flow.lastWasHardBreak = false;
-                flow.prevFlowMarginBottom = 0;
-                flow.prevFlowLineHeight = 0;
-                return;   // the block is laid out; the loop this came from would continue
-            }
+        var ib = new InputFieldBlockState();
+        ib.block = block;
+        ib.flow = flow;
+        ib.profile = profile;
+        ib.doc = doc;
+        ib.docFontDict = docFontDict;
+        ib.marginBottom = marginBottom;
+        ib.marginLeft = marginLeft;
+        ib.marginTop = marginTop;
+        ib.pageHeight = pageHeight;
+        ib.pageWidth = pageWidth;
+        ib.blockFontSize = blockFontSize;
+        ib.lineHeight = lineHeight;
+        // An inline run: label text and controls share wrapping line boxes
+        // with a pen, so label|input|label|select rows stay inline.
+        if (ib.block.InlineItems is { Count: > 0 } runItems)
+        {
+            LayoutInlineFieldRun(ib, runItems);
+            return;   // the block is laid out; the loop this came from would continue
+        }
 
-            if (flow.y < pageHeight - marginTop - 1e-3)
-                flow.y -= block.MarginTop;
-            var fieldH = block.InputHeight > 0 ? block.InputHeight : lineHeight;
-            var boxAbove = !block.InputDrawValue ? 0
-                : block.IsSelectBox ? SelectBoxAboveBaselinePt : InputBoxAboveBaselinePt;
-            if (flow.y + boxAbove - fieldH < marginBottom)
-            {
-                flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                EnsureFonts(flow.page, docFontDict);
-                flow.y = FreshPageTopY(profile.escapedAttrDoc, pageHeight, marginTop); flow.pendingTopDrop = profile.hasZeroTopMargin;
-            }
-            EmitControlAt(block, marginLeft + block.LeftIndent, flow.y, flow, doc, lineHeight);
-            flow.y -= (block.InputAdvance > 0 ? block.InputAdvance : fieldH) + block.MarginBottom;
-            flow.lastWasHardBreak = false;
+        if (ib.flow.y < ib.pageHeight - ib.marginTop - 1e-3)
+            ib.flow.y -= ib.block.MarginTop;
+        ib.fieldH = ib.block.InputHeight > 0 ? ib.block.InputHeight : ib.lineHeight;
+        ib.boxAbove = !ib.block.InputDrawValue ? 0
+            : ib.block.IsSelectBox ? SelectBoxAboveBaselinePt : InputBoxAboveBaselinePt;
+        if (ib.flow.y + ib.boxAbove - ib.fieldH < ib.marginBottom)
+        {
+            ib.flow.page = ib.doc.Pages.Add(ib.pageWidth, ib.pageHeight);
+            EnsureFonts(ib.flow.page, ib.docFontDict);
+            ib.flow.y = FreshPageTopY(ib.profile, ib.pageHeight, ib.marginTop); ib.flow.pendingTopDrop = ib.profile.hasZeroTopMargin;
+        }
+        double? columnAbove = null;
+        if (ib.block.InputInColumn)
+        {
+            // the cursor is the label's line top: the baseline sits one ascent under it
+            var asc = (WinMetricsFor(UaSerifFaceName) is { } uaFm ? uaFm.asc : UaSerifAscentEm) * ib.blockFontSize;
+            columnAbove = ib.fieldH - asc - UaInputBoxBelowBaselinePt;
+        }
+        EmitControlAt(ib.block, ib.marginLeft + ib.block.LeftIndent, ib.flow.y, ib.flow, ib.doc, ib.lineHeight, columnAbove);
+        ib.flow.y -= (ib.block.InputAdvance > 0 ? ib.block.InputAdvance : ib.fieldH) + ib.block.MarginBottom;
+        ib.flow.lastWasHardBreak = false;
     }
 
     /// <summary>Lays out one image block - floats, bands, placeholders included - and advances the flow past it.</summary>
@@ -257,376 +167,89 @@ internal static partial class HtmlToPdfConverter
     private static void LayoutImageBlock(
         Block block, HtmlFlowCursor flow, HtmlDocProfile profile, Document doc, Core.PdfDictionary docFontDict, HtmlLoadOptions? options, List<byte[]> inlineSvgs, Stack<(double SavedML, double SavedCW, double TopY, double MinEndY, Page StartPage)> bandStack, double marginBottom, double marginLeft, double marginTop, double pageHeight, double pageWidth, double lineHeight)
     {
-            // Form dialect: a block image sits at the preceding text's CSS box
-            // bottom plus that block's bottom margin/padding — rewind the legacy
-            // full-line-box advance (same correction the <hr> branch makes).
-            if (profile.formHorizontalDoc && flow.prevFlowLineHeight > 0)
+        // Form dialect: a block image sits at the preceding text's CSS box
+        // bottom plus that block's bottom margin/padding — rewind the legacy
+        // full-line-box advance (same correction the <hr> branch makes).
+        if (profile.formHorizontalDoc && flow.prevFlowLineHeight > 0)
+        {
+            flow.y += flow.prevFlowLineHeight - flow.prevFlowFontSize * 0.3;
+            flow.prevFlowLineHeight = 0;
+        }
+        // Vector sources (an inline-<svg> placeholder or an SVG file behind <img src>)
+        // rasterize through the SVG engine; their natural size is the SVG viewport in
+        // CSS pixels (× 0.75 → pt), not the raster's pixel count.
+        byte[]? bytes;
+        double svgNatW = 0, svgNatH = 0;
+        Document? svgVector = null;
+        if (block.ImageSrc is { } bsrc && bsrc.StartsWith("inline-svg:", StringComparison.Ordinal)
+            && int.TryParse(bsrc["inline-svg:".Length..], out var svgIdx)
+            && svgIdx >= 0 && svgIdx < inlineSvgs.Count)
+        {
+            var svgSrc = inlineSvgs[svgIdx];
+            // A root svg with no absolute width attribute (width:100%
+            // style or nothing) fills its containing block — the raster
+            // viewport is the content box in CSS px, so the artwork
+            // keeps its 0.75 pt/px scale unclipped (measured:
+            // ink to 850 px drawn from margin+6, never squeezed).
+            var svgHeadM = Regex.Match(Encoding.UTF8.GetString(svgSrc), @"<svg\b[^>]*>");
+            if (svgHeadM.Success
+                && !Regex.IsMatch(svgHeadM.Value, @"\bwidth\s*=\s*[""']?\d"))
             {
-                flow.y += flow.prevFlowLineHeight - flow.prevFlowFontSize * 0.3;
-                flow.prevFlowLineHeight = 0;
+                var vpWpx = Math.Max(100.0, flow.contentWidth - 2 * UaBodyMarginPt) / 0.75;
+                // height:100% of an AUTO parent is auto — the replaced
+                // element falls back to the CSS default 150 px, and the
+                // svg CLIPS at it (measured: the list box cuts
+                // at svg y=150, only row 1 and the ascenders of row 2
+                // survive). An absolute height attribute stands.
+                var svgHAttr = Regex.Match(svgHeadM.Value,
+                    @"\bheight\s*=\s*[""']?([\d.]+)");
+                var vpHpx = svgHAttr.Success && double.TryParse(
+                        svgHAttr.Groups[1].Value,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out var svgHv) && svgHv > 0
+                    ? svgHv : 150.0;
+                var svgFull = Encoding.UTF8.GetString(svgSrc);
+                var vpTag = svgHeadM.Value.Insert("<svg".Length,
+                    Compat.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        $" width=\"{vpWpx:0.##}\" height=\"{vpHpx:0.##}\""));
+                svgSrc = Encoding.UTF8.GetBytes(svgFull
+                    .Remove(svgHeadM.Index, svgHeadM.Length)
+                    .Insert(svgHeadM.Index, vpTag));
             }
-            // Vector sources (an inline-<svg> placeholder or an SVG file behind <img src>)
-            // rasterize through the SVG engine; their natural size is the SVG viewport in
-            // CSS pixels (× 0.75 → pt), not the raster's pixel count.
-            byte[]? bytes;
-            double svgNatW = 0, svgNatH = 0;
-            if (block.ImageSrc is { } bsrc && bsrc.StartsWith("inline-svg:", StringComparison.Ordinal)
-                && int.TryParse(bsrc["inline-svg:".Length..], out var svgIdx)
-                && svgIdx >= 0 && svgIdx < inlineSvgs.Count)
+            (bytes, var vw, var vh, svgVector) = ImageRasterizer.RasterizeSvgWithDocument(svgSrc);
+            svgNatW = vw * 0.75; svgNatH = vh * 0.75;
+        }
+        else
+        {
+            bytes = LoadConverterImage(block.ImageSrc, options);
+            if (IsSvgBytes(bytes))
             {
-                var svgSrc = inlineSvgs[svgIdx];
-                // A root svg with no absolute width attribute (width:100%
-                // style or nothing) fills its containing block — the raster
-                // viewport is the content box in CSS px, so the artwork
-                // keeps its 0.75 pt/px scale unclipped (measured:
-                // ink to 850 px drawn from margin+6, never squeezed).
-                var svgHeadM = Regex.Match(Encoding.UTF8.GetString(svgSrc), @"<svg\b[^>]*>");
-                if (svgHeadM.Success
-                    && !Regex.IsMatch(svgHeadM.Value, @"\bwidth\s*=\s*[""']?\d"))
-                {
-                    var vpWpx = Math.Max(100.0, flow.contentWidth - 2 * UaBodyMarginPt) / 0.75;
-                    // height:100% of an AUTO parent is auto — the replaced
-                    // element falls back to the CSS default 150 px, and the
-                    // svg CLIPS at it (measured: the list box cuts
-                    // at svg y=150, only row 1 and the ascenders of row 2
-                    // survive). An absolute height attribute stands.
-                    var svgHAttr = Regex.Match(svgHeadM.Value,
-                        @"\bheight\s*=\s*[""']?([\d.]+)");
-                    var vpHpx = svgHAttr.Success && double.TryParse(
-                            svgHAttr.Groups[1].Value,
-                            System.Globalization.NumberStyles.Float,
-                            System.Globalization.CultureInfo.InvariantCulture,
-                            out var svgHv) && svgHv > 0
-                        ? svgHv : 150.0;
-                    var svgFull = Encoding.UTF8.GetString(svgSrc);
-                    var vpTag = svgHeadM.Value.Insert("<svg".Length,
-                        string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                            $" width=\"{vpWpx:0.##}\" height=\"{vpHpx:0.##}\""));
-                    svgSrc = Encoding.UTF8.GetBytes(svgFull
-                        .Remove(svgHeadM.Index, svgHeadM.Length)
-                        .Insert(svgHeadM.Index, vpTag));
-                }
-                bytes = ImageRasterizer.RasterizeSvg(svgSrc, out var vw, out var vh);
+                (bytes, var vw, var vh, svgVector) = ImageRasterizer.RasterizeSvgWithDocument(bytes!);
                 svgNatW = vw * 0.75; svgNatH = vh * 0.75;
             }
-            else
-            {
-                bytes = LoadConverterImage(block.ImageSrc, options);
-                if (IsSvgBytes(bytes))
-                {
-                    bytes = ImageRasterizer.RasterizeSvg(bytes!, out var vw, out var vh);
-                    svgNatW = vw * 0.75; svgNatH = vh * 0.75;
-                }
-            }
-            if (bytes is not null)
-            {
-                double natW = 0, natH = 0;
-                if (svgNatW > 0 && svgNatH > 0) { natW = svgNatW; natH = svgNatH; }
-                else
-                {
-                    TryReadImagePixelSize(bytes, out var pxW, out var pxH);
-                    if (pxW > 0 && pxH > 0) { natW = pxW * 0.75; natH = pxH * 0.75; }
-                }
-                var w = block.ImageWidth > 0 ? block.ImageWidth * 0.75 : 0;
-                var h = block.ImageHeight > 0 ? block.ImageHeight * 0.75 : 0;
-                if (w <= 0 && h <= 0) { w = natW > 0 ? natW : 72; h = natH > 0 ? natH : 72; }
-                else if (h <= 0) h = (natW > 0 && natH > 0) ? w * natH / natW : w;
-                else if (w <= 0) w = (natW > 0 && natH > 0) ? h * natW / natH : h;
-                // Absolutely positioned image: seats at margins + left/top
-                // (CSS px → pt; measured: x = 90 + left·0.75, top = 72 + top·0.75)
-                // and leaves the flow — no width clamp, no cursor advance.
-                if (profile.uaStdSerif && block.ImageAbsPos)
-                {
-                    var apX = marginLeft + block.ImageAbsLeftPx * 0.75;
-                    var apTop = pageHeight - marginTop - block.ImageAbsTopPx * 0.75;
-                    try
-                    {
-                        flow.page.AddImage(bytes, new Rectangle(apX, apTop - h, apX + w, apTop));
-                    }
-                    catch { /* undecodable image: skip, keep the flow going */ }
-                    flow.contentPage = flow.page;
-                    flow.lastWasHardBreak = false;
-                    return;   // the block is laid out; the loop this came from would continue
-                }
-                var availW = flow.contentWidth;
-                // an inline %-max-width caps the drawn box at its share of the
-                // content width (aspect kept)
-                if (block.ImageMaxWFrac > 0 && availW > 0 && w > availW * block.ImageMaxWFrac)
-                {
-                    h *= availW * block.ImageMaxWFrac / w;
-                    w = availW * block.ImageMaxWFrac;
-                }
-                var rtlOverflow = profile.rtlDoc && availW > 0 && w > availW;
-                // Chart-card: the widened page fits the chart at NATURAL size; its
-                // indented right edge may pass the content box by the container
-                // chrome (it draws there, unclipped) — never downscale.
-                if (availW > 0 && w > availW && !rtlOverflow && !profile.chartCardDoc)
-                { h *= availW / w; w = availW; }
-                var padTop = block.ImagePadTopPx * 0.75;
-                var padBottom = block.ImagePadBottomPx * 0.75;
-                // Word-filtered pages: an over-tall image draws AT the flow
-                // position and CROSSES the page boundary — each continuation
-                // page redraws it shifted up by one content band (measured:
-                // the snip capture runs 290..1076 across two sheets).
-                if (profile.msoFilteredDoc && flow.y - h - padTop - padBottom < marginBottom)
-                {
-                    flow.y -= padTop;
-                    var crossX = block.ImageCentered
-                        ? marginLeft + (flow.contentWidth - w) / 2
-                        : marginLeft + block.ImageIndentPt;
-                    var crossBand = pageHeight - marginTop - marginBottom;
-                    var crossInv = System.Globalization.CultureInfo.InvariantCulture;
-                    // Each sheet's content clips at the margin
-                    // band — the rows past the bottom margin appear only on
-                    // the continuation page (which clips above its top
-                    // margin in turn: no row repeats).
-                    void CrossDraw(Page cp, double topY, bool clipTop)
-                    {
-                        var clipLo = marginBottom;
-                        var clipHi = clipTop ? pageHeight - marginTop : pageHeight;
-                        cp.AddContentStream(Encoding.ASCII.GetBytes(string.Create(crossInv,
-                            $"q 0 {clipLo:0.##} {pageWidth:0.##} {clipHi - clipLo:0.##} re W n\n")));
-                        try { cp.AddImage(bytes, new Rectangle(crossX, topY - h, crossX + w, topY)); }
-                        catch { /* undecodable image: keep the flow */ }
-                        cp.AddContentStream(Encoding.ASCII.GetBytes("Q\n"));
-                    }
-                    CrossDraw(flow.page, flow.y, clipTop: false);
-                    var crossTop = flow.y;
-                    while (crossBand > 0 && crossTop - h < marginBottom - 0.01)
-                    {
-                        flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                        EnsureFonts(flow.page, docFontDict);
-                        crossTop += crossBand;
-                        CrossDraw(flow.page, crossTop, clipTop: true);
-                    }
-                    flow.y = crossTop - h - padBottom;
-                    flow.contentPage = flow.page;
-                    flow.lastWasHardBreak = false;
-                    return;   // the block is laid out; the loop this came from would continue
-                }
-                if (flow.y - h - padTop - padBottom < marginBottom)
-                {
-                    // Inside a float column the overflow is clipped, not paginated.
-                    if (profile.floatBandDoc && bandStack.Count > 0)
-                    {
-                        flow.bandColClipped = true;
-                        flow.lastWasHardBreak = false;
-                        return;   // the block is laid out; the loop this came from would continue
-                    }
-                    flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                    EnsureFonts(flow.page, docFontDict);
-                    flow.y = pageHeight - marginTop; flow.pendingTopDrop = profile.hasZeroTopMargin;
-                }
-                flow.y -= padTop;
-                // A RIGHT-floated image hangs off the right content edge, inset by
-                // its own margin, instead of starting at the flow cursor.
-                var imgX = profile.floatImageDoc && block.FloatRight
-                    ? marginLeft + flow.contentWidth - w - block.ImageIndentPt
-                    : rtlOverflow ? marginLeft + flow.contentWidth - w
-                    : block.ImageCentered ? marginLeft + (flow.contentWidth - w) / 2
-                    : marginLeft + block.ImageIndentPt;
-                // Two floats that do not fit side by side do not overlap: the later
-                // one drops to below the earlier one and takes its own edge there.
-                // Measured on the certificate page - a 168.75 pt logo floated left
-                // reaches 317.25 and the 131.25 pt logo floated right would start at
-                // 315.25, so the second seats at y = the first's bottom
-                // rather than beside it.
-                var floatDropY = flow.y;
-                if (profile.floatImageDoc && block.FloatRight && flow.floatIndentPt > 0
-                    && imgX < marginLeft + flow.floatIndentPt
-                    && !double.IsNegativeInfinity(flow.floatBottomY))
-                    floatDropY = flow.floatBottomY;
-                var imgFlowY = flow.y;
-                flow.y = floatDropY;
-                try
-                {
-                    if (block.ImageRotateDeg != 0)
-                    {
-                        // CSS transform: rotate(θ) spins the image about its layout
-                        // box centre and leaves the layout box (and the flow advance)
-                        // unrotated. CSS angles are clockwise on the page; the stamp
-                        // matrix is PDF counter-clockwise, hence the sign flip. The
-                        // stamp anchors at the ROTATED bounding box's bottom-left.
-                        var rad = block.ImageRotateDeg * Math.PI / 180.0;
-                        var bw = Math.Abs(w * Math.Cos(rad)) + Math.Abs(h * Math.Sin(rad));
-                        var bh = Math.Abs(w * Math.Sin(rad)) + Math.Abs(h * Math.Cos(rad));
-                        var cx = imgX + w / 2;
-                        var cy = flow.y - h / 2;
-                        var stamp = ImageStamp.FromEncodedBytes(bytes);
-                        stamp.XIndent = cx - bw / 2;
-                        stamp.YIndent = cy - bh / 2;
-                        stamp.DisplayWidth = w;
-                        stamp.DisplayHeight = h;
-                        stamp.RotateAngle = -block.ImageRotateDeg;
-                        stamp.ApplyTo(flow.page);
-                    }
-                    else
-                        flow.page.AddImage(bytes, new Rectangle(imgX, flow.y - h, imgX + w, flow.y));
-                }
-                catch { /* undecodable image: skip, keep the flow going */ }
-                // Chart-card: the widget CARD around the chart paints a soft grey
-                // box-shadow (2px offset, 2px blur — the only visible chrome, the
-                // card's fill and border being white). Approximate the bitmap
-                // a browser renders with the offset right/bottom bars plus a hairline
-                // ring. Card box recovered from the content position: its left chrome
-                // insets the image, its inner box is the col's content width, and it
-                // closes one chrome below the chart.
-                if (profile.chartCardDoc && block.ImageCardShadow is { } cardShadow
-                    && block.ImageCardChromePt > 0)
-                {
-                    var chrome = block.ImageCardChromePt;
-                    var cardL = marginLeft + block.ImageIndentPt - chrome;
-                    var cardInnerW = flow.contentWidth - block.ImageWidenPadPt;
-                    var cardR = cardL + cardInnerW + 2 * chrome;
-                    var cardTopPdf = pageHeight - marginTop;
-                    var cardBottomPdf = flow.y - h - chrome;
-                    const double ShadowOffPt = 1.5;   // 2px offset
-                    const double ShadowExtPt = 2.75;  // offset + blur extent, measured on the expected bitmap
-                    var inv2 = System.Globalization.CultureInfo.InvariantCulture;
-                    var sr = cardShadow.R / 255.0; var sg = cardShadow.G / 255.0; var sbv = cardShadow.B / 255.0;
-                    var ops = string.Create(inv2,
-                        $"q {sr:0.###} {sg:0.###} {sbv:0.###} rg " +
-                        $"{cardR:0.##} {cardBottomPdf - ShadowExtPt:0.##} {ShadowExtPt:0.##} {cardTopPdf - ShadowOffPt - (cardBottomPdf - ShadowExtPt):0.##} re f " +
-                        $"{cardL + ShadowOffPt:0.##} {cardBottomPdf - ShadowExtPt:0.##} {cardR - cardL - ShadowOffPt + ShadowExtPt:0.##} {ShadowExtPt:0.##} re f " +
-                        $"{sr:0.###} {sg:0.###} {sbv:0.###} RG 0.5 w " +
-                        $"{cardL:0.##} {cardBottomPdf:0.##} {cardR - cardL:0.##} {cardTopPdf - cardBottomPdf:0.##} re S Q\n");
-                    flow.page.AddContentStream(Encoding.ASCII.GetBytes(ops));
-                }
-                flow.contentPage = flow.page;
-                // A LEFT-FLOATED image leaves the flow: the cursor stays where it
-                // was and the block boxes below keep starting at the content top —
-                // only their LINES are shortened, on the right of the image, until
-                // the flow has passed its bottom edge.
-                if (profile.floatImageDoc && block.FloatLeft)
-                {
-                    flow.floatBottomY = double.IsNegativeInfinity(flow.floatBottomY)
-                        ? flow.y - h - padBottom
-                        : System.Math.Min(flow.floatBottomY, flow.y - h - padBottom);
-                    // The float's occupied width is measured from the content edge,
-                    // so it counts the image's OWN margin as well as its box - and the
-                    // margin facing the flow, which is where wrapped text stops.
-                    flow.floatIndentPt = block.ImageIndentPt + w
-                        + (block.ImageFloatGutterPt ?? FloatGutterPt);
-                    flow.y = imgFlowY;
-                    flow.lastWasHardBreak = false;
-                    return;   // the block is laid out; the loop this came from would continue
-                }
-                // A RIGHT float leaves the flow the same way: the cursor stays put and
-                // the blocks below keep their top, with their lines shortened on the
-                // RIGHT until the flow has passed the image's bottom edge. Two floats
-                // in a row share the deepest bottom.
-                if (profile.floatImageDoc && block.FloatRight)
-                {
-                    flow.floatRightTopY = flow.y;
-                    flow.floatRightBottomY = flow.y - h - padBottom;
-                    flow.floatRightInsetPt = block.ImageIndentPt + w
-                        + (block.ImageFloatGutterPt ?? FloatGutterPt);
-                    // The float left the flow: the cursor never moved for it.
-                    flow.y = imgFlowY;
-                    flow.lastWasHardBreak = false;
-                    return;   // the block is laid out; the loop this came from would continue
-                }
-                flow.y -= h + padBottom;
-                // Inline image in a band column: the image sits on a text line box,
-                // so the line's tail (descent + leading) separates it from the next
-                // paragraph — without it the following text's ascent rises to the
-                // image's bottom edge (the legacy baseline-at-cursor model).
-                if (profile.floatBandDoc && bandStack.Count > 0) flow.y -= 9;
-                // Form dialect: same baseline-at-cursor problem in the main flow —
-                // the following section heading's ascent plus the heading gap
-                // kept below a block image.
-                else if (profile.formHorizontalDoc) flow.y -= 25.5;
-            }
-            else if (profile.uaStdSerif && !profile.msoFilteredDoc && !profile.escapedAttrDoc
-                && block.ImageWidth > 0 && block.ImageHeight > 0)
-            {
-                // UA flow: an unloadable image with a DECLARED box (class or
-                // attribute size) reserves that box — it draws the
-                // browser's bordered placeholder frame with the 32×32 icon at
-                // its top-left, and the flow resumes below it (the licensing
-                // letter's 453×271 px photo box).
-                var phW = block.ImageWidth * 0.75;
-                var phH = block.ImageHeight * 0.75;
-                var phX = marginLeft + block.LeftIndent;
-                var phTop = flow.y;
-                if (phTop - phH < marginBottom)
-                {
-                    flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                    EnsureFonts(flow.page, docFontDict);
-                    flow.y = FreshPageTopY(profile.escapedAttrDoc, pageHeight, marginTop); flow.pendingTopDrop = profile.hasZeroTopMargin;
-                    phTop = flow.y;
-                }
-                var uaPhDark = ParseCssColor("#555555");
-                var uaPhLite = ParseCssColor("#AAAAAA");
-                DrawBox(flow.page, phX, phTop, phW, 1, null, 0, uaPhDark);
-                DrawBox(flow.page, phX, phTop - phH, phW, 1, null, 0, uaPhLite);
-                DrawBox(flow.page, phX, phTop - phH, 1, phH, null, 0, uaPhDark);
-                DrawBox(flow.page, phX + phW - 1, phTop - phH, 1, phH, null, 0, uaPhLite);
-                var uaPhName = RegisterPlaceholderIcon(doc, flow.page, ref flow.flowIconRef, masked: true);
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
-                    $"q 32 0 0 32 {phX + 3:0.##} {phTop - 3 - 32:0.##} cm /{uaPhName} Do Q\n")));
-                flow.contentPage = flow.page;
-                flow.y -= phH;
-            }
-            else if (profile.msoFilteredDoc)
-            {
-                // Word-filtered pages: an unloadable image leaves the browser's
-                // 32×32 placeholder while its paragraph keeps ONE empty UA line
-                // of flow. Both lead placeholders ride 14.4 under the top margin
-                // (measured); the banner in the absolutely positioned span seats
-                // at 90 + (left 0 + margin-left −96px)·0.75 + the 1 pt frame
-                // inset = 19, the inline one at the content edge.
-                var mphX = flow.msoBrokenImgCount == 0 ? 90.0 - 72.0 + 1.0 : marginLeft + 0.75;
-                flow.msoBrokenImgCount++;
-                var mphTop = pageHeight - 72.0 - MsoBrokenImgDropPt;
-                var mphName = RegisterPlaceholderIcon(doc, flow.page, ref flow.flowIconRef, masked: true);
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
-                    $"q 32 0 0 32 {mphX:0.##} {mphTop - 32:0.##} cm /{mphName} Do Q\n")));
-                var mphDark = ParseCssColor("#555555");
-                var mphLite = ParseCssColor("#AAAAAA");
-                DrawBox(flow.page, mphX - 1, mphTop + 1, 34, 1, null, 0, mphDark);
-                DrawBox(flow.page, mphX - 1, mphTop - 32, 34, 1, null, 0, mphLite);
-                DrawBox(flow.page, mphX - 1, mphTop - 32, 1, 34, null, 0, mphDark);
-                DrawBox(flow.page, mphX + 32, mphTop - 32, 1, 34, null, 0, mphLite);
-                flow.contentPage = flow.page;
-                // the paragraph's one empty UA text line (an image block
-                // carries no font size, so the per-block line height is 0 here)
-                flow.y -= lineHeight > 1 ? lineHeight : PpLineBoxPt;
-            }
-            else if (profile.escapedAttrDoc)
-            {
-                // A broken image renders the browser's 32×32 placeholder icon at
-                // the content edge (the escaped float:/size styles can never
-                // apply). Measured: the icon's top rides 9.47 pt above the flow
-                // cursor — a heading's bottom margin does not span a replaced
-                // box — and a following grid's top border lands 1.38 pt under
-                // the icon (the cursor sits one 0.9em ascent below that edge).
-                var iconTop = flow.y + 9.47;
-                if (iconTop - 32 < marginBottom)
-                {
-                    flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                    EnsureFonts(flow.page, docFontDict);
-                    flow.y = FreshPageTopY(profile.escapedAttrDoc, pageHeight, marginTop); flow.pendingTopDrop = profile.hasZeroTopMargin;
-                    iconTop = flow.y;
-                }
-                var phName = RegisterPlaceholderIcon(doc, flow.page, ref flow.flowIconRef, masked: true);
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
-                    $"q 32 0 0 32 {marginLeft + 1:0.##} {iconTop - 32:0.##} cm /{phName} Do Q\n")));
-                // The browser frames a broken image with a 1 pt INSET border —
-                // top/left #555, bottom/right #aaa — half a point outside the icon.
-                var phDark = ParseCssColor("#555555");
-                var phLite = ParseCssColor("#AAAAAA");
-                DrawBox(flow.page, marginLeft, iconTop, 34, 1, null, 0, phDark);
-                DrawBox(flow.page, marginLeft, iconTop - 33, 34, 1, null, 0, phLite);
-                DrawBox(flow.page, marginLeft, iconTop - 33, 1, 34, null, 0, phDark);
-                DrawBox(flow.page, marginLeft + 33, iconTop - 33, 1, 34, null, 0, phLite);
-                flow.contentPage = flow.page;
-                flow.y = iconTop - 33 - 0.9 * 12;
-            }
-            flow.lastWasHardBreak = false;
-            flow.prevFlowMarginBottom = 0;
-            flow.prevFlowLineHeight = 0;
-            flow.afterRuleDrop = false;
+        }
+        if (bytes is not null)
+        {
+            if (!PlaceImage(bytes, svgNatW, svgNatH, block, flow, profile, doc, docFontDict, bandStack, marginBottom, marginLeft, marginTop, pageHeight, pageWidth, svgVector?.Pages.Count > 0 ? svgVector.Pages[1] : null)) return;
+        }
+        else if (profile.uaStdSerif && !profile.msoFilteredDoc && !profile.escapedAttrDoc
+            && block.ImageWidth > 0 && block.ImageHeight > 0)
+        {
+            PlaceUaMissingImage(block, flow, profile, doc, docFontDict, marginBottom, marginLeft, marginTop, pageHeight, pageWidth);
+        }
+        else if (profile.msoFilteredDoc)
+        {
+            PlaceMsoMissingImage(flow, doc, marginLeft, pageHeight, lineHeight);
+        }
+        else if (profile.escapedAttrDoc)
+        {
+            PlaceEscapedMissingImage(flow, profile, doc, docFontDict, marginBottom, marginLeft, marginTop, pageHeight, pageWidth);
+        }
+        flow.lastWasHardBreak = false;
+        flow.prevFlowMarginBottom = 0;
+        flow.prevFlowLineHeight = 0;
+        flow.afterRuleDrop = false;
             flow.afterFhTable = false;
     }
 
@@ -721,7 +344,7 @@ internal static partial class HtmlToPdfConverter
             {
                 flow.page = doc.Pages.Add(pageWidth, pageHeight);
                 EnsureFonts(flow.page, docFontDict);
-                flow.y = FreshPageTopY(profile.escapedAttrDoc, pageHeight, marginTop); flow.pendingTopDrop = profile.hasZeroTopMargin;
+                flow.y = FreshPageTopY(profile, pageHeight, marginTop); flow.pendingTopDrop = profile.hasZeroTopMargin;
                 btnTop = flow.y;
             }
             // DataWorks: the Completed submit right-aligns on its legacy
@@ -753,10 +376,7 @@ internal static partial class HtmlToPdfConverter
     /// flow past the space it occupies.</summary>
     /// <remarks>Lifted verbatim out of the block-dispatch loop in
     /// <see cref="ConvertFromHtml"/>.</remarks>
-    private static void LayoutHardBreakBlock(Block block, HtmlFlowCursor flow, HtmlDocProfile profile,
-        HtmlBlockMetrics metrics, Document doc, Core.PdfDictionary docFontDict, bool uaFlow,
-        bool breakAfterTable, bool wasRow, string? bodyCssFace, double marginBottom, double marginLeft, double marginTop,
-        double pageHeight, double pageWidth)
+    private static void LayoutHardBreakBlock(ConvertState cv, Block block, HtmlBlockMetrics metrics, bool breakAfterTable, bool wasRow)
     {
             // Border-top divider marker: the div's rule strokes here, above
             // its content, and spends only its own width.
@@ -764,16 +384,16 @@ internal static partial class HtmlToPdfConverter
                 && block.BorderWidth > 0)
             {
                 var invtr = System.Globalization.CultureInfo.InvariantCulture;
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(string.Create(invtr,
+                cv.flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(invtr,
                     $"q {topRule.R / 255.0:0.###} {topRule.G / 255.0:0.###} {topRule.B / 255.0:0.###} RG " +
-                    $"{block.BorderWidth:0.##} w {marginLeft:0.##} {flow.y - block.BorderWidth / 2:0.##} m " +
-                    $"{pageWidth - marginLeft:0.##} {flow.y - block.BorderWidth / 2:0.##} l S Q\n")));
+                    $"{block.BorderWidth:0.##} w {cv.marginLeft:0.##} {cv.flow.y - block.BorderWidth / 2:0.##} m " +
+                    $"{cv.pageWidth - cv.marginLeft:0.##} {cv.flow.y - block.BorderWidth / 2:0.##} l S Q\n")));
                 // The rule spends its own width plus the wrapper's
                 // padding-top under it (measured: the From block opens
                 // pad + margin below the rule).
-                flow.y -= block.BorderWidth + block.PadTop;
-                flow.contentPage = flow.page;
-                flow.lastWasHardBreak = false;
+                cv.flow.y -= block.BorderWidth + block.PadTop;
+                cv.flow.contentPage = cv.flow.page;
+                cv.flow.lastWasHardBreak = false;
                 return;   // the block is laid out; the loop this came from would continue
             }
             // Prefer the explicit CSS height over the default half-line
@@ -782,77 +402,127 @@ internal static partial class HtmlToPdfConverter
             // collapse intended pagination.
             // A <br> directly after a styled row ends a full default-size line box
             // (the browser's 16px body line), not the usual half-line spacer.
-            var spacer = block.ExplicitHeight > 0
-                ? block.ExplicitHeight
-                // Redline: an empty paragraph occupies its FULL 1.15 em box
-                // (probed: 13.8 between the FORM header and the first grid).
-                : profile.redlineDiffDoc && metrics.blockFontSize > 0
-                ? RedlineEmptyParaPt
-                : (flow.lastWasHardBreak ? 0 : (wasRow ? 13.5 : metrics.lineHeight * 0.5));
-            // Form dialect: this document family separates sections with CSS
-            // margins, and its bare <br>s are all float-clears (`clear:both`) that
-            // collapse to the float bottom — they add no line boxes of their own.
-            if (profile.formHorizontalDoc && block.ExplicitHeight <= 0) spacer = 0;
-            // Form-document dialect: every standalone <br> is one full line box at
-            // its enclosing size — consecutive <br>s stack (no half-line coalescing).
-            else if (profile.formDialectTables && block.IsLineBreak)
-                spacer = (block.FontSize > 0 ? block.FontSize : metrics.blockFontSize) * 1.3;
-            // CSS run dialect: a standalone <br> is one full line box of the page
-            // stylesheet's own base face and size — the same rule its cells pitch on.
-            else if (bodyCssFace is not null && block.IsLineBreak
-                     && WinMetricsFor(bodyCssFace) is { } brFace)
-                spacer = MetricLineHeight(
-                    block.FontSize > 0 ? block.FontSize : profile.bodyCssFontPt, brFace.sum);
-            // Float flow: a <br> ENDS the line it sits on, and the flow has already
-            // spent that line's advance — so the first of a run is free and every one
-            // after it stands a full line box of the paragraph's own pitch. Measured on
-            // the certificate: its `<br><br>` sub-paragraph separator puts the next
-            // glyph top exactly two pitches below the last one (440.71 against 440.72).
-            else if (profile.floatBothSidesDoc && block.IsLineBreak)
-                spacer = flow.lastWasHardBreak ? metrics.lineHeight : 0;
-            // Metric flow: a real <br> is one full line box at the size of its enclosing
-            // style — every <br> counts (no coalescing). Styled spacers keep their CSS
-            // height; other empty containers collapse to nothing.
-            if (profile.metricFlow)
-                spacer = block.IsLineBreak && WinMetricsFor(profile.metricFace) is { } brm
-                    ? (uaFlow
-                        ? (block.FontSize > 0 ? block.FontSize : 12.0) * 1.125
-                          // A break paragraph that FOLLOWS a metric table takes
-                          // the UA paragraph margin a text neighbour would have
-                          // opened (probed: table -> <p><br/></p> -> table gaps
-                          // 13.44 + 13.5 + 13.44 exactly; between text
-                          // paragraphs the margins come from the text path and
-                          // nothing is added here).
-                          // The first REAL line break of a post-table tail stands
-                          // the UA margin its table neighbour never read (probed:
-                          // table, bare <br>, <p><br/></p>, text spaces
-                          // 13.44+13.5 / 13.5 / 13.44+asc - the second break's
-                          // margin arrives through the following text block's own
-                          // margin-top).
-                          + (profile.uaBareDoc && breakAfterTable
-                              && block.UaSpacerPara ? UaParagraphMarginPt : 0)
-                        : MetricLineHeight(block.FontSize > 0 ? block.FontSize : 11.0, brm.sum))
-                    : block.IsLineBreak ? block.ExplicitHeight
-                    : block.IsHardBreak && block.ExplicitHeight > 0 ? block.ExplicitHeight
-                    : 0;
+            TraceHardBreakSeat(cv, block, metrics, wasRow);
+            // A break that OPENS an unwrapped wrapper-table row stands the row chrome
+            // the unwrap padded its first block by, exactly as a text block spends it
+            // (probed on the RTL letter: the cell's leading <br/> line starts 2.25
+            // under the table top, the next table's leading nbsp line 4.5 under the
+            // previous table's last line).
+            if (cv.profile.uaStdSerif && block.PadTop > 0) cv.flow.y -= block.PadTop;
+            var spacer = HardBreakSpacerPt(cv, block, metrics, breakAfterTable, wasRow);
+            PaintSpacerBox(cv, block, spacer);
             if (spacer > 0)
             {
-                if (flow.y - spacer < marginBottom)
+                if (cv.flow.y - spacer < cv.marginBottom)
                 {
-                    flow.page = doc.Pages.Add(pageWidth, pageHeight);
-                    EnsureFonts(flow.page, docFontDict);
-                    flow.y = FreshPageTopY(profile.escapedAttrDoc, pageHeight, marginTop); flow.pendingTopDrop = profile.hasZeroTopMargin;
+                    cv.flow.page = cv.doc.Pages.Add(cv.pageWidth, cv.pageHeight);
+                    EnsureFonts(cv.flow.page, cv.docFontDict);
+                    cv.flow.y = FreshPageTopY(cv.profile, cv.pageHeight, cv.marginTop); cv.flow.pendingTopDrop = cv.profile.hasZeroTopMargin;
                 }
-                flow.y -= spacer;
+                cv.flow.y -= spacer;
             }
-            flow.lastWasHardBreak = true;
-            flow.lastBreakWasUaSpacer = block.UaSpacerPara;
+            cv.flow.lastWasHardBreak = true;
+            cv.flow.lastBreakWasUaSpacer = block.UaSpacerPara;
             // A zero-space break (the form dialect's float-clears) is layout-inert:
             // it must not hide the preceding text block from the <hr>/image rewind.
             if (spacer > 0)
             {
-                flow.prevFlowMarginBottom = 0;
-                flow.prevFlowLineHeight = 0;
+                cv.flow.prevFlowMarginBottom = 0;
+                cv.flow.prevFlowLineHeight = 0;
             }
+    }
+
+    /// <summary>The UA paragraph margin a post-table tail's first real line break stands for the
+    /// paragraph that follows (see HardBreakSpacerPt); the flow remembers it stood it.</summary>
+    private static double UaTailMarginPt(ConvertState cv, Block block, bool breakAfterTable)
+    {
+        if (!(cv.profile.uaBareDoc && breakAfterTable && block.UaSpacerPara)) return 0;
+        cv.flow.uaTailMarginSpent = true;
+        return UaParagraphMarginPt;
+    }
+
+    /// <summary>ASPOSE_TRACE_SEAT=1: the state a hard break spends its spacer from (sheet-typography flow).</summary>
+    private static void TraceHardBreakSeat(ConvertState cv, Block block, HtmlBlockMetrics metrics, bool wasRow)
+    {
+        if (!cv.profile.sheetTypographyDoc || Environment.GetEnvironmentVariable("ASPOSE_TRACE_SEAT") != "1") return;
+        Console.WriteLine(FormattableString.Invariant($"[seat-hb] y={cv.flow.y:0.##} fs={block.FontSize:0.##} mfs={metrics.blockFontSize:0.##} lh={metrics.lineHeight:0.##} explicit={block.ExplicitHeight:0.##} br={block.IsLineBreak} lastHb={cv.flow.lastWasHardBreak} wasRow={wasRow} mt={block.MarginTop:0.##} mb={block.MarginBottom:0.##}"));
+    }
+
+    /// <summary>The vertical space a hard break spends: its declared height, its dialect's
+    /// empty-paragraph box, or the line box of the face and size it stands in.</summary>
+    /// <summary>The percent line-height factor a UA break's line box resolves at: the break's own
+    /// (inherited) factor, else the body tag's where its attribute is the flow's typography; 0 = none.</summary>
+    private static double UaBreakLineFactor(ConvertState cv, Block block)
+        => block.UaLineFactor > 0 ? block.UaLineFactor
+            : cv.uaBodyFaceFromAttr && cv.bodyLineFactor > 0 ? cv.bodyLineFactor : 0;
+
+    private static double HardBreakSpacerPt(ConvertState cv, Block block, HtmlBlockMetrics metrics, bool breakAfterTable, bool wasRow)
+    {
+        var spacer = block.ExplicitHeight > 0
+            ? block.ExplicitHeight
+            // Redline: an empty paragraph occupies its FULL 1.15 em box
+            // (probed: 13.8 between the FORM header and the first grid).
+            : cv.profile.redlineDiffDoc && metrics.blockFontSize > 0
+            ? RedlineEmptyParaPt
+            : (cv.flow.lastWasHardBreak ? 0 : (wasRow ? 13.5 : metrics.lineHeight * 0.5));
+        // Form dialect: this document family separates sections with CSS
+        // margins, and its bare <br>s are all float-clears (`clear:both`) that
+        // collapse to the float bottom — they add no line boxes of their own.
+        if (cv.profile.formHorizontalDoc && block.ExplicitHeight <= 0) spacer = 0;
+        // Form-document dialect: every standalone <br> is one full line box at
+        // its enclosing size — consecutive <br>s stack (no half-line coalescing).
+        else if (cv.profile.formDialectTables && block.IsLineBreak)
+            spacer = (block.FontSize > 0 ? block.FontSize : metrics.blockFontSize) * 1.3;
+        // CSS run dialect: a standalone <br> is one full line box of the page
+        // stylesheet's own base face and size — the same rule its cells pitch on.
+        else if (cv.bodyCssFace is not null && block.IsLineBreak
+                 && WinMetricsFor(cv.bodyCssFace) is { } brFace)
+            spacer = MetricLineHeight(
+                block.FontSize > 0 ? block.FontSize : cv.profile.bodyCssFontPt, brFace.sum);
+        // Float flow: a <br> ENDS the line it sits on, and the cv.flow has already
+        // spent that line's advance — so the first of a run is free and every one
+        // after it stands a full line box of the paragraph's own pitch. Measured on
+        // the certificate: its `<br><br>` sub-paragraph separator puts the next
+        // glyph top exactly two pitches below the last one (440.71 against 440.72).
+        else if (cv.profile.floatBothSidesDoc && block.IsLineBreak)
+            spacer = cv.flow.lastWasHardBreak ? metrics.lineHeight : 0;
+        // Metric flow: a real <br> is one full line box at the size of its enclosing
+        // style — every <br> counts (no coalescing). Styled spacers keep their CSS
+        // height; other empty containers collapse to nothing.
+        if (cv.profile.metricFlow)
+            spacer = block.IsLineBreak && WinMetricsFor(cv.profile.metricFace) is { } brm
+                ? (cv.uaFlow
+                    // A declared line box is the break's WHOLE box, nothing added.
+                    ? block.LineBoxPt > 0 ? block.LineBoxPt
+                    // (…or a percent line-height's factor at the break's size - MEASURED, the evaluation
+                    //  form: the 11 pt body's `line-height: 100%` paces its inter-table <br>s 11)
+                    : UaBreakLineFactor(cv, block) is > 0 and var brFactor
+                    ? (block.FontSize > 0 ? block.FontSize : 12.0) * brFactor + UaTailMarginPt(cv, block, breakAfterTable)
+                    // …otherwise the break's line box is the flow face's px-rounded hhea
+                    // line at the break's size, the box every text line of the flow stands
+                    // in (probed: a 14px cell's leading <br/> line is 16px = 12 pt, where
+                    // 1.125 em gives 11.81; at 12 pt both give 13.5).
+                    : MetricLineHeight(block.FontSize > 0 ? block.FontSize : 12.0,
+                        HheaLineSumFor(cv.profile.metricFace) ?? brm.sum)
+                      // A break paragraph that FOLLOWS a metric table takes
+                      // the UA paragraph margin a text neighbour would have
+                      // opened (probed: table -> <p><br/></p> -> table gaps
+                      // 13.44 + 13.5 + 13.44 exactly; between text
+                      // paragraphs the margins come from the text path and
+                      // nothing is added here).
+                      // The first REAL line break of a post-table tail stands
+                      // the UA margin its table neighbour never read (probed:
+                      // table, bare <br>, <p><br/></p>, text spaces
+                      // 13.44+13.5 / 13.5 / 13.44+asc - the second break's
+                      // margin arrives through the following text block's own
+                      // margin-top).
+                      + UaTailMarginPt(cv, block, breakAfterTable)
+                    // (the pt form's bare <br> is one line box of the body's own size: 8 pt Tahoma -> 13 px)
+                    : MetricLineHeight(block.FontSize > 0 ? block.FontSize
+                        : cv.profile.ptFormDoc && cv.profile.formBodyFontPt > 0 ? cv.profile.formBodyFontPt : 11.0, brm.sum))
+                : block.IsLineBreak ? block.ExplicitHeight
+                : block.IsHardBreak && block.ExplicitHeight > 0 ? block.ExplicitHeight
+                : 0;
+        return spacer;
     }
 }

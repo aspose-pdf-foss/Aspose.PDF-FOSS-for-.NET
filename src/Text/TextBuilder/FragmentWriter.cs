@@ -1,4 +1,4 @@
-using Aspose.Pdf.Content;
+﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Text;
@@ -14,325 +14,28 @@ public sealed partial class TextBuilder
     /// segments with a space between them).</summary>
     private void WriteFragment(TextFragment fragment, bool addTrailingSpace, Core.PdfStream? rewrite)
     {
-        var text = fragment.Text + (addTrailingSpace ? " " : "");
-
-        // If FontData was set via implicit FontData→FontInfo conversion on TextState.Font,
-        // propagate it to FontData so the font gets embedded properly.
-        if (fragment.TextState.FontData is null && fragment.TextState.Font?.SourceFontData is { } srcFd)
-            fragment.TextState.FontData = srcFd;
-
-        // Route every embedded-TTF fragment through the CIDFont (Type0 /
-        // Identity-H) path so glyph advances align with the font's own metrics.
-        // Pitfall: the multi-segment branch below originally emitted
-        // ShowText(literal) against the Identity-H font, producing
-        // nonsense glyph IDs from each
-        // pair of ASCII bytes. The branch now encodes each segment's text as
-        // 2-byte glyph IDs via the same parser the fragment-level path uses,
-        // so the CID route is safe for both single- and multi-segment
-        // fragments. TextAbsorber.DecodeWithToUnicode round-trips the text
-        // for extraction via the emitted /ToUnicode CMap.
-        // A Bold/Italic FontStyle on a repository-resolved (non-core) face selects
-        // the styled family member (Times New Roman + Bold|Italic → the Bold Italic
-        // face); the embedded /BaseFont then reports
-        // family+styles. Genuine Core-14 names keep the Standard-14 mapping below.
-        if (ResolveStyledFace(fragment.TextState, fragment.TextState.FontData) is { } styledFace)
-            fragment.TextState.FontData = styledFace;
-
-        // A face whose licence does not cover embedding is not written into the file at
-        // all. Settle that before a writer is chosen: reporting is raised here, and a
-        // caller that switched reporting off keeps its save, the run falling to the
-        // by-name Standard-14 path with the reason left on the face.
-        var embeddableFontData = fragment.TextState.FontData is { TtfData: not null } licenceProbe
-            && RefuseUnlicensedEmbedding(licenceProbe, _page) ? null : fragment.TextState.FontData;
-        var needsCid = embeddableFontData is { TtfData: not null };
-
-        // Arabic is cursive: the embedded-font path resolves each character through the
-        // font's cmap to a single glyph, so the base letters must first be replaced with
-        // their contextual presentation forms (and lam-alef ligatures) and reordered to
-        // visual order. Without this an embedded Arabic font renders disjoint, isolated,
-        // logical-order letters. Only the CID path benefits — Standard-14 fonts have no
-        // Arabic glyphs regardless.
-        if (needsCid)
-            text = ArabicShaper.ShapeForDisplay(text);
-
-        string fontResName;
-        byte[]? hexGlyphIds = null;
-
-        if (needsCid)
-        {
-            var fontData = embeddableFontData!;
-            // A font whose cmap lacks glyphs for the text is
-            // silently substituted with a covering host face (Thai → Tahoma, Han →
-            // SimSun, …) — otherwise every missing char writes glyph 0 and the
-            // duplicate ToUnicode entries garble extraction.
-            if (!FontRepository.CoversText(fontData.TtfData, text))
-            {
-                var substitute = FontRepository.SubstituteForMissingGlyphs(text, fragment.TextState.Font);
-                // A substitute takes over only when it covers MORE of the text than
-                // the face the caller chose: a face missing two Romanian comma-below
-                // letters keeps its run (they draw as notdef) instead of being traded
-                // for a face that lacks every ideograph of the same run.
-                if (substitute?.TtfData is not null
-                    && FontRepository.CoverCount(substitute.TtfData, text)
-                       > FontRepository.CoverCount(fontData.TtfData, text))
-                    fontData = substitute;
-            }
-            (fontResName, hexGlyphIds) = EnsureEmbeddedCIDFont(fontData, text);
-            // Per-LINE covering hand-off: a line the chosen
-            // face cannot cover is drawn WHOLE in a covering host face (Times
-            // New Roman first) with its own embedded font resource - an Arial
-            // Unicode MS paragraph keeps its face while its Romanian comma-below
-            // line comes back in Times. Only lines the face genuinely
-            // cannot cover switch; the fragment's own face resumes after each.
-            _cidLineOverrides = null;
-            if (fontData.TtfData is { } baseTtf && text.IndexOf('\n') >= 0)
-            {
-                var probeLines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
-                for (var li = 0; li < probeLines.Length; li++)
-                {
-                    var lineText = probeLines[li];
-                    if (lineText.Length == 0 || FontRepository.CoversText(baseTtf, lineText)) continue;
-                    if (FontRepository.ResolveCoveringFont(baseTtf, lineText) is not { SourceFontData.TtfData: not null } cover)
-                        continue;
-                    var (lineRes, lineHex) = EnsureEmbeddedCIDFont(cover.SourceFontData, lineText);
-                    if (lineHex is not null)
-                        (_cidLineOverrides ??= new())[li] = (lineRes, lineHex);
-                }
-            }
-        }
-        else if (embeddableFontData is { TtfData: not null } fontData2)
-        {
-            fontResName = EnsureEmbeddedTrueTypeFont(fontData2);
-        }
-        else
-        {
-            var baseFontName = fragment.TextState.Std14FaceOverride
-                ?? MapToStandard14(fragment.TextState);
-            fontResName = EnsureFontResource(baseFontName, fragment.TextState.EmitStandard14Descriptor,
-                fragment.TextState.Std14Widths);
-        }
-
-        var fontSize = fragment.TextState.FontSize;
-        var x = fragment.Position?.XIndent ?? 0;
-        var y = fragment.Position?.YIndent ?? 0;
-
-        // Compute descent compensation for embedded fonts.
-        // The absorber's Position.Y = Td.Y + descent*fs/1000 (descent is negative),
-        // so we must write Td.Y = user_y - descent*fs/1000 to round-trip correctly.
-        double descentComp = needsCid
-            ? ComputeCidDescentCompensation(fragment.TextState, fontSize)
-            : ComputeDescentCompensation(fragment.TextState, fontSize);
-
-        var builder = new ContentStreamBuilder();
-        builder.SaveState();
-
-        // Tab-stop line: the text is a sequence of runs separated by #$TAB markers,
-        // each run seated against its stop — ending at it, centred on it, or starting
-        // from it — with the stop's leader drawn across the gap the tab opened.
-        if (fragment.TabStops is { Count: > 0 } stops
-            && fragment.Text.Contains(TabMarker, StringComparison.Ordinal))
-        {
-            AppendTabbedLine(builder, fragment, stops, fontResName, fontSize, x, y, descentComp);
-            builder.RestoreState();
-            if (rewrite is not null) rewrite.ReplaceData(builder.Build());
-            else
-            {
-                _page.AddContentStream(builder.Build());
-                fragment.AttachedSegment = _page.LastContentStreamSegment();
-            }
-            _page.ResetContentsCache();
-            fragment.AttachedSignature = fragment.AttachedLayoutSignature();
-            return;
-        }
-
-        // A fragment appended through the public API writes each segment as its OWN
-        // run, seated at that segment's own position — segments do NOT flow after one
-        // another, and one that was never positioned stays at the origin. The
-        // fragment-level background is then ONE box
-        // spanning every run. A fragment the LAYOUT ENGINE hands over is the opposite
-        // case: its segments are pieces of one flowed line and are chained along it.
+        var fw = new FragmentWriteState();
+        ResolveFragmentFace(fw, fragment, addTrailingSpace);
+        if (!TryResolveFragmentFont(fw, fragment)) return;
+        if (!TrySeatFragment(fw, fragment, rewrite)) return;
         if (fragment.Segments.Count > 1 && !fragment.AttachedInline)
         {
-            var seats = BuildSegmentSeats(fragment, fontSize, x, y);
-            EmitFragmentBackground(builder, fragment, seats);
-            AppendSegmentRuns(builder, fragment, seats, fontResName, fontSize,
-                descentComp, x, y, addTrailingSpace);
+            var seats = BuildSegmentSeats(fragment, fw.fontSize, fw.x, fw.y);
+            EmitFragmentBackground(fw.builder, fragment, seats);
+            AppendSegmentRuns(fw.builder, fragment, seats, fw.fontResName, fw.fontSize,
+                fw.descentComp, fw.x, fw.y, addTrailingSpace);
         }
-        else if (fragment.Segments.Count > 1 && SegmentStylesDiffer(fragment, fontSize))
+        else if (fragment.Segments.Count > 1 && SegmentStylesDiffer(fragment, fw.fontSize))
         {
-            EmitBackgroundRectangles(builder, fragment, fontResName, fontSize, x, y);
-            AppendStyledSegments(fragment, builder, fontResName, fontSize, descentComp, x, y);
+            EmitBackgroundRectangles(fw.builder, fragment, fw.fontResName, fw.fontSize, fw.x, fw.y);
+            AppendStyledSegments(fragment, fw.builder, fw.fontResName, fw.fontSize, fw.descentComp, fw.x, fw.y);
         }
         else
         {
-            EmitBackgroundRectangles(builder, fragment, fontResName, fontSize, x, y);
-            var fg = fragment.TextState.ForegroundColor;
-            if (fg?.PatternColorSpace is Aspose.Pdf.Drawing.GradientAxialShading grad)
-            {
-                // A gradient foreground paints the run through a PatternType-2 shading
-                // pattern whose matrix spans the run's advance box, axis running in the
-                // text's logical direction (an RTL run starts its gradient at the right).
-                var patName = EmitTextGradientPattern(grad, fragment, text, hexGlyphIds, fontSize, x, y);
-                if (patName is not null) builder.Raw($"/Pattern cs /{patName} scn\n");
-                else builder.SetFillColor(0, 0, 0);
-            }
-            else if (fg is not null)
-            {
-                var fgGs = TextParagraph.EnsureFillAlphaExtGState(_page, fg.AByte);
-                if (fgGs is not null) builder.SetExtGState(fgGs);
-                builder.SetFillColor(fg.R / 255.0, fg.G / 255.0, fg.B / 255.0);
-            }
-
-            var sc = fragment.TextState.StrokingColor;
-            if (sc is not null)
-                builder.SetStrokeColor(sc.R / 255.0, sc.G / 255.0, sc.B / 255.0);
-
-            // A STROKING render mode also needs its pen: the default line width is a
-            // full point, which at text sizes floods the glyphs into blobs. Producers
-            // that fake a bold weight this way — filling and stroking the same regular
-            // face rather than switching to a bold one — set the pen to a fraction of
-            // the size, and the replacement has to keep that relationship for the run to
-            // come back the same weight.
-            var mode = fragment.TextState.RenderingMode;
-            var strokes = mode is Aspose.Pdf.Text.TextRenderingMode.StrokeText
-                or Aspose.Pdf.Text.TextRenderingMode.FillThenStrokeText
-                or Aspose.Pdf.Text.TextRenderingMode.StrokeTextAndAddPathToClipping
-                or Aspose.Pdf.Text.TextRenderingMode.FillThenStrokeTextAndAddPathToClipping;
-            if (strokes) builder.SetLineWidth(fontSize / SyntheticBoldPenRatio);
-
-            builder.BeginText();
-            builder.SetFont(fontResName, fontSize);
-            if (mode != Aspose.Pdf.Text.TextRenderingMode.FillText)
-                builder.SetTextRenderingMode((int)mode);
-            // Emit Tc/Tw so the requested character/word spacing is actually applied when
-            // the page is rendered or re-parsed (without these operators the run renders at
-            // default spacing). The fragment's own q/Q scope confines them to this run.
-            if (fragment.TextState.CharacterSpacing != 0)
-                builder.SetCharSpacing(fragment.TextState.CharacterSpacing);
-            if (fragment.TextState.WordSpacing != 0)
-                builder.SetWordSpacing(fragment.TextState.WordSpacing);
-            // Horizontal scaling (Tz): stretch/compress the run's glyph advances. Without
-            // this the renderer draws at 100% regardless of TextState.HorizontalScaling.
-            if (Math.Abs(fragment.TextState.HorizontalScaling - 100) > 1e-9)
-                builder.SetHorizontalScaling(fragment.TextState.HorizontalScaling);
-
-            // \n inside the fragment text needs explicit T* breaks: PDF's Tj
-            // operator renders the whole string on one line (newline chars are
-            // either dropped or drawn as .notdef). Without splitting, a multi-
-            // line input collapses to a single overflowing line.
-            var normalised = text.Replace("\r\n", "\n").Replace('\r', '\n');
-            var hasNewlines = normalised.IndexOf('\n') >= 0;
-            // An explicit LineSpacing is extra leading on top of the glyph height
-            // (line pitch = fontSize + LineSpacing, matching the generator paginator);
-            // otherwise fall back to the default 1.2x leading.
-            var lineHeight = fragment.TextState.FlowLinePitch
-                ?? (fragment.TextState.LineSpacing > 0
-                    ? fontSize + fragment.TextState.LineSpacing
-                    : fontSize * 1.2);
-            if (hasNewlines) builder.SetLeading(lineHeight);
-            // A non-zero TextState.Rotation rotates the run about its position via a
-            // text matrix; the descent shift (applied straight down in the unrotated
-            // case) is rotated to stay perpendicular to the rotated baseline.
-            var rotation = fragment.TextState.Rotation;
-            if (Math.Abs(rotation % 360.0) > 1e-9)
-            {
-                var rad = rotation * Math.PI / 180.0;
-                double cos = Math.Cos(rad), sin = Math.Sin(rad);
-                builder.SetTextMatrix(cos, sin, -sin, cos,
-                    x + descentComp * sin, y - descentComp * cos);
-            }
-            else if (Math.Abs(fragment.TextState.SourceTmScale - 1.0) > 1e-9)
-            {
-                // Text drawn under a horizontally scaled matrix: a replacement put in
-                // its place carries the same scale, so it occupies the same width.
-                builder.SetTextMatrix(fragment.TextState.SourceTmScale, 0, 0, 1, x, y - descentComp);
-            }
-            else
-            {
-                builder.MoveTextPosition(x, y - descentComp);
-            }
-
-            if (hexGlyphIds is not null)
-            {
-                // For CID fonts the hex glyph stream is byte-aligned (2 bytes/glyph)
-                // but newlines came in as char positions, not byte positions. Re-build
-                // per-line hex slices from the original text using the same mapping.
-                if (hasNewlines)
-                    WriteCidLinesWithBreaks(builder, fragment.TextState.FontData!, normalised,
-                        fontResName, fontSize);
-                else
-                    builder.ShowTextHex(hexGlyphIds);
-                _cidLineOverrides = null;
-            }
-            else
-            {
-                var lines = normalised.Split('\n');
-                for (var i = 0; i < lines.Length; i++)
-                {
-                    if (i > 0) builder.NextLine();
-                    if (lines[i].Length > 0) builder.ShowText(lines[i]);
-                }
-            }
-
-            builder.EndText();
+            WriteMixedSegments(fw, fragment);
         }
 
-        builder.RestoreState();
-
-        var runBytes = builder.Build();
-        if (rewrite is not null)
-        {
-            rewrite.ReplaceData(runBytes);
-            // A previously materialised operator view of the page would flush the
-            // stale operators back over the rewritten segment at save.
-            _page.ResetContentsCache();
-        }
-        else if (fragment.TextState.MarkedContentTag is { } mcTag)
-            _page.AddMarkedContentStream(runBytes, mcTag, fragment.TextState.MarkedContentMcid);
-        else
-        {
-            _page.AddContentStream(runBytes);
-            fragment.AttachedSegment = _page.LastContentStreamSegment();
-        }
-        fragment.AttachedSignature = fragment.AttachedLayoutSignature();
-        // Record the fragment's LOGICAL text, not the display form: Arabic input
-        // is shaped into presentation forms above, and storing the shaped string
-        // makes the save-time sync see a phantom text change — TextReplacer then
-        // re-writes the run without shaping.
-        fragment.LastWrittenText = fragment.Text + (addTrailingSpace ? " " : "");
-        if (rewrite is null) _page.RegisterAttachedFragment(fragment);
-
-        // Underline/strikeout are drawn as thin rectangles at save time. The
-        // TextState flags are typically set before the fragment is attached to a
-        // page, so the property setters' own registration (which needs a SourcePage)
-        // is skipped — register here now that the fragment lives on this page. The
-        // flag may sit on the fragment's TextState or on any of its segments.
-        // Only a REQUESTED underline is drawn. One the absorber merely observed under the
-        // source describes the page as it already is — re-emitting it for a replacement
-        // lays a second copy over the original rule.
-        bool underline = fragment.TextState.UnderlineRequested;
-        bool strikeOut = fragment.TextState.StrikeOut;
-        if (fragment.Segments is { } segs)
-        {
-            foreach (var seg in segs)
-            {
-                if (seg.TextState.UnderlineRequested) underline = true;
-                if (seg.TextState.StrikeOut) strikeOut = true;
-            }
-        }
-        // A rotated run's decorations must rotate with it: the save-time rule
-        // writer keys its rotation-aware path on TextDirX/Y, which only the
-        // absorber populates — an APPENDED fragment carries its angle in
-        // TextState.Rotation, so seed the direction from that (every rule is
-        // drawn along the rotated baseline).
-        if ((underline || strikeOut) && Math.Abs(fragment.TextState.Rotation % 360.0) > 1e-9)
-        {
-            var decRad = fragment.TextState.Rotation * Math.PI / 180.0;
-            fragment.TextDirX = Math.Cos(decRad);
-            fragment.TextDirY = Math.Sin(decRad);
-        }
-        if (underline) _page.RegisterUnderlineFragment(fragment);
-        if (strikeOut) _page.RegisterStrikeOutFragment(fragment);
+        FinishFragment(fw, fragment, addTrailingSpace, rewrite);
     }
 
     /// <summary>One appended segment's seat. <see cref="SegmentSeat.TmX"/>/<see cref="SegmentSeat.TmY"/>
@@ -476,8 +179,10 @@ public sealed partial class TextBuilder
             string resName;
             byte[]? hexIds = null;
             // Arabic is cursive: shape to contextual presentation forms in visual
-            // order before the glyph lookup (a no-op for every other script).
-            var segText = ArabicShaper.ShapeForDisplay(seat.Text);
+            // order before the glyph lookup (a no-op for every other script). The
+            // paragraph reads left to right, so each Arabic run flips in place and the
+            // runs keep their logical order.
+            var segText = ArabicShaper.ShapeForLtrParagraph(seat.Text);
             if (seat.FontData is { TtfData: not null })
             {
                 (resName, hexIds) = EnsureEmbeddedCIDFont(seat.FontData, segText);
@@ -508,7 +213,7 @@ public sealed partial class TextBuilder
             if (charSpacing != 0) builder.SetCharSpacing(charSpacing);
             var wordSpacing = runState.WordSpacing != 0
                 ? runState.WordSpacing : fragment.TextState.WordSpacing;
-            if (wordSpacing != 0) builder.SetWordSpacing(wordSpacing);
+            if (wordSpacing != 0 && hexIds is null) builder.SetWordSpacing(wordSpacing);
             var scaling = Math.Abs(runState.HorizontalScaling - 100) > 1e-9
                 ? runState.HorizontalScaling : fragment.TextState.HorizontalScaling;
             if (Math.Abs(scaling - 100) > 1e-9) builder.SetHorizontalScaling(scaling);
@@ -517,7 +222,8 @@ public sealed partial class TextBuilder
             if (renderMode != Aspose.Pdf.Text.TextRenderingMode.FillText)
                 builder.SetTextRenderingMode((int)renderMode);
             builder.MoveTextPosition(seat.TmX, seat.TmY);
-            if (hexIds is not null) builder.ShowTextHex(hexIds);
+            if (hexIds is not null)
+                ShowComposite(builder, hexIds, CompositeWordSpacing(segText, hexIds, wordSpacing, seat.FontSize));
             else builder.ShowText(segText);
             builder.EndText();
         }
@@ -640,7 +346,7 @@ public sealed partial class TextBuilder
     }
 
     private void WriteCidLinesWithBreaks(ContentStreamBuilder builder, FontData fontData, string normalised,
-        string baseResName, double fontSize)
+        string baseResName, double fontSize, double wordSpacing = 0)
     {
         var glyphParser = new GlyphOutlineParser(fontData.TtfData!);
         var lines = normalised.Split('\n');
@@ -687,7 +393,8 @@ public sealed partial class TextBuilder
                 bytes.Add((byte)(gid >> 8));
                 bytes.Add((byte)(gid & 0xFF));
             }
-            builder.ShowTextHex(bytes.ToArray());
+            var glyphIds = bytes.ToArray();
+            ShowComposite(builder, glyphIds, CompositeWordSpacing(line, glyphIds, wordSpacing, fontSize));
         }
     }
 
@@ -720,9 +427,15 @@ public sealed partial class TextBuilder
             {
                 var segX = seg.Position?.XIndent ?? curX;
                 var segY = seg.Position?.YIndent ?? curY;
-                var segFs = styledSegs && seg.TextState.FontSize > 0 ? seg.TextState.FontSize : fontSize;
+                // The size and rise the run draws with (a script segment draws smaller, on a shifted
+                // baseline); fontSize already carries a whole-fragment script's size.
+                var segBase = styledSegs && seg.TextState.FontSize > 0 ? seg.TextState.FontSize : fragment.TextState.FontSize;
+                var segFs = styledSegs && seg.TextState.FontSize > 0 ? ScriptSize(seg.TextState, seg.TextState.FontSize) : fontSize;
+                var rise = ScriptRise(styledSegs ? seg.TextState : fragment.TextState, segBase);
 
-                var fontName = (styledSegs ? seg.TextState.FontName : null) ?? fragment.TextState.FontName;
+                // The face the run draws in: a fragment naming none draws in the Standard-14 face
+                // the writer maps it to, so its box measures with that face's widths.
+                var fontName = (styledSegs ? seg.TextState.FontName : null) ?? fragment.TextState.FontName ?? MapToStandard14(fragment.TextState);
                 var fd = (styledSegs ? seg.TextState.FontData ?? seg.TextState.Font?.SourceFontData : null)
                     ?? fragment.TextState.FontData ?? fragment.TextState.Font?.SourceFontData;
                 double LineWidth(string s)
@@ -777,7 +490,7 @@ public sealed partial class TextBuilder
                     builder.SetFillColor(bg.R / 255.0, bg.G / 255.0, bg.B / 255.0);
                     if (borderColor is not null)
                         builder.SetStrokeColor(borderColor.R / 255.0, borderColor.G / 255.0, borderColor.B / 255.0);
-                    builder.SetMatrix(cos, sin, -sin, cos, segX, segY - li * bgLineHeight);
+                    builder.SetMatrix(cos, sin, -sin, cos, segX - sin * rise, segY + cos * rise - li * bgLineHeight);
                     builder.Rectangle(0, 0, lw, rh);
                     if (borderColor is not null) builder.FillAndStrokeEvenOdd();
                     else builder.Fill();

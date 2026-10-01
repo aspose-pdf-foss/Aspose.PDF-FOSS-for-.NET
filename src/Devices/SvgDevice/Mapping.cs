@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
@@ -21,10 +21,20 @@ public sealed partial class SvgDevice
         m1[4] * m2[1] + m1[5] * m2[3] + m2[5],
     };
 
-    private static string FormatHex(double r, double g, double b) =>
-        $"#{ClampByte(r):x2}{ClampByte(g):x2}{ClampByte(b):x2}";
+    /// <summary>An SVG colour as #rrggbbAA. The ALPHA pair is upper case because the reference
+    /// spells it so and a hex assertion is case-sensitive; the RGB digits keep their original lower
+    /// case because NOTHING evidences a change there - the only two corpus assertions are
+    /// #000000FF, whose RGB half is zeros and therefore case-blind. ⚠ If a probe ever
+    /// shows the reference writes #FF0000FF for a non-zero colour, this is where it changes. The alpha byte is always written, opaque included
+    /// (#000000FF), which is the spelling the reference emits; expressing it here rather than in
+    /// the companion fill-opacity/stroke-opacity attribute is written TOO, because the reference
+    /// writes both (a corpus assertion pins it). SVG multiplies them, so translucent content carries its alpha
+    /// twice - that is the reference's behaviour and matching it is the contract, not a mistake
+    /// to correct here.</summary>
+    private static string FormatHex(double r, double g, double b, double a = 1.0) =>
+        $"#{ClampByte(r):x2}{ClampByte(g):x2}{ClampByte(b):x2}{ClampByte(a):X2}";
 
-    private static int ClampByte(double v) => Math.Clamp((int)Math.Round(v * 255), 0, 255);
+    private static int ClampByte(double v) => Compat.Clamp((int)Math.Round(v * 255), 0, 255);
 
     /// <summary>
     /// Set an RGB colour from the numeric operands of an <c>sc</c>/<c>scn</c>
@@ -48,58 +58,60 @@ public sealed partial class SvgDevice
     /// <summary>Map scn tint operands through the space's tint transform into RGB.
     /// Returns false when the operands don't fit the space (caller falls back to the
     /// operand-count inference).</summary>
-    private static bool TintToRgb(SoftwarePageRenderer.ImageColorSpaceInfo cs,
-        List<PdfObject> operands, ref double r, ref double g, ref double b)
+    private static (double r, double g, double b)? TintToRgb(SoftwarePageRenderer.ImageColorSpaceInfo cs,
+        List<PdfObject> operands)
     {
         var n = cs.TintComponents;
-        if (n <= 0 || operands.Count < n) return false;
+        if (n <= 0 || operands.Count < n) return null;
         var tints = new double[n];
         for (var i = 0; i < n; i++)
         {
-            if (operands[operands.Count - n + i] is not (PdfInteger or PdfReal)) return false;
+            if (operands[operands.Count - n + i] is not (PdfInteger or PdfReal)) return null;
             tints[i] = Num(operands[operands.Count - n + i]);
         }
         double[] alt;
         try { alt = cs.TintTransform!.Evaluate(tints); }
-        catch { return false; }
+        catch { return null; }
         switch (cs.AltSpaceName)
         {
             case "DeviceCMYK" when alt.Length >= 4:
-                CmykToRgb(alt[0], alt[1], alt[2], alt[3], out r, out g, out b);
-                return true;
+                var (r, g, b) = CmykToRgb(alt[0], alt[1], alt[2], alt[3]);
+                return (r, g, b);
             case "DeviceRGB" when alt.Length >= 3:
-                r = alt[0]; g = alt[1]; b = alt[2];
-                return true;
+                return (alt[0], alt[1], alt[2]);
             case "DeviceGray" when alt.Length >= 1:
-                r = g = b = alt[0];
-                return true;
+                return (alt[0], alt[0], alt[0]);
         }
-        return false;
+        return null;
     }
 
-    private static void SetColorFromComponents(List<PdfObject> operands, ref double r, ref double g, ref double b)
+    /// <summary>The colour the operands set by their count - gray, RGB or CMYK - or the current colour when the
+    /// count fits none.</summary>
+    private static (double r, double g, double b) SetColorFromComponents(List<PdfObject> operands, double r, double g, double b)
     {
         var nums = operands.Where(o => o is PdfInteger or PdfReal).Select(Num).ToList();
         switch (nums.Count)
         {
             case 1:
-                r = g = b = nums[0];
-                break;
+                return (nums[0], nums[0], nums[0]);
             case 3:
-                r = nums[0]; g = nums[1]; b = nums[2];
-                break;
+                return (nums[0], nums[1], nums[2]);
             case 4:
-                CmykToRgb(nums[0], nums[1], nums[2], nums[3], out r, out g, out b);
-                break;
+                var (cr, cg, cb) = CmykToRgb(nums[0], nums[1], nums[2], nums[3]);
+                return (cr, cg, cb);
         }
+        return (r, g, b);
     }
 
-    private static void CmykToRgb(double c, double m, double y, double k,
-        out double r, out double g, out double b)
+    private static (double r, double g, double b) CmykToRgb(double c, double m, double y, double k)
     {
+        double r = default;
+        double g = default;
+        double b = default;
         r = (1 - c) * (1 - k);
         g = (1 - m) * (1 - k);
         b = (1 - y) * (1 - k);
+        return (r, g, b);
     }
 
     private static string MapLineCap(int cap) => cap switch
@@ -206,7 +218,7 @@ public sealed partial class SvgDevice
             // BCL Bitmap PNG encoder; re-encode through GDI+ so chunk layout
             // and byte bulk match that output (the zipped-output sizes the
             // corpus pins are the BCL encoder's).
-            if (OperatingSystem.IsWindowsVersionAtLeast(6, 1))
+            if (Compat.IsWindowsVersionAtLeast(6, 1))
             {
                 try { bytes = GdiReencodePng(bytes); }
                 catch { /* keep the managed-encoder PNG */ }

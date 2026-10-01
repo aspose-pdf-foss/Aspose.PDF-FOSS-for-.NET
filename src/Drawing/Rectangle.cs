@@ -7,14 +7,19 @@ namespace Aspose.Pdf.Drawing;
 /// </summary>
 public sealed class Rectangle : Shape
 {
+    /// <summary>Gets or sets the X coordinate of the left edge, in points relative to the graph.</summary>
     public double Left { get; set; }
+    /// <summary>Gets or sets the Y coordinate of the bottom edge, in points relative to the graph.</summary>
     public double Bottom { get; set; }
+    /// <summary>Gets or sets the width in points.</summary>
     public double Width { get; set; }
+    /// <summary>Gets or sets the height in points.</summary>
     public double Height { get; set; }
 
     /// <summary>Corner radius for rounded-rectangle rendering (0 = sharp corners). Stored only.</summary>
     public double RoundedCornerRadius { get; set; }
 
+    /// <summary>Creates a rectangle with its lower-left corner at (<c>left</c>, <c>bottom</c>) and the given width and height, in points relative to the graph.</summary>
     public Rectangle(double left, double bottom, double width, double height)
     {
         Left = left; Bottom = bottom; Width = width; Height = height;

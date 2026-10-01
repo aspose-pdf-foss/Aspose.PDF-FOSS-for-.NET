@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Content;
@@ -39,6 +39,34 @@ public partial class Table : BaseParagraph
     /// with X a resolvable installed face): its rows pitch at X's own CSS line box —
     /// this is the face's hhea (asc+desc)/em ratio. Zero = not that dialect.</summary>
     internal double InlineFaceGridRatio { get; set; }
+
+    /// <summary>A grid seated on the browser's own line box in a DOCUMENT face: the face's
+    /// usWinAscent and (usWinAscent+usWinDescent) as fractions of the em. The generator's
+    /// own dialect seats a baseline one FACE DESCENT above the em box's bottom, which is
+    /// the em box, not the CSS line box - it lands 1.16 pt high on 10 pt Arial. A grid that
+    /// already pitches, pads and spaces like the browser seats like it too: half the surplus
+    /// leading, then the ascent. Zero asc = not that dialect.</summary>
+    internal (double Asc, double Sum) UaSeatMetrics { get; set; }
+
+    /// <summary>The line box a UA checkbox takes in a cell of this grid, split at its baseline:
+    /// above it the larger of the seat's ascent half and the 13 px box with its 3 px top margin,
+    /// below it the larger of the seat's descent half and the 3 px bottom margin (14.70 at 12 pt
+    /// Times, where the descent half wins below; 14.25 at 10 pt Arial, where the margins win).</summary>
+    internal (double Above, double Below) UaCheckboxLine(double fontPt)
+    {
+        var box = UaSeatMetrics.Asc > 0 ? FaceCssLineBoxPt(fontPt, UaSeatMetrics.Sum) : CssLineBoxPt(fontPt);
+        var drop = UaSeatMetrics.Asc > 0 ? UaSeatDropPt(fontPt) : fontPt;
+        return (Math.Max(drop, UaCheckboxBoxPt + UaCheckboxMarginBlockPt),
+            Math.Max(box - drop, UaCheckboxMarginBlockPt));
+    }
+
+    /// <summary>Line-box top to the baseline for a grid seated on a document face; zero when
+    /// the grid names none and the generator's own em-box seat stands.</summary>
+    internal double UaSeatDropPt(double fontPt)
+        => UaSeatMetrics.Asc > 0 && fontPt > 0
+            ? (FaceCssLineBoxPt(fontPt, UaSeatMetrics.Sum) - fontPt * UaSeatMetrics.Sum) / 2
+              + fontPt * UaSeatMetrics.Asc
+            : 0;
 
     /// <summary>The caller lays every spill slice onto pages that share ONE /Font
     /// resource dictionary (the HTML converter's per-conversion dict) — Type0
@@ -87,7 +115,7 @@ public partial class Table : BaseParagraph
     private const double InlineRadioCenterRisePt = 4.89;
 
     /// <summary>Markers bracketing an inline PUSH BUTTON's caption in cell text
-    /// (`<input type="button" value="Print">` in a form grid) — the render pass
+    /// (`&lt;input type="button" value="Print">` in a form grid) — the render pass
     /// draws the 3D button chrome around the enclosed caption. Private-use
     /// codepoints: no real document text contains them.</summary>
     internal const char InlineButtonChar = '';
@@ -190,9 +218,27 @@ public partial class Table : BaseParagraph
     /// cell border joins the column pitch AFTER the declared widths were fitted, so a
     /// grid that exactly filled its band overruns it by one pitch per column: the
     /// reference draws that column's box at its full width and wraps and centres its
-    /// text in what is left of the page. Content is measured on the clamped width
-    /// (colWidths already carries it); this is what the BOX gets back.</summary>
+    /// text in what is left of the page past the right rule and padding. Content is
+    /// measured on the clamped width (colWidths already carries it); this is what
+    /// the BOX gets back.</summary>
     internal double LastColBoxOverhang;
+
+    /// <summary>The band a generator host cell centres an OVER-WIDE nested grid in: a
+    /// flat 1000 pt, whatever the page or the host (probed at 90 and 72 pt page
+    /// margins and 249 / 271 / 300 pt host cells: the grid's left edge is twice its
+    /// own Margin.Left plus half of 1000 less its declared width, so 7 x 70 with a
+    /// 10 pt margin starts at 275 on every one of them). Its columns scale alike so
+    /// their declared sum is the host cell width plus one column pitch per column
+    /// (0.5 pt rules: 7 x 70 in a 249 pt cell -> 36.57 each, 5 x 70 -> 50.8, 7 x 70
+    /// in a 300 pt cell -> 43.86).</summary>
+    private const double NestedCentreBandPt = 1000;
+
+    /// <summary>Set on a centred nested grid whose declared widths overrun its
+    /// generator host cell: the sum its columns are scaled to (0 = not over-wide).</summary>
+    internal double NestedOverwideTarget;
+
+    /// <summary>The declared column sum of an over-wide centred nested grid.</summary>
+    internal double NestedDeclaredSum;
 
     // XML header band: the table-level BackgroundColor fill bleeds to this full
     // width from x = 0 (an era header band paints edge-to-edge while its
@@ -242,8 +288,10 @@ public partial class Table : BaseParagraph
     /// pages (see <see cref="RepeatingRowsCount"/>). Stored only.</summary>
     public TextState? RepeatingRowsStyle { get; set; }
 
+    /// <summary>Gets or sets how the table is placed across the page's content width: <c>Center</c> or <c>Right</c> offsets a table narrower than that width; the default <c>Left</c> keeps it at the left margin. Ignored when the table's <c>Left</c> position is greater than zero.</summary>
     public HorizontalAlignment Alignment { get; set; } = HorizontalAlignment.Left;
 
+    /// <summary>Creates an empty table with no rows or columns.</summary>
     public Table()
     {
         Rows = new Rows(this);
@@ -273,8 +321,8 @@ public partial class Table : BaseParagraph
                 {
                     var cell = row.Cells[ci];
                     var pad = cell.Margin ?? row.DefaultCellPadding ?? DefaultCellPadding;
-                    var need = MaxLineWidth(cell, row, exact: true) + (pad?.Left ?? 0) + (pad?.Right ?? 0)
-                        + AutoFitMeasureGuardPt;
+                    var need = Math.Max(MaxLineWidth(cell, row, exact: true), WidestPicture(cell))
+                        + (pad?.Left ?? 0) + (pad?.Right ?? 0) + AutoFitMeasureGuardPt;
                     if (need > w[ci]) w[ci] = need;
                 }
             }
@@ -284,7 +332,7 @@ public partial class Table : BaseParagraph
         }
         double total = 0;
         foreach (var tok in ColumnWidths.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
-            if (TryParseWidthToken(tok, out var w))
+            if (TryParseWidthToken(tok) is { } w)
                 total += w;
         return total;
     }
@@ -492,178 +540,9 @@ public partial class Table : BaseParagraph
     //
     // Each ImportDataTable / ImportDataView overload converts the source's
     // string-rendered cells into Row/Cell instances inserted starting at the
-    // 1-based (firstFilledRow, firstFilledColumn) offset. The overloads
+    // 0-based (firstFilledRow, firstFilledColumn) offset. The overloads
     // returning void keep the published reflection signature exactly.
-
-    /// <summary>Import a one-dimensional object array into the table, wrapping the
-    /// values into rows by the table's column count. Filling starts at the 1-based
-    /// (firstFilledRow, firstFilledColumn) offset and continues on the next row at
-    /// column 1 once a row is full — so a long array spans many rows (and paginates
-    /// when the table is broken) rather than a single very wide row.</summary>
-    public void ImportArray(object?[] importedArray, int firstFilledRow, int firstFilledColumn, bool isLeftColumnsFilled)
-    {
-        if (importedArray is null) return;
-        _ = isLeftColumnsFilled;
-
-        // Column count drives the wrap. When the table declares no columns yet,
-        // fall back to a single row (the whole array) so callers that rely on a
-        // column-less table keep the prior one-row behaviour.
-        var columnCount = ResolveImportColumnCount();
-        if (columnCount <= 0) columnCount = importedArray.Length;
-        if (columnCount <= 0) return;
-
-        var row = Math.Max(1, firstFilledRow);
-        var col = Math.Min(Math.Max(1, firstFilledColumn), columnCount);
-        foreach (var value in importedArray)
-        {
-            EnsureRowsAndColumns(row, columnCount);
-            var r = Rows[row - 1];
-            EnsureCellCount(r, col);
-            r.Cells[col - 1].Text = value?.ToString() ?? string.Empty;
-            if (++col > columnCount) { col = 1; row++; }
-        }
-    }
-
-    /// <summary>The table's column count used when wrapping an imported array:
-    /// the number of declared <see cref="ColumnWidths"/>, else the widest existing
-    /// row, else zero (no columns declared yet).</summary>
-    private int ResolveImportColumnCount()
-    {
-        if (!string.IsNullOrEmpty(ColumnWidths))
-        {
-            var n = ColumnWidths.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).Length;
-            if (n > 0) return n;
-        }
-        var max = 0;
-        foreach (var r in Rows)
-            if (r.Cells.Count > max) max = r.Cells.Count;
-        return max;
-    }
-
-    /// <summary>Place a sequence of values into a single table row starting at the
-    /// 1-based (firstFilledRow, firstFilledColumn) offset — the per-row fill used by
-    /// the DataTable / DataView importers, which already iterate row by row and so
-    /// must not wrap.</summary>
-    private void FillSingleRow(object?[] values, int firstFilledRow, int firstFilledColumn)
-    {
-        // Both 0 and 1 are accepted as "first position"; positions are 1-based here.
-        if (firstFilledRow < 1) firstFilledRow = 1;
-        if (firstFilledColumn < 1) firstFilledColumn = 1;
-        EnsureRowsAndColumns(firstFilledRow, firstFilledColumn + values.Length);
-        var row = Rows[firstFilledRow - 1];
-        for (int i = 0; i < values.Length; i++)
-        {
-            var cellIdx = firstFilledColumn - 1 + i;
-            EnsureCellCount(row, cellIdx + 1);
-            row.Cells[cellIdx].Text = values[i]?.ToString() ?? string.Empty;
-        }
-    }
-
-    /// <summary>Import all rows of a <see cref="System.Data.DataTable"/>.</summary>
-    public void ImportDataTable(System.Data.DataTable importedDataTable, bool isColumnNamesImported,
-        int firstFilledRow, int firstFilledColumn)
-    {
-        if (importedDataTable is null) return;
-        var startRow = firstFilledRow < 1 ? 1 : firstFilledRow;
-        if (isColumnNamesImported)
-        {
-            var header = importedDataTable.Columns.Cast<System.Data.DataColumn>()
-                .Select(c => (object)c.ColumnName).ToArray();
-            FillSingleRow(header, startRow, firstFilledColumn);
-            startRow++;
-        }
-        for (int r = 0; r < importedDataTable.Rows.Count; r++)
-        {
-            var values = importedDataTable.Rows[r].ItemArray;
-            // Coerce DBNull to empty string so .ToString() doesn't surface "System.DBNull".
-            for (int i = 0; i < values.Length; i++)
-                if (values[i] is null || values[i] is System.DBNull) values[i] = string.Empty;
-            FillSingleRow(values, startRow + r, firstFilledColumn);
-        }
-    }
-
-    /// <summary>Import with explicit max-rows / max-columns and HTML support flag.</summary>
-    public void ImportDataTable(System.Data.DataTable importedDataTable, bool isColumnNamesShown,
-        int firstFilledRow, byte firstFilledColumn, int maxRows, int maxColumns, bool isHtmlSupported)
-    {
-        if (importedDataTable is null) return;
-        _ = maxColumns; _ = isHtmlSupported;
-        var startRow = firstFilledRow < 1 ? 1 : firstFilledRow;
-        if (isColumnNamesShown)
-        {
-            var header = importedDataTable.Columns.Cast<System.Data.DataColumn>()
-                .Take(maxColumns > 0 ? maxColumns : int.MaxValue)
-                .Select(c => (object)c.ColumnName).ToArray();
-            FillSingleRow(header, startRow, firstFilledColumn);
-            startRow++;
-        }
-        var rowCap = maxRows > 0 ? Math.Min(maxRows, importedDataTable.Rows.Count) : importedDataTable.Rows.Count;
-        for (int r = 0; r < rowCap; r++)
-        {
-            var values = importedDataTable.Rows[r].ItemArray;
-            for (int i = 0; i < values.Length; i++)
-                if (values[i] is null || values[i] is System.DBNull) values[i] = string.Empty;
-            FillSingleRow(values, startRow + r, firstFilledColumn);
-        }
-    }
-
-    /// <summary>Import a subset of rows / columns selected by index lists.</summary>
-    public void ImportDataTable(System.Data.DataTable importedDataTable,
-        int[] sourceRowList, int[] sourceColumnList,
-        int firstFilledRow, int firstFilledColumn,
-        bool showColumnNamesAsFirstRow, bool isHtmlSupported)
-    {
-        if (importedDataTable is null || sourceRowList is null || sourceColumnList is null) return;
-        _ = isHtmlSupported;
-        var startRow = firstFilledRow < 1 ? 1 : firstFilledRow;
-        if (showColumnNamesAsFirstRow)
-        {
-            var header = sourceColumnList
-                .Where(c => c >= 0 && c < importedDataTable.Columns.Count)
-                .Select(c => (object)importedDataTable.Columns[c].ColumnName)
-                .ToArray();
-            FillSingleRow(header, startRow, firstFilledColumn);
-            startRow++;
-        }
-        for (int r = 0; r < sourceRowList.Length; r++)
-        {
-            var rowIx = sourceRowList[r];
-            if (rowIx < 0 || rowIx >= importedDataTable.Rows.Count) continue;
-            var row = importedDataTable.Rows[rowIx];
-            var values = sourceColumnList
-                .Where(c => c >= 0 && c < importedDataTable.Columns.Count)
-                .Select(c => (object)(row[c] is System.DBNull ? string.Empty : row[c]?.ToString() ?? string.Empty))
-                .ToArray();
-            FillSingleRow(values, startRow + r, firstFilledColumn);
-        }
-    }
-
-    /// <summary>Import a <see cref="System.Data.DataView"/>.</summary>
-    public void ImportDataView(System.Data.DataView sourceDataView, bool isColumnNamesImported,
-        int firstFilledRow, int firstFilledColumn, int maxRows, int maxColumns)
-    {
-        if (sourceDataView is null) return;
-        var startRow = firstFilledRow < 1 ? 1 : firstFilledRow;
-        var cols = sourceDataView.Table?.Columns.Cast<System.Data.DataColumn>().ToList()
-                   ?? new System.Collections.Generic.List<System.Data.DataColumn>();
-        if (maxColumns > 0 && maxColumns < cols.Count) cols = cols.GetRange(0, maxColumns);
-        if (isColumnNamesImported)
-        {
-            var header = cols.Select(c => (object)c.ColumnName).ToArray();
-            FillSingleRow(header, startRow, firstFilledColumn);
-            startRow++;
-        }
-        var rowCap = maxRows > 0 ? Math.Min(maxRows, sourceDataView.Count) : sourceDataView.Count;
-        for (int r = 0; r < rowCap; r++)
-        {
-            var values = cols.Select(c =>
-            {
-                var v = sourceDataView[r][c.ColumnName];
-                return (object?)(v is System.DBNull ? string.Empty : v?.ToString() ?? string.Empty);
-            }).ToArray();
-            FillSingleRow(values, startRow + r, firstFilledColumn);
-        }
-    }
+    // ImportArray below is a separate API with its own wrap rule.
 
     private void EnsureRowsAndColumns(int rowCount, int colCount)
     {
@@ -791,6 +670,32 @@ public partial class Table : BaseParagraph
     /// floors, but the cell that holds it sizes against what the grid would like).</summary>
     internal double HtmlPreferredWidthPt { get; set; }
 
+    /// <summary>The HTML builder's MIN-content width for this table: its columns' min-content
+    /// floors and the spacing between them - what the grid shrinks to before it overflows.</summary>
+    internal double HtmlMinContentPt { get; set; }
+    /// <summary>The HTML builder's MAX-content width for this table: its columns' max-content
+    /// (each floored at its declared width) and the spacing between them - what the grid wants
+    /// when its host has room, whatever percent of the host it declared.</summary>
+    internal double HtmlMaxContentPt { get; set; }
+    /// <summary>The absolute box the HTML table declared (attribute, style or class width), in pt; 0 when it declared none.</summary>
+    internal double HtmlDeclaredBoxPt;
+
+    /// <summary>The sheet states this grid's cells' own box, so the grid lays out the way a browser lays
+    /// it out: its own FRAME stands outside its columns and the box its cells share is that much narrower.</summary>
+    internal bool HtmlCellBoxSheet { get; set; }
+
+    /// <summary>The grid drew a rule row (an hr banded at its own box).</summary>
+    internal bool HtmlRuleRows { get; set; }
+
+    /// <summary>The grid never breaks a line BEFORE one of the characters no line may start with
+    /// (see the converter's NoBreakBeforeChars): a label written <c>Unit # :</c> keeps its colon.</summary>
+    internal bool HtmlNoBreakBeforePunct { get; set; }
+
+    /// <summary>The percent each column DECLARED, space separated, 0 for a column that declared none;
+    /// null unless the builder read the grid on the declared-cell-box dialect. The layout shares the box
+    /// out by what these ask for rather than by what the cells happen to be widest at.</summary>
+    internal string? HtmlColumnPercents { get; set; }
+
     /// <summary>Set by the HTML builder when the grid (or one nested in it) carries
     /// an OVER-DECLARED fixed-layout attribute row — width attributes summing past
     /// 100%. The converter reads it off the width probe to pick the render path:
@@ -821,6 +726,13 @@ public partial class Table : BaseParagraph
     /// min-content floor sum (BuildTableFromHtml's uaSerifMin) - the
     /// ink-widen sheet model applies when this table drives the widen.</summary>
     internal bool HtmlPctMinNatural { get; set; }
+    /// <summary>The min-floor natural is one ROW's demand (a spanning nowrap line): the sheet adds
+    /// the grid's lead and trail chrome round it, none of the column gaps the line runs across.</summary>
+    internal bool HtmlRowDemandNatural { get; set; }
+
+    /// <summary>What the min-floor natural width (HtmlPctMinNatural) carries past its last
+    /// ink: the advance a text control in the last column adds beyond its box.</summary>
+    internal double HtmlMinFloorTrailingPt { get; set; }
 
     /// <summary>When positive, a row-band fill on the row's LAST cell extends its
     /// right edge to this x (the page's right edge): the over-declared grid
@@ -847,6 +759,12 @@ public partial class Table : BaseParagraph
     /// synthetic shares the builder emits for undeclared grids, which only carry
     /// proportions and must not inflate columns past their floors.</summary>
     internal bool HtmlColPctDeclared { get; set; }
+    /// <summary>CSS auto layout: when the columns that DECLARED a percent still want width after
+    /// the surplus is spent, the auto columns yield theirs down to min-content (a `width:100%`
+    /// column beside two auto columns leaves them their widest words).</summary>
+    internal bool HtmlUaAutoYield { get; set; }
+    /// <summary>The sheet breaks every token in this grid (`word-break: break-all`): a word wider than its column fills it character by character.</summary>
+    internal bool HtmlBreakAnywhere { get; set; }
 
     /// <summary>Which columns actually carried a declared percent (the rest hold the
     /// even leftover share the builder synthesises). CSS auto layout hands the box's
@@ -894,6 +812,9 @@ public partial class Table : BaseParagraph
     /// in its host cell and the grid drawn one margin down — the one-sided twin of
     /// the capsule outset below.</summary>
     internal double HtmlMarginTopPt;
+    internal double HtmlMarginBottomPt;
+    /// <summary>The declared box came from an absolute (px/pt) width, not a percent of the host.</summary>
+    internal bool HtmlDeclaredBoxAbs;
 
     /// <summary>Standing list indent (pt) at the grid's position in its host cell's
     /// markup: a table inside an <c>&lt;li&gt;</c> anchors at the item's text indent
@@ -920,9 +841,14 @@ public partial class Table : BaseParagraph
 
     /// <summary>Per-page image blits collected during the most recent <see cref="BuildMultiPage"/>:
     /// entry <c>i</c> holds the page-space (data, rect) pairs for the i-th returned content blob.
-    /// The caller applies these via <see cref="Page.AddImage(byte[], Rectangle)"/> once each page
+    /// The caller applies these via <c>Page.AddImage</c> once each page
     /// (including overflow pages) has been materialised.</summary>
     internal IReadOnlyList<List<(byte[] data, Rectangle rect)>> LastImageDraws => _pageImages;
+
+    /// <summary>Per built page, the reserved blocks its cells hold, each with the rectangle the
+    /// cell gave it; the flow tells each block's part its page once that page exists.</summary>
+    internal IReadOnlyList<List<(ReservedBlock block, ReservedPart part, Rectangle rect)>> LastBlockDraws => _pageBlocks;
+    private readonly List<List<(ReservedBlock block, ReservedPart part, Rectangle rect)>> _pageBlocks = new();
 
     /// <summary>Per built page, the checkbox widgets laid out in its cells with the
     /// rectangle each landed on. Page 0's are bound to the page at build time; a
@@ -966,6 +892,12 @@ public partial class Table : BaseParagraph
     /// line-quanta allotment would fill to the page bottom and paint the band strip
     /// that must stay bare below the break).</summary>
     internal readonly List<double> LastPageConsumedH = new();
+
+    /// <summary>Where the table's part on each page of the last build ends (y-up, the
+    /// bottom edge of what that page took), first page first; the last is
+    /// <see cref="LastPageEndY"/>. A box the table breaks inside closes each page's part
+    /// under it. Left short by the builds that compose other tables' pages.</summary>
+    internal readonly List<double> PageEndYs = new();
 
     // True when the build comes from the page's main paragraph flow — the only
     // context where the "don't START a table inside the bottom-margin band" keep

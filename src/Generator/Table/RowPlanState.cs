@@ -23,6 +23,7 @@ private sealed class RowPlanState
     // Non-text content (images, control glyphs) keeps its full height as the tight value.
     public double tightForMax;
     public double maxVertPad;
+    public double maxBorderV;
     public double maxTopPad;
     public List<(double padV, int lineCount, double tight, double exact, double ownStack)> cellTotals = null!;
     // Row height = MAX over cells of (its own padding + its own content),

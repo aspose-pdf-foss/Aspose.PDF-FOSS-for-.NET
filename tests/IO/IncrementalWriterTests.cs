@@ -14,7 +14,7 @@ public class IncrementalWriterTests
 
         // Modify the Info dictionary
         var newInfo = new PdfDictionary();
-        newInfo.Set("Title", new PdfString(System.Text.Encoding.Latin1.GetBytes("Modified")));
+        newInfo.Set("Title", new PdfString(Compat.Latin1.GetBytes("Modified")));
 
         var saved = doc.SaveIncremental((4, newInfo));
 
@@ -33,7 +33,7 @@ public class IncrementalWriterTests
 
         // Add a new object
         var newDict = new PdfDictionary();
-        newDict.Set("Test", new PdfString(System.Text.Encoding.Latin1.GetBytes("Hello")));
+        newDict.Set("Test", new PdfString(Compat.Latin1.GetBytes("Hello")));
 
         var saved = doc.SaveIncremental((10, newDict));
 
@@ -49,10 +49,10 @@ public class IncrementalWriterTests
         using var doc = Document.Open(pdf);
 
         var obj1 = new PdfDictionary();
-        obj1.Set("Key1", new PdfString(System.Text.Encoding.Latin1.GetBytes("Val1")));
+        obj1.Set("Key1", new PdfString(Compat.Latin1.GetBytes("Val1")));
 
         var obj2 = new PdfDictionary();
-        obj2.Set("Key2", new PdfString(System.Text.Encoding.Latin1.GetBytes("Val2")));
+        obj2.Set("Key2", new PdfString(Compat.Latin1.GetBytes("Val2")));
 
         var saved = doc.SaveIncremental((10, obj1), (11, obj2));
         using var doc2 = Document.Open(saved);

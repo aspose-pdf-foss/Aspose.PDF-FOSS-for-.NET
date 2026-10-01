@@ -182,7 +182,7 @@ public partial class RedactionAnnotation : Annotation
             var s = (Dict.Get("CreationDate") as PdfString)?.ToText();
             return ParsePdfDate(s);
         }
-        set => Dict.Set("CreationDate", new PdfString(System.Text.Encoding.Latin1.GetBytes(FormatPdfDate(value))));
+        set => Dict.Set("CreationDate", new PdfString(Compat.Latin1.GetBytes(FormatPdfDate(value))));
     }
 
 
@@ -201,66 +201,20 @@ public partial class RedactionAnnotation : Annotation
         if (page is null || Rect is null) return;
         var r = Rect;
 
-        // Physically remove the text under the rectangle so it can no longer be
-        // extracted, not just covered. Find the fragments whose
-        // bounding box overlaps the redaction rect and delete them through a
-        // TextReplacer in redaction mode: a full deletion that normally drops the
-        // show operator (reflowing the rest of the line and shifting visible text
-        // outside the box) instead leaves a glyph-less advance, so
-        // following text keeps its position. Scope each deletion to the fragment's
-        // line (TargetY) to avoid touching same-text elsewhere. Guarded so an edit
-        // failure still leaves the opaque overlay below.
-        try
-        {
-            var absorber = new Text.TextFragmentAbsorber();
-            page.Accept(absorber);
-            foreach (Text.TextFragment tf in absorber.TextFragments)
-            {
-                var fr = tf.Rectangle;
-                if (fr is null || string.IsNullOrEmpty(tf.Text)) continue;
-                // Vertical overlap with the redaction rect (same line band).
-                if (!(fr.LLY < r.URY && fr.URY > r.LLY)) continue;
-                // Horizontal overlap required too.
-                if (!(fr.LLX < r.URX && fr.URX > r.LLX)) continue;
-
-                if (fr.LLX >= r.LLX - 0.5 && fr.URX <= r.URX + 0.5)
-                {
-                    // Fragment lies entirely within the rect — redact it whole.
-                    tf.RedactFromContent();
-                    continue;
-                }
-
-                // FOSS returns line-level fragments, so a word-sized redaction rect
-                // overlaps a longer line. Redact only the characters whose advance
-                // span falls inside the rect's X range (so the rest of the line is
-                // kept), width-preserving so following text does not reflow.
-                var sub = SubstringInXRange(tf, r.LLX, r.URX);
-                if (!string.IsNullOrEmpty(sub))
-                {
-                    // X+Y scoping pins the edit to this fragment's operator; an
-                    // unscoped substring like a single letter would otherwise be
-                    // deleted from every operator on the line.
-                    var tr = new Text.TextReplacer { PreserveAdvanceOnDelete = true };
-                    if (tf.HasExplicitPosition)
-                    {
-                        tr.TargetY = tf.Position!.YIndent;
-                        tr.TargetX = tf.Position!.XIndent;
-                    }
-                    tr.Replace(page, sub, string.Empty, false);
-                }
-            }
-        }
-        catch { /* fall back to overlay-only redaction */ }
+        // Remove for good what the page paints under the rectangle - glyphs, the parts of paths
+        // and images there, the same inside the forms it draws - so none of it can be read back
+        // out of the file, while what lies outside keeps its place.
+        var fill = FillColor ?? Color.Black;
+        ContentRedactor.Apply(page, r, fill);
+        MustRewriteWhole(page);
 
         // Redaction also removes interactive form fields whose widget lies under the
         // redaction rectangle: the field is dropped from the AcroForm
         // /Fields and its widget from the page /Annots, so its value can no longer be
-        // read back. Fields outside the rectangle are untouched. Guarded so a form
-        // mishap still leaves the opaque overlay below.
-        try { RemoveFieldsUnder(r); }
-        catch { /* leave fields intact, still draw the overlay */ }
+        // read back. Fields outside the rectangle are untouched.
+        RemoveFieldsUnder(r);
+        RemoveAnnotationsUnder(page, r);
 
-        var fill = FillColor ?? Color.Black;
         var b = new Content.ContentStreamBuilder();
         b.SaveState();
         b.SetFillColor(fill.R / 255.0, fill.G / 255.0, fill.B / 255.0);
@@ -361,7 +315,7 @@ public partial class RedactionAnnotation : Annotation
         sb.Append($"1 0 0 1 {F(tx)} {F(baseline)} Tm\n");
         sb.Append($"{showOp} Tj\n");
         sb.Append("ET\n");
-        page.AddContentStream(System.Text.Encoding.Latin1.GetBytes(sb.ToString()));
+        page.AddContentStream(Compat.Latin1.GetBytes(sb.ToString()));
     }
 
     /// <summary>Get (or create) the page's /Resources/Font dictionary.</summary>
@@ -455,6 +409,8 @@ public partial class RedactionAnnotation : Annotation
         }
         if (removedFields.Count == 0) return;
         acro.Set("Fields", keptFields);
+        // The removed fields, values and all, are no longer reachable: the save leaves them out.
+        reader.MayHaveOrphansOnSave = true;
 
         // Drop the matching widget annotations (the field dict itself, or a kid
         // widget whose /Parent is a removed field) from this page's /Annots.
@@ -474,39 +430,49 @@ public partial class RedactionAnnotation : Annotation
         }
     }
 
-    // Characters of <paramref name="tf"/> whose advance span lies (by midpoint)
-    // within the device-X range [x0,x1] of a redaction rect — used to redact a
-    // word out of a longer line fragment without touching the rest of the line.
-    // Uses the fragment font's cumulative measured width (falls back to an even
-    // split when metrics are unavailable).
-    private static string? SubstringInXRange(Text.TextFragment tf, double x0, double x1)
+    /// <summary>What a redaction removed must not survive in an earlier revision: the page's
+    /// document is saved whole from now on, never as an incremental update.</summary>
+    internal static void MustRewriteWhole(Page page)
     {
-        var rect = tf.Rectangle;
-        var text = tf.Text;
-        if (rect is null || string.IsNullOrEmpty(text)) return null;
-        var font = tf.TextState?.Font;
-        var fs = tf.TextState?.FontSize ?? 0;
+        if (page.Reader.OwnerDocument is { } document) document.MustRewriteWhole = true;
+    }
 
-        double Prefix(int n)
+    /// <summary>Remove every annotation on <paramref name="page"/> whose rectangle overlaps
+    /// <paramref name="area"/> - with the popups and replies that hang off it - but the redaction
+    /// marks themselves and the form widgets (their fields follow their own rule). What an
+    /// annotation holds is not drawn - a note's text, a link's address, a comment quoting the words
+    /// under it - so touching the area at all is enough for it to go.</summary>
+    internal static void RemoveAnnotationsUnder(Page page, Rectangle area)
+    {
+        var reader = page.Reader;
+        if (reader.Resolve(page.Dict.Get("Annots")) is not PdfArray annots) return;
+        var entries = annots.Select(a => (Ref: a, Dict: reader.ResolveDict(a))).ToList();
+        var removed = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        foreach (var (_, dict) in entries)
         {
-            if (n <= 0) return 0;
-            if (font is not null && fs > 0)
-            {
-                try { return font.MeasureString(text.Substring(0, n), (float)fs); }
-                catch { }
-            }
-            return rect.Width * n / text.Length; // even-split fallback
+            if (dict is null || dict.GetName("Subtype") is "Redact" or "Widget" or "Popup") continue;
+            if (reader.Resolve(dict.Get("Rect")) is PdfArray arr && Rectangle.FromPdfArray(arr, reader) is { } rect
+                && rect.LLX < area.URX && rect.URX > area.LLX && rect.LLY < area.URY && rect.URY > area.LLY)
+                removed.Add(dict);
         }
+        if (removed.Count == 0) return;
 
-        int start = -1, end = -1;
-        for (int i = 0; i < text.Length; i++)
+        // Popups of removed annotations and replies to them go too, and replies to those.
+        for (var grew = true; grew;)
         {
-            double cl = rect.LLX + Prefix(i);
-            double cr = rect.LLX + Prefix(i + 1);
-            double mid = (cl + cr) / 2;
-            if (mid >= x0 && mid <= x1) { if (start < 0) start = i; end = i; }
+            grew = false;
+            foreach (var (_, dict) in entries)
+                if (dict is not null && !removed.Contains(dict)
+                    && (removed.Contains(reader.ResolveDict(dict.Get("Parent"))!)
+                        || removed.Contains(reader.ResolveDict(dict.Get("IRT"))!)))
+                    grew |= removed.Add(dict);
         }
-        return start < 0 ? null : text.Substring(start, end - start + 1);
+        var kept = new PdfArray();
+        foreach (var (reference, dict) in entries)
+            if (dict is null || !removed.Contains(dict)) kept.Add(reference);
+        if (kept.Count > 0) page.Dict.Set("Annots", kept);
+        else page.Dict.Remove("Annots");
+        reader.MayHaveOrphansOnSave = true;
     }
 
     private static Color ColorFromArray(PdfArray arr)

@@ -79,13 +79,13 @@ internal static partial class HtmlToPdfConverter
     /// from the root attributes when present) and collect the extracted markup. The
     /// placeholders flow through the normal image-block layout and rasterize through the
     /// SVG engine at draw time.</summary>
-    internal static string ExtractInlineSvgs(string html, out List<byte[]> svgs)
+    internal static (string result, List<byte[]> svgs) ExtractInlineSvgs(string html)
     {
-        svgs = new List<byte[]>();
+        var svgs = new List<byte[]>();
         if (string.IsNullOrEmpty(html) || html.IndexOf("<svg", StringComparison.OrdinalIgnoreCase) < 0)
-            return html;
+            return (html, svgs);
         var list = svgs;
-        return Regex.Replace(html, @"<svg\b[\s\S]*?</svg\s*>", m =>
+        return (Regex.Replace(html, @"<svg\b[\s\S]*?</svg\s*>", m =>
         {
             var idx = list.Count;
             // Repair an UNTERMINATED attribute value on the root element
@@ -143,7 +143,7 @@ internal static partial class HtmlToPdfConverter
             var attrs = (w > 0 ? $" width=\"{w.ToString("0.##", inv)}\"" : "")
                       + (h > 0 ? $" height=\"{h.ToString("0.##", inv)}\"" : "");
             return $"<img src=\"inline-svg:{idx}\"{attrs} />";
-        }, RegexOptions.IgnoreCase);
+        }, RegexOptions.IgnoreCase), svgs);
     }
 
     /// <summary>True when the bytes are an SVG document (optionally behind a BOM,
@@ -232,7 +232,7 @@ internal static partial class HtmlToPdfConverter
     private static string? ResolveLocalResource(string path)
     {
         if (System.IO.File.Exists(path)) return path;
-        if (OperatingSystem.IsWindows()) return null;
+        if (Compat.IsWindows()) return null;
         try
         {
             var dir = System.IO.Path.GetDirectoryName(path);
@@ -250,6 +250,11 @@ internal static partial class HtmlToPdfConverter
     private static byte[]? LoadConverterImage(string src, HtmlLoadOptions? options)
     {
         if (string.IsNullOrWhiteSpace(src)) return null;
+        // A URL-valued attribute is stripped of leading and trailing ASCII whitespace before it
+        // is resolved, so `src=' Sample+Image.jpg'` names the file the directory holds; without
+        // the strip the space becomes part of the name, the image never loads, and the page that
+        // should have grown to hold it stays at the default sheet.
+        src = src.Trim();
         var loader = options?.CustomLoaderOfExternalResources;
         if (loader is not null)
         {
@@ -273,12 +278,15 @@ internal static partial class HtmlToPdfConverter
                 || src.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                 return FetchRemoteImage(src); // browsers fetch; an unreachable URL falls back to alt text
             var path = IO.CallerPaths.FileUriToPath(src);
+            // A local reference is a URL: its percent-escapes name the file decoded
+            // (the Word mail's `test%20Mail_files/image002.gif` lives in "test Mail_files").
+            if (path.IndexOf('%') >= 0) path = Uri.UnescapeDataString(path);
             // A page saved on Windows references its assets with backslash separators
             // ("Images\logo.png"). A browser treats the backslash as a path separator
             // in a file URL and so does NTFS; a POSIX file system reads it as part of
             // the file NAME, so every such reference silently misses (the email
             // newsletter lost all 42 of its images and collapsed to one page).
-            if (!OperatingSystem.IsWindows()) path = path.Replace('\\', '/');
+            if (!Compat.IsWindows()) path = path.Replace('\\', '/');
             // Resolve a relative src against the document's base directory (the HtmlLoadOptions
             // BasePath), the way a browser resolves it against the page URL — otherwise a relative
             // image reference is looked up against the process working directory and never found.
@@ -331,7 +339,7 @@ internal static partial class HtmlToPdfConverter
         // The re-encode runs through the System.Drawing image codecs, which exist only
         // on Windows. Off Windows the bytes pass through untouched - the same answer the
         // catch below produces, without paying for a PlatformNotSupportedException.
-        if (!OperatingSystem.IsWindows()) return data;
+        if (!Compat.IsWindows()) return data;
 #pragma warning disable CA1416
         try
         {
@@ -349,22 +357,24 @@ internal static partial class HtmlToPdfConverter
 #pragma warning restore CA1416
     }
 
-    private static bool TryReadImagePixelSize(byte[] d, out int w, out int h)
+    private static (int w, int h)? TryReadImagePixelSize(byte[] d)
     {
+        int w = default;
+        int h = default;
         w = 0; h = 0;
-        if (d is null || d.Length < 24) return false;
+        if (d is null || d.Length < 24) return null;
         if (d[0] == 0x89 && d[1] == 0x50 && d[2] == 0x4E && d[3] == 0x47)
         {
             w = (d[16] << 24) | (d[17] << 16) | (d[18] << 8) | d[19];
             h = (d[20] << 24) | (d[21] << 16) | (d[22] << 8) | d[23];
-            return w > 0 && h > 0;
+            return (w > 0 && h > 0) ? (w, h) : null;
         }
         // GIF87a/89a: logical screen size at offsets 6..9, little-endian.
         if (d[0] == (byte)'G' && d[1] == (byte)'I' && d[2] == (byte)'F')
         {
             w = d[6] | (d[7] << 8);
             h = d[8] | (d[9] << 8);
-            return w > 0 && h > 0;
+            return (w > 0 && h > 0) ? (w, h) : null;
         }
         if (d[0] == 0xFF && d[1] == 0xD8)
         {
@@ -379,12 +389,12 @@ internal static partial class HtmlToPdfConverter
                 {
                     h = (d[i + 5] << 8) | d[i + 6];
                     w = (d[i + 7] << 8) | d[i + 8];
-                    return w > 0 && h > 0;
+                    return (w > 0 && h > 0) ? (w, h) : null;
                 }
                 i += 2 + seg;
             }
         }
-        return false;
+        return null;
     }
 
     /// <summary>Parse the first CSS colour token (hex, rgb(), or a common
@@ -392,6 +402,10 @@ internal static partial class HtmlToPdfConverter
     internal static Color? ParseCssColor(string text)
     {
         if (string.IsNullOrEmpty(text)) return null;
+        // A `url(...)` token names an image, never a colour - a data URI's base64 payload
+        // spells any colour name (and any hex digit run) by chance, so the scan skips it.
+        if (text.IndexOf("url(", StringComparison.OrdinalIgnoreCase) >= 0)
+            text = Regex.Replace(text, @"url\([^)]*\)", " ", RegexOptions.IgnoreCase);
         var hex = Regex.Match(text, @"#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b");
         if (hex.Success)
         {
@@ -413,7 +427,7 @@ internal static partial class HtmlToPdfConverter
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var a))
         {
-            a = Math.Clamp(a, 0, 1);
+            a = Compat.Clamp(a, 0, 1);
             int Comp(string v) => (int)Math.Round(int.Parse(v) * a + 255 * (1 - a));
             return Color.FromRgbBytes(Comp(rgba.Groups[1].Value),
                 Comp(rgba.Groups[2].Value), Comp(rgba.Groups[3].Value));
@@ -441,6 +455,8 @@ internal static partial class HtmlToPdfConverter
                 case "lightblue": return Color.FromArgb(173, 216, 230);
                 case "lightyellow": return Color.FromArgb(255, 255, 224);
                 case "whitesmoke": return Color.FromArgb(245, 245, 245);
+                case "aliceblue": return Color.FromArgb(240, 248, 255);
+                case "firebrick": return Color.FromArgb(178, 34, 34);
                 case "beige": return Color.FromArgb(245, 245, 220);
                 case "pink": return Color.FromArgb(255, 192, 203);
                 case "brown": return Color.FromArgb(165, 42, 42);
@@ -453,5 +469,82 @@ internal static partial class HtmlToPdfConverter
             }
         }
         return null;
+    }
+
+    /// <summary>An HTML5 canvas element with a straight-line 2D-context script becomes the inline SVG
+    /// its calls paint (probed: a red fillRect with a cleared window draws as the filled box with a
+    /// white window; the fallback text inside the element is not drawn). fillStyle/strokeStyle/
+    /// lineWidth state, fillRect/clearRect/strokeRect, and beginPath/moveTo/lineTo/closePath/arc with
+    /// fill/stroke are read; anything else in the script is skipped. The element's own CSS border
+    /// draws as a frame inside the box.</summary>
+    internal static string ReplaceCanvasesWithSvg(string html)
+    {
+        if (string.IsNullOrEmpty(html) || html.IndexOf("<canvas", StringComparison.OrdinalIgnoreCase) < 0)
+            return html;
+        var scripts = string.Join("\n", Regex.Matches(html, @"<script\b[^>]*>([\s\S]*?)</script\s*>", RegexOptions.IgnoreCase)
+            .Cast<Match>().Select(m => m.Groups[1].Value));
+        return Regex.Replace(html, @"<canvas\b([^>]*)>[\s\S]*?</canvas\s*>", m =>
+        {
+            var attrs = m.Groups[1].Value;
+            string Attr(string name) => Regex.Match(attrs, name + @"\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase)
+                is { Success: true } am ? am.Groups[1].Value : "";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (!double.TryParse(Attr("width"), System.Globalization.NumberStyles.Float, inv, out var w) || w <= 0) w = 300;
+            if (!double.TryParse(Attr("height"), System.Globalization.NumberStyles.Float, inv, out var h) || h <= 0) h = 150;
+            var id = Attr("id");
+            var sb = new StringBuilder();
+            sb.Append(FormattableString.Invariant($"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:0.##}\" height=\"{h:0.##}\">"));
+            var style = Regex.Match(attrs, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+            var border = style.Success
+                ? Regex.Match(style.Groups[1].Value, @"border\s*:\s*([\d.]+)px\s+\w+\s+([#\w(),.\s]+)", RegexOptions.IgnoreCase) : null;
+            if (border is { Success: true })
+                sb.Append(FormattableString.Invariant($"<rect x=\"{double.Parse(border.Groups[1].Value, inv) / 2:0.##}\" y=\"{double.Parse(border.Groups[1].Value, inv) / 2:0.##}\" width=\"{w - double.Parse(border.Groups[1].Value, inv):0.##}\" height=\"{h - double.Parse(border.Groups[1].Value, inv):0.##}\" fill=\"none\" stroke=\"{border.Groups[2].Value.Trim()}\" stroke-width=\"{border.Groups[1].Value}\"/>"));
+            if (id.Length > 0) AppendCanvasScript(sb, scripts, id);
+            sb.Append("</svg>");
+            return sb.ToString();
+        }, RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>The 2D-context calls of the script that took the canvas by id, as SVG elements.</summary>
+    private static void AppendCanvasScript(StringBuilder sb, string scripts, string canvasId)
+    {
+        var got = Regex.Match(scripts, @"(\w+)\s*=\s*document\.getElementById\(\s*[""']" + Regex.Escape(canvasId) + @"[""']\s*\)");
+        if (!got.Success) return;
+        var ctxM = Regex.Match(scripts[got.Index..], @"(\w+)\s*=\s*" + got.Groups[1].Value + @"\.getContext\(\s*[""']2d[""']\s*\)");
+        if (!ctxM.Success) return;
+        var ctx = ctxM.Groups[1].Value;
+        var body = scripts[(got.Index + ctxM.Index + ctxM.Length)..];
+        var fill = "#000"; var stroke = "#000"; var lineWidth = "1";
+        var path = new StringBuilder();
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        string Num(string v) => double.TryParse(v.Trim(), System.Globalization.NumberStyles.Float, inv, out var d) ? d.ToString("0.##", inv) : "0";
+        foreach (Match st in Regex.Matches(body, ctx + @"\.(\w+)\s*(?:=\s*([""']?)([^;""']*)\2|\(([^)]*)\))\s*;"))
+        {
+            var name = st.Groups[1].Value;
+            var value = st.Groups[3].Value.Trim();
+            var args = st.Groups[4].Value.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).Select(Num).ToArray();
+            switch (name)
+            {
+                case "fillStyle": fill = value; break;
+                case "strokeStyle": stroke = value; break;
+                case "lineWidth": lineWidth = Num(value); break;
+                case "fillRect" when args.Length == 4:
+                    sb.Append($"<rect x=\"{args[0]}\" y=\"{args[1]}\" width=\"{args[2]}\" height=\"{args[3]}\" fill=\"{fill}\"/>"); break;
+                case "clearRect" when args.Length == 4:
+                    sb.Append($"<rect x=\"{args[0]}\" y=\"{args[1]}\" width=\"{args[2]}\" height=\"{args[3]}\" fill=\"#fff\"/>"); break;
+                case "strokeRect" when args.Length == 4:
+                    sb.Append($"<rect x=\"{args[0]}\" y=\"{args[1]}\" width=\"{args[2]}\" height=\"{args[3]}\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"{lineWidth}\"/>"); break;
+                case "beginPath": path.Clear(); break;
+                case "moveTo" when args.Length == 2: path.Append($"M{args[0]} {args[1]} "); break;
+                case "lineTo" when args.Length == 2: path.Append($"L{args[0]} {args[1]} "); break;
+                case "closePath": path.Append("Z "); break;
+                case "arc" when args.Length >= 5:
+                    sb.Append($"<circle cx=\"{args[0]}\" cy=\"{args[1]}\" r=\"{args[2]}\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"{lineWidth}\" data-pending=\"1\"/>"); break;
+                case "stroke" when path.Length > 0:
+                    sb.Append($"<path d=\"{path.ToString().Trim()}\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"{lineWidth}\"/>"); break;
+                case "fill" when path.Length > 0:
+                    sb.Append($"<path d=\"{path.ToString().Trim()}\" fill=\"{fill}\"/>"); break;
+            }
+        }
     }
 }

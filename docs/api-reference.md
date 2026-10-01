@@ -49,7 +49,7 @@ PDF-format / conversion enums.
 | `OutlineItem` / `Outlines` / `OutlineCollection` / `OutlineItemCollection` / `OutlineBuilder` / `OutlineItemBuilder` | Bookmark / outline entries and builders |
 | `OptionalContentBuilder` / `OptionalContentGroup` / `OptionalContentProperties` / `LayerEntry` / `Layer` / `LayerCollection` | Optional-content (layer) data |
 | `OutputIntent` / `OutputIntents` | PDF/X output intents                                    |
-| `Stamp` / `TextStamp` / `PageNumberStamp` / `PdfPageStamp` | Stamp base plus the text, page-number and PDF-page stamps applied to pages |
+| `Stamp` / `TextStamp` / `PageNumberStamp` / `PdfPageStamp` / `WatermarkStamp` | Stamp base plus the text, page-number, PDF-page and watermark stamps applied to pages |
 | `Table` / `Row` / `Cell` / `Rows` / `Cells` | Table model for page content                 |
 | `TocInfo` / `Heading` / `LevelFormat` | Table-of-contents configuration                    |
 | `ValidationIssue`           | Document-validation issue                                    |
@@ -57,7 +57,7 @@ PDF-format / conversion enums.
 | `Hyperlink`                 | Inline hyperlink reference                                   |
 | `RenderingOptions`          | Top-level rendering options                                  |
 | `Operator`                  | Base content-stream operator                                 |
-| `Artifact` / `BackgroundArtifact` / `WatermarkArtifact` / `ArtifactCollection` | Page artifacts |
+| `Artifact` / `BackgroundArtifact` / `WatermarkArtifact` / `HeaderArtifact` / `ArtifactCollection` | Page artifacts |
 | `PdfFormatConversionOptions` | PDF/A or PDF/X conversion configuration                     |
 | `HeadingLevels` / `AutoTaggingSettings` / `FontEmbeddingOptions` / `PdfANonSpecificationFlags` / `PdfASymbolicFontEncodingStrategy` / `ToUnicodeProcessingRules` | Conversion-tuning types |
 | `RgbToDeviceGrayConversionStrategy` | RGB->DeviceGray reduction strategy                   |
@@ -66,17 +66,27 @@ PDF-format / conversion enums.
 | `Paragraphs`                | Page-paragraph collection                                    |
 | `Image`                     | Image paragraph for generator content                        |
 | `ColumnInfo`                | Column layout settings                                       |
+| `BoxBlock` / `ListBlock` / `ListBlockItem` | Flow blocks: a bordered, padded box that holds other paragraphs, and a list whose items share one marker column |
+| `BackgroundPicture` / `CornerRadii` / `CornerRadius` | A box's background pictures (sized, positioned and repeated as CSS backgrounds are) and rounded corners |
+| `ReservedBlock` / `ReservedPart` / `ReservedRoom` | A block whose room the flow reserves and whose content the caller lays out and paints part by part, across pages |
 | `WebHyperlink` / `LocalHyperlink` / `FileHyperlink` | Hyperlink targets for generator content |
 | `PaginationArtifact` / `BatesNArtifact` / `PageCollectionExtensions` | Bates numbering and pagination artifacts (`AddBatesNumbering`, `AddPagination`, `UpdatePagination`, `DeleteBatesNumbering` on `PageCollection`) |
 | `ImagePlacement` / `ImagePlacementCollection` / `ImagePlacementAbsorber` | Placed-image extraction |
 | `FontUtilities`             | Font utility methods                                         |
 | `ExportFieldsToJsonOptions` / `FieldSerializationResult` / `FieldExportingData` / `AcroFormData` / `AppearanceEntry` / `AppearanceImageData` / `DefaultResourcesData` | Form-field JSON export model (`AppearanceImageData` carries a widget appearance's decoded image) |
 | `SaveOptions` / `PdfSaveOptions` / `UnifiedSaveOptions` / `SvgSaveOptions` / `LoadOptions` | Save / load option bases |
-| `MdLoadOptions` / `SvgLoadOptions` / `TxtLoadOptions` / `PageSizeInfo` | Markdown / SVG / text import options |
+| `HtmlSaveOptions.ResourceSavingStrategy` / `CssSavingStrategy` / `CssUrlMakingStrategy` / `HtmlPageMarkupSavingStrategy`, `SvgSaveOptions.EmbeddedImagesSavingStrategy`, `LoadOptions.ResourceLoadingStrategy`, `UnifiedSaveOptions.ConversionProgressEventHandler` | Callback delegates nested in the option classes (resource naming, external-resource loading, progress) |
+| `Document.CallBackGetHocr` / `Document.CallBackGetHocrWithPage` / `Document.FontSubstitutionHandler` / `Page.BeforePageGenerate` | Delegates nested in `Document` / `Page`: the external-OCR callbacks of `Document.Convert`, font-substitution notification, and the per-page event fired before a page is written |
+| `MdLoadOptions` / `SvgLoadOptions` / `TxtLoadOptions` / `PsLoadOptions` / `PageSizeInfo` | Markdown / SVG / text / PostScript import options |
 | `Document.MergeOptions` / `Document.RepairOptions` | Merge and repair settings (nested in `Document`) |
 | `DocumentCollection`        | Set of documents                                             |
-| `PageResources` / `Resources` / `XForm` / `XFormCollection` / `ExtGStateValue` / `Opi` | Page resource dictionaries and form XObjects |
-| `JavaScriptCollection`      | Document-level JavaScript entries                            |
+| `PageResources` / `Resources` / `XForm` / `XFormCollection` / `XFormResources` / `Resources.ExtGStateValue` / `Opi` | Page resource dictionaries and form XObjects |
+| `PageExtensions`            | Extension methods over `Page` that edit its content stream   |
+| `BitmapInfo`                | Raw pixel data (size and pixel layout) added to a page as an uncompressed image |
+| `IIndexBitmapConverter`     | Contract for 1/4/8-bpp quantisation of `System.Drawing` bitmaps |
+| `DataEditor.DictionaryEditor` / `ICosPdfPrimitive` / `CosPdfPrimitive` / `CosPdfName` / `CosPdfString` / `CosPdfNumber` / `CosPdfBoolean` / `CosPdfDictionary` | Low-level editing of a page, catalog or resources dictionary as a map of names to typed values (`Aspose.Pdf.DataEditor`) |
+| `GroupProcessor.ObjectKey`  | Object number + generation of an indirect object (`Aspose.Pdf.GroupProcessor`) |
+| `Document.JavaScriptCollection` | Document-level JavaScript entries (nested in `Document`)  |
 | `PageActionCollection`      | Page open / close actions                                    |
 | `Watermark` / `Group`       | Page watermark and transparency-group dictionaries           |
 | `Id`                        | The two byte strings of the trailer `/ID` array              |
@@ -86,11 +96,13 @@ PDF-format / conversion enums.
 | `OcspSettings` / `TimestampSettings` | Signature OCSP and timestamp settings               |
 | `OperatorCollection` / `BaseOperatorCollection` / `ContentsAppender` / `RawOperator` / `OperatorSelector` / `IOperatorSelector` | Content-stream operator access |
 | `OptimizedMemoryStream` / `ZDeflaterOutputStream` / `ZInflaterInputStream` | Stream helpers |
-| `BoundsCheckableList` / `PolygonsHelper` | Bounds-checked list and polygon geometry helpers     |
+| `BoundsCheckableList<T>` / `PolygonsHelper` | Bounds-checked list (`BoundsCheckMode`) and polygon geometry helpers |
+| `SignaturesCompromiseDetector` | Detects structural signature attacks (forged or hollow `/Contents` / `/ByteRange`, wrapped unsigned bytes); `Check` reports through `Signatures.CompromiseCheckResult` / `Signatures.SignaturesCoverage` (`Aspose.Pdf.Signatures`) |
 | `PdfException` / `InvalidPasswordException` / `InvalidPdfFileFormatException` / `FontNotFoundException` / `IncorrectFontUsageException` / `UnsupportedFontTypeException` / `PdfTextDecodingException` / `InvalidFormTypeOperationException` / `DeprecatedFeatureException` / `BoundsOutOfRangeException` / `CrashReportOptions` / `PdfExceptionMessages` | Exception hierarchy |
 | `EmptyValueException`       | Thrown when a required value is left empty (e.g. `DateField.Init` on a field without a `PartialName`) |
 | `FontEmbeddingException`    | Raised when a font's licence forbids embedding it into the document |
 | `MissingOptionalDependencyException` | Raised when an optional package the operation needs (System.Drawing.Common for printing) is not referenced |
+| `Sanitization.SanitizationException` | Raised during signature verification when the document's structure is recognised as a signature-forgery attack (`Aspose.Pdf.Sanitization`) |
 
 Enumerations: `BorderSide`, `BorderCornerStyle`, `BlendMode`, `ColorSpace`,
 `ColorType`, `ColumnAdjustment`, `ConvertErrorAction`,
@@ -104,11 +116,14 @@ Enumerations: `BorderSide`, `BorderCornerStyle`, `BlendMode`, `ColorSpace`,
 `PasswordType`, `PdfFormat`, `PdfAStandardVersion`, `PdfVersion`, `PrintDuplex`,
 `PrintScaling`, `Rotation`, `SaveFormat`, `Subset`, `TabOrder`, `TableBroken`,
 `VerticalAlignment`, `WarningType`, `ProgressEventType`, `ReturnAction`,
-`ExtractTextMode`, `ExtractImageMode`, `ArtifactType`, `ArtifactSubtype`,
-`HtmlDocumentType`, `HtmlMediaType`, `HtmlPageLayoutOption`,
-`ConversionEngines`, `PuaProcessingStrategy`, `RemoveFontsStrategy`,
-`SegmentAlignStrategy`, `XmpPdfAExtensionCategoryType`, `XmpFieldType`,
-`AFRelationship`, `FileEncoding`.
+`ExtractTextMode`, `ExtractImageMode`, `HtmlDocumentType`, `HtmlMediaType`,
+`HtmlPageLayoutOption`, `XmpPdfAExtensionCategoryType`, `XmpFieldType`,
+`AFRelationship`, `FileEncoding`, `BackgroundBoxArea`, `RuleStyle`,
+`BoundsCheckMode`, `CollectionFieldSubtype`. Some enumerations are nested in
+the type that uses them: `Artifact.ArtifactType`, `Artifact.ArtifactSubtype`,
+`SvgLoadOptions.ConversionEngines`, and
+`PdfFormatConversionOptions.PuaProcessingStrategy` / `RemoveFontsStrategy` /
+`SegmentAlignStrategy`.
 
 `SaveFormat` and `LoadFormat` also carry members for formats this library does
 not implement (see [Not included](#not-included)); `Document.Save` throws
@@ -149,19 +164,22 @@ not implement (see [Not included](#not-included)); `Document.Save` throws
 | `FontEmbedder`              | Embed fonts into a document                                  |
 | `FontSource` / `FileFontSource` / `FolderFontSource` / `MemoryFontSource` / `SystemFontSource` | Font discovery sources |
 | `FontSourceCollection`      | Registered font sources                                      |
-| `FontSubstitution` / `SimpleFontSubstitution` / `CustomFontSubstitutionBase` / `OriginalFontSpecification` / `FontSubstitutionCollection` | Font substitution rules |
+| `FontSubstitution` / `SimpleFontSubstitution` / `CustomFontSubstitutionBase` / `CustomFontSubstitutionBase.OriginalFontSpecification` / `FontSubstitutionCollection` | Font substitution rules |
 | `FontData` / `PdfFontView` / `IFontOptions` | Font program data and engine-font views              |
 | `ExternalFontCache`         | Folders searched for external (non-embedded) fonts           |
 | `PhysicalTextSegment`       | Page-space projection of an absorbed `TextSegment`           |
 | `TextOptions`               | Base for the text edit / search option classes               |
-| `OneBasedList`              | Read-only list with a 1-based indexer                        |
 | `RegexManager`              | Global regex settings for text search (match timeout, non-backtracking engine) |
+| `OpenTypeFeatures`          | The OpenType features a font carries (`liga`, `onum`, stylistic sets, ...) and the glyphs a run becomes once they are applied |
+| `TextDecorationStyle`       | Geometry of an underline or strike-through rule: thickness, offset from the baseline, colour, opacity |
 
 Enumerations: `FontStyles`, `FontType` / `FontTypes`, `CoordinateOrigin`,
-`ClippingPathsProcessingMode`, `FontReplace`, `FontSizeAdjustment`,
-`LanguageTransformation`, `LineSpacingMode`, `NoCharacterAction`,
-`ReplaceAdjustment`, `Scope`, `TabAlignmentType`, `TabLeaderType`,
-`TextFormattingMode`, `TextRenderingMode`, `WordWrapMode`.
+`TabAlignmentType`, `TabLeaderType`, `TextRenderingMode`. Nested in the option
+classes: `TextEditOptions.ClippingPathsProcessingMode` / `FontReplace` /
+`LanguageTransformation` / `NoCharacterAction`,
+`TextReplaceOptions.FontSizeAdjustment` / `ReplaceAdjustment` / `Scope`,
+`TextFormattingOptions.LineSpacingMode` / `WordWrapMode`, and
+`TextExtractionOptions.TextFormattingMode`.
 `ImagePlacement*`, `FontUtilities` and `FontSubsetStrategy` live in the
 top-level `Aspose.Pdf` namespace.
 
@@ -172,6 +190,7 @@ top-level `Aspose.Pdf` namespace.
 | `Form`                      | Interactive AcroForm with field collection                   |
 | `Field`                     | Base class for every form field                              |
 | `TextBoxField` / `RichTextBoxField` | Text inputs                                          |
+| `FileSelectBoxField`        | Text field holding a file path (the FileSelect flag); returned for such fields when a form is loaded |
 | `DateField`                 | Text field with a date format and a popup JavaScript calendar (`Init(page)` wires the script) |
 | `BarcodeField`              | Barcode-bearing text field (`Symbology`)                     |
 | `CheckboxField`             | Checkbox                                                     |
@@ -192,7 +211,7 @@ top-level `Aspose.Pdf` namespace.
 
 Enumerations: `FieldType`, `BoxStyle`, `BoxShape`, `FormType`,
 `IconCaptionPosition`, `ScalingMode`, `ScalingReason`,
-`DocMDPAccessPermissions`, `SignDependentElementsRenderingModes`,
+`DocMDPAccessPermissions`, `Form.SignDependentElementsRenderingModes`,
 `SubjectNameElements`, `Symbology`. The JSON export types
 (`ExportFieldsToJsonOptions`, `FieldSerializationResult`,
 `FieldSerializationStatus`) live in the top-level `Aspose.Pdf` namespace.
@@ -227,7 +246,7 @@ Enumerations: `FieldType`, `BoxStyle`, `BoxShape`, `FormType`,
 | `DefaultAppearance`         | Default appearance (DA) string wrapper                       |
 | `Border` / `Dash`           | Annotation border configuration                              |
 | `ExplicitDestination` / `XYZExplicitDestination` / `FitExplicitDestination` / `FitBExplicitDestination` / `FitHExplicitDestination` / `FitVExplicitDestination` / `FitBHExplicitDestination` / `FitBVExplicitDestination` / `FitRExplicitDestination` | Destinations |
-| `Measure` / `NumberFormat` / `NumberFormatList` | Measure dictionary and its number formats           |
+| `Measure` / `Measure.NumberFormat` / `Measure.NumberFormatList` | Measure dictionary and its number formats (nested in `Measure`) |
 | `IAppointment`              | Marker for objects an outline item can point at (actions, destinations) |
 | `RichTextToFlatStructureTransformer` | Flattens free-text rich text to plain runs           |
 | `JavascriptExtensions.FieldDateTimeFormatter` / `FieldNumberCurrencyFormatter` / `FieldNumberPercentFormatter` | Acrobat-style field formatting (`Aspose.Pdf.Annotations.JavascriptExtensions`) |
@@ -249,7 +268,8 @@ Enumerations: `AnnotationType`, `AnnotationFlags`, `AnnotationState`,
 `PrinterMarkSidePosition`, `TextAlignment`, `Justification`, `FreeTextIntent`,
 `RichTextFontStyles`, `ExplicitDestinationType`, `LightingSchemeType`,
 `RenderModeType`, `SoundEncoding`, `SoundIcon`,
-`SoundSampleDataEncodingFormat`, `PDF3DActivation`, `ActionType`.
+`SoundSampleDataEncodingFormat`, `PDF3DActivation`, `ActionType`,
+`CaretSymbol`, `RenditionType`.
 
 ## `Aspose.Pdf.Security`
 
@@ -264,6 +284,7 @@ Enumerations: `AnnotationType`, `AnnotationFlags`, `AnnotationState`,
 | `ValidationOptions` / `ValidationResult` | Signature-validation configuration              |
 | `BitString`                 | ASN.1 bit-string used by certificate processing              |
 | `VerificationResult`        | Outcome of `PdfFileSignature.TryVerifySignature`             |
+| `UnsignedContentAbsorber` / `UnsignedContentAbsorber.Result` / `UnsignedContentAbsorber.UnsignedContent` | Finds the objects a signed document gained after its last signature (`TryGetContent`) |
 | `SignatureAlgorithmInfo` / `TimestampAlgorithmInfo` | Algorithms used by a signature / its timestamp |
 | `EncryptionInfo`            | Encryption details of an opened document                     |
 | `SignatureLengthMismatchException` | Thrown when a produced signature does not fit the reserved `/Contents` space |
@@ -273,8 +294,10 @@ Enumerations: `AnnotationType`, `AnnotationFlags`, `AnnotationState`,
 
 Enumerations: `SignatureAlgorithmType`, `CryptographicStandard`,
 `ValidationMethod`, `ValidationMode`, `ValidationStatus`, `VerificationState`.
-`CryptoAlgorithm`, `DigestHashAlgorithm` and `Permissions` live in the
-top-level `Aspose.Pdf` namespace.
+`CryptoAlgorithm`, `DigestHashAlgorithm`, `Permissions` and
+`SignaturesCompromiseDetector` live in the top-level `Aspose.Pdf` namespace;
+the detector's `CompromiseCheckResult` and `SignaturesCoverage` live in
+`Aspose.Pdf.Signatures`.
 
 ## `Aspose.Pdf.Converters`
 
@@ -287,8 +310,23 @@ top-level `Aspose.Pdf` namespace.
 | `MarkdownConverterOptions`  | Heading thresholds, table support                            |
 | `PdfToMarkdown.MarkdownSaveOptions` | Markdown save options (`Aspose.Pdf.PdfToMarkdown`)   |
 
-The import load options (`MdLoadOptions`, `SvgLoadOptions`, `TxtLoadOptions`,
+The import load options (`MdLoadOptions`, `SvgLoadOptions`, `TxtLoadOptions`, `PsLoadOptions`,
 `PageSizeInfo`) live in the top-level `Aspose.Pdf` namespace.
+
+PostScript and Encapsulated PostScript are read by interpreting the program and recording what
+it paints. `PsLoadOptions.FontsFolders` names the folders searched for the font programs the
+source asks for: a face among the standard fourteen is referenced by name, any other face is
+outlined from the program found there, and a face that cannot be found paints no text.
+Tiling patterns paint (a cell drawn with paths stays vector), composite fonts draw through
+their descendant fonts (escape and 8/8 mapping), and sampled images are drawn from the
+program's own data. Smooth shadings painted with `shfill` are not drawn, and the
+raster-device controls (halftones, screens, transfer functions) are accepted and ignored.
+
+```csharp
+var options = new PsLoadOptions { FontsFolders = new[] { @"C:\fonts" } };
+using var doc = new Document("artwork.eps", options);
+doc.Save("artwork.pdf");
+```
 
 ## `Aspose.Pdf.Devices`
 
@@ -311,7 +349,6 @@ The import load options (`MdLoadOptions`, `SvgLoadOptions`, `TxtLoadOptions`,
 | `RgbaBuffer`                | Raw RGBA pixel buffer                                        |
 | `Resolution`                | DPI resolution settings                                      |
 | `TiffSettings` / `Margins`  | TIFF encoder configuration                                   |
-| `IndexBitmapConverter`      | Base for index-bitmap quantisation helpers (`IIndexBitmapConverter` is in `Aspose.Pdf`) |
 | `PageSize`                  | TIFF page-size hint                                          |
 | `JpegEncoder` (delegate)    | Pluggable JPEG encoder callback                              |
 
@@ -368,8 +405,9 @@ factories when authoring one.
 | `StructureTextState`        | Text state applied to authored structure content             |
 | `ElementList` / `ITextElement` | Child list and text-bearing element contract              |
 | `HeaderElementTextConflictException` / `TOCpageHasNoTitleException` | Tagged table-of-contents errors |
+| `MarkedContentItem`         | A run of text or an image a structure element marks, in reading order, with its font, colour and rectangle (`StructureElement.GetMarkedContent`, `Page.GetArtifactContent`) |
 
-Enumerations: `AttributeKey`, `AttributeOwnerStandard`.
+Enumerations: `AttributeKey`, `AttributeOwnerStandard`, `MarkedContentKind`.
 
 ## `Aspose.Pdf.Facades`
 
@@ -381,7 +419,7 @@ Enumerations: `AttributeKey`, `AttributeOwnerStandard`.
 | `PdfFileSecurity`           | Encrypt, decrypt, change passwords                           |
 | `PdfFileSignature`          | Sign, verify, inspect signatures                             |
 | `FormEditor`                | Fill, flatten, create, remove form fields                    |
-| `Form` / `FormImportResult` | Facade-level form access and import outcome                  |
+| `Form` / `Form.FormImportResult` | Facade-level form access and import outcome (nested in `Form`) |
 | `FormDataConverter`         | Convert form data between FDF / XML / DataTable              |
 | `FormFieldFacade`           | Field-appearance settings                                    |
 | `FormattedText` / `FormattedTextFont` / `FontColor` | Rich text for facade APIs            |
@@ -397,7 +435,7 @@ Enumerations: `AttributeKey`, `AttributeOwnerStandard`.
 | `PdfConverter`              | Page-to-image conversion cursor (`DoConvert` / `GetNextImage` / `SaveAsTIFF`) |
 | `PdfExtractor`              | Extract text, images, and attachments                        |
 | `PdfXmpMetadata`            | XMP metadata accessor                                        |
-| `PdfViewer`                 | Page decoding and printing surface: `DecodePage` (Windows only), print-to-PDF-file via `PrintDocumentWithSettings`; spooler printing throws `PlatformNotSupportedException` |
+| `PdfViewer`                 | Page decoding and printing surface: `DecodePage`, and `PrintDocument` / `PrintDocumentWithSettings` / `PrintDocuments` / `PrintLargePdf` through an installed printer (Windows only); a print-to-file job with a `.pdf` target is written directly |
 | `Stamp` / `StampInfo`       | Stamp object / extracted stamp info                          |
 | `DocumentPrivilege`         | Document permission flags                                    |
 | `ReplaceTextStrategy`       | Text-replace tuning knobs                                    |
@@ -410,16 +448,21 @@ Enumerations: `AttributeKey`, `AttributeOwnerStandard`.
 | `SignatureName`             | Composite signature-name descriptor                          |
 | `LineInfo`                  | Line parameters for `PdfContentEditor.DrawCurve` / polygons  |
 | `IFacade` / `ISaveableFacade` | Facade contracts (`BindPdf`, `Save`)                       |
-| `PdfQueryPageSettingsEventHandler` (delegate) | `PdfViewer` page-settings event               |
+| `PdfQueryPageSettingsEventHandler` (delegate) / `PdfPrintPageInfo` | `PdfViewer` page-settings event and the page number it reports |
 
 Enumerations: `FieldType` (facade variant), `KeySize`, `Algorithm`,
 `SubmitFormFlag`, `PropertyFlag`, `ImageMergeMode`, `BlendingColorSpace`,
 `StampType`, `EncodingType`, `FontStyle`, `WordWrapMode`, `PositioningMode`,
 `PdfConverterImageFormat`, `DataType`, `DefaultMetadataProperties`,
-`AutoRotateMode`, `ImportStatus`, `Scope`, `NoCharacterAction`,
+`AutoRotateMode`, `Form.ImportStatus`, `ReplaceTextStrategy.Scope`,
+`ReplaceTextStrategy.NoCharacterAction`,
 `PdfFileEditor.ConcatenateCorruptedFileAction`. The printing support types
-(`PrinterSettings`, `PageSettings`, `PrintingOptionalDependencyGuard`, the print
-event args) live in `Aspose.Pdf.Printing`.
+(`PrinterSettings`, `PageSettings`, `PaperSize` / `PaperSizes`, `PaperSource` /
+`PaperSources`, `PrinterResolution`, `PrintRange`, `Duplex`, `PaperKind`,
+`PaperSourceKind`, `PrinterResolutionKind`, `PrintingOptionalDependencyGuard`,
+the print event args `CustomPrintEventArgs`, `StartEndPageEventArgs`,
+`PdfQueryPageSettingsEventArgs`, and the `*Extensions` helpers) live in
+`Aspose.Pdf.Printing`.
 
 ## `Aspose.Pdf.Drawing`
 
@@ -431,10 +474,14 @@ event args) live in `Aspose.Pdf.Printing`.
 | `Path`                      | Composite shape: its child shapes' outlines form one path painted with the `Path`'s own `GraphInfo` |
 | `Color`                     | Drawing colour (RGB) with named presets                      |
 | `Point`                     | Drawing-space point                                          |
-| `GradientAxialShading`      | Axial-gradient fill                                          |
+| `GradientAxialShading`      | Axial-gradient fill: start / end colours or any number of `Stops` |
 | `PatternColorSpace`         | Pattern colour space                                         |
+| `LinearGradientLayout` / `LinearGradientSegment` / `GradientStopSpec` | A linear gradient laid out from CSS colour-stop rules (stop positions, hints, spread) as the pieces of an axial shading |
+| `CssBackground` / `CssBackgroundTile` | Geometry of a background picture in its area: size, position and the tiles a repeat produces |
 
-Enumerations: `ImageFormat`.
+Enumerations: `ImageFormat`, `GradientSpread`, `GradientOffsetKind`,
+`GradientHintKind`, `CssBackgroundSizing`, `CssBackgroundEdge`,
+`CssBackgroundRepeat`.
 
 ## `Aspose.Pdf.Actions`
 
@@ -488,15 +535,20 @@ Enumerations: `ShadingType`.
 
 ## `Aspose.Pdf.Stamps`
 
+There is no separate `Aspose.Pdf.Stamps` namespace any more: every stamp type
+is declared in the top-level `Aspose.Pdf` namespace, listed here as a group.
+
 | Class                       | Description                                                  |
 |-----------------------------|--------------------------------------------------------------|
 | `Stamp`                     | Abstract base for stamps                                     |
 | `TextStamp`                 | Text stamp                                                   |
+| `ImageStamp`                | Image stamp                                                  |
+| `PageNumberStamp`           | Page-number stamp                                            |
+| `PdfPageStamp`              | A page of another PDF stamped onto a page                    |
 | `WatermarkStamp`            | Watermark stamp                                              |
 
-`PageNumberStamp`, `PdfPageStamp` and `ImageStamp` (plus a second `Stamp` /
-`TextStamp` pair) live in the top-level `Aspose.Pdf` namespace; `StampInfo` /
-`StampType` live in `Aspose.Pdf.Facades`.
+`StampInfo` / `StampType` (and the facade-level `Stamp`) live in
+`Aspose.Pdf.Facades`.
 
 ## `Aspose.Pdf.Content`
 
@@ -507,6 +559,7 @@ Enumerations: `ShadingType`.
 | `GraphicsState`             | Live graphics-state snapshot                                 |
 | `PathExtractor` / `PathSegment` / `ExtractedPath` | Vector-path extraction                |
 | `PathCommand`               | One path-construction command with its coordinates           |
+| `RealSpelling`              | How real numbers are written into a content stream (decimal places for geometry and for colour values) |
 
 Enumerations: `PathOp`, `PathOperationType`, `PathPaintMode`.
 
@@ -516,20 +569,27 @@ Typed wrappers around every PDF content-stream operator. `Operator` (in
 `Aspose.Pdf`) is the base type; the typed subclasses live here.
 
 The full set includes path-construction operators (`MoveTo`, `LineTo`,
-`CurveTo`, `Re`, `ClosePath`), painting operators (`Stroke`, `Fill`,
-`EOFill`, `FillStroke`, `ClosePathFillStroke`, `EndPath`), state operators
+`CurveTo`, `CurveTo1`, `CurveTo2`, `Re`, `ClosePath`), painting operators
+(`Stroke`, `ClosePathStroke`, `Fill`, `ObsoleteFill`, `EOFill`, `FillStroke`,
+`EOFillStroke`, `ClosePathFillStroke`, `ClosePathEOFillStroke`, `EndPath`), state operators
 (`GSave`, `GRestore`, `Clip`, `EOClip`, `SetLineWidth`, `SetLineCap`,
 `SetLineJoin`, `SetMiterLimit`, `SetDash`, `SetFlat`, `GS`, `ConcatenateMatrix`),
-text operators (`BT`, `ET`, `ShowText`, `MoveTextPosition`,
-`MoveTextPositionSetLeading`, `MoveToNextLine`, `SetTextMatrix`,
-`SetTextLeading`, `SetTextRenderingMode`, `SelectFont`,
+text operators (`BT`, `ET`, `ShowText`, `SetGlyphsPositionShowText`,
+`MoveToNextLineShowText`, `SetSpacingMoveToNextLineShowText`,
+`MoveTextPosition`, `MoveTextPositionSetLeading`, `MoveToNextLine`,
+`SetTextMatrix`, `SetTextLeading`, `SetTextRenderingMode`, `SelectFont`,
 `SetCharacterSpacing`, `SetWordSpacing`, `SetHorizontalTextScaling`,
-`SetTextRise`), colour operators (`SetRGBColor`, `SetRGBColorStroke`,
+`SetTextRise`), Type 3 glyph metrics (`SetCharWidth`,
+`SetCharWidthBoundingBox`), colour operators (`SetRGBColor`, `SetRGBColorStroke`,
 `SetCMYKColor`, `SetCMYKColorStroke`, `SetGray`, `SetGrayStroke`,
 `SetColor`, `SetColorStroke`, `SetAdvancedColor`, `SetAdvancedColorStroke`,
 `SetColorSpace`, `SetColorSpaceStroke`, `SetColorRenderingIntent`), and
 marked-content / inline-image operators (`BMC`, `BDC`, `EMC`, `MP`, `DP`,
-`BX`, `EX`, `BI`, `ID`, `EI`, `Do`, `ShFill`).
+`BX`, `EX`, `BI`, `ID`, `EI`, `Do`, `ShFill`). Grouping bases
+(`TextOperator`, `TextShowOperator`, `TextPlaceOperator`, `TextStateOperator`,
+`BlockTextOperator`, `SetColorOperator`, `BasicSetColorOperator`,
+`BasicSetColorAndPatternOperator`) and `GlyphPosition` (one element of a `TJ`
+array) complete the namespace.
 
 Enumerations: `LineCap`, `LineJoin`.
 
@@ -542,6 +602,7 @@ Enumerations: `LineCap`, `LineJoin`.
 | `GraphicsAbsorber`          | Extracts a page's painted vector sub-paths                   |
 | `SubPath`                   | One painted sub-path with its paint and transform            |
 | `XFormPlacement`            | A form-XObject invocation found in a content stream          |
+| `SvgExtractor` / `SvgExtractionOptions` | Writes a page's vector graphics (all, a chosen set, or one SVG per cluster of touching elements) as SVG documents |
 
 ## `Aspose.Pdf.Structure`
 
@@ -563,8 +624,13 @@ Enumerations: `LineCap`, `LineJoin`.
 | `SideBySideDocsComparisonResult` | `HasChanges`, per-page `FirstDocChanges` / `SecondDocChanges`, per-page `FullChanges` |
 | `SideBySidePagesComparisonResult` | `HasChanges`, `FirstPageChanges` / `SecondPageChanges`, `FullChanges` |
 | `EditContainer` | One highlighted change: `Id`, its `DiffOperation`, and the `Rects` it covers |
-| `GraphicalPdfComparer` | Pixel comparison of two pages (`Resolution`, `Color`, `Threshold`) — **Windows only** |
-| `ImagesDifference` | `Difference` / `Stride` / `Height`, `SourceImage`, `GetDestinationImage()`, `DifferenceToImage()` — **Windows only** |
+| `TextPdfComparer` | Text diff of two pages or documents (`ComparePages`, `CompareDocumentsPageByPage`, `CompareFlatDocuments`) returning `DiffOperation` lists, plus `CreateComparisonStatistics` |
+| `ComparisonOptions` | `ExtractionArea`, `ExcludeAreas1` / `ExcludeAreas2`, `ExcludeTables`, `EditOperationsOrder` for a text comparison |
+| `DocumentComparisonStatistics` / `TextItemComparisonStatistics` | Character and edit counts per page and for the whole document |
+| `IFileOutputGenerator` / `IStringOutputGenerator` / `HtmlDiffOutputGenerator` / `MarkdownDiffOutputGenerator` / `JsonDiffOutputGenerator` / `PdfOutputGenerator` | Write a text-comparison result as HTML, Markdown, JSON or PDF, to a file or a string |
+| `OutputTextStyle` / `TextStyle` | Styles of inserted, deleted and equal text in a comparison output, and whether deleted text is struck through |
+| `GraphicalPdfComparer` | Pixel comparison of two pages or documents (`Resolution`, `Color`, `Threshold`), written as an image or a PDF; rendering, diffing and the written outputs are managed code and work off Windows |
+| `ImagesDifference` | `Difference` / `Stride` / `Height`; the `System.Drawing.Bitmap` views `SourceImage`, `GetDestinationImage()`, `DifferenceToImage()` are **Windows only** |
 
 ## `Aspose.Pdf.Comparison.Diff`
 
@@ -580,16 +646,21 @@ See [Comparison](comparison.md) for worked examples.
 
 The following surface areas are intentionally not part of this library:
 
-- `Aspose.Pdf.AI`, `Aspose.Pdf.LowCode`, `Aspose.Pdf.Plugins`
-- DOCX / EPUB / XPS / PCL / LaTeX / DJVU / OFD / PostScript converters — the
+- AI-assisted workflows, one-call low-code façades and plug-in pipelines
+- DOCX / EPUB / XPS / PCL / LaTeX / DJVU / OFD / CGM converters — the
   `SaveFormat` / `LoadFormat` members exist, but `Document.Save` throws
   `NotSupportedException` for them and no import path reads them
 - 3D-content rendering — `PDF3D*` annotations are read (artwork, views,
   cross-sections) and a `Content` assigned to an annotation read from a document is
   written back to its `/3DD` stream, but a newly created `PDF3DAnnotation` writes
   no 3D stream and the model is not displayed
-- Native (spooler) printing — `PdfViewer.PrintDocument`, `PrintDocumentWithSetup`,
-  `PrintDocuments` and `PrintLargePdf` throw `PlatformNotSupportedException`;
-  `PrintDocumentWithSettings` only handles `PrinterSettings.PrintToFile` with a
-  `.pdf` target. `Aspose.Pdf.Printing.PrintingOptionalDependencyGuard` reports a
-  missing System.Drawing.Common package as `MissingOptionalDependencyException`
+- Printing sends each page to the printer as drawing commands - glyph outlines, paths and
+  the page's own images - so the printer rasterises it at its own resolution; a page goes as
+  a rendered image at `PdfViewer.Resolution` DPI only when `PrintAsImage`,
+  `PrintAsGrayscale` or `UseIntermidiateImage` is set, when it shows Type 3 text, or when its content is composited
+  from pixels (transparency groups, blend modes, soft masks). `PrintPageDialog` raises no
+  dialog, the library having no windowing dependency. A print job needs an installed
+  printer and runs on Windows only, except a print-to-file job with a `.pdf` target, which
+  is written directly.
+  `Aspose.Pdf.Printing.PrintingOptionalDependencyGuard` reports a missing
+  System.Drawing.Common package as `MissingOptionalDependencyException`

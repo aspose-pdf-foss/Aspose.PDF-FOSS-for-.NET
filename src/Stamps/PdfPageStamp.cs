@@ -1,8 +1,7 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Globalization;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
-using Aspose.Pdf.Stamps;
 
 namespace Aspose.Pdf;
 
@@ -10,7 +9,7 @@ namespace Aspose.Pdf;
 /// Stamps the content of one PDF page onto another page.
 /// The source page is drawn as a Form XObject at the specified position.
 /// </summary>
-public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
+public sealed partial class PdfPageStamp : Stamp
 {
     private Page _sourcePage;
     private PdfReader _sourceReader;
@@ -28,6 +27,12 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
     /// exposes the stamp's fonts (F1/F2…) at page level and the form inherits them.</summary>
     internal bool PromoteFontsToPage { get; set; }
 
+    /// <summary>How far the imported form's box reaches past the source page on every side.
+    /// A stroke drawn on the page's very edge (an SVG's viewport rectangle) is half outside
+    /// the box and clipped by it; the reference draws such artwork onto the page itself, where
+    /// that edge stroke shows in full.</summary>
+    internal double BBoxOutsetPt { get; set; }
+
     // Font entries hoisted out of the (shared) imported form, re-applied to every
     // target page the stamp lands on.
     private List<(string Name, PdfObject Font)>? _promotedFonts;
@@ -38,11 +43,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
     /// geometry — turn this off to avoid double-adding.</summary>
     internal bool CarryAnnotations { get; set; } = true;
 
-    /// <summary>Width of the stamp in points. Defaults to source page width.</summary>
-    public double Width { get; set; }
 
-    /// <summary>Height of the stamp in points. Defaults to source page height.</summary>
-    public double Height { get; set; }
 
     /// <summary>The source page being stamped.</summary>
     public Page PdfPage
@@ -67,7 +68,7 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
     }
 
     /// <summary>Alias for <see cref="ApplyTo"/> matching the public surface.</summary>
-    public void Put(Page page) => ApplyTo(page);
+    public override void Put(Page page) => ApplyTo(page);
 
     /// <summary>Create a PdfPageStamp from page <paramref name="pageIndex"/>
     /// (1-based) of the PDF at <paramref name="fileName"/>.</summary>
@@ -86,188 +87,69 @@ public sealed class PdfPageStamp : Aspose.Pdf.Stamps.Stamp
         return ms.ToArray();
     }
 
+    /// <summary>A matrix coefficient in the content stream's number format.</summary>
+    private static string Fmt(double v) => v.ToString("0.######", CultureInfo.InvariantCulture);
+
     internal override byte[] BuildContentStream(Page targetPage)
     {
-        var sourcePage = _sourcePage;
-        var sourceReader = _sourceReader;
+        var pg = new PageStampContentState();
+        pg.targetPage = targetPage;
+        pg.sourcePage = _sourcePage;
+        pg.sourceReader = _sourceReader;
 
-        // Get source page content
-        var sourceContent = GetPageContent(sourcePage.Dict, sourceReader);
-        if (sourceContent.Length == 0) return [];
+        pg.sourceContent = GetPageContent(pg.sourcePage.Dict, pg.sourceReader);
+        if (pg.sourceContent.Length == 0) return [];
 
-        var mb = sourcePage.MediaBox;
-        var targetReader = targetPage.Reader;
-        var targetDoc = targetReader.OwnerDocument;
+        pg.mb = pg.sourcePage.MediaBox;
+        pg.targetReader = pg.targetPage.Reader;
+        pg.targetDoc = pg.targetReader.OwnerDocument;
 
-        // Build (or reuse) the source-page Form XObject. When the same stamp is applied to
-        // several pages of one target document the form is imported once and shared via a
-        // single indirect reference; each page's /XObject entry points at it.
-        PdfObject formObject;
-        if (targetDoc is not null && _importedForm.TryGetValue(targetDoc, out var sharedRef))
+        if (pg.targetDoc is not null && _importedForm.TryGetValue(pg.targetDoc, out var sharedRef))
         {
-            formObject = sharedRef;
+            pg.formObject = sharedRef;
         }
         else
         {
-            var formDict = new PdfDictionary();
-            formDict.Set("Type", new PdfName("XObject"));
-            formDict.Set("Subtype", new PdfName("Form"));
-
-            var bbox = new PdfArray();
-            bbox.Add(new PdfReal(mb.LLX));
-            bbox.Add(new PdfReal(mb.LLY));
-            bbox.Add(new PdfReal(mb.URX));
-            bbox.Add(new PdfReal(mb.URY));
-            formDict.Set("BBox", bbox);
-
-            // Import the source page's resources into the TARGET document. The source
-            // /Resources dictionary holds indirect references into the source document's
-            // object table (fonts, ICC colour spaces, images, ExtGStates); copying them
-            // verbatim would leave dangling references in the target. ImportDict resolves
-            // the whole object graph against the source reader and re-registers it with
-            // fresh object numbers in the target so the form is self-contained.
-            var srcResources = ResolveEffectiveResources(sourcePage.Dict, sourceReader);
-            if (srcResources is not null && targetDoc is not null)
-                formDict.Set("Resources", targetDoc.ImportDict(srcResources, sourceReader,
-                    targetDoc.GetSharedImportCloneMap(sourceReader)));
-            else if (srcResources is not null)
-                formDict.Set("Resources", srcResources);
-
-            // Hoist the imported form's fonts for page-level promotion (facade path):
-            // capture the /Font entries and strip the key from the form's resources so
-            // the form inherits them from the page (the expected layout).
-            if (PromoteFontsToPage)
-            {
-                var formRes = targetReader.ResolveDict(formDict.Get("Resources"))
-                    ?? formDict.Get("Resources") as PdfDictionary;
-                var formFonts = formRes is null ? null
-                    : targetReader.ResolveDict(formRes.Get("Font")) ?? formRes.Get("Font") as PdfDictionary;
-                if (formRes is not null && formFonts is not null)
-                {
-                    _promotedFonts = new List<(string, PdfObject)>();
-                    foreach (var key in formFonts.Keys.ToList())
-                    {
-                        var v = formFonts.Get(key);
-                        if (v is not null) _promotedFonts.Add((key, v));
-                    }
-                    formRes.Remove("Font");
-                }
-            }
-
-            var formStream = new PdfStream(formDict, sourceContent);
-
-            if (targetDoc is not null)
-            {
-                // Register the form as a single indirect object so repeated applications
-                // (and the writer) reference one shared copy.
-                var objNum = targetDoc.AllocateObjectNumber();
-                targetDoc.AddNewObject(objNum, formStream, registerOverlay: true);
-                var formRef = new PdfIndirectRef(objNum, 0);
-                _importedForm[targetDoc] = formRef;
-                formObject = formRef;
-            }
-            else
-            {
-                formObject = formStream;
-            }
+            ImportSourceForm(pg);
         }
 
-        // Register the Form XObject in target page resources
-        var targetResources = targetReader.ResolveDict(targetPage.Dict.Get("Resources"));
+        var targetResources = pg.targetReader.ResolveDict(pg.targetPage.Dict.Get("Resources"));
         if (targetResources is null)
         {
             targetResources = new PdfDictionary();
-            targetPage.Dict.Set("Resources", targetResources);
+            pg.targetPage.Dict.Set("Resources", targetResources);
         }
+        pg.targetResources = targetResources;
 
-        var xobjectDict = targetReader.ResolveDict(targetResources.Get("XObject"));
+        var xobjectDict = pg.targetReader.ResolveDict(pg.targetResources.Get("XObject"));
         if (xobjectDict is null)
         {
             xobjectDict = new PdfDictionary();
-            targetResources.Set("XObject", xobjectDict);
+            pg.targetResources.Set("XObject", xobjectDict);
         }
+        pg.xobjectDict = xobjectDict;
 
         // Re-apply the hoisted stamp fonts to this target page's /Resources/Font
         // (fresh names are NOT invented: the source names are kept,
         // e.g. F1/F2; existing page entries win on collision).
-        if (PromoteFontsToPage && _promotedFonts is { Count: > 0 })
-        {
-            var pageFonts = targetReader.ResolveDict(targetResources.Get("Font"))
-                ?? targetResources.Get("Font") as PdfDictionary;
-            if (pageFonts is null)
-            {
-                pageFonts = new PdfDictionary();
-                targetResources.Set("Font", pageFonts);
-            }
-            foreach (var (name, font) in _promotedFonts)
-                if (!pageFonts.ContainsKey(name))
-                    pageFonts.Set(name, font);
-        }
+        PromoteFormFonts(pg);
 
-        // Find unique name for the form XObject on this page
-        var xobjName = "Fm0";
-        var counter = 0;
-        while (xobjectDict.ContainsKey(xobjName))
-            xobjName = $"Fm{++counter}";
+        pg.xobjName = "Fm0";
+        pg.counter = 0;
+        while (pg.xobjectDict.ContainsKey(pg.xobjName))
+            pg.xobjName = $"Fm{++pg.counter}";
 
-        xobjectDict.Set(xobjName, formObject);
+        pg.xobjectDict.Set(pg.xobjName, pg.formObject);
 
-        // Build content stream to draw the form XObject
-        var sx = Width / mb.Width * ZoomX;
-        var sy = Height / mb.Height * ZoomY;
+        pg.sx = Width / pg.mb.Width * ZoomX;
+        pg.sy = Height / pg.mb.Height * ZoomY;
 
-        // Stamp placement: alignment (with margins) when set; Left/Bottom keep the
-        // legacy XIndent/YIndent placement so indent-positioned stamps are unchanged.
-        // Negative/explicit indents pass through untouched; margins only kick in
-        // when the indent is exactly unset (0) under the default alignment.
-        var x = HorizontalAlignment switch
-        {
-            HorizontalAlignment.Center => (targetPage.Width - Width * ZoomX) / 2 + LeftMargin - RightMargin,
-            HorizontalAlignment.Right => targetPage.Width - Width * ZoomX - RightMargin - XIndent,
-            HorizontalAlignment.Left => XIndent != 0 ? XIndent : LeftMargin,
-            _ => XIndent,
-        };
-        var y = VerticalAlignment switch
-        {
-            VerticalAlignment.Top => targetPage.Height - Height * ZoomY - TopMargin - YIndent,
-            VerticalAlignment.Center => (targetPage.Height - Height * ZoomY) / 2 + BottomMargin - TopMargin,
-            VerticalAlignment.Bottom => YIndent != 0 ? YIndent : BottomMargin,
-            _ => YIndent,
-        };
+        ComputeStampPlacement(pg);
 
-        var f = (double v) => v.ToString("0.######", CultureInfo.InvariantCulture);
-
-        // Placement matrix. Normally axis-aligned (sx 0 0 sy X Y), but when the target
-        // page is displayed rotated 90° the stamp must be rotated with it so it lands
-        // upright in the displayed view — the /Rotate 90 is baked into
-        // the matrix as (0 sx -sy 0  W-YIndent  XIndent), W being the page width.
-        string matrix;
-        var rot = ((targetPage.RotateDegrees % 360) + 360) % 360;
-        if (rot == 90)
-        {
-            var tmb = targetPage.MediaBox;
-            matrix = $"0 {f(sx)} {f(-sy)} 0 {f(tmb.Width - y)} {f(x)}";
-        }
-        else
-        {
-            // Indents are measured from the TARGET page's box origin (a page whose
-            // MediaBox lower-left is not (0,0) still stamps at its visible corner),
-            // and the SOURCE page's own box origin maps to the placement point.
-            var tmb = targetPage.MediaBox;
-            matrix = $"{f(sx)} 0 0 {f(sy)} {f(tmb.LLX + x - mb.LLX * sx)} {f(tmb.LLY + y - mb.LLY * sy)}";
-        }
-
-        // Draw the stamp form inside an /Artifact marked-content block with a default
-        // graphics state: the overlay is a pagination
-        // artifact, not real page content, and the leading `gs` resets the graphics
-        // state so the stamp is isolated from whatever state the page content left.
-        var gsName = targetPage.AddExtGState(new Content.ExtGState());
-        // %StampId identifies the block to GetStamps/DeleteStampById; the parser
-        // expects the comment immediately before the q that opens the stamp block.
-        var idComment = StampId != 0 ? $"%StampId={StampId}\n" : "";
-        var content =
-            $"/Artifact BDC\n{idComment}q\n/{gsName} gs\n{matrix} cm\n/{xobjName} Do\nQ\nEMC\n";
-        return System.Text.Encoding.ASCII.GetBytes(content);
+        pg.gsName = pg.targetPage.AddExtGState(new Content.ExtGState());
+        pg.idComment = StampId != 0 ? $"%StampId={StampId}\n" : "";
+        pg.content = $"/Artifact BDC\n{pg.idComment}q\n/{pg.gsName} gs\n{pg.matrix} cm\n/{pg.xobjName} Do\nQ\nEMC\n";
+        return System.Text.Encoding.ASCII.GetBytes(pg.content);
     }
 
     /// <summary>

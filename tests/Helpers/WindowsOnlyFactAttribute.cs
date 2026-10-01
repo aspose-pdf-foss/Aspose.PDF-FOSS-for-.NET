@@ -11,7 +11,7 @@ internal sealed class WindowsOnlyFactAttribute : FactAttribute
 {
     public WindowsOnlyFactAttribute()
     {
-        if (!OperatingSystem.IsWindows())
+        if (!Compat.IsWindows())
         {
             Skip = "Windows-only API (System.Drawing / GDI+).";
         }

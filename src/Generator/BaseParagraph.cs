@@ -6,6 +6,9 @@ namespace Aspose.Pdf;
 /// </summary>
 public class BaseParagraph
 {
+    /// <summary>Creates a paragraph with default alignment, an empty margin and no hyperlink.</summary>
+    public BaseParagraph() { }
+
     /// <summary>Horizontal alignment applied to this paragraph.</summary>
     public HorizontalAlignment HorizontalAlignment { get; set; }
 

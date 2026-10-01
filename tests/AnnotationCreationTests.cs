@@ -7,6 +7,23 @@ namespace Aspose.Pdf.Tests;
 
 public class AnnotationCreationTests
 {
+    [Theory]
+    [InlineData(ColorsOfCMYK.Cyan, "cyan")]
+    [InlineData(ColorsOfCMYK.Magenta, "magenta")]
+    [InlineData(ColorsOfCMYK.Yellow, "yellow")]
+    [InlineData(ColorsOfCMYK.Black, "black")]
+    public void ColorBar_XfdfColorName_RoundTrips(ColorsOfCMYK channel, string name)
+    {
+        Assert.Equal(name, ColorBarAnnotation.XfdfColorName(channel));
+        Assert.Equal(channel, ColorBarAnnotation.FromXfdfColorName(name));
+    }
+
+    [Fact]
+    public void ColorBar_FromXfdfColorName_RejectsAnUnknownName()
+    {
+        Assert.Throws<ArgumentException>(() => ColorBarAnnotation.FromXfdfColorName("orange"));
+    }
+
     [Fact]
     public void AddInkAnnotation_RoundTrip()
     {
@@ -153,6 +170,75 @@ public class AnnotationCreationTests
         Assert.Single(doc2.Pages[1].Annotations);
         Assert.Equal(AnnotationType.Watermark, doc2.Pages[1].Annotations[1].AnnotationType);
         Assert.Equal("CONFIDENTIAL", doc2.Pages[1].Annotations[1].Contents);
+    }
+
+    [Fact]
+    public void WatermarkAnnotation_IsAnAnnotation_AndComesBackAsOne()
+    {
+        var input = PdfBuilder.BuildMinimal();
+        using var doc = Document.Open(input);
+        var page = doc.Pages[1];
+
+        var watermark = new WatermarkAnnotation(page, new Rectangle(100, 500, 400, 600));
+        watermark.Contents = "CONFIDENTIAL";
+        // Taken by the collection as the annotation it is, not through an overload of its own.
+        Annotation asAnnotation = watermark;
+        page.Annotations.Add(asAnnotation, considerRotation: false);
+        watermark.Opacity = 0.5;
+        watermark.SetTextAndState(new[] { "HELLO", "Line 1" }, new Aspose.Pdf.Text.TextState { FontSize = 32 });
+
+        var saved = doc.ToArray();
+        using var doc2 = Document.Open(saved);
+        var read = doc2.Pages[1].Annotations[1];
+        Assert.IsType<WatermarkAnnotation>(read);
+        Assert.Equal(AnnotationType.Watermark, read.AnnotationType);
+        Assert.Equal("CONFIDENTIAL", read.Contents);
+        Assert.Equal(100, read.Rect!.LLX, 3);
+        // The text it was given after it joined the page is painted in its appearance.
+        Assert.NotNull(read.Appearance["N"]);
+    }
+
+    [Fact]
+    public void ANewWatermark_HandsOutANormalAppearanceToDrawInto_AndWhatIsDrawnSurvivesSaving()
+    {
+        var input = PdfBuilder.BuildMinimal();
+        using var doc = Document.Open(input);
+        var page = doc.Pages[1];
+
+        var watermark = new WatermarkAnnotation(page, page.Rect);
+        var form = watermark.Appearance["N"];
+        Assert.NotNull(form);
+        form.BBox = page.Rect;
+        form.Contents.Add(new Operators.GSave());
+        form.Contents.Add(new Operators.ConcatenateMatrix(new Matrix(30, 0, 0, 15, 0, 0)));
+        form.Contents.Add(new Operators.GRestore());
+        page.Annotations.Add(watermark, considerRotation: false);
+
+        using var saved = Document.Open(doc.ToArray());
+        var read = saved.Pages[1].Annotations[1];
+        Assert.IsType<WatermarkAnnotation>(read);
+        Assert.NotNull(read.NormalAppearance);
+        Assert.Equal(3, read.NormalAppearance!.Contents.Count);
+    }
+
+    [Fact]
+    public void OnlyAWatermarkIsGivenAnAppearanceToDrawInto()
+    {
+        var input = PdfBuilder.BuildMinimal();
+        using var doc = Document.Open(input);
+        var page = doc.Pages[1];
+
+        // Every other kind of annotation draws from its own geometry, and a caller asking for an
+        // appearance it has not got is told so.
+        Assert.Null(new SquareAnnotation(page, new Rectangle(10, 10, 20, 20)).Appearance["N"]);
+        Assert.Null(new TextAnnotation(page, new Rectangle(10, 10, 20, 20)).Appearance["N"]);
+
+        // Nor is one grafted onto a watermark that came out of a document without one.
+        var watermark = new WatermarkAnnotation(page, new Rectangle(10, 10, 20, 20));
+        watermark.Contents = "no appearance of its own";
+        page.Annotations.Add(watermark, considerRotation: false);
+        using var saved = Document.Open(doc.ToArray());
+        Assert.Null(saved.Pages[1].Annotations[1].Appearance["N"]);
     }
 
     [Fact]

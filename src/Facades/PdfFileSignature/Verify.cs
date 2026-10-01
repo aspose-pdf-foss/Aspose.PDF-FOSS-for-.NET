@@ -34,9 +34,11 @@ public sealed partial class PdfFileSignature
         return Forms.DocMDPAccessPermissions.NoChanges;
     }
 
+    /// <summary>Returns true when the named signature is intact and valid; false when the name is null.</summary>
     public bool VerifySignature(SignatureName signName)
         => signName is not null && VerifySignature(signName.FullName);
 
+    /// <summary>Returns the signing certificate of the named signature as a stream of DER-encoded (.cer) bytes, or null when it cannot be found or the name is null.</summary>
     public Stream? ExtractCertificate(SignatureName signName)
         => signName is null ? null : ExtractCertificate(signName.FullName);
 
@@ -59,10 +61,8 @@ public sealed partial class PdfFileSignature
         try
         {
             var bytes = new byte[certStream.Length];
-            certStream.Read(bytes, 0, bytes.Length);
-#pragma warning disable SYSLIB0057 // X509Certificate2(byte[]) still works on .NET 8; loader API is .NET 9+
-            certificate = new System.Security.Cryptography.X509Certificates.X509Certificate2(bytes);
-#pragma warning restore SYSLIB0057
+            certStream.ReadExactly(bytes);
+            certificate = Compat.LoadCertificate(bytes);
             return true;
         }
         catch
@@ -71,6 +71,7 @@ public sealed partial class PdfFileSignature
         }
     }
 
+    /// <summary>Returns true when the named signature is intact and valid. Throws when the signature is detected as forged.</summary>
     public bool VerifySignature(string signName)
     {
         var forgery = DetectSignatureForgery(signName);
@@ -80,71 +81,14 @@ public sealed partial class PdfFileSignature
         return PdfSigner.Verify(input, signName, _password);
     }
 
-    /// <summary>
-    /// Detect a Universal Signature Forgery (USF) attack on the named signature.
-    /// A signature whose CMS envelope (/Contents) is absent/empty, or whose
-    /// /ByteRange is absent or malformed, is a forgery — verifiers that skip
-    /// validation for such structures would wrongly report it as valid. Returns
-    /// a description of the forgery, or <c>null</c> when the signature is sound.
-    /// </summary>
+    /// <summary>The forgery verdict for the named signature - see
+    /// <see cref="Signature.DetectForgery(long)"/> - or null when it is sound or absent.</summary>
     private string? DetectSignatureForgery(string signName)
     {
         var input = RequireBound();
         using var doc = OpenDoc(input);
         var sig = Signature.EnumerateSignatures(doc).FirstOrDefault(s => s.FieldName == signName);
-        if (sig is null) return null;
-
-        const string usf = "Universal Signature Forgery";
-
-        // Absent/empty CMS envelope or absent/malformed byte range.
-        if (sig.ByteRangeRaw is null || sig.ByteRangeRaw.Length < 4
-            || sig.ContentsRaw is null || sig.ContentsRaw.Length == 0)
-        {
-            return $"Signature '{signName}' is compromised by USF ({usf}): " +
-                   "its /Contents or /ByteRange is missing, empty, or malformed.";
-        }
-
-        // A hollow CMS envelope: /Contents is present and well-formed hex, but
-        // every byte is zero. Real envelopes zero-pad only the tail after the
-        // DER structure; an all-zero envelope holds no signature at all, and a
-        // verifier that trusts the padding would report it valid.
-        var contents = sig.ContentsRaw;
-        var allZero = true;
-        for (var i = 0; i < contents.Length; i++)
-        {
-            if (contents[i] != 0) { allZero = false; break; }
-        }
-        if (allZero)
-        {
-            return $"Signature '{signName}' is compromised by USF ({usf}): " +
-                   "its /Contents holds no signature data.";
-        }
-
-        // A fabricated /ByteRange whose covered region extends beyond the end of
-        // the file (or starts before it): the signed range cannot be honoured, so
-        // the signature validates nothing. A sound range never reaches past EOF.
-        var br = sig.ByteRangeRaw;
-        if (br[0] < 0 || br[1] < 0 || br[2] < 0 || br[3] < 0
-            || br[2] + br[3] > input.Length || br[0] + br[1] > br[2])
-        {
-            return $"Signature '{signName}' is compromised by USF ({usf}): " +
-                   "its /ByteRange does not correspond to the document.";
-        }
-
-        // SWA (Signature Wrapping Attack): the /ByteRange and /Contents are
-        // structurally valid, but the unsigned gap between the two signed ranges
-        // (which must hold only the /Contents hex string <…>) is larger than that
-        // hex string. The surplus unsigned bytes hide injected objects the
-        // signature does not cover. On-disk hex length = 2·bytes + 2 delimiters;
-        // a small slack absorbs optional whitespace around the delimiters.
-        var gap = br[2] - (br[0] + br[1]);
-        var contentsHexLen = 2L * sig.ContentsRaw.Length + 2;
-        if (gap - contentsHexLen > 128)
-        {
-            return $"Signature '{signName}' is compromised by SWA (Signature Wrapping Attack): " +
-                   "the /ByteRange leaves unsigned content in the /Contents gap.";
-        }
-        return null;
+        return sig?.DetectForgery(input.Length);
     }
 
     /// <summary>
@@ -228,6 +172,7 @@ public sealed partial class PdfFileSignature
         }
     }
 
+    /// <summary>Returns true when the bound document carries usage rights (a /UR or /UR3 entry in /Perms).</summary>
     public bool ContainsUsageRights()
     {
         var input = RequireBound();
@@ -237,6 +182,7 @@ public sealed partial class PdfFileSignature
         return perms.ContainsKey("UR") || perms.ContainsKey("UR3");
     }
 
+    /// <summary>Removes the usage rights (/UR and /UR3) from the bound document.</summary>
     public void RemoveUsageRights()
     {
         var input = RequireBound();
@@ -270,7 +216,8 @@ public sealed partial class PdfFileSignature
         out Security.ValidationResult validationResult)
     {
         var basic = VerifySignature(signName);
-        return Validate(basic, options, signName, out validationResult);
+        (var valid, validationResult) = Validate(basic, options, signName);
+        return valid;
     }
 
     public bool VerifySignature(string signName,
@@ -291,10 +238,8 @@ public sealed partial class PdfFileSignature
             if (certStream is not null)
             {
                 var bytes = new byte[certStream.Length];
-                certStream.Read(bytes, 0, bytes.Length);
-#pragma warning disable SYSLIB0057
-                var signerCert = new System.Security.Cryptography.X509Certificates.X509Certificate2(bytes);
-#pragma warning restore SYSLIB0057
+                certStream.ReadExactly(bytes);
+                var signerCert = Compat.LoadCertificate(bytes);
                 if (!signerCert.Thumbprint.Equals(publicKeyCertificate.Thumbprint,
                         System.StringComparison.OrdinalIgnoreCase))
                 {
@@ -305,7 +250,8 @@ public sealed partial class PdfFileSignature
                 }
             }
         }
-        return Validate(basic, options, signName, out validationResult);
+        (var valid, validationResult) = Validate(basic, options, signName);
+        return valid;
     }
 
     /// <summary>Cert-pinned verify without ValidationOptions. Returns true
@@ -359,40 +305,27 @@ public sealed partial class PdfFileSignature
     /// <item>Revocation (OCSP/CRL) is not implemented: a non-Auto method is Undefined
     /// with its own message, failing the verify only under Strict.</item>
     /// </list></summary>
-    private bool Validate(bool ok, Security.ValidationOptions? options, string signName,
-        out Security.ValidationResult validationResult)
+    /// <returns>Whether the signature passes under the options, and the result that says why.</returns>
+    private (bool valid, Security.ValidationResult result) Validate(bool ok, Security.ValidationOptions? options, string signName)
     {
         if (!ok)
-        {
-            validationResult = new Security.ValidationResult(Security.ValidationStatus.Invalid,
-                $"Signature {signName} failed cryptographic verification.");
-            return false;
-        }
+            return (false, new Security.ValidationResult(Security.ValidationStatus.Invalid,
+                $"Signature {signName} failed cryptographic verification."));
         if (options is null || options.ValidationMode == Security.ValidationMode.None)
-        {
-            validationResult = options is null
+            return (true, options is null
                 ? new Security.ValidationResult(Security.ValidationStatus.Valid, $"Signature {signName} verified.")
                 : new Security.ValidationResult(Security.ValidationStatus.Undefined,
-                    "No validation requested (ValidationMode.None).");
-            return true;
-        }
+                    "No validation requested (ValidationMode.None)."));
         var strict = options.ValidationMode == Security.ValidationMode.Strict;
-        if (options.CheckCertificateChain && !SignerChainIsTrusted(signName, out var why))
-        {
-            validationResult = new Security.ValidationResult(Security.ValidationStatus.Undefined,
+        if (options.CheckCertificateChain && UntrustedChainReason(signName) is { } why)
+            return (!strict, new Security.ValidationResult(Security.ValidationStatus.Undefined,
                 $"Signature {signName} passed cryptographic verification but its certificate chain " +
-                $"could not be validated to a trusted root: {why}");
-            return !strict;
-        }
+                $"could not be validated to a trusted root: {why}"));
         if (options.ValidationMethod != Security.ValidationMethod.Auto)
-        {
-            validationResult = new Security.ValidationResult(Security.ValidationStatus.Undefined,
-                "Failed to obtain certificate revocation list.");
-            return !strict;
-        }
-        validationResult = new Security.ValidationResult(Security.ValidationStatus.Valid,
-            $"Signature {signName} verified.");
-        return true;
+            return (!strict, new Security.ValidationResult(Security.ValidationStatus.Undefined,
+                "Failed to obtain certificate revocation list."));
+        return (true, new Security.ValidationResult(Security.ValidationStatus.Valid,
+            $"Signature {signName} verified."));
     }
 
     /// <summary>Resolve the named signature's signer chain to a trusted root
@@ -400,9 +333,9 @@ public sealed partial class PdfFileSignature
     /// signature carries — the CMS certificate set, or the /Cert array of a
     /// PKCS#1 signature — judged at the signing time (/M), or now when the
     /// signature carries no date.</summary>
-    private bool SignerChainIsTrusted(string signName, out string reason)
+    /// <returns>Why the chain is not trusted, or null when it resolves to a trusted root.</returns>
+    private string? UntrustedChainReason(string signName)
     {
-        reason = "signature not found";
         var input = RequireBound();
         using var doc = OpenDoc(input);
         foreach (var sig in Signature.EnumerateSignatures(doc))
@@ -413,9 +346,9 @@ public sealed partial class PdfFileSignature
                 : new List<byte[]>();
             if (certs.Count == 0 && sig.CertRaw is { Count: > 0 } pkcs1Certs) certs = pkcs1Certs;
             var when = sig.Date != default ? sig.Date : DateTime.UtcNow;
-            return Security.SignerChainTrust.IsTrusted(certs, when, out reason);
+            return Security.SignerChainTrust.UntrustedReason(certs, when);
         }
-        return false;
+        return "signature not found";
     }
 
     private static string? LeafName(string? fullName)

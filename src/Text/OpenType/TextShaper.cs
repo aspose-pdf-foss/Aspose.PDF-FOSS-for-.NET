@@ -38,6 +38,87 @@ internal static class TextShaper
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<byte[], OtfLayout?> _cache = new();
 
     /// <summary>
+    /// Shape <paramref name="text"/> applying the OpenType features NAMED by the caller,
+    /// rather than the ones a script needs to be legible at all.
+    ///
+    /// This is the typographic half of shaping: `liga` for the fi and fl ligatures,
+    /// `onum` for old-style figures, `ss01` for a face's first stylistic set. None of it
+    /// is applied unless asked for — a Latin run is one glyph per character by default,
+    /// which is what the rest of this library has always assumed and what the reference
+    /// these features were measured against also does.
+    ///
+    /// Each glyph comes back with the CLUSTER it came from, because a ligature stands for
+    /// several characters and the caller has to be able to say which: that is what lets
+    /// the text be extracted from the page afterwards.
+    ///
+    /// Returns null when nothing applied, so the caller keeps its straight cmap walk and
+    /// pays nothing for asking.
+    /// </summary>
+    internal static (ushort Glyph, int Cluster)[]? ShapeFeatures(
+        byte[] ttf, string text, Func<int, ushort> glyphOf, IReadOnlyList<string> features)
+    {
+        if (string.IsNullOrEmpty(text) || features is null || features.Count == 0) return null;
+
+        var layout = LayoutOf(ttf);
+        if (layout is null || !layout.Has("GSUB")) return null;
+
+        var scripts = layout.Scripts("GSUB");
+        var buf = Buffer(text, glyphOf);
+        var gsub = new GsubEngine(layout);
+        var changed = false;
+
+        // A Latin face lists its features under `latn`, and a face that serves several
+        // scripts from one set lists them under the default script instead. Asking both
+        // costs nothing when only one is present.
+        foreach (var scriptTag in new[] { "latn", "DFLT" })
+        {
+            if (!scripts.Contains(scriptTag)) continue;
+            foreach (var feature in features)
+            {
+                if (string.IsNullOrEmpty(feature)) continue;
+                foreach (var lookup in layout.LookupsForFeature("GSUB", scriptTag, feature))
+                    changed |= gsub.ApplyLookup(buf, lookup, MaskAll);
+            }
+        }
+
+        if (!changed) return null;
+
+        var result = new (ushort, int)[buf.Count];
+        for (var i = 0; i < buf.Count; i++) result[i] = (buf[i].Glyph, buf[i].Cluster);
+        return result;
+    }
+
+    /// <summary>One glyph per codepoint, each remembering where it came from.</summary>
+    private static List<ShapedGlyph> Buffer(string text, Func<int, ushort> glyphOf)
+    {
+        var buf = new List<ShapedGlyph>(text.Length);
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+            {
+                buf.Add(new ShapedGlyph(glyphOf(char.ConvertToUtf32(text[i], text[i + 1])), i));
+                i++;
+                continue;
+            }
+            buf.Add(new ShapedGlyph(glyphOf(text[i]), i));
+        }
+        return buf;
+    }
+
+    private static OtfLayout? LayoutOf(byte[] ttf)
+    {
+        lock (_cache)
+        {
+            if (!_cache.TryGetValue(ttf, out var layout))
+            {
+                layout = OtfLayout.Open(ttf);
+                _cache.Add(ttf, layout);
+            }
+            return layout;
+        }
+    }
+
+    /// <summary>
     /// Shape <paramref name="text"/> with <paramref name="ttf"/>. Returns null when the run
     /// needs no shaping or the font carries no rules for it — the caller then keeps its
     /// straight cmap mapping.

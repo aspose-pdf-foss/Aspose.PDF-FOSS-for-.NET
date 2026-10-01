@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.IO.Filters;
 using Aspose.Pdf.Text;
@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Optimization;
 /// <summary>
 /// Removes unused glyphs from embedded font programs to reduce file size.
 /// </summary>
-internal static class FontSubsetter
+internal static partial class FontSubsetter
 {
     /// <summary>
     /// Scan all pages for font usage and remove unused glyph data from embedded fonts.
@@ -162,157 +162,32 @@ internal static class FontSubsetter
     /// <summary>
     /// Subset embedded TrueType fonts, keeping only glyphs used in the document.
     /// </summary>
-    public static void SubsetEmbeddedFonts(PdfReader reader, Func<int, PdfStream?>? resolveNewStream = null,
-        bool newlyEmbeddedOnly = false)
+    public static void SubsetEmbeddedFonts(PdfReader reader, Func<int, PdfStream?>? resolveNewStream = null, bool newlyEmbeddedOnly = false)
     {
-        var directCodes = new Dictionary<PdfDictionary, HashSet<int>>();
-        var usedCodes = CollectUsedGlyphs(reader, directCodes);
-        if (usedCodes.Count == 0 && directCodes.Count == 0) return;
+        var su = new FontSubsetState();
+        su.reader = reader;
+        su.resolveNewStream = resolveNewStream;
+        su.newlyEmbeddedOnly = newlyEmbeddedOnly;
+        su.directCodes = new Dictionary<PdfDictionary, HashSet<int>>();
+        su.usedCodes = CollectUsedGlyphs(su.reader, su.directCodes);
+        if (su.usedCodes.Count == 0 && su.directCodes.Count == 0) return;
 
         // Composite (Type0/CID) fonts first: group by FontFile2 stream so a program
         // shared between several font dictionaries is subset ONCE with the union of
         // their used CIDs (subsetting per-dict would drop the other dict's glyphs).
-        SubsetCidFonts(reader, usedCodes, directCodes, resolveNewStream, newlyEmbeddedOnly);
+        SubsetCidFonts(su.reader, su.usedCodes, su.directCodes, su.resolveNewStream, su.newlyEmbeddedOnly);
 
-        // Simple fonts, also grouped by FontFile2 stream: the PDF/A embedder shares one
-        // program object between identical faces referenced by several font dictionaries,
-        // and subsetting it per-dictionary would drop the other dictionaries' glyphs.
-        var byProgram = new Dictionary<PdfStream,
+        su.byProgram = new Dictionary<PdfStream,
             (HashSet<int> subsetCodes, List<(PdfDictionary fontDict, PdfDictionary descriptor, string baseFont, HashSet<int> ownCodes)> fonts, bool isPending)>();
 
-        foreach (var (fontObjNum, charCodes) in usedCodes)
+        foreach (var (fontObjNum, charCodes) in su.usedCodes)
         {
-            var fontObj = reader.Resolve(new PdfIndirectRef(fontObjNum, 0));
-            if (fontObj is not PdfDictionary fontDict) continue;
-
-            var baseFont = fontDict.GetName("BaseFont");
-            if (baseFont is null) continue;
-
-            if (fontDict.GetName("Subtype") == "Type0") continue; // handled above
-
-            // Skip Standard 14 fonts
-            if (IsStandard14(baseFont)) continue;
-
-            // Get font descriptor
-            var descriptorObj = fontDict.Get("FontDescriptor");
-            if (descriptorObj is null) continue;
-            var descriptor = reader.ResolveDict(descriptorObj);
-            if (descriptor is null) continue;
-
-            // Only process TrueType fonts with FontFile2
-            var fontFileRef = descriptor.Get("FontFile2");
-            if (fontFileRef is null) continue;
-
-            // The program stream may be an original file object (resolvable through the
-            // reader) or one that a preceding pass (e.g. PDF/A font embedding) allocated but
-            // has not yet serialised — those live in the document's pending-object list and
-            // are only reachable through the supplied resolver.
-            var fontFileStream = reader.ResolveStream(fontFileRef);
-            var isPendingProgram = fontFileStream is null;
-            if (fontFileStream is null && fontFileRef is PdfIndirectRef nref)
-                fontFileStream = resolveNewStream?.Invoke(nref.ObjectNumber);
-            if (fontFileStream is null) continue;
-
-
-            // The content stream records single-byte character codes; the glyph cmap may be
-            // keyed by those raw codes (symbol/Mac cmaps common in Word subset fonts) or by
-            // Unicode (a (3,1) cmap, used by the system faces the PDF/A embedder substitutes
-            // in). Offer both the raw code and its WinAnsi→Unicode mapping so the subsetter
-            // keeps the right glyph whichever cmap the program carries — extra non-matching
-            // codes resolve to gid 0 and are ignored, so this never drops a used glyph.
-            var subsetCodes = new HashSet<int>(charCodes);
-            foreach (var code in charCodes)
-                if (code is >= 0 and <= 255)
-                {
-                    subsetCodes.Add(Cp1252.GetString(new[] { (byte)code })[0]);
-                    // Symbolic (3,0) cmaps — ubiquitous in Word-produced subset
-                    // fonts — key their glyphs at 0xF000+code.
-                    subsetCodes.Add(0xF000 | code);
-                }
-
-            if (!byProgram.TryGetValue(fontFileStream, out var entry))
-            {
-                entry = (new HashSet<int>(), new List<(PdfDictionary, PdfDictionary, string, HashSet<int>)>(), isPendingProgram);
-                byProgram[fontFileStream] = entry;
-            }
-            entry.subsetCodes.UnionWith(subsetCodes);
-            entry.fonts.Add((fontDict, descriptor, baseFont, charCodes));
+            if (!CollectFontSubsetCodes(su, fontObjNum, charCodes)) break;
         }
 
-        foreach (var (fontFileStream, entry) in byProgram)
+        foreach (var (fontFileStream, entry) in su.byProgram)
         {
-            // Decode the font stream
-            byte[] fontData;
-            try
-            {
-                fontData = reader.DecodeStream(fontFileStream);
-            }
-            catch
-            {
-                continue; // Skip fonts that fail to decode
-            }
-
-            if (fontData.Length < 12) continue; // Too small to be a valid TrueType font
-
-            // Parse the font with TrueTypeParser
-            TrueTypeParser parser;
-            try
-            {
-                parser = new TrueTypeParser(fontData);
-                parser.Parse();
-            }
-            catch
-            {
-                continue; // Skip fonts that fail to parse
-            }
-
-            // Only the programs THIS conversion just embedded are re-subset when
-            // the caller asks for the conservative mode: they come from
-            // cmap-complete system faces the subsetter's code model matches. A
-            // source's own embedded (usually already-subset) program uses
-            // producer-specific encodings — re-subsetting one has produced both
-            // tofu (unresolved codes) and mismapped glyphs (rebuilt-cmap key
-            // clashes) on Word-produced files.
-            if (newlyEmbeddedOnly && !entry.isPending) continue;
-
-            // Perform subsetting once for the shared program
-            byte[] subsetData;
-            try
-            {
-                var subsetter = new TrueTypeSubsetter(fontData, parser);
-                Dictionary<int, int> glyphMap;
-                (subsetData, glyphMap) = subsetter.Subset(entry.subsetCodes);
-                // Safety valve: codes were used but NONE resolved through the
-                // program's cmap — keep the full program.
-                if (glyphMap.Count <= 1 && entry.subsetCodes.Count > 0)
-                    continue;
-            }
-            catch
-            {
-                continue; // Skip fonts that fail to subset
-            }
-
-            // Only replace if the subset is actually smaller
-            if (subsetData.Length >= fontData.Length) continue;
-
-            // Replace the font stream data
-            fontFileStream.ReplaceData(subsetData);
-            // Remove filter since we're writing raw data
-            fontFileStream.Dict.Remove("Filter");
-            fontFileStream.Dict.Remove("DecodeParms");
-            fontFileStream.Dict.Set("Length", new PdfInteger(subsetData.Length));
-
-            foreach (var (fontDict, descriptor, baseFont, ownCodes) in entry.fonts)
-            {
-                // Update Length1 in the font descriptor
-                descriptor.Set("Length1", new PdfInteger(subsetData.Length));
-
-                // Update Widths array based on used character range
-                UpdateWidths(fontDict, ownCodes, parser, reader);
-
-                // Add subset prefix to BaseFont name
-                AddSubsetPrefix(fontDict, descriptor, baseFont);
-            }
+            if (!SubsetFontProgram(su, fontFileStream, entry)) break;
         }
     }
 
@@ -322,125 +197,43 @@ internal static class FontSubsetter
     /// valid), so unused glyphs just lose their outlines. Programs shared between
     /// several font dictionaries are subset once with the union of their used CIDs.
     /// </summary>
-    private static void SubsetCidFonts(PdfReader reader, Dictionary<int, HashSet<int>> usedCodes,
-        Dictionary<PdfDictionary, HashSet<int>> directCodes,
-        Func<int, PdfStream?>? resolveNewStream, bool newlyEmbeddedOnly = false)
+    private static void SubsetCidFonts(PdfReader reader, Dictionary<int, HashSet<int>> usedCodes, Dictionary<PdfDictionary, HashSet<int>> directCodes, Func<int, PdfStream?>? resolveNewStream, bool newlyEmbeddedOnly = false)
     {
-        // FontFile2 stream → (union of used GIDs, participating font dicts)
-        var byProgram = new Dictionary<PdfStream, (HashSet<int> gids, List<(PdfDictionary type0, PdfDictionary descriptor)> fonts)>();
-        // CIDToGIDMap stream → union of used CIDs across the fonts sharing it.
-        var byMap = new Dictionary<PdfStream, (HashSet<int> cids, byte[] data)>();
+        var sc = new CidSubsetState();
+        sc.reader = reader;
+        sc.usedCodes = usedCodes;
+        sc.directCodes = directCodes;
+        sc.resolveNewStream = resolveNewStream;
+        sc.newlyEmbeddedOnly = newlyEmbeddedOnly;
+        sc.byProgram = new Dictionary<PdfStream, (HashSet<int> gids, List<(PdfDictionary type0, PdfDictionary descriptor)> fonts)>();
+        sc.byMap = new Dictionary<PdfStream, (HashSet<int> cids, byte[] data)>();
 
-        // Indirect fonts (keyed by object number) and direct inline ones (the form
-        // /DA embed nests its Type0 graph in the resources; the writer hoists it at
-        // save time, so at optimize time it exists only as an instance).
-        var candidates = new List<(PdfDictionary fontDict, HashSet<int> charCodes)>();
-        foreach (var (fontObjNum, charCodes) in usedCodes)
+        sc.candidates = new List<(PdfDictionary fontDict, HashSet<int> charCodes)>();
+        foreach (var (fontObjNum, charCodes) in sc.usedCodes)
         {
-            if (reader.Resolve(new PdfIndirectRef(fontObjNum, 0)) is not PdfDictionary fontDict) continue;
-            candidates.Add((fontDict, charCodes));
+            if (sc.reader.Resolve(new PdfIndirectRef(fontObjNum, 0)) is not PdfDictionary fontDict) continue;
+            sc.candidates.Add((fontDict, charCodes));
         }
-        foreach (var (fontDict, charCodes) in directCodes)
-            candidates.Add((fontDict, charCodes));
+        foreach (var (fontDict, charCodes) in sc.directCodes)
+            sc.candidates.Add((fontDict, charCodes));
 
-        foreach (var (fontDict, charCodes) in candidates)
+        foreach (var (fontDict, charCodes) in sc.candidates)
         {
-            if (fontDict.GetName("Subtype") != "Type0") continue;
-
-            var descendants = reader.Resolve(fontDict.Get("DescendantFonts")) as PdfArray;
-            var cidFont = descendants is { Count: > 0 } ? reader.ResolveDict(descendants[0]) : null;
-            var descriptor = cidFont is null ? null : reader.ResolveDict(cidFont.Get("FontDescriptor"));
-            var fontFileRef = descriptor?.Get("FontFile2");
-            if (fontFileRef is null) continue;
-            var fontFileStream = reader.ResolveStream(fontFileRef);
-            var isPendingProgram = fontFileStream is null;
-            if (fontFileStream is null && fontFileRef is PdfIndirectRef nref)
-                fontFileStream = resolveNewStream?.Invoke(nref.ObjectNumber);
-            if (fontFileStream is null) continue;
-            // Conversion-time subsetting touches only the programs this conversion
-            // just embedded (see the simple-font loop for the rationale).
-            if (newlyEmbeddedOnly && !isPendingProgram) continue;
-
-            // CID → GID: identity unless the descendant carries a CIDToGIDMap stream.
-            var gids = new HashSet<int>();
-            var mapRef = cidFont!.Get("CIDToGIDMap");
-            byte[]? cid2gid = null;
-            if (mapRef is not null and not PdfName)
-            {
-                var mapStream = reader.ResolveStream(mapRef);
-                if (mapStream is null && mapRef is PdfIndirectRef mref)
-                    mapStream = resolveNewStream?.Invoke(mref.ObjectNumber);
-                if (mapStream is not null)
-                    try { cid2gid = reader.DecodeStream(mapStream); } catch { }
-                if (cid2gid is not null && mapStream is not null)
-                {
-                    if (!byMap.TryGetValue(mapStream, out var me))
-                        byMap[mapStream] = me = (new HashSet<int>(), cid2gid);
-                    me.cids.UnionWith(charCodes);
-                }
-            }
-            foreach (var cid in charCodes)
-            {
-                if (cid2gid is null) { gids.Add(cid); continue; }
-                var off = cid * 2;
-                if (off + 1 < cid2gid.Length)
-                    gids.Add((cid2gid[off] << 8) | cid2gid[off + 1]);
-            }
-
-            if (!byProgram.TryGetValue(fontFileStream, out var entry))
-            {
-                entry = (new HashSet<int>(), new List<(PdfDictionary, PdfDictionary)>());
-                byProgram[fontFileStream] = entry;
-            }
-            entry.gids.UnionWith(gids);
-            entry.fonts.Add((fontDict, descriptor!));
+            if (!CollectCidCandidate(sc, fontDict, charCodes)) break;
         }
 
-        foreach (var (stream, entry) in byProgram)
+        foreach (var (stream, entry) in sc.byProgram)
         {
-            byte[] fontData;
-            try { fontData = reader.DecodeStream(stream); } catch { continue; }
-            if (fontData.Length < 12) continue;
-
-            byte[] subsetData;
-            try
-            {
-                var parser = new Text.TrueTypeParser(fontData);
-                parser.Parse();
-                subsetData = new Text.TrueTypeSubsetter(fontData, parser).SubsetSparse(entry.gids);
-            }
-            catch { continue; }
-
-            if (subsetData.Length >= fontData.Length) continue;
-
-            stream.ReplaceData(subsetData);
-            stream.Dict.Remove("Filter");
-            stream.Dict.Remove("DecodeParms");
-            stream.Dict.Set("Length", new PdfInteger(subsetData.Length));
-            stream.Dict.Set("Length1", new PdfInteger(subsetData.Length));
+            if (!SubsetCidProgram(sc, stream, entry)) break;
         }
 
         // A dense CIDToGIDMap barely compresses (tens of KB of distinct GIDs). The
         // sparse subset keeps outlines only for the used CIDs, so entries for every
         // other CID can go to 0 (.notdef) — the long zero runs then deflate to
         // almost nothing on save.
-        foreach (var (mapStream, (cids, data)) in byMap)
+        foreach (var (mapStream, (cids, data)) in sc.byMap)
         {
-            var sparse = new byte[data.Length];
-            var kept = 0;
-            foreach (var cid in cids)
-            {
-                var off = cid * 2;
-                if (off + 1 >= data.Length) continue;
-                sparse[off] = data[off];
-                sparse[off + 1] = data[off + 1];
-                kept++;
-            }
-            if (kept == 0) continue;
-            mapStream.ReplaceData(sparse);
-            mapStream.Dict.Remove("Filter");
-            mapStream.Dict.Remove("DecodeParms");
-            mapStream.Dict.Set("Length", new PdfInteger(sparse.Length));
+            if (!WriteCidSubsetMap(mapStream, cids, data)) break;
         }
     }
 

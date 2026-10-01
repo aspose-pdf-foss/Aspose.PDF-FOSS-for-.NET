@@ -15,6 +15,9 @@ public sealed class Cells : IEnumerable<Cell>
 {
     private readonly List<Cell> _cells = new();
 
+    /// <summary>Creates an empty cell collection.</summary>
+    public Cells() { }
+
     /// <summary>Number of cells.</summary>
     public int Count => _cells.Count;
 

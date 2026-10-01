@@ -46,6 +46,30 @@ public class PdfFileEditorFeatureTests
     }
 
     [Fact]
+    public void ResizeContents_MovesASquareButLeavesAWatermarkWhereItIs()
+    {
+        using var doc = Document.Open(PdfBuilder.BuildMinimal());
+        var page = doc.Pages[1];
+        var where = new Rectangle(70, 750, 150, 800);
+
+        var square = new Annotations.SquareAnnotation(page, where);
+        page.Annotations.Add(square);
+        var watermark = new Annotations.WatermarkAnnotation(page, where);
+        page.Annotations.Add(watermark);
+
+        var margin = PdfFileEditor.ContentsResizeValue.Percents(20);
+        var auto = PdfFileEditor.ContentsResizeValue.Auto();
+        new PdfFileEditor().ResizeContents(doc,
+            new PdfFileEditor.ContentsResizeParameters(margin, auto, margin, margin, auto, margin));
+
+        // The square is part of what was resized and travels with it.
+        Assert.NotEqual(where.LLX, square.Rect!.LLX, 3);
+        // The watermark is stamped over the page, wherever the content ends up.
+        Assert.Equal(where.LLX, watermark.Rect!.LLX, 3);
+        Assert.Equal(where.URY, watermark.Rect!.URY, 3);
+    }
+
+    [Fact]
     public void MakeNUp_Grid_PacksPagesIntoSheets()
     {
         // 4-page input → 2×2 grid → 1 output sheet

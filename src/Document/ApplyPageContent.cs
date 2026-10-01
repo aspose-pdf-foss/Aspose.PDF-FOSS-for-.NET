@@ -19,6 +19,58 @@ public sealed partial class Document : IDisposable
     /// slot's content was laid; the materialised page adopts their state.</summary>
     private readonly Dictionary<int, Page> _preparedOverflowPages = new();
 
+    /// <summary>Content waiting for a page number that does not exist yet.</summary>
+    private readonly List<(int PageNumber, Text.TextFragment Fragment)> _finalPagePlacements = new();
+
+    /// <summary>Place an explicitly positioned fragment on the page that will bear
+    /// <paramref name="pageNumber"/> ONCE THE DOCUMENT HAS PAGINATED, rather than on
+    /// whatever page holds that number right now.
+    ///
+    /// The two differ whenever the flow is still going to grow. A caller that adds a
+    /// page today to put something on "page 3" has picked a page that a continuation
+    /// inserted ahead of it will renumber -- its content ends up on page 5 of the
+    /// finished document, and two empty pages appear where it reserved them. Saying
+    /// "page 3 of whatever this becomes" is a different request, and until now there
+    /// was no way to make it.
+    ///
+    /// The fragment carries its own <see cref="Text.TextFragment.Position"/>, as any
+    /// explicitly placed one does; only WHICH page it lands on is deferred.</summary>
+    public void PlaceOnFinalPage(int pageNumber, Text.TextFragment fragment)
+    {
+        if (pageNumber < 1 || fragment is null) return;
+        _finalPagePlacements.Add((pageNumber, fragment));
+    }
+
+    /// <summary>Resolve everything <see cref="PlaceOnFinalPage"/> deferred, now that
+    /// pagination has settled and a page number means what it will mean in the file.
+    /// A number past the end still extends the document -- the caller asked for that
+    /// page -- but only after the flow has taken every page it needs.</summary>
+    private void ApplyFinalPagePlacements()
+    {
+        if (_finalPagePlacements.Count == 0) return;
+        // Grouped by page and PREPENDED, not appended. The caller asked for this
+        // page before it existed, so everything the flow later put there came
+        // after -- the page was made to hold this, and the flow continued onto
+        // it. Appending would read the other way round in the extracted text.
+        // One prepend per page, over the fragments concatenated in the order they
+        // were asked for, since prepending each in turn would reverse them.
+        foreach (var group in _finalPagePlacements.GroupBy(p => p.PageNumber))
+        {
+            while (Pages.Count < group.Key) Pages.Add();
+            var page = Pages[group.Key];
+            var blocks = new List<byte[]>();
+            var builder = new Text.TextBuilder(page) { ContentSink = blocks.Add };
+            foreach (var (_, fragment) in group) builder.AppendTextInline(fragment);
+            if (blocks.Count == 0) continue;
+            var total = blocks.Sum(b => b.Length);
+            var joined = new byte[total];
+            var at = 0;
+            foreach (var b in blocks) { Buffer.BlockCopy(b, 0, joined, at, b.Length); at += b.Length; }
+            page.PrependContentStream(joined);
+        }
+        _finalPagePlacements.Clear();
+    }
+
     /// <summary>
     /// Apply page-level Paragraphs, Headers, and Footers to each page's content stream.
     /// Called automatically before save.
@@ -28,6 +80,11 @@ public sealed partial class Document : IDisposable
         // generator paragraph tree must be registered in the AcroForm before the
         // pages are written, so they round-trip as real fields.
         RegisterGeneratedFormFields();
+
+        // An authored tagged document is rendered onto its pages before any page is laid
+        // out: a table-of-contents page draws the entries the rendered headers ask for, and a
+        // page laid out once resumes below what it drew rather than starting over.
+        EnsureTaggedPdfMetadata();
 
         var pc = new PageContentState();
         pc.preLayoutPageCount = Pages.Count;
@@ -51,6 +108,8 @@ public sealed partial class Document : IDisposable
         pc.overflowPageRefs = AddOverflowPages(pc.overflowPages, pc.overflowImages, pc.pendingFlows,
             pc.preLayoutPageCount);
         FinaliseDeferredFlows(pc.pendingFlows, pc.overflowPageRefs);
+        // Page numbers mean what they will mean in the file only from here on.
+        ApplyFinalPagePlacements();
         // The page-count bands deferred above render now that every page exists.
         for (var pi = 1; pi <= Pages.Count; pi++)
         {
@@ -58,7 +117,8 @@ public sealed partial class Document : IDisposable
             if (pg.HeaderFooterApplied || (pg.Header is null && pg.Footer is null)) continue;
             pg.HeaderFooterApplied = true;
             pg.Header?.RenderToPage(pg, isHeader: true, pg.Number, this);
-            pg.Footer?.RenderToPage(pg, isHeader: false, pg.Number, this, true);
+            pg.Footer?.RenderToPage(pg, isHeader: false, pg.Number, this,
+                !_deferredNumberBands.TryGetValue(pg, out var drawsTables) || drawsTables);
         }
         EmitDeferredTocLeaders(pc.pendingTocEmits, pc.pendingFlows, pc.overflowPageRefs);
     }
@@ -90,6 +150,10 @@ public sealed partial class Document : IDisposable
         // each one's insertions separately — both land at the same slot and the later one
         // pushes the earlier down, reversing them.
         var insertedFor = new Dictionary<int, int>();
+        // Every insertion above an owner pushes that owner's live index up; the
+        // owner is still one of the pages that existed before layout, and the
+        // count of pages inserted at or before its index says by how much.
+        var insertedAt = new List<int>();
         // Add overflow pages (from multi-page table layout) after iteration.
         // Track the Page created for each slot so deferred link annotations
         // (per-segment hyperlinks queued by FlowLayout) can resolve to the
@@ -102,10 +166,12 @@ public sealed partial class Document : IDisposable
             var owner = slotOwner[slot];
             var ownerIdx = owner is null ? -1 : Pages.IndexOf(owner);
             var already = ownerIdx >= 1 && insertedFor.TryGetValue(ownerIdx, out var c) ? c : 0;
-            if (ownerIdx >= 1 && ownerIdx < preLayoutPageCount && ownerIdx + already < Pages.Count)
+            var shiftedBy = insertedAt.Count(at => at <= ownerIdx);
+            if (ownerIdx >= 1 && ownerIdx - shiftedBy < preLayoutPageCount && ownerIdx + already < Pages.Count)
             {
                 newPage = Pages.Insert(ownerIdx + already + 1, width, height);
                 insertedFor[ownerIdx] = already + 1;
+                insertedAt.Add(ownerIdx + already + 1);
             }
             else
             {
@@ -113,7 +179,16 @@ public sealed partial class Document : IDisposable
                 if (ownerIdx >= 1) insertedFor[ownerIdx] = already + 1;
             }
             newPage.MediaBox = new Rectangle(0, 0, width, height);
+            // The page continues its owner: it takes the owner's font names first, so
+            // content written against those names (a Times paragraph's F1) reaches the
+            // same faces here, and only then registers a default of its own.
+            if (owner is not null) MergePageFontResources(owner, newPage);
             Table.RegisterFont(newPage);
+            if (owner is not null)
+            {
+                Text.TextParagraph.CarryExtGStates(owner, newPage);
+                Text.TextParagraph.CarryXObjects(owner, newPage, content);
+            }
             newPage.AddContentStream(content);
             if (overflowImages.TryGetValue(slot, out var imgs))
                 foreach (var (data, rect) in imgs)
@@ -158,6 +233,7 @@ public sealed partial class Document : IDisposable
             flow.FinaliseNotifications(pageRange);
             flow.FinaliseAnnotations(pageRange, PageCount);
             flow.FinaliseFormFields(pageRange, this);
+            flow.FinaliseReservedBlocks(pageRange);
             flow.FinaliseRules(pageRange);
             // A page watermark repeats on the overflow pages its content spilled onto.
             if (flow.CurrentPage.PendingWatermark is { Available: true, Image: { } fwmImage })
@@ -237,172 +313,17 @@ public sealed partial class Document : IDisposable
         // page sequence: only now is it known which page each heading actually
         // rendered on (content pagination and IsInNewPage move headings onto
         // overflow pages materialised above).
+        var te = new TocLeaderEmitState { pendingFlows = pendingFlows, overflowPageRefs = overflowPageRefs };
         foreach (var (tocPage, tocFontName, tocContPages, tocEntriesPending) in pendingTocEmits)
         {
-            var tocPageIdxFinal = Pages.IndexOf(tocPage);
-
-            // The page a heading FINALLY landed on: the flow that laid it out
-            // recorded its slot; map the slot through that flow's overflow range.
-            int FinalHeadingIdx(Heading h)
-            {
-                foreach (var (flow, slotStart, slotEnd) in pendingFlows)
-                {
-                    if (!flow.TryGetParagraphPosition(h, out var pos)) continue;
-                    var hp = pos.slot < 0 ? flow.CurrentPage
-                        : slotStart + pos.slot < slotEnd ? overflowPageRefs[slotStart + pos.slot] : null;
-                    return hp is not null ? Pages.IndexOf(hp) : 0;
-                }
-                return 0;
-            }
-
+            te.tocPage = tocPage;
+            te.tocFontName = tocFontName;
+            te.tocContPages = tocContPages;
+            te.tocPageIdxFinal = Pages.IndexOf(tocPage);
             foreach (var rec in tocEntriesPending)
             {
-                var target = rec.slot == 0 ? tocPage : tocContPages[rec.slot - 1];
-                if (rec.preLeader.Length > 0) target.AddContentStream(rec.preLeader);
-                var destIdx = rec.destPage is not null ? Pages.IndexOf(rec.destPage) : 0;
-                if (destIdx <= 0) destIdx = FinalHeadingIdx(rec.heading);
-                if (destIdx <= 0)
-                    destIdx = rec.fallbackIdx > tocPageIdxFinal
-                        ? rec.fallbackIdx + tocContPages.Count
-                        : rec.fallbackIdx;
-                if (destIdx <= 0) continue;
-
-                // IsCountTocPages=false: the printed numbers skip the TOC chain
-                // itself (TOC page + its continuations) — the first content page
-                // after a one-page TOC prints as "1" — while the GoTo link keeps
-                // the physical index.
-                var displayIdx = destIdx;
-                if (tocPage.TocInfo?.IsCountTocPages == false)
-                {
-                    var chainEnd = tocPageIdxFinal + tocContPages.Count;
-                    var sub = destIdx > chainEnd ? tocContPages.Count + 1
-                        : destIdx >= tocPageIdxFinal ? destIdx - tocPageIdxFinal + 1 : 0;
-                    if (destIdx - sub >= 1) displayIdx = destIdx - sub;
-                }
-                var pageNumStr = displayIdx.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                // Entries whose segment declared its own font measure through that
-                // font's real advances (see the layout-side comment).
-                double M(string s) => rec.measure?.Invoke(s)
-                    ?? MeasureEntry(s, rec.entrySize, rec.entryFace);
-                var pageNumWidth = M(pageNumStr);
-                // The leader fill glyph: '.' for a Dot leader, '_' for a Solid one
-                // (underscore advances abut, so the run reads as a continuous rule).
-                var leaderChar = rec.leader == Text.TabLeaderType.Solid ? '_' : '.';
-                var dotW = M(leaderChar.ToString());
-                var leaderFontRes = rec.entryFace == "Helvetica"
-                    ? tocFontName : Table.RegisterFont(target, rec.entryFace);
-                var lb = new Content.ContentStreamBuilder();
-                // The entry's underlined variant draws filled 0.5 pt rectangles
-                // under each run (prefix at natural width, text to its end).
-                if (rec.underline)
-                {
-                    var uy = rec.lastY - 0.207 * rec.entrySize + 0.207;
-                    var prefixNat = MeasureEntry(rec.prefix, rec.entrySize, rec.entryFace);
-                    if (prefixNat > 0)
-                        lb.SaveState().SetFillColor(0, 0, 0)
-                            .Rectangle(rec.x0, uy, prefixNat, 0.5).FillEvenOdd().RestoreState();
-                    lb.SaveState().SetFillColor(0, 0, 0)
-                        .Rectangle(rec.x0 + prefixNat, uy, rec.textEnd - rec.x0 - prefixNat, 0.5)
-                        .FillEvenOdd().RestoreState();
-                }
-
-                // One text show at (x, lastY), horizontally scaled by tz percent.
-                // CJK runs (no glyphs in the Standard-14 set) embed a script-matched
-                // face and show as CID hex, exactly like the entry's earlier lines.
-                void LeaderShow(double x, string s, double tz)
-                {
-                    if (s.Length == 0) return;
-                    var scaled = System.Math.Abs(tz - 100) > 1e-9;
-                    if (s.Length > 0 && ContainsCjkText(s)
-                        && Text.CjkFallbackFont.ResolveEmbeddableBytes(s) is { Length: > 0 } cjkTtf)
-                    {
-                        var cjkDict = Table.ResolvePageFontDict(target);
-                        var (cjkRes, cjkHex) = Text.Type0FontEmbedder.Embed(
-                            cjkDict, cjkTtf, "CJK", s.Replace('\t', ' '),
-                            stripSpacesInBaseFont: true);
-                        lb.BeginText().SetFont(cjkRes, rec.entrySize).SetFillColor(0, 0, 0)
-                            .SetTextMatrix(1, 0, 0, 1, x, rec.lastY);
-                        if (scaled) lb.SetHorizontalScaling(tz);
-                        lb.ShowTextHex(cjkHex);
-                        // Tz is graphics state — reset before closing the block.
-                        if (scaled) lb.SetHorizontalScaling(100);
-                        lb.EndText();
-                        return;
-                    }
-                    lb.BeginText().SetFont(leaderFontRes, rec.entrySize).SetFillColor(0, 0, 0)
-                        .SetTextMatrix(1, 0, 0, 1, x, rec.lastY);
-                    if (scaled) lb.SetHorizontalScaling(tz);
-                    lb.ShowText(s);
-                    if (scaled) lb.SetHorizontalScaling(100);
-                    lb.EndText();
-                }
-
-                if (rec.lastLine.Length > 0 && dotW > 0)
-                {
-                    // The entry's final line is drawn HERE, horizontally scaled to fit
-                    // the column: the numbering prefix paints unscaled at the line
-                    // start, while the text, the leader dots and the page number
-                    // carry one shared Tz. With
-                    //   q = (colW − prefixW − textW − numW) / dotW,
-                    //   D = round(q) − 1,
-                    //   Tz = 100·colW / (prefixW + textW + D·dotW + numW),
-                    // the dots+number show starts flush at the SCALED text end — so
-                    // RAW extraction reads "…Heading 1....2" with no space, and a
-                    // CJK entry's dots begin just right of where its natural width
-                    // ends. The prefix sits in the denominator but paints unscaled
-                    // (numbered lines end a hair short of the right stop).
-                    var linePrefix = rec.prefix.Length > 0
-                        && rec.lastLine.StartsWith(rec.prefix, StringComparison.Ordinal)
-                        ? rec.prefix : string.Empty;
-                    var lineText = rec.lastLine.Substring(linePrefix.Length);
-                    var prefixW = M(linePrefix);
-                    var textW = M(lineText);
-                    var colW = rec.rightStop - rec.lastX;
-                    var q = (colW - prefixW - textW - pageNumWidth) / dotW;
-                    var dotCount = (int)System.Math.Round(q, System.MidpointRounding.AwayFromZero) - 1;
-                    if (dotCount < 0) dotCount = 0;
-                    var natural = prefixW + textW + dotCount * dotW + pageNumWidth;
-                    var tz = natural > 0 ? 100.0 * colW / natural : 100.0;
-                    LeaderShow(rec.lastX + prefixW, lineText, tz);
-                    LeaderShow(rec.lastX + prefixW + textW * tz / 100.0,
-                        new string(leaderChar, dotCount) + pageNumStr, tz);
-                }
-                else
-                {
-                    // Legacy right-aligned model for the paths the scaled draw does
-                    // not cover: TabLeaderType.None keeps the page number alone on
-                    // the column stop; IsShowPageNumbers=false closes the entry with
-                    // an empty show at the text end (as the fragment path does); an underlined
-                    // entry keeps its natural-width text (drawn with the entry) and
-                    // right-aligns its leader.
-                    var remainder = rec.rightStop - rec.textEnd - pageNumWidth;
-                    var dotCount = dotW > 0 && remainder > 0
-                        ? (int)System.Math.Round(remainder / dotW, System.MidpointRounding.AwayFromZero) - 1
-                        : 0;
-                    if (dotCount < 0) dotCount = 0;
-                    if (rec.leader == Text.TabLeaderType.None) dotCount = 0;
-                    var leaderText = rec.showNumbers
-                        ? new string(leaderChar, dotCount) + pageNumStr : string.Empty;
-                    var drawStart = rec.showNumbers
-                        ? rec.rightStop - pageNumWidth - dotCount * dotW : rec.textEnd;
-                    lb.BeginText().SetFont(leaderFontRes, rec.entrySize).SetFillColor(0, 0, 0)
-                        .SetTextMatrix(1, 0, 0, 1, drawStart, rec.lastY)
-                        .ShowText(leaderText)
-                        .EndText();
-                }
-                target.AddContentStream(lb.Build());
-
-                // The GoTo destination is the top-left of the target page
-                // (0, page-height) mapped back through its rotation —
-                // matching the heading-branch links, so validators that
-                // expect the corner destination accept the TOC link too.
-                var destPage = Pages.At(destIdx);
-                var destRect = destPage.GetPageRect(true);
-                var (destLeft, destTop) = destPage.RotationMatrix
-                    .InverseTransformPoint(0, destRect.Height);
-                target.Annotations.AddLinkAnnotation(rec.linkRect,
-                    new Aspose.Pdf.Annotations.GoToAction(
-                        new Aspose.Pdf.Annotations.XYZExplicitDestination(destIdx, destLeft, destTop, 0)));
+                te.rec = rec;
+                EmitTocLeaderEntry(te);
             }
         }
     }
@@ -441,39 +362,12 @@ public sealed partial class Document : IDisposable
         // /Background marked-content block so re-applying a background replaces
         // the previous one instead of stacking, and Color.White means "remove
         // the background" (the documented semantics).
-        if (page.ExplicitBackground is { } pageBg && !page.BackgroundApplied)
-        {
-            page.BackgroundApplied = true;
-            page.RemoveTaggedBackground();
-            var isWhite = pageBg.R == 255 && pageBg.G == 255 && pageBg.B == 255;
-            if (!isWhite)
-            {
-                var box = page.MediaBox;
-                var bgBuilder = new Content.ContentStreamBuilder();
-                bgBuilder.BeginMarkedContent(Page.BackgroundMarkerTag);
-                bgBuilder.SaveState();
-                bgBuilder.SetFillColor(pageBg.R / 255.0, pageBg.G / 255.0, pageBg.B / 255.0);
-                bgBuilder.Rectangle(box.LLX, box.LLY, box.Width, box.Height);
-                bgBuilder.Fill();
-                bgBuilder.RestoreState();
-                bgBuilder.EndMarkedContent();
-                page.PrependContentStream(bgBuilder.Build());
-            }
-        }
+        ApplyExplicitPageBackground(page);
 
         // Materialise /AP appearances for annotations that lack one so they render
         // (the renderer draws Line/Polygon/Polyline only from their /AP) and expose
         // NormalAppearance after save.
-        foreach (var annot in page.Annotations)
-        {
-            if (annot is Annotations.FreeTextAnnotation freeText)
-                freeText.GenerateAppearance();
-            else if (annot is Annotations.LineAnnotation or Annotations.PolygonAnnotation
-                            or Annotations.PolylineAnnotation or Annotations.SquareAnnotation
-                            or Annotations.CircleAnnotation or Annotations.TextAnnotation
-                     && annot.NormalAppearance is null)
-                annot.UpdateAppearances();
-        }
+        PlacePageAnnotations(page);
 
         // Render page Header/Footer set through Page.Header / Page.Footer.
         // Independent of the paragraph layout below (a page may carry only a
@@ -486,35 +380,7 @@ public sealed partial class Document : IDisposable
         if (!page.HeaderFooterApplied && !bandWaitsForCount
             && (page.Header is not null || page.Footer is not null))
         {
-            page.HeaderFooterApplied = true;
-            // Header paragraphs — text, HTML and Table alike — render on every
-            // page that references them, whether laid out by the generator or
-            // imported with its own content (their cells stay text-extractable
-            // and any widgets/links bind to the page they land on).
-            //
-            // A FOOTER table is the one case that is gated: one HeaderFooter
-            // instance shared across the already-inked static pages of an
-            // imported document draws no footer table (a footer table stamped
-            // onto every page of a loaded document is dropped). It still draws
-            // on a generator-laid-out page, and a footer owned by a single page
-            // draws normally; text/HTML footer fragments always render.
-            bool FooterDrawsTables()
-            {
-                if (page.Paragraphs.Count > 0 || page.TocInfo is not null
-                    || (page.GetContentStreamBytes()?.Length ?? 0) == 0)
-                    return true;
-                var footer = page.Footer;
-                var refs = 0;
-                for (var pi2 = 1; pi2 <= Pages.Count; pi2++)
-                {
-                    if (ReferenceEquals(Pages[pi2].Footer, footer)) refs++;
-                    if (refs > 1) return false;
-                }
-                return true;
-            }
-            page.Header?.RenderToPage(page, isHeader: true, page.Number, this);
-            page.Footer?.RenderToPage(page, isHeader: false, page.Number, this,
-                FooterDrawsTables());
+            ApplyPageHeaderFooterBands(page);
         }
 
         // A page laid out by an earlier ProcessParagraphs() call re-enters

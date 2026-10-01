@@ -89,19 +89,19 @@ public partial class Field
         if (inputJsonStream is null) return false;
         try
         {
-            using var reader = new StreamReader(inputJsonStream, System.Text.Encoding.UTF8, leaveOpen: true);
+            using var reader = Compat.LeaveOpenReader(inputJsonStream, System.Text.Encoding.UTF8);
             using var doc = System.Text.Json.JsonDocument.Parse(reader.ReadToEnd());
             var root = doc.RootElement;
             string? value = null;
             if (root.ValueKind == System.Text.Json.JsonValueKind.Array)
             {
                 foreach (var element in root.EnumerateArray())
-                    if (TryFindValueByPath(element, string.Empty, fieldFullNameInJSON, out value))
+                    if ((value = TryFindValueByPath(element, string.Empty, fieldFullNameInJSON)) is not null)
                         break;
             }
             else
             {
-                TryFindValueByPath(root, string.Empty, fieldFullNameInJSON, out value);
+                value = TryFindValueByPath(root, string.Empty, fieldFullNameInJSON);
             }
             if (value is null) return false;
             ApplyImportedValue(value);
@@ -116,11 +116,11 @@ public partial class Field
 
     /// <summary>Search a field node (recursing through <c>ChildFields</c>) for a
     /// leaf whose accumulated dotted path equals <paramref name="target"/>.</summary>
-    private static bool TryFindValueByPath(
-        System.Text.Json.JsonElement element, string prefix, string target, out string? value)
+    private static string? TryFindValueByPath(
+        System.Text.Json.JsonElement element, string prefix, string target)
     {
-        value = null;
-        if (element.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+        string? value = null;
+        if (element.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
         var name = element.TryGetProperty("Name", out var n) ? n.GetString() ?? string.Empty : string.Empty;
         var full = prefix.Length == 0 ? name : prefix + "." + name;
         // Children are nested under "ChildFields" (field-level export) or "Fields"
@@ -130,18 +130,18 @@ public partial class Field
             kids.ValueKind == System.Text.Json.JsonValueKind.Array)
         {
             foreach (var kid in kids.EnumerateArray())
-                if (TryFindValueByPath(kid, full, target, out value))
-                    return true;
-            return false;
+                if (TryFindValueByPath(kid, full, target) is { } found)
+                    return found;
+            return null;
         }
         if (full == target &&
             element.TryGetProperty("Value", out var v) &&
             v.ValueKind == System.Text.Json.JsonValueKind.String)
         {
             value = v.GetString();
-            return true;
+            return value;
         }
-        return false;
+        return null;
     }
 
     private void ApplyImportedValue(string value)

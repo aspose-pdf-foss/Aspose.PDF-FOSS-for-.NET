@@ -78,11 +78,12 @@ public sealed partial class Form
             throw new InvalidOperationException("No document bound.");
 
         var fields = FormJsonSerializer.BuildFieldData(_doc);
-        var json = System.Text.Json.JsonSerializer.Serialize(fields, new System.Text.Json.JsonSerializerOptions
+        var context = new FormJsonContext(new System.Text.Json.JsonSerializerOptions
         {
             WriteIndented = indented,
             DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
         });
+        var json = System.Text.Json.JsonSerializer.Serialize(fields, context.ListFormFieldData);
         var bytes = System.Text.Encoding.UTF8.GetBytes(json);
         outputJsonStream.Write(bytes, 0, bytes.Length);
         if (outputJsonStream.CanSeek)

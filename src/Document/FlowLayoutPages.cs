@@ -189,6 +189,10 @@ public sealed partial class Document
                 var cap = Text.Standard14Fonts.GetCapHeight(baseFont);
                 return _curY - (cap > 0 ? cap / 1000.0 * fontSize : fontSize * 0.7);
             }
+            // A DECLARED line box already seats the baseline: FirstBaselineSeat
+            // returns the baseline itself for it, not the box bottom, so the
+            // descent the legacy seat adds below would push it a descent too low.
+            if (DeclaresLineBox(state)) return FirstBaselineSeat(state, fontSize, lineHeight);
             return FirstBaselineSeat(state, fontSize, lineHeight) + DescentNorm(baseFont) * fontSize;
         }
 
@@ -261,7 +265,7 @@ public sealed partial class Document
         /// reduced by any block indent.</summary>
         internal double CurWidth => (_colWidths is not null
             ? _colWidths[_curCol]
-            : _startPage.Width - (AnchorLeft ?? _marginLeft) - _marginRight) - LeftIndent;
+            : _startPage.Width - (AnchorLeft ?? _marginLeft) - _marginRight) - LeftIndent - RightIndent;
 
         /// <summary>Absolute left edge the full-width flow writes from once a
         /// positioned paragraph (a Graph with an assigned Left) re-anchored it:
@@ -278,6 +282,7 @@ public sealed partial class Document
             _colDeepestY = Math.Min(_colDeepestY, _curY);
             if (_colLefts is not null && _curCol < _colLefts.Length - 1)
             {
+                _partBottom = null;
                 _curCol++;
                 _curY = _colBandTop;
             }
@@ -393,9 +398,25 @@ public sealed partial class Document
         /// leading a caller asks for opens the pitch BETWEEN links and must not
         /// grow the clickable box, which is why a 1.5 pt leading leaves a 0.1 pt
         /// gap between the boxes of two consecutive lines.</summary>
+        /// <summary>True when the CALLER asked for a line box, by naming
+        /// <see cref="Text.TextFormattingOptions.LineSpacingMode.LineBox"/>. Said
+        /// in one place because two seats ask it and they must agree; kept apart
+        /// from <c>LineBoxSeat</c>, which is the HTML dialect's own flag and keeps
+        /// its own cap-height placement.</summary>
+        private static bool DeclaresLineBox(Text.TextState? state) =>
+            state?.FormattingOptions is
+                { LineSpacing: Text.TextFormattingOptions.LineSpacingMode.LineBox };
+
         private static (double Above, double Below) LinkBoxExtent(Text.TextState? state,
             double fontSize)
         {
+            // A caller that declared its own line-box extents gets them, whatever
+            // the face would have said. Both must be present to count: half a pair
+            // is a caller mistake, and silently mixing one declared edge with one
+            // face edge would seat text somewhere neither asked for.
+            if (state is { LineBoxAscentEm: { } declaredAscent, LineBoxDescentEm: { } declaredDescent })
+                return (declaredAscent * fontSize, declaredDescent * fontSize);
+
             var ttf = state?.FontData?.TtfData ?? state?.Font?.SourceFontData?.TtfData;
             if (ttf is { Length: > 12 } && Text.FontRepository.ReadTtfHheaExtent(ttf)
                     is { ascent: > 0 } hh)
@@ -415,6 +436,7 @@ public sealed partial class Document
 
         private void StartNewPage(bool flushEmpty = false)
         {
+            ClosePartsAtBreak();
             _lastBodyBaseline = null;
             // Flush the previous overflow page (if any) so each overflow-queue entry
             // corresponds to exactly one new Page — otherwise all overflow content
@@ -440,6 +462,8 @@ public sealed partial class Document
                 _colBandTop = _curY;
                 _colDeepestY = _curY;
             }
+            OpenPartsAfterBreak();
+            _pageTopY = _curY;
         }
 
         /// <summary>Break a run list into lines of (x, token, run) cells at

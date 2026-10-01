@@ -28,11 +28,13 @@ public sealed partial class SoftwarePageRenderer
     /// GDI+ decoder does. Without it a letterhead logo whose background is a single keyed
     /// colour painted that colour as a solid block over the page.
     /// </summary>
-    private static void FoldColorKeyMask(PdfDictionary dict, PdfReader reader, byte[] samples,
-        int w, int h, int comps, ref byte[]? alpha, ref int alphaW, ref int alphaH)
+    /// <returns>The alpha plane with the colour-key mask folded in - the key's own plane when there was none,
+    /// the given plane unchanged when the image carries no colour key.</returns>
+    private static (byte[]? alpha, int alphaW, int alphaH) FoldColorKeyMask(PdfDictionary dict, PdfReader reader, byte[] samples,
+        int w, int h, int comps, byte[]? alpha, int alphaW, int alphaH)
     {
-        if (w <= 0 || h <= 0 || comps <= 0) return;
-        if (reader.Resolve(dict.Get("Mask")) is not PdfArray ck || ck.Count < comps * 2) return;
+        if (w <= 0 || h <= 0 || comps <= 0) return (alpha, alphaW, alphaH);
+        if (reader.Resolve(dict.Get("Mask")) is not PdfArray ck || ck.Count < comps * 2) return (alpha, alphaW, alphaH);
 
         var key = new int[comps * 2];
         for (var i = 0; i < key.Length; i++) key[i] = (int)NumFrom(ck[i]);
@@ -50,11 +52,7 @@ public sealed partial class SoftwarePageRenderer
             plane[i] = masked ? (byte)0 : (byte)255;
         }
 
-        if (alpha is null)
-        {
-            alpha = plane; alphaW = w; alphaH = h;
-            return;
-        }
+        if (alpha is null) return (plane, w, h);
         // Both planes are sampled in base-image coordinates; combine on the existing grid.
         for (var y = 0; y < alphaH; y++)
             for (var x = 0; x < alphaW; x++)
@@ -64,6 +62,7 @@ public sealed partial class SoftwarePageRenderer
                 var idx = y * alphaW + x;
                 alpha[idx] = (byte)(alpha[idx] * plane[syr * w + sxr] / 255);
             }
+        return (alpha, alphaW, alphaH);
     }
 
     /// <summary>

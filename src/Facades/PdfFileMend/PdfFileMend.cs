@@ -1,5 +1,4 @@
-using System.Globalization;
-using System.IO.Compression;
+﻿using System.Globalization;
 using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.Text;
@@ -401,66 +400,27 @@ public sealed partial class PdfFileMend : ISaveableFacade
     /// </summary>
     internal static (byte[] pixels, int width, int height, bool hasAlpha) DecodePng(byte[] png)
     {
-        var pos = 8; // skip signature
-        var width = 0;
-        var height = 0;
-        var bitDepth = 0;
-        var colorType = 0;
-        byte[]? palette = null;   // PLTE: RGB triples, one per index (colorType 3)
-        byte[]? trns = null;      // tRNS: alpha per palette index (optional)
-        var idatData = new MemoryStream();
+        var pd = new MendPngDecodeState();
+        pd.png = png;
+        pd.pos = 8; // skip signature
+        pd.width = 0;
+        pd.height = 0;
+        pd.bitDepth = 0;
+        pd.colorType = 0;
+        pd.palette = null;   // PLTE: RGB triples, one per index (colorType 3)
+        pd.trns = null;      // tRNS: alpha per palette index (optional)
+        pd.idatData = new MemoryStream();
 
-        while (pos < png.Length - 4)
-        {
-            var chunkLen = ReadInt32BE(png, pos);
-            var chunkType = Encoding.ASCII.GetString(png, pos + 4, 4);
-            var dataStart = pos + 8;
+        ReadPngChunks(pd);
 
-            if (chunkType == "IHDR")
-            {
-                width = ReadInt32BE(png, dataStart);
-                height = ReadInt32BE(png, dataStart + 4);
-                bitDepth = png[dataStart + 8];
-                colorType = png[dataStart + 9];
-            }
-            else if (chunkType == "PLTE")
-            {
-                palette = new byte[chunkLen];
-                Array.Copy(png, dataStart, palette, 0, chunkLen);
-            }
-            else if (chunkType == "tRNS")
-            {
-                trns = new byte[chunkLen];
-                Array.Copy(png, dataStart, trns, 0, chunkLen);
-            }
-            else if (chunkType == "IDAT")
-            {
-                idatData.Write(png, dataStart, chunkLen);
-            }
-            else if (chunkType == "IEND")
-            {
-                break;
-            }
-
-            pos = dataStart + chunkLen + 4; // +4 for CRC
-        }
-
-        if (width == 0 || height == 0)
+        if (pd.width == 0 || pd.height == 0)
             throw new ArgumentException("Invalid PNG: could not read IHDR");
 
-        // Decompress IDAT data (deflate inside zlib wrapper)
-        var compressedData = idatData.ToArray();
-        byte[] decompressed;
-        using (var compMs = new MemoryStream(compressedData))
-        using (var zlib = new ZLibStream(compMs, CompressionMode.Decompress))
-        using (var outMs = new MemoryStream())
-        {
-            zlib.CopyTo(outMs);
-            decompressed = outMs.ToArray();
-        }
+        pd.compressedData = pd.idatData.ToArray();
+        pd.decompressed = IO.Filters.ManagedInflater.InflateToEnd(pd.compressedData, 0, pd.compressedData.Length, zlibWrapper: true);
 
-        var hasAlpha = colorType == 4 || colorType == 6;
-        var channels = colorType switch
+        pd.hasAlpha = pd.colorType == 4 || pd.colorType == 6;
+        pd.channels = pd.colorType switch
         {
             0 => 1, // Grayscale
             2 => 3, // RGB
@@ -469,112 +429,46 @@ public sealed partial class PdfFileMend : ISaveableFacade
             6 => 4, // RGBA
             _ => 3,
         };
-        // Bytes per pixel used by the row filters is ceil(bitsPerPixel/8), min 1
-        // (PNG spec §9.2). Stride is the packed scanline length; for 8/16-bit this
-        // equals width*channels*(bitDepth/8) as before, and it also handles the
-        // sub-byte (1/2/4-bit) palette/grayscale case.
-        var bpp = Math.Max(1, channels * bitDepth / 8);
-        var stride = (width * channels * bitDepth + 7) / 8;
+        pd.bpp = Math.Max(1, pd.channels * pd.bitDepth / 8);
+        pd.stride = (pd.width * pd.channels * pd.bitDepth + 7) / 8;
 
-        // Unfilter scanlines
-        var raw = new byte[height * stride];
-        var prevRow = new byte[stride];
-        var srcPos = 0;
+        pd.raw = new byte[pd.height * pd.stride];
+        pd.prevRow = new byte[pd.stride];
+        pd.srcPos = 0;
 
-        for (var y = 0; y < height; y++)
-        {
-            var filterByte = decompressed[srcPos++];
-            var rowStart = y * stride;
-
-            Array.Copy(decompressed, srcPos, raw, rowStart, stride);
-            srcPos += stride;
-
-            switch (filterByte)
-            {
-                case 0: // None
-                    break;
-                case 1: // Sub
-                    for (var x = bpp; x < stride; x++)
-                        raw[rowStart + x] = (byte)(raw[rowStart + x] + raw[rowStart + x - bpp]);
-                    break;
-                case 2: // Up
-                    for (var x = 0; x < stride; x++)
-                        raw[rowStart + x] = (byte)(raw[rowStart + x] + prevRow[x]);
-                    break;
-                case 3: // Average
-                    for (var x = 0; x < stride; x++)
-                    {
-                        var a = x >= bpp ? raw[rowStart + x - bpp] : 0;
-                        raw[rowStart + x] = (byte)(raw[rowStart + x] + (a + prevRow[x]) / 2);
-                    }
-                    break;
-                case 4: // Paeth
-                    for (var x = 0; x < stride; x++)
-                    {
-                        var a = x >= bpp ? raw[rowStart + x - bpp] : 0;
-                        var b = prevRow[x];
-                        var c = x >= bpp ? prevRow[x - bpp] : 0;
-                        raw[rowStart + x] = (byte)(raw[rowStart + x] + PaethPredictor(a, b, c));
-                    }
-                    break;
-            }
-
-            Array.Copy(raw, rowStart, prevRow, 0, stride);
-        }
+        UnfilterPngRows(pd);
 
         // Convert to RGB or RGBA
-        if (colorType == 3 && palette is not null) // Palette index -> RGB (RGBA when tRNS present)
+        if (pd.colorType == 3 && pd.palette is not null) // Palette index -> RGB (RGBA when tRNS present)
         {
-            var pixelCount = width * height;
-            var indices = UnpackIndices(raw, width, height, stride, bitDepth);
-            byte R(int idx) { var p = idx * 3; return p + 2 < palette.Length ? palette[p] : (byte)0; }
-            byte G(int idx) { var p = idx * 3; return p + 2 < palette.Length ? palette[p + 1] : (byte)0; }
-            byte B(int idx) { var p = idx * 3; return p + 2 < palette.Length ? palette[p + 2] : (byte)0; }
-            if (trns is not null)
-            {
-                var rgba = new byte[pixelCount * 4];
-                for (var i = 0; i < pixelCount; i++)
-                {
-                    var idx = indices[i];
-                    rgba[i * 4] = R(idx); rgba[i * 4 + 1] = G(idx); rgba[i * 4 + 2] = B(idx);
-                    rgba[i * 4 + 3] = idx < trns.Length ? trns[idx] : (byte)255;
-                }
-                return (rgba, width, height, true);
-            }
-            var rgb3 = new byte[pixelCount * 3];
-            for (var i = 0; i < pixelCount; i++)
-            {
-                var idx = indices[i];
-                rgb3[i * 3] = R(idx); rgb3[i * 3 + 1] = G(idx); rgb3[i * 3 + 2] = B(idx);
-            }
-            return (rgb3, width, height, false);
+            return DecodePalettePng(pd);
         }
-        if (colorType == 0) // Grayscale -> RGB
+        if (pd.colorType == 0) // Grayscale -> RGB
         {
-            var rgb = new byte[width * height * 3];
-            for (var i = 0; i < width * height; i++)
+            var rgb = new byte[pd.width * pd.height * 3];
+            for (var i = 0; i < pd.width * pd.height; i++)
             {
-                rgb[i * 3] = raw[i];
-                rgb[i * 3 + 1] = raw[i];
-                rgb[i * 3 + 2] = raw[i];
+                rgb[i * 3] = pd.raw[i];
+                rgb[i * 3 + 1] = pd.raw[i];
+                rgb[i * 3 + 2] = pd.raw[i];
             }
-            return (rgb, width, height, false);
+            return (rgb, pd.width, pd.height, false);
         }
-        else if (colorType == 4) // Grayscale+Alpha -> RGBA
+        else if (pd.colorType == 4) // Grayscale+Alpha -> RGBA
         {
-            var rgba = new byte[width * height * 4];
-            for (var i = 0; i < width * height; i++)
+            var rgba = new byte[pd.width * pd.height * 4];
+            for (var i = 0; i < pd.width * pd.height; i++)
             {
-                rgba[i * 4] = raw[i * 2];
-                rgba[i * 4 + 1] = raw[i * 2];
-                rgba[i * 4 + 2] = raw[i * 2];
-                rgba[i * 4 + 3] = raw[i * 2 + 1];
+                rgba[i * 4] = pd.raw[i * 2];
+                rgba[i * 4 + 1] = pd.raw[i * 2];
+                rgba[i * 4 + 2] = pd.raw[i * 2];
+                rgba[i * 4 + 3] = pd.raw[i * 2 + 1];
             }
-            return (rgba, width, height, true);
+            return (rgba, pd.width, pd.height, true);
         }
 
         // colorType 2 (RGB) or 6 (RGBA) — already in correct format
-        return (raw, width, height, hasAlpha);
+        return (pd.raw, pd.width, pd.height, pd.hasAlpha);
     }
 
 }

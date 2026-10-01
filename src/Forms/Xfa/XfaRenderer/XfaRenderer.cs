@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Xml;
 
@@ -14,7 +14,10 @@ namespace Aspose.Pdf.Forms.Xfa;
 /// </summary>
 internal static partial class XfaRenderer
 {
-    private const double Mm = 72.0 / 25.4;
+    /// <summary>Points per millimetre as the reference's XFA layout converts them: the
+    /// rounded 2.835, not 72/25.4 (probed: an A4 medium of 210mm x 297mm renders a
+    /// 595.35 x 841.995 pt page).</summary>
+    private const double Mm = 2.835;
 
     // A positioned, ready-to-paint primitive (coordinates already in PDF points, bottom-left origin).
     private sealed class Item
@@ -91,17 +94,18 @@ internal static partial class XfaRenderer
 
     private static void RenderInternal(Document doc, XmlElement template, Func<string, string?>? rawValue)
     {
-        var root = FirstChild(template, "subform");
-        if (root is null) return;
+        var xr = new XfaRenderState();
+        xr.doc = doc;
+        xr.template = template;
+        xr.rawValue = rawValue;
+        xr.root = FirstChild(xr.template, "subform");
+        if (xr.root is null) return;
 
-        // Data-driven occurrence expansion: clone the template and duplicate repeatable
-        // subforms once per bound data group, so layout and value binding see the real
-        // instance list (e.g. an order subform with occur max=3 and three data rows).
-        var dataRoot = LoadDataRoot(doc);
-        var groups = new List<XmlElement>();
-        var formRoot = LoadFormRoot(doc);
-        var origRoot = root;
-        root = ExpandOccurrences(root, dataRoot, groups, formRoot);
+        xr.dataRoot = LoadDataRoot(xr.doc);
+        xr.groups = new List<XmlElement>();
+        xr.formRoot = LoadFormRoot(xr.doc);
+        xr.origRoot = xr.root;
+        xr.root = ExpandOccurrences(xr.root, xr.dataRoot, xr.groups, xr.formRoot);
         // The form packet is the RUNTIME state a viewer saved: its elements carry
         // the presence, values and captions the form's scripts resolved (e.g. only
         // the peril section the claim concerns stays visible, labels in the chosen
@@ -109,10 +113,10 @@ internal static partial class XfaRenderer
         // runtime state — the template alone shows every conditional variant at
         // once. The ORIGINAL root gets the same overlay: the master pages
         // (pageSet/pageArea) are read from the original template, not the clone.
-        if (formRoot is not null)
+        if (xr.formRoot is not null)
         {
-            OverlayFormPresence(root, formRoot);
-            OverlayFormPresence(origRoot, formRoot);
+            OverlayFormPresence(xr.root, xr.formRoot);
+            OverlayFormPresence(xr.origRoot, xr.formRoot);
         }
 
         // Body content flows through the master page's content areas. Every visible
@@ -120,307 +124,56 @@ internal static partial class XfaRenderer
         // (Designer emits e.g. captioned text fields directly under the root, and they
         // consume flow height like any subform row); Designer metadata subforms
         // ("designer__stylesheet" etc.) are not content.
-        var bodies = Boxes(root)
+        var bodies = Boxes(xr.root)
             .Where(s => s.LocalName is "subform" or "field" or "draw" or "exclGroup"
                         && !s.GetAttribute("name").StartsWith("designer__", StringComparison.Ordinal))
             .ToList();
-        var pageAreas = Descendants(template, "pageArea").ToList();
-        if (bodies.Count == 0 || pageAreas.Count == 0) return;
+        xr.pageAreas = Descendants(xr.template, "pageArea").ToList();
+        if (bodies.Count == 0 || xr.pageAreas.Count == 0) return;
 
         // The current master pageArea: a body's <breakBefore target="…"> switches to the
         // named pageArea; startNew keeps the master and starts a fresh page.
-        var master = BreakTarget(bodies[0], pageAreas)
-                     ?? pageAreas.FirstOrDefault(p => p.GetAttribute("name") == bodies[0].GetAttribute("name"))
-                     ?? pageAreas.FirstOrDefault();
-        if (master is null) return;
+        xr.master = BreakTarget(bodies[0], xr.pageAreas)
+                     ?? xr.pageAreas.FirstOrDefault(p => p.GetAttribute("name") == bodies[0].GetAttribute("name"))
+                     ?? xr.pageAreas.FirstOrDefault()!;
+        if (xr.master is null) return;
 
-        // Ordered pageSet progression: the pageAreas are consumed front to
-        // back, one area per page up to its occur max (default 1, -1 unbounded), and
-        // the LAST area repeats for every remaining page - a first-page master with a
-        // big header hands over to the taller continuation master from page 2 on.
-        // An explicit breakBefore target overrides the cursor (handled at the break).
-        var masterIdx = Math.Max(0, pageAreas.IndexOf(master));
-        var pagesOnMaster = 0;
-        static int OccurMax(XmlElement pa)
-        {
-            var oc = pa.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == "occur");
-            var maxS = oc?.GetAttribute("max");
-            if (string.IsNullOrEmpty(maxS)) return 1;
-            if (maxS == "-1") return int.MaxValue;
-            return int.TryParse(maxS, out var m) && m > 0 ? m : 1;
-        }
-        void AdvanceMaster()
-        {
-            if (pagesOnMaster >= OccurMax(master!) && masterIdx + 1 < pageAreas.Count)
-            {
-                masterIdx++;
-                master = pageAreas[masterIdx];
-                pagesOnMaster = 0;
-            }
-        }
-
-        var xfaImages = LoadXfaImages(doc);
-        // id="…" elements (floatingFields etc.) referenced by rich-text <span xfa:embed="#id"/>.
-        var idElements = new Dictionary<string, XmlElement>(StringComparer.Ordinal);
-        foreach (var el in template.SelectNodes(".//*")!.OfType<XmlElement>())
+        xr.masterIdx = Math.Max(0, xr.pageAreas.IndexOf(xr.master));
+        xr.pagesOnMaster = 0;
+        xr.xfaImages = LoadXfaImages(xr.doc);
+        xr.idElements = new Dictionary<string, XmlElement>(StringComparer.Ordinal);
+        foreach (var el in xr.template.SelectNodes(".//*")!.OfType<XmlElement>())
         {
             var id = el.GetAttribute("id");
-            if (id.Length > 0 && !idElements.ContainsKey(id)) idElements[id] = el;
+            if (id.Length > 0 && !xr.idElements.ContainsKey(id)) xr.idElements[id] = el;
         }
-        var newPages = new List<(double w, double h, List<Item> items)>();
-        Ctx ctx = null!;
-        double pw = 612, ph = 792;
-        var areas = new List<(double x, double y, double w, double h, string name)>();
-        int ai = 0; double used = 0;
-        bool pageFresh = false;
-        void NewPage()
-        {
-            (pw, ph) = MasterMedium(master!);
-            areas = MasterContentAreas(master!, pw, ph);
-            var items = new List<Item>();
-            ctx = new Ctx
-            {
-                PageH = ph, RawValue = rawValue, Items = items, Groups = groups, Images = xfaImages,
-                IdElements = idElements, DataRoot = dataRoot, PageNum = newPages.Count + 1,
-                StrictBinding = formRoot is null,
-            };
-            // Master content (cover art, headers, footers) is positioned in page coordinates.
-            foreach (var c in Boxes(master!))
-                Place(ctx, c, Len(c.GetAttribute("x"), 0), Len(c.GetAttribute("y"), 0), "", pw - Len(c.GetAttribute("x"), 0));
-            newPages.Add((pw, ph, items));
-            if (System.Environment.GetEnvironmentVariable("XFA_PAGES") is not null)
-                System.Console.Error.WriteLine($"NEWPAGE	page={newPages.Count}	master={master!.GetAttribute("name")}	idx={masterIdx}	onMaster={pagesOnMaster}");
-            pagesOnMaster++;
-            ai = 0; used = 0;
-            pageFresh = true;
-        }
-        NewPage();
-        var rootPath = root.GetAttribute("name") + "[0]";
-        // A flow-container that cannot fit the remaining space SPLITS between its own
-        // rows rather than forcing a fresh page (XFA's default keep=none): a viewer
-        // fills the page bottom with the rows that fit and continues the rest on the
-        // next page. Containers carrying <keep intact> stay whole.
-        static bool KeepIntact(XmlElement c) => c.ChildNodes.OfType<XmlElement>()
-            .Any(k => k.LocalName == "keep" && k.GetAttribute("intact") is "contentArea" or "pageArea");
-        bool Splittable(XmlElement c) =>
-            c.LocalName == "subform"
-            && c.GetAttribute("layout") is "tb" or "table" or "lr-tb"
-            && !KeepIntact(c)
-            && Boxes(c).Count() > 1;
-        void FlowRows(XmlElement c, double indentL, double indentR)
-        {
-            var (mt2, _, ml2, _) = Margins(c);
-            var cname = c.GetAttribute("name");
-            var p2 = cname.Length > 0 ? $"{rootPath}.{cname}[{SiblingIndex(c)}]" : rootPath;
-            double cw = BoxW(c);
-            if (cw <= 0) cw = areas[ai].w - indentL - indentR;
-            used += mt2;
-            // Group children into visual rows: tb/table advance per child; lr-tb
-            // accumulates children left-to-right until the width wraps.
-            var rows = new List<List<XmlElement>>();
-            if (c.GetAttribute("layout") == "lr-tb")
-            {
-                double xx = 0; List<XmlElement> row = new();
-                foreach (var k in Boxes(c))
-                {
-                    double kw = FlowWidth(ctx, k);
-                    if (row.Count > 0 && xx + kw > cw + 0.5) { rows.Add(row); row = new(); xx = 0; }
-                    row.Add(k); xx += kw;
-                }
-                if (row.Count > 0) rows.Add(row);
-            }
-            else
-                rows.AddRange(Boxes(c).Select(k => new List<XmlElement> { k }));
-            foreach (var row in rows)
-            {
-                double rh = row.Max(k => Height(ctx, k, cw));
-                if (System.Environment.GetEnvironmentVariable("XFA_PAGES") is not null)
-                    System.Console.Error.WriteLine($"ROW\t{string.Join('+', row.Select(k => k.GetAttribute("name")))}\trh={rh:F1}\tpage={newPages.Count}\tused={used:F1}\tareaH={areas[ai].h:F1}");
-                // A lone splittable subform row that overflows the remaining space
-                // while its own first row still fits splits at the page bottom
-                // (same fills-bottom rule as the top-level flow) instead of moving
-                // whole to the next area.
-                if (row.Count == 1 && rh > areas[ai].h - used + 0.1 && Splittable(row[0])
-                    && Boxes(row[0]).FirstOrDefault(k => !IsFloating(k)) is { } firstNested
-                    && Height(ctx, firstNested, cw) <= areas[ai].h - used + 0.1)
-                {
-                    FlowRows(row[0], indentL + ml2, indentR);
-                    continue;
-                }
-                while (rh > areas[ai].h - used + 0.1 && !(used == 0 && rh > areas[ai].h))
-                {
-                    ai++;
-                    if (ai >= areas.Count) { AdvanceMaster(); NewPage(); }
-                    else used = 0;
-                }
-                double xx2 = areas[ai].x + indentL + ml2;
-                foreach (var rc in row)
-                {
-                    double rcw = FlowWidth(ctx, rc);
-                    Place(ctx, rc, xx2, areas[ai].y + used, p2, rcw > 0 ? rcw : cw);
-                    xx2 += rcw;
-                }
-                used += rh;
-            }
-        }
+        xr.newPages = new List<(double w, double h, List<Item> items)>();
+        xr.ctx = null!;
+        xr.pw = 612;
+        xr.ph = 792;
+        xr.areas = new List<(double x, double y, double w, double h, string name)>();
+        xr.ai = 0; xr.used = 0;
+        xr.pageFresh = false;
+        NewPage(xr);
+        xr.rootPath = xr.root.GetAttribute("name") + "[0]";
         foreach (var body in bodies)
         {
-            double h = Height(ctx, body, areas[ai].w);
-            // An empty trailing body (Designer end-of-form marker) renders nothing and
-            // must not force a page even when it carries a breakBefore.
-            if (h <= 0.5) continue;
-            // A y-positioned decorative draw overlays the current position without
-            // consuming flow height (same rule as inside container flows).
-            if (IsFloating(body))
-            {
-                Place(ctx, body, areas[ai].x + Len(body.GetAttribute("x"), 0),
-                      areas[ai].y + used + Len(body.GetAttribute("y"), 0), rootPath,
-                      areas[ai].w - Len(body.GetAttribute("x"), 0));
-                continue;
-            }
-            // A breakBefore acts only when it names a pageArea or requests a new page;
-            // Designer also emits EMPTY <breakBefore/> placeholders that are no-ops.
-            var brk = body.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == "breakBefore");
-            if (brk is not null)
-            {
-                var target = BreakTarget(body, pageAreas);
-                var startNew = brk.GetAttribute("startNew") == "1";
-                if (target is not null || startNew)
-                {
-                    var switched = target is not null && !ReferenceEquals(target, master);
-                    if (target is not null)
-                    {
-                        master = target;
-                        masterIdx = Math.Max(0, pageAreas.IndexOf(target));
-                        // A break to the master already in effect (Designer stamps one
-                        // on the entry body) must not restart its occur count - that
-                        // would pin the ordered progression to it forever.
-                        if (switched) pagesOnMaster = 0;
-                    }
-                    // A CONTENT-AREA-targeted break on the SAME master moves the flow
-                    // into that area - on the CURRENT page while the area is unused
-                    // there (a multi-area page's bodies lay into their
-                    // own areas of ONE page, startNew notwithstanding); a fresh page
-                    // only when the area is already consumed.
-                    var caName = brk is null ? null : BreakContentAreaName(brk);
-                    var caIdx = caName is null ? -1 : areas.FindIndex(a => a.name == caName);
-                    if (!switched && caIdx >= 0)
-                    {
-                        var consumed = caIdx < ai || (caIdx == ai && used > 0);
-                        if (consumed && !pageFresh) NewPage();
-                        var landIdx = areas.FindIndex(a => a.name == caName);
-                        if (landIdx >= 0) { ai = landIdx; used = 0; }
-                    }
-                    else
-                    {
-                        if (!pageFresh) NewPage();
-                        else if (switched) { newPages.RemoveAt(newPages.Count - 1); NewPage(); }
-                        if (caName is not null)
-                        {
-                            var landIdx = areas.FindIndex(a => a.name == caName);
-                            if (landIdx >= 0) { ai = landIdx; used = 0; }
-                        }
-                    }
-                }
-            }
-            // A flow body splits between its rows mid-page (keep=none fills the page
-            // bottom) in two cases: it is substantially taller than a WHOLE content
-            // area (it could never fit any single area), or it fits a whole area but
-            // not the remaining space AND its first row does — then the rows that fit
-            // stay at the page bottom and the rest continues on the next page. A body
-            // in the small-overflow band just above a whole area (≤20pt over) advances
-            // instead — a viewer places it whole, tolerating the overflow, rather than
-            // breaking it up.
-            double maxAreaH = areas.Max(a => a.h);
-            bool fillsBottom = h > areas[ai].h - used + 0.1 && h <= maxAreaH + 0.1
-                && Boxes(body).FirstOrDefault(c => !IsFloating(c)) is { } firstRow
-                && Height(ctx, firstRow, areas[ai].w) <= areas[ai].h - used + 0.1;
-            if ((h > maxAreaH + 20 || fillsBottom) && used > 0 && Splittable(body)
-                && body.GetAttribute("layout") is "tb" or "table")
-            {
-                if (System.Environment.GetEnvironmentVariable("XFA_PAGES") is not null)
-                    System.Console.Error.WriteLine($"BODYSPLIT\t{body.GetAttribute("name")}\th={h:F1}\tpage={newPages.Count}\tused={used:F1}");
-                FlowRows(body, 0, 0);
-                pageFresh = false;
-                continue;
-            }
-            while (h > areas[ai].h - used + 0.1 && !(used == 0 && h > areas[ai].h))
-            {
-                ai++;
-                if (ai >= areas.Count) { AdvanceMaster(); NewPage(); }
-                else used = 0;
-            }
-            if (System.Environment.GetEnvironmentVariable("XFA_PAGES") is not null)
-                System.Console.Error.WriteLine($"BODY\t{body.GetAttribute("name")}\th={h:F1}\tpage={newPages.Count}\tarea={ai}\tused={used:F1}\tareaH={areas[ai].h:F1}");
-            if (h > areas[ai].h + 20 && used == 0 && body.GetAttribute("layout") == "lr-tb"
-                && Splittable(body))
-            {
-                // An over-tall lr-tb body flows its wrapped rows across content
-                // areas / continuation pages, same as a tb/table body below —
-                // placing it whole would clip everything past the first area.
-                FlowRows(body, 0, 0);
-                pageFresh = false;
-                continue;
-            }
-            if (h > areas[ai].h + 20 && used == 0 && body.GetAttribute("layout") is "tb" or "table")
-            {
-                // A flow body substantially taller than a whole content area SPLITS: its
-                // top-level children flow across content areas / continuation pages
-                // (over-tall subforms paginate inside rather than clipping).
-                // A small overshoot (≤20pt) stays on one page — coarse Height() rounding
-                // must not force a page for content that belongs together.
-                var (mtB, _, mlB, mrB) = Margins(body);
-                used += mtB;
-                foreach (var c in Boxes(body).ToList())
-                {
-                    if (IsFloating(c))
-                    {
-                        Place(ctx, c, areas[ai].x + mlB + Len(c.GetAttribute("x"), 0),
-                              areas[ai].y + used + Len(c.GetAttribute("y"), 0), rootPath,
-                              areas[ai].w - mlB - Len(c.GetAttribute("x"), 0));
-                        continue;
-                    }
-                    double ch = Height(ctx, c, areas[ai].w - mlB - mrB);
-                    if (System.Environment.GetEnvironmentVariable("XFA_PAGES") is not null)
-                        System.Console.Error.WriteLine($"CHILD\t{c.GetAttribute("name")}\tch={ch:F1}\tpage={newPages.Count}\tused={used:F1}");
-                    if (ch > areas[ai].h - used + 0.1 && !(used == 0 && ch > areas[ai].h) && Splittable(c))
-                    {
-                        FlowRows(c, mlB, mrB);
-                        continue;
-                    }
-                    while (ch > areas[ai].h - used + 0.1 && !(used == 0 && ch > areas[ai].h))
-                    {
-                        ai++;
-                        if (ai >= areas.Count) { AdvanceMaster(); NewPage(); }
-                        else used = 0;
-                    }
-                    Place(ctx, c, areas[ai].x + mlB, areas[ai].y + used, rootPath, areas[ai].w - mlB - mrB);
-                    used += ch;
-                }
-            }
-            else
-            {
-                Place(ctx, body, areas[ai].x, areas[ai].y + used, rootPath, areas[ai].w);
-                used += h;
-            }
-            pageFresh = false;
+            if (!RenderBody(xr, body, bodies)) break;
         }
-        if (newPages.Count == 0) return;
+        if (xr.newPages.Count == 0) return;
 
-        // The total page count is only known now: substitute it into any
-        // xfa.layout.pageCount() placeholders emitted while painting masters.
-        var total = newPages.Count.ToString(CultureInfo.InvariantCulture);
-        foreach (var (_, _, items) in newPages)
+        xr.total = xr.newPages.Count.ToString(CultureInfo.InvariantCulture);
+        foreach (var (_, _, items) in xr.newPages)
             foreach (var it in items)
                 if (it.Kind == "text" && it.Text.Contains(PageCountSentinel, StringComparison.Ordinal))
-                    it.Text = it.Text.Replace(PageCountSentinel, total, StringComparison.Ordinal);
+                    it.Text = it.Text.Replace(PageCountSentinel, xr.total, StringComparison.Ordinal);
 
         // Replace all existing pages with the rendered ones (bounded to avoid any delete-loop hang).
-        for (int guard = doc.Pages.Count + 8; doc.Pages.Count > 0 && guard > 0; guard--)
-            doc.Pages.Delete(1);
-        foreach (var (w, h, items) in newPages)
+        for (int guard = xr.doc.Pages.Count + 8; xr.doc.Pages.Count > 0 && guard > 0; guard--)
+            xr.doc.Pages.Delete(1);
+        foreach (var (w, h, items) in xr.newPages)
         {
-            var page = doc.Pages.Add(w, h);
+            var page = xr.doc.Pages.Add(w, h);
             EnsureFonts(page);
             page.AddContentStream(Emit(items, page));
         }

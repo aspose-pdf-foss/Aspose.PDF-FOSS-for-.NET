@@ -32,8 +32,15 @@ public class TextFragmentState : TextState
     /// <summary>Whether positioning treats Y as the baseline or the descender.</summary>
     public new CoordinateOrigin CoordinateOrigin { get => base.CoordinateOrigin; set => base.CoordinateOrigin = value; }
 
-    /// <summary>Font size in points.</summary>
-    public new float FontSize { get => base.FontSize; set => base.FontSize = value; }
+    /// <summary>The fragment's font size in points: while the fragment's own size was never set, the
+    /// one the caller set on every segment when they all agree; else the fragment's own.</summary>
+    public new float FontSize
+    {
+        get => !FontSizeTouched
+            && SharedBySegments(segment => segment.TextState.FontSizeTouched ? segment.TextState.FontSize : (float?)null) is (true, { } shared)
+            ? shared : base.FontSize;
+        set => base.FontSize = value;
+    }
 
     /// <summary>Font style flags (Bold / Italic).</summary>
     public new FontStyles FontStyle { get => base.FontStyle; set => base.FontStyle = value; }
@@ -80,14 +87,15 @@ public class TextFragmentState : TextState
     /// <summary>Word spacing (Tw) in text-space units.</summary>
     public new float WordSpacing { get => base.WordSpacing; set => base.WordSpacing = value; }
 
-    /// <summary>
-    /// The font used to render the fragment. Returns the base
-    /// <see cref="TextState.Font"/> cast to <see cref="Font"/>; setters
-    /// upcast through the inherited storage.
-    /// </summary>
+    /// <summary>The fragment's font: while the fragment's own face was never set, the one
+    /// the caller set on every segment when they all name the same face; else the
+    /// fragment's own.</summary>
     public new Aspose.Pdf.Text.Font? Font
     {
-        get => base.Font as Aspose.Pdf.Text.Font;
+        get => !FontTouched
+            && SharedBySegments(segment => segment.TextState.FontTouched ? segment.TextState.Font?.FontName : null, skipEmpty: false) is (true, not null)
+            ? _fragment.Segments[1].TextState.Font
+            : base.Font as Aspose.Pdf.Text.Font;
         set
         {
             base.Font = value;
@@ -103,6 +111,32 @@ public class TextFragmentState : TextState
     /// bounding box. Stored only — the renderer does not currently emit
     /// the border stroke.</summary>
     public bool DrawTextRectangleBorder { get; set; }
+
+    /// <summary>True when the fragment is one the caller composed (an absorbed fragment's
+    /// segments carry the page's faces, which the fragment reports in its own way), it has
+    /// segments, and <paramref name="read"/> gives the same value on every one of them: the
+    /// fragment's state then reports what its segments show. A fragment whose own value the
+    /// caller set keeps it: a generator or HTML layout sets segment values of its own and
+    /// must not have the fragment follow them.</summary>
+    private (bool shared, T value) SharedBySegments<T>(Func<TextSegment, T> read, bool skipEmpty = true)
+    {
+        if (_fragment.AbsorbedRectangle is not null) return (false, default!);
+        var segments = _fragment.Segments;
+        TextSegment? first = null;
+        for (var i = 1; i <= segments.Count && first is null; i++)
+            if (!skipEmpty || !string.IsNullOrEmpty(segments[i].Text)) first = segments[i];
+        if (first is null) return (false, default!);
+        var value = read(first);
+        for (var i = 1; i <= segments.Count; i++)
+        {
+            // The empty segment a bare `new TextFragment()` starts with says nothing about
+            // the caller's sizing, so the segments added beside it still agree among
+            // themselves; the face keeps reading every segment, as before.
+            if (skipEmpty && string.IsNullOrEmpty(segments[i].Text)) continue;
+            if (!Equals(read(segments[i]), value)) return (false, value);
+        }
+        return (true, value);
+    }
 
     /// <summary>Tab-stop settings inherited from the owning fragment.</summary>
     public TabStops TabStops => _fragment.TabStops ?? new TabStops();

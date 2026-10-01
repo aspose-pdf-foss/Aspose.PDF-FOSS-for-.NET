@@ -67,7 +67,10 @@ var boldItalic = FontRepository.FindFont("Arial", FontStyles.Bold | FontStyles.I
 > `TextState.Font` (a `Font` object) embeds the actual font program.
 
 Embedding honours the face's own licence: a TrueType/OpenType font whose OS/2
-`fsType` forbids embedding raises `FontEmbeddingException` at save time. Set
+`fsType` marks it as restricted-licence (no embedding at all) raises
+`FontEmbeddingException` at save time; preview-and-print and editable faces
+embed normally, and an OS/2 table older than version 2 is not read as a
+licence statement. Set
 `Document.DisableFontLicenseVerifications = true` to embed it anyway, or clear
 `font.FontOptions.NotifyAboutFontEmbeddingError` to let the save finish with
 the face referenced by name only; the reason stays readable through
@@ -109,8 +112,16 @@ var brand = FontRepository.FindFont("Brand");
 ```
 
 The collection starts with a `SystemFontSource` (the platform's installed fonts
-— Windows, `/usr/share/fonts`, and the macOS font folders) and the per-user
-fonts folder. `FontRepository.ReloadFonts()` resets it to that default.
+— the Windows fonts folders, `/usr/share/fonts`, `/usr/local/share/fonts` and
+the user's font folders on Linux, and the macOS font folders) plus, on Windows,
+a `FolderFontSource` for the per-user fonts folder when it exists.
+`FontRepository.ReloadFonts()` resets it to that default.
+
+On Linux, where the Windows families are usually not installed, a request for
+Arial / Helvetica, Times New Roman or Courier New resolves to the
+metric-compatible Liberation faces, Calibri and Cambria to Carlito and Caladea,
+Verdana to DejaVu Sans, and Comic Sans MS to Comic Neue, when those packages
+are installed.
 
 ## Substituting missing fonts
 
@@ -137,6 +148,17 @@ replacement text contains characters the current font lacks and
 `TextEditOptions.NoCharacterAction.ReplaceFonts` is in effect, a covering face
 is chosen from the registered sources (caller-registered folders first, then the
 system fonts).
+
+`Document.FontSubstitution` (a `FontSubstitutionHandler(Font oldFont, Font newFont)`
+event) reports the substitutions the library does make when it embeds a
+program for a font the document only names — when `Font.IsEmbedded` is set to
+`true` on a font read from the document, or during a conformance conversion (`Document.Convert`)
+— for example a Helvetica that is embedded from Arial:
+
+```csharp
+doc.FontSubstitution += (oldFont, newFont) =>
+    Console.WriteLine($"{oldFont.FontName} -> {newFont.FontName}");
+```
 
 ## Inspecting the fonts in a document
 
@@ -195,11 +217,39 @@ doc.Save("subset.pdf");
 are already embedded. See [Optimization](optimization.md) for the broader
 size-reduction pipeline.
 
+## OpenType features
+
+A Latin run is one glyph per character unless a feature is asked for.
+`OpenTypeFeatures.Apply` runs a face's feature tables over a string — `liga`
+turns "fi" into the single glyph the face draws it with, `onum` picks old-style
+digits, `ss01` a stylistic set — and returns the glyphs the run becomes, each
+with the index of the first character it stands for, or `null` when the face
+has no such feature or none of its rules matched:
+
+```csharp
+using Aspose.Pdf.Text;
+
+byte[] program = File.ReadAllBytes("Garamond.otf");
+var glyphs = OpenTypeFeatures.Apply(program, "office", new[] { "liga" });
+
+if (glyphs is not null)
+    foreach (var (glyph, firstCharacter) in glyphs)
+        Console.WriteLine($"glyph {glyph} starts at character {firstCharacter}");
+```
+
+A caller that lays text out itself needs the same glyph run twice — once to
+measure it, because a ligature is narrower than the characters it replaces,
+and once to draw it. The text-showing operators `ShowText` and
+`SetGlyphsPositionShowText` (in `Aspose.Pdf.Operators`) carry the same
+`Features` list, so naming the features
+there draws what `Apply` measured, and text drawn that way still extracts as
+the characters the glyphs stand for.
+
 ## What's not included
 
 - Font **rasterisation hints**: glyphs are rendered from their unhinted
   outlines.
-- Fonts whose licence forbids embedding are not embedded unless
+- Fonts whose licence is restricted (no embedding) are not embedded unless
   `Document.DisableFontLicenseVerifications` is set (see
   [Finding and embedding fonts](#finding-and-embedding-fonts)).
 - See [Scope and Limitations](../README.md#scope-and-limitations) in the README

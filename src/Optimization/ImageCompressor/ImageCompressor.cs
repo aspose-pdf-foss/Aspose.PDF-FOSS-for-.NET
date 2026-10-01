@@ -1,5 +1,4 @@
-using System.IO.Compression;
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 using Aspose.Pdf.IO.Filters;
 
@@ -118,7 +117,7 @@ internal static partial class ImageCompressor
             byte[] data;
             try { data = reader.DecodeStream(s) ?? s.RawData; }
             catch { data = s.RawData; }
-            return Convert.ToHexString(Security.ShaDigest.Sha256(data));
+            return Compat.ToHexString(Security.ShaDigest.Sha256(data));
         }
 
         foreach (var (xobjDict, key, stream, entry) in allImages)
@@ -241,39 +240,42 @@ internal static partial class ImageCompressor
 
     private static void TryDownsampleImage(PdfStream stream, PdfReader reader, int maxDpi, int quality)
     {
-        var width = (int)stream.Dict.GetInt("Width", 0);
-        var height = (int)stream.Dict.GetInt("Height", 0);
-        if (width <= 0 || height <= 0) return;
+        var dn = new ImageDownsampleState();
+        dn.stream = stream;
+        dn.reader = reader;
+        dn.maxDpi = maxDpi;
+        dn.quality = quality;
+        dn.width = (int)dn.stream.Dict.GetInt("Width", 0);
+        dn.height = (int)dn.stream.Dict.GetInt("Height", 0);
+        if (dn.width <= 0 || dn.height <= 0) return;
 
-        var filterName = GetFilterName(stream);
+        dn.filterName = GetFilterName(dn.stream);
 
         // JPEG that exceeds the target resolution: decode, box-filter down, and re-encode
         // at the requested quality. (JPX/JBIG2 have no managed codec, so leave them alone.)
-        if (filterName is "DCTDecode")
+        if (dn.filterName is "DCTDecode")
         {
-            TryDownsampleJpeg(stream, reader, maxDpi, quality);
+            TryDownsampleJpeg(dn.stream, dn.reader, dn.maxDpi, dn.quality);
             return;
         }
-        if (filterName is "JPXDecode" or "JBIG2Decode")
+        if (dn.filterName is "JPXDecode" or "JBIG2Decode")
             return;
 
-        // Determine components per pixel from ColorSpace
-        var components = GetComponents(stream);
-        var bpc = (int)stream.Dict.GetInt("BitsPerComponent", 8);
+        dn.components = GetComponents(dn.stream);
+        dn.bpc = (int)dn.stream.Dict.GetInt("BitsPerComponent", 8);
 
-        // Estimate DPI: assume the image is displayed at full page width (612pt = 8.5in)
-        var estimatedDpiX = width * 72.0 / 612.0;
-        var estimatedDpiY = height * 72.0 / 792.0;
-        var estimatedDpi = Math.Max(estimatedDpiX, estimatedDpiY);
+        dn.estimatedDpiX = dn.width * 72.0 / 612.0;
+        dn.estimatedDpiY = dn.height * 72.0 / 792.0;
+        dn.estimatedDpi = Math.Max(dn.estimatedDpiX, dn.estimatedDpiY);
 
-        if (estimatedDpi <= maxDpi) return;
+        if (dn.estimatedDpi <= dn.maxDpi) return;
 
-        var scaleFactor = (double)maxDpi / estimatedDpi;
-        var newWidth = Math.Max(1, (int)(width * scaleFactor));
-        var newHeight = Math.Max(1, (int)(height * scaleFactor));
+        dn.scaleFactor = (double)dn.maxDpi / dn.estimatedDpi;
+        dn.newWidth = Math.Max(1, (int)(dn.width * dn.scaleFactor));
+        dn.newHeight = Math.Max(1, (int)(dn.height * dn.scaleFactor));
 
         // Don't bother if reduction is trivial
-        if (newWidth >= width && newHeight >= height) return;
+        if (dn.newWidth >= dn.width && dn.newHeight >= dn.height) return;
 
         // Bilevel (1-bit) scans — typically high-resolution CCITT G4 fax images — are by
         // far the largest objects in scanned documents. Down-rezzing them to the target DPI
@@ -282,11 +284,11 @@ internal static partial class ImageCompressor
         // target resolution still holds legible text. Below a legibility floor, box-averaging
         // a fax scan to grey destroys the very text it exists to carry for a negligible saving
         // over its existing G4 compression, so such a scan is left at full resolution.
-        if (bpc == 1 && !stream.Dict.GetBool("ImageMask") && IsGrayOrCcitt(stream, reader))
+        if (dn.bpc == 1 && !dn.stream.Dict.GetBool("ImageMask") && IsGrayOrCcitt(dn.stream, dn.reader))
         {
             const int BilevelLegibilityFloorDpi = 60;
-            if (maxDpi < BilevelLegibilityFloorDpi) return;
-            TryDownsampleBilevel(stream, reader, width, height, newWidth, newHeight);
+            if (dn.maxDpi < BilevelLegibilityFloorDpi) return;
+            TryDownsampleBilevel(dn.stream, dn.reader, dn.width, dn.height, dn.newWidth, dn.newHeight);
             return;
         }
 
@@ -294,72 +296,38 @@ internal static partial class ImageCompressor
         // one byte per pixel, box-filter down, and re-store as 8-bit gray Flate. Fewer,
         // wider samples more than offset the 2→8 bit growth, and the generic 8-bit path
         // below cannot read the packed rows.
-        if ((bpc == 2 || bpc == 4) && components == 1
-            && !stream.Dict.GetBool("ImageMask")
-            && stream.Dict.GetName("ColorSpace") == "DeviceGray")
+        if ((dn.bpc == 2 || dn.bpc == 4) && dn.components == 1
+            && !dn.stream.Dict.GetBool("ImageMask")
+            && dn.stream.Dict.GetName("ColorSpace") == "DeviceGray")
         {
-            byte[] packed;
-            try { packed = reader.DecodeStream(stream); }
-            catch { return; }
-
-            var rowBytes = (width * bpc + 7) / 8;
-            if (packed.Length < rowBytes * height) return;
-            var maxVal = (1 << bpc) - 1;
-            var gray = new byte[width * height];
-            for (var y = 0; y < height; y++)
-            {
-                var rowOff = y * rowBytes;
-                for (var x = 0; x < width; x++)
-                {
-                    var bitPos = x * bpc;
-                    var b = packed[rowOff + (bitPos >> 3)];
-                    var shift = 8 - bpc - (bitPos & 7);
-                    var sample = (b >> shift) & maxVal;
-                    gray[y * width + x] = (byte)(sample * 255 / maxVal);
-                }
-            }
-
-            var down = BoxFilterDownsample(gray, width, height, 1, newWidth, newHeight);
-            var comp = Compress(down);
-            stream.ReplaceData(comp);
-            stream.Dict.Set("Filter", new PdfName("FlateDecode"));
-            stream.Dict.Set("Length", new PdfInteger(comp.Length));
-            stream.Dict.Set("Width", new PdfInteger(newWidth));
-            stream.Dict.Set("Height", new PdfInteger(newHeight));
-            stream.Dict.Set("BitsPerComponent", new PdfInteger(8));
-            stream.Dict.Remove("DecodeParms");
-            return;
+            if (!ExpandPackedGrayImage(dn)) return;
         }
 
-        if (bpc != 8) return; // Only handle 8-bit images otherwise
+        if (dn.bpc != 8) return; // Only handle 8-bit images otherwise
 
-        // Decode the image data
-        byte[] decoded;
         try
         {
-            decoded = reader.DecodeStream(stream);
+            dn.decoded = dn.reader.DecodeStream(dn.stream);
         }
         catch
         {
             return;
         }
 
-        var expectedSize = width * height * components;
-        if (decoded.Length < expectedSize) return;
+        dn.expectedSize = dn.width * dn.height * dn.components;
+        if (dn.decoded.Length < dn.expectedSize) return;
 
-        // Downsample using box filter
-        var downsampled = BoxFilterDownsample(decoded, width, height, components, newWidth, newHeight);
+        dn.downsampled = BoxFilterDownsample(dn.decoded, dn.width, dn.height, dn.components, dn.newWidth, dn.newHeight);
 
-        // Compress
-        var compressed = Compress(downsampled);
+        dn.compressed = Compress(dn.downsampled);
 
         // Update stream
-        stream.ReplaceData(compressed);
-        stream.Dict.Set("Filter", new PdfName("FlateDecode"));
-        stream.Dict.Set("Length", new PdfInteger(compressed.Length));
-        stream.Dict.Set("Width", new PdfInteger(newWidth));
-        stream.Dict.Set("Height", new PdfInteger(newHeight));
-        stream.Dict.Remove("DecodeParms");
+        dn.stream.ReplaceData(dn.compressed);
+        dn.stream.Dict.Set("Filter", new PdfName("FlateDecode"));
+        dn.stream.Dict.Set("Length", new PdfInteger(dn.compressed.Length));
+        dn.stream.Dict.Set("Width", new PdfInteger(dn.newWidth));
+        dn.stream.Dict.Set("Height", new PdfInteger(dn.newHeight));
+        dn.stream.Dict.Remove("DecodeParms");
     }
 
     /// <summary>True for a single-component (grayscale) image, including CCITT fax streams
@@ -483,10 +451,10 @@ internal static partial class ImageCompressor
         byte[] jpeg;
         try
         {
-            jpeg = JpegEncoderImpl.Encode((int x, int y, out byte r, out byte g, out byte b) =>
+            jpeg = JpegEncoderImpl.Encode((int x, int y) =>
             {
                 var idx = (y * newWidth + x) * 3;
-                r = rgb[idx]; g = rgb[idx + 1]; b = rgb[idx + 2];
+                return (rgb[idx], rgb[idx + 1], rgb[idx + 2]);
             }, newWidth, newHeight, quality);
         }
         catch { return; }
@@ -621,13 +589,5 @@ internal static partial class ImageCompressor
         };
     }
 
-    private static byte[] Compress(byte[] data)
-    {
-        using var ms = new MemoryStream();
-        using (var zlib = new ZLibStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
-        {
-            zlib.Write(data);
-        }
-        return ms.ToArray();
-    }
+    private static byte[] Compress(byte[] data) => IO.Filters.ManagedDeflater.DeflateZlib(data, IO.Filters.DeflateLevel.Best);
 }

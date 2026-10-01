@@ -9,6 +9,17 @@ namespace Aspose.Pdf.Comparison.Diff
     /// <see cref="DiffOptimization"/> (<see cref="DiffOptimization.OperationsMerger"/> et al.).</summary>
     internal sealed class DiffSolver
     {
+        private readonly EditOperationsOrder _order;
+
+        /// <summary>Diff with the default edit order (delete before insert).</summary>
+        public DiffSolver() : this(null) { }
+
+        /// <summary>Diff under the given options. Only the edit order affects the text diff
+        /// itself - the extraction area and the exclusions apply when text is taken off a
+        /// page, before it reaches here.</summary>
+        public DiffSolver(ComparisonOptions? comparisonOptions)
+            => _order = comparisonOptions?.EditOperationsOrder ?? EditOperationsOrder.DeleteFirst;
+
         /// <summary>Diff <paramref name="oldText"/> against <paramref name="newText"/>.
         /// The returned edits rebuild the source via <see cref="DiffUtils.AssemblySourceText"/>
         /// and the destination via <see cref="DiffUtils.AssemblyDestinationText"/>.</summary>
@@ -18,8 +29,7 @@ namespace Aspose.Pdf.Comparison.Diff
             // The bisect emits edits in the order the middle snake exposes them, which leaves
             // adjacent runs of one kind and equalities that could be absorbed. Callers get the
             // canonical script, so it is merged and slid before it leaves.
-            new DiffOptimization.MergingOptimizer(EditOperationsOrder.DeleteFirst)
-                .Execute(diffs);
+            new DiffOptimization.MergingOptimizer(_order).Execute(diffs);
             return diffs;
         }
 

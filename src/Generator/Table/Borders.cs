@@ -185,6 +185,11 @@ public partial class Table
                 if (t > mixTop) mixTop = t;
                 if (bo < mixBottom) mixBottom = bo;
             }
+            foreach (var (boxBottom, boxTop) in builder.InlineBoxes)
+            {
+                if (boxTop > mixTop) mixTop = boxTop;
+                if (boxBottom < mixBottom) mixBottom = boxBottom;
+            }
             if (mixTop > mixBottom)
             {
                 builder.InsertAt(mark,
@@ -236,6 +241,15 @@ public partial class Table
                          firstBase - lastBase + CellClipLineEm * fs)
             + (hasSup ? SuperscriptClipAboveEm * fs : 0)
             + (hasSub ? (SubscriptClipBelowEm(face) + SubscriptClipAboveEm(face, hasSup)) * fs : 0);
+        // A picture standing on a line raises that line above the text's box, or
+        // stands alone on a line under the last text; the bound reaches it too.
+        var top = bottom + h;
+        foreach (var (boxBottom, boxTop) in builder.InlineBoxes)
+        {
+            if (boxTop > top) top = boxTop;
+            if (boxBottom < bottom) bottom = boxBottom;
+        }
+        h = top - bottom;
         builder.InsertAt(mark,
             $"q\nq\n{Fmt(x)} {Fmt(bottom)} {Fmt(w)} {Fmt(h)} re\nW\nn\n");
         builder.RestoreState().RestoreState();
@@ -314,8 +328,51 @@ public partial class Table
         return top + bot;
     }
 
+    /// <summary>Adjacent cells SHARE one stroke on the boundary between them,
+    /// the way a collapsed HTML table draws: the boundary carries a single rule
+    /// centred on it, half of it lying in each of the two cells.
+    ///
+    /// A declared column width is then the boundary-to-boundary PITCH — the
+    /// rules are inside it — where the default (separate) model reads the
+    /// declared width as the text box and grows the column by a whole stroke at
+    /// each end. A row likewise bills one stroke per boundary instead of its own
+    /// top and bottom pair, and the grid's last rule on each axis sits half a
+    /// stroke inside the table's box rather than a whole one outside it.
+    ///
+    /// When the two cells meeting on a boundary bring different rules, the WIDER
+    /// one is drawn (the earlier cell keeps a tie), and along the grid's outer
+    /// edge the table's own <see cref="Border"/> is the other party rather than a
+    /// frame of its own -- the conflict rule of CSS 2.1 §17.6.2.1. The lines stay
+    /// on the declared pitch; each cell's box stands half of its own rules inside
+    /// them, and a row is as tall as its tallest cell's box.
+    ///
+    /// ⚠ Not <see cref="IsBordersIncluded"/>: that asks for the rules to be
+    /// counted INSIDE each cell's own declared box, which still gives every cell
+    /// its own rule. Collapsing removes one of the two.</summary>
+    public bool IsBordersCollapsed { get; set; }
+
+    /// <summary>The height a COLLAPSED grid occupies beyond the sum of its rows.
+    /// Every row bills the single rule on the boundary it opens on, so the last
+    /// rule — the one under the final row — is still unpaid; and the grid as a
+    /// whole sits half a rule inside its own top edge and half a rule above its
+    /// bottom one. Both statements come to exactly one stroke. Zero for a
+    /// separate-bordered grid, whose rows each bill their own pair.</summary>
+    private double CollapsedGridEdgeHeight()
+    {
+        if (!IsBordersCollapsed) return 0;
+        // A resolved grid's top already stands where its own top rule puts it (see
+        // CollapsedTopShift); what is left is the half skeleton rule its rows do not
+        // bill and half the widest rule under its last row.
+        if (_collapsedRules is { } rules) return (CollapsedSkeleton() + rules.TopEdge(rules.Rows)) / 2;
+        var b = DefaultCellBorder ?? UniformAssignedCellBorder();
+        return b is null ? 0 : BorderTopBottom(b) / 2;
+    }
+
     private double OuterBorderWidth()
     {
+        // A resolved collapsed grid draws no frame of its own: the table's border
+        // is one of the parties to every outer boundary (see CollapsedRules).
+        if (IsBordersCollapsed && CollapsedSkeleton() > 0) return 0;
         if (Border is not { } b || !b.Side.HasFlag(BorderSide.Box)) return 0;
         var w = b.RawTop?.LineWidth > 0 ? b.RawTop.LineWidth : b.Width;
         return w > 0 ? w : 0;

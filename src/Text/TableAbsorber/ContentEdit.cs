@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
@@ -31,210 +31,89 @@ public sealed partial class TableAbsorber
     private static byte[] FilterContentStream(byte[] stream, Rectangle tableRect, Page page, bool wholeBlocksOnly, bool textOnly, bool decorationOnly)
     {
         var (rA, rB, rC, rD, rE, rF) = PageRotationCtm(page);
-        var lexer = new PdfLexer(stream);
+        var cf = new ContentFilterState();
+        cf.lexer = new PdfLexer(stream);
         var result = new MemoryStream();
-        var removals = new List<(int start, int end)>();
-        var operands = new List<PdfObject>();
-
-        // CTM state — initialized to the page rotation matrix
-        var ctmStack = new Stack<(double a, double b, double c, double d, double e, double f)>();
-        double ctmA = rA, ctmB = rB, ctmC = rC, ctmD = rD, ctmE = rE, ctmF = rF;
-
-        // Path construction state — track byte offset of first path operator and all points
-        var pathStart = -1;
-        var pathPoints = new List<(double x, double y)>();
-
-        // Text block state — track BT offset, text positions, and text matrix components
-        var btStart = -1;
-        var textPoints = new List<(double x, double y)>();
-        double tx = 0, ty = 0, txLine = 0, tyLine = 0;
-        double tmA = 1, tmB = 0, tmC = 0, tmD = 1, leading = 0;
+        cf.removals = new List<(int start, int end)>();
+        cf.operands = new List<PdfObject>();
+        cf.ctmStack = new Stack<(double a, double b, double c, double d, double e, double f)>();
+        cf.ctmA = rA; cf.ctmB = rB; cf.ctmC = rC; cf.ctmD = rD; cf.ctmE = rE; cf.ctmF = rF;
+        cf.pathStart = -1;
+        cf.pathPoints = new List<(double x, double y)>();
+        cf.btStart = -1;
+        cf.textPoints = new List<(double x, double y)>();
+        cf.tx = 0; cf.ty = 0; cf.txLine = 0; cf.tyLine = 0;
+        cf.tmA = 1; cf.tmB = 0; cf.tmC = 0; cf.tmD = 1; cf.leading = 0;
+        cf.tableRect = tableRect;
+        cf.wholeBlocksOnly = wholeBlocksOnly;
+        cf.textOnly = textOnly;
+        cf.decorationOnly = decorationOnly;
 
         while (true)
         {
-            var tokenStart = (int)lexer.Position;
-            var token = lexer.NextToken();
+            var tokenStart = (int)cf.lexer.Position;
+            var token = cf.lexer.NextToken();
             if (token.Kind == TokenKind.Eof) break;
 
             switch (token.Kind)
             {
                 case TokenKind.Integer:
-                    operands.Add(new PdfInteger(token.IntValue));
+                    cf.operands.Add(new PdfInteger(token.IntValue));
                     break;
                 case TokenKind.Real:
-                    operands.Add(new PdfReal(token.RealValue));
+                    cf.operands.Add(new PdfReal(token.RealValue));
                     break;
                 case TokenKind.LiteralString:
-                    operands.Add(new PdfString(token.BytesValue!));
+                    cf.operands.Add(new PdfString(token.BytesValue!));
                     break;
                 case TokenKind.HexString:
-                    operands.Add(new PdfString(token.BytesValue!, isHex: true));
+                    cf.operands.Add(new PdfString(token.BytesValue!, isHex: true));
                     break;
                 case TokenKind.Name:
-                    operands.Add(new PdfName(token.StringValue!));
+                    cf.operands.Add(new PdfName(token.StringValue!));
                     break;
                 case TokenKind.ArrayStart:
-                    operands.Add(ParseArray(lexer));
+                    cf.operands.Add(ParseArray(cf.lexer));
                     break;
                 case TokenKind.Keyword:
-                    HandleFilterOperator(token.StringValue!, operands, tokenStart, (int)lexer.Position,
-                        ref ctmA, ref ctmB, ref ctmC, ref ctmD, ref ctmE, ref ctmF, ctmStack,
-                        ref pathStart, pathPoints, ref btStart, textPoints,
-                        ref tx, ref ty, ref txLine, ref tyLine,
-                        ref tmA, ref tmB, ref tmC, ref tmD, ref leading,
-                        tableRect, removals, lexer, wholeBlocksOnly, textOnly, decorationOnly);
-                    operands.Clear();
+                    HandleFilterOperator(cf, token.StringValue!, tokenStart, (int)cf.lexer.Position);
+                    cf.operands.Clear();
                     break;
                 default:
-                    operands.Clear();
+                    cf.operands.Clear();
                     break;
             }
         }
 
-        if (removals.Count == 0) return stream;
-        return ApplyRemovals(stream, removals, result);
+        if (cf.removals.Count == 0) return stream;
+        return ApplyRemovals(stream, cf.removals, result);
     }
 
     /// <summary>
     /// Dispatches a single PDF operator during content stream filtering.
     /// Updates CTM/text matrix state and records byte ranges to remove.
     /// </summary>
-    private static void HandleFilterOperator(
-        string op, List<PdfObject> operands, int tokenStart, int tokenEnd,
-        ref double ctmA, ref double ctmB, ref double ctmC, ref double ctmD, ref double ctmE, ref double ctmF,
-        Stack<(double a, double b, double c, double d, double e, double f)> ctmStack,
-        ref int pathStart, List<(double x, double y)> pathPoints,
-        ref int btStart, List<(double x, double y)> textPoints,
-        ref double tx, ref double ty, ref double txLine, ref double tyLine,
-        ref double tmA, ref double tmB, ref double tmC, ref double tmD, ref double leading,
-        Rectangle tableRect, List<(int start, int end)> removals, PdfLexer lexer,
-        bool wholeBlocksOnly, bool textOnly, bool decorationOnly)
+    private static void HandleFilterOperator(ContentFilterState cf, string op, int tokenStart, int tokenEnd)
     {
         switch (op)
         {
-            // ── Graphics state ──
-            case "q":
-                ctmStack.Push((ctmA, ctmB, ctmC, ctmD, ctmE, ctmF));
+            case "q": case "Q": case "cm":
+                FilterStateOperator(cf, op);
                 break;
-            case "Q":
-                if (ctmStack.Count > 0)
-                    (ctmA, ctmB, ctmC, ctmD, ctmE, ctmF) = ctmStack.Pop();
+            case "m": case "l": case "re": case "c": case "v": case "y": case "h": case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n": case "W": case "W*":
+                FilterPathOperator(cf, tokenStart, tokenEnd, op);
                 break;
-            case "cm":
-                // Concatenate matrix: CTM' = operand × CTM (PDF 32000 §8.3.4)
-                if (operands.Count >= 6)
-                    ConcatenateCtm(operands, ref ctmA, ref ctmB, ref ctmC, ref ctmD, ref ctmE, ref ctmF);
+            case "BT": case "ET": case "TL": case "Td": case "TD": case "T*": case "Tm":
+                FilterTextOperator(cf, tokenStart, tokenEnd, op);
                 break;
-
-            // ── Path construction (PDF 32000 §8.5.2) ──
-            case "m" or "l":
-                if (pathStart < 0) pathStart = tokenStart;
-                if (operands.Count >= 2)
-                    pathPoints.Add(TransformPoint(operands[0], operands[1], ctmA, ctmB, ctmC, ctmD, ctmE, ctmF));
-                break;
-            case "re":
-                // Rectangle: add opposite corners to capture the full extent
-                if (pathStart < 0) pathStart = tokenStart;
-                if (operands.Count >= 4)
-                {
-                    var rx = Num(operands[0]); var ry = Num(operands[1]);
-                    var rw = Num(operands[2]); var rh = Num(operands[3]);
-                    pathPoints.Add(ApplyMatrix(rx, ry, ctmA, ctmB, ctmC, ctmD, ctmE, ctmF));
-                    pathPoints.Add(ApplyMatrix(rx + rw, ry + rh, ctmA, ctmB, ctmC, ctmD, ctmE, ctmF));
-                }
-                break;
-            case "c" or "v" or "y":
-                // Curve operators — only the endpoint matters for hit testing
-                if (pathStart < 0) pathStart = tokenStart;
-                if (operands.Count >= 2)
-                    pathPoints.Add(TransformPoint(operands[^2], operands[^1], ctmA, ctmB, ctmC, ctmD, ctmE, ctmF));
-                break;
-            case "h":
-                if (pathStart < 0) pathStart = tokenStart;
-                break;
-
-            // ── Path painting — finalize and check if path falls inside table ──
-            case "S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*" or "n":
-                // textOnly: the caller is sweeping up TEXT a delete could not match, so
-                // the drawing around it stays. A path is dropped for merely GRAZING the
-                // rectangle (any one point inside), which makes a rule running under a
-                // line of text — its top edge a fraction of a point inside the band —
-                // collateral damage of replacing that line.
-                // decorationOnly: the caller is removing a rule that BELONGS to the text
-                // it just replaced, so the path must lie WHOLLY inside that text's band.
-                // A rule belonging to a line cannot be wider than the line; a page rule
-                // running under it overruns the band and stays.
-                if (!textOnly && pathStart >= 0 && pathPoints.Count > 0
-                    && (decorationOnly
-                        ? AllPointsInRect(pathPoints, tableRect)
-                        : AnyPointInRect(pathPoints, tableRect)))
-                    removals.Add((pathStart, tokenEnd));
-                pathStart = -1;
-                pathPoints.Clear();
-                break;
-
-            case "W" or "W*":
-                // Clipping — preserve as-is
-                break;
-
-            // ── Text block (PDF 32000 §9.4) ──
-            case "BT":
-                btStart = tokenStart;
-                textPoints.Clear();
-                tx = txLine = ty = tyLine = 0;
-                tmA = 1; tmB = 0; tmC = 0; tmD = 1;
-                leading = 0;
-                break;
-            case "ET":
-                if (!decorationOnly && btStart >= 0 && textPoints.Count > 0
-                    && (wholeBlocksOnly
-                        ? AllPointsInRect(textPoints, tableRect)
-                        : AnyPointInRect(textPoints, tableRect)))
-                    removals.Add((btStart, tokenEnd));
-                btStart = -1;
-                textPoints.Clear();
-                break;
-
-            // ── Text positioning operators ──
-            case "TL":
-                if (operands.Count >= 1) leading = Num(operands[0]);
-                break;
-            case "Td":
-                if (operands.Count >= 2)
-                    UpdateTextPosition(operands, ref tx, ref ty, ref txLine, ref tyLine, tmA, tmB, tmC, tmD);
-                break;
-            case "TD":
-                // TD sets leading and moves — equivalent to: -ty2 TL tx ty Td
-                if (operands.Count >= 2)
-                {
-                    leading = -Num(operands[1]);
-                    UpdateTextPosition(operands, ref tx, ref ty, ref txLine, ref tyLine, tmA, tmB, tmC, tmD);
-                }
-                break;
-            case "T*":
-                // Move to start of next line using current leading
-                txLine = tmC * (-leading) + txLine;
-                tyLine = tmD * (-leading) + tyLine;
-                tx = txLine; ty = tyLine;
-                break;
-            case "Tm":
-                if (operands.Count >= 6)
-                {
-                    tmA = Num(operands[0]); tmB = Num(operands[1]);
-                    tmC = Num(operands[2]); tmD = Num(operands[3]);
-                    tx = txLine = Num(operands[4]);
-                    ty = tyLine = Num(operands[5]);
-                }
-                break;
-
             // ── Text showing — record the current text position ──
             case "Tj" or "TJ" or "'" or "\"":
-                if (btStart >= 0)
-                    textPoints.Add(ApplyMatrix(tx, ty, ctmA, ctmB, ctmC, ctmD, ctmE, ctmF));
+                if (cf.btStart >= 0)
+                    cf.textPoints.Add(ApplyMatrix(cf.tx, cf.ty, cf.ctmA, cf.ctmB, cf.ctmC, cf.ctmD, cf.ctmE, cf.ctmF));
                 break;
 
             case "BI":
-                SkipInlineImage(lexer);
+                SkipInlineImage(cf.lexer);
                 break;
         }
     }
@@ -243,30 +122,27 @@ public sealed partial class TableAbsorber
     /// Concatenates a 6-element matrix from operands into the current CTM.
     /// Formula: CTM' = M × CTM (PDF 32000 §8.3.4).
     /// </summary>
-    private static void ConcatenateCtm(List<PdfObject> operands,
-        ref double ctmA, ref double ctmB, ref double ctmC, ref double ctmD, ref double ctmE, ref double ctmF)
+    private static void ConcatenateCtm(ContentFilterState cf)
     {
-        var a = Num(operands[0]); var b = Num(operands[1]);
-        var c = Num(operands[2]); var d = Num(operands[3]);
-        var e = Num(operands[4]); var f = Num(operands[5]);
-        var nA = a * ctmA + b * ctmC;
-        var nB = a * ctmB + b * ctmD;
-        var nC = c * ctmA + d * ctmC;
-        var nD = c * ctmB + d * ctmD;
-        var nE = e * ctmA + f * ctmC + ctmE;
-        var nF = e * ctmB + f * ctmD + ctmF;
-        ctmA = nA; ctmB = nB; ctmC = nC; ctmD = nD; ctmE = nE; ctmF = nF;
+        var a = Num(cf.operands[0]); var b = Num(cf.operands[1]);
+        var c = Num(cf.operands[2]); var d = Num(cf.operands[3]);
+        var e = Num(cf.operands[4]); var f = Num(cf.operands[5]);
+        var nA = a * cf.ctmA + b * cf.ctmC;
+        var nB = a * cf.ctmB + b * cf.ctmD;
+        var nC = c * cf.ctmA + d * cf.ctmC;
+        var nD = c * cf.ctmB + d * cf.ctmD;
+        var nE = e * cf.ctmA + f * cf.ctmC + cf.ctmE;
+        var nF = e * cf.ctmB + f * cf.ctmD + cf.ctmF;
+        cf.ctmA = nA; cf.ctmB = nB; cf.ctmC = nC; cf.ctmD = nD; cf.ctmE = nE; cf.ctmF = nF;
     }
 
     /// <summary>Applies Td/TD text position update using the text matrix.</summary>
-    private static void UpdateTextPosition(List<PdfObject> operands,
-        ref double tx, ref double ty, ref double txLine, ref double tyLine,
-        double tmA, double tmB, double tmC, double tmD)
+    private static void UpdateTextPosition(ContentFilterState cf)
     {
-        var dx = Num(operands[0]); var dy = Num(operands[1]);
-        txLine = tmA * dx + tmC * dy + txLine;
-        tyLine = tmB * dx + tmD * dy + tyLine;
-        tx = txLine; ty = tyLine;
+        var dx = Num(cf.operands[0]); var dy = Num(cf.operands[1]);
+        cf.txLine = cf.tmA * dx + cf.tmC * dy + cf.txLine;
+        cf.tyLine = cf.tmB * dx + cf.tmD * dy + cf.tyLine;
+        cf.tx = cf.txLine; cf.ty = cf.tyLine;
     }
 
     /// <summary>

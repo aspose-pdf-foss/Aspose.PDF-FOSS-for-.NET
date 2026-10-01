@@ -107,12 +107,34 @@ public partial class Table
         public string Text = "";
         public double FontSize;
 
+        /// <summary>The line's own advance when it is a box of a known height -- a
+        /// picture's box under <see cref="CellPictureBoxesAreExact"/>. Zero means
+        /// the line pitches by its font and leading, or the row's uniform pitch.</summary>
+        public double OwnPitch;
+
+        /// <summary>Where the line seats its baseline below its top when it worked
+        /// that out itself -- a line of runs a picture raised (see
+        /// <see cref="PlanSegmentRunsText"/>). Zero means the line box or the
+        /// face decides.</summary>
+        public double OwnBaseline;
+
         /// <summary>Caller-declared leading (points) for this line: its pitch is
         /// <c>FontSize + Leading</c> and its baseline sits that much deeper, because
         /// the leading lies ABOVE the glyphs. Sourced from the paragraph's
         /// <c>TextState.LineSpacing</c> (or the document's under the XML dialect);
         /// zero when nothing declared one.</summary>
         public double Leading;
+
+        /// <summary>The line box the CALLER declared for this line, in em: its
+        /// extents above and below the baseline. When both are present the line's
+        /// surplus leading splits evenly above and below that box instead of lying
+        /// entirely above the glyphs — the ordinary half-leading seat, the same one
+        /// the page flow gives a declared line box
+        /// (see <c>FlowLayoutTextFragment.FirstBaselineSeat</c>). Zero when the
+        /// paragraph declared none, which leaves the cell on the generator's own
+        /// seat (a whole line above the glyphs, the face's descent below them).</summary>
+        public double LineBoxAscentEm;
+        public double LineBoxDescentEm;
         /// <summary>The line came from the HTML engine's own parse, so a blank one is a
         /// real line box the markup asked for (a leading <c>&lt;br&gt;</c>) rather than a
         /// spacer the cell may collapse.</summary>
@@ -144,6 +166,8 @@ public partial class Table
         /// <summary>The line's OWN css box (DataWorks control cells advance
         /// per-line instead of at the row's uniform pitch).</summary>
         public double OwnLinePt;
+        /// <summary>OwnLinePt is a DECLARED line-height: a UA-boxed line stands on it, not on its face box.</summary>
+        public bool OwnDeclared;
 
         /// <summary>Extra space above this line from the source fragment's
         /// Margin.Top (applied to the fragment's first wrapped line) — label
@@ -195,6 +219,9 @@ public partial class Table
         /// and emits the line as hex glyph IDs.</summary>
         public byte[]? Type0Ttf;
         public string? Type0FontName;
+        /// <summary>The Standard-14 face this line draws in when its fragment named one by name
+        /// (Times-Roman, Courier-Bold, ...); null draws the table's face, bold or not.</summary>
+        public string? BaseFont;
         // When set, the Type0 render emits each space-separated token as its own positioned
         // run (space-separated CJK), so the absorber surfaces per-token fragments. Not set for
         // shaped Arabic (which is one visual-order run and must not be re-split).
@@ -221,9 +248,15 @@ public partial class Table
         // and the baseline offset from the box top. Zero = legacy uniform stepping.
         public double BoxH;
         public double BaseOff;
+        /// <summary>The line belongs to a list item (an HTML-engine cell line inside ul/ol).</summary>
+        public bool InListItem;
+        /// <summary>The line belongs to a block element (p / div / heading), whose box closes in full.</summary>
+        public bool InBlock;
         // A paragraph-margin spacer (generator dialect): an empty line whose BoxH is
         // the gap it reserves — never dropped as a "leading blank".
         public bool MarginSpacer;
+        /// <summary>A list marker drawn hanging before this line, in its own size and face.</summary>
+        public (string Text, double Size, string? Family, double BoxPt)? Marker;
         // An HTML-engine line born from a PLAIN-TEXT HtmlFragment in a generator
         // cell (the probed exact-stack dialect) — cells holding one price as
         // exact stacks; markup-family HTML cells keep the calibrated css boxes.
@@ -271,12 +304,27 @@ public partial class Table
         public double X;
         public double Width;
         public double Size;
+
+        /// <summary>The picture this run is, when it is one: its bytes and its
+        /// height above the baseline it stands on (its width is <see cref="Width"/>).</summary>
+        public byte[]? Picture;
+        public double PictureHeight;
         public bool Bold;
         public bool Italic;
         public bool Underline;
         public Color? Color;
         public byte[]? Ttf;
         public string? FontName;
+        /// <summary>The Standard-14 face this run draws in when it names one (a run
+        /// of a paragraph flowing as runs); null draws the line's face, bold or
+        /// slanted by the flags above.</summary>
+        public string? BaseFont;
+        /// <summary>The run's own character and word spacing, when it declares any.</summary>
+        public double CharSpacing;
+        public double WordSpacing;
+        /// <summary>A tab's leader: stroked across the run's width along the baseline. A tab
+        /// run shows no text.</summary>
+        public GraphInfo? Leader;
     }
 
     /// <summary>Segments of <paramref name="tf"/> that actually carry ink.</summary>
@@ -372,6 +420,13 @@ public partial class Table
         public List<CellLine> Lines = new();
         public double LineHeight;
         public double TightLine;
+        // A block CUT by a page break: how many of its lines each page before
+        // the last one took, in page order. Null while the block is never cut.
+        public List<int>? Portions;
+        // The draw pass's own cursor over those portions -- one page consumes
+        // one portion, in the order the layout cut them.
+        public int LinesDrawn;
+        public int PortionsDrawn;
     }
 
     /// <summary>Wrapped content lines for a row-spanning cell (text-only: TextFragment /
@@ -387,157 +442,36 @@ public partial class Table
 
     private void BuildSpanBlockLines(SpanBlock block, double[] colWidths)
     {
-        var cell = block.Cell;
-        var row = block.Row;
-        var padding = EffectivePad(cell, row);
-        var dp = DefaultPad(cell, row);
+        var sk = new SpanBlockLinesState();
+        sk.block = block;
+        sk.colWidths = colWidths;
+        sk.cell = sk.block.Cell;
+        sk.row = sk.block.Row;
+        sk.padding = EffectivePad(sk.cell, sk.row);
+        sk.dp = DefaultPad(sk.cell, sk.row);
         // Same box the GRID cells wrap in: where the cell border joins the column pitch
         // the text starts at the border's inner edge and takes no implicit padding on
         // top of it, and the pitch itself is not text space. Measuring the span cell
         // with the border counted twice wrapped its heading a line early.
         var (spanPitchL, spanPitchR) = CellBorderPitch();
-        var padLeft = padding?.Left ?? (spanPitchL > 0 ? 0 : dp);
-        var padRight = padding?.Right ?? (spanPitchR > 0 ? 0 : dp);
-        var width = GetCellWidth(colWidths, block.GridCol, block.ColSpan);
-        var availWidth = width - padLeft - padRight - _columnPitch;
+        sk.padLeft = sk.padding?.Left ?? (spanPitchL > 0 ? 0 : sk.dp);
+        sk.padRight = sk.padding?.Right ?? (spanPitchR > 0 ? 0 : sk.dp);
+        sk.width = GetCellWidth(sk.colWidths, sk.block.GridCol, sk.block.ColSpan);
+        sk.availWidth = sk.width - sk.padLeft - sk.padRight
+            - (CollapsedCellSides(sk.cell, colWidths.Length) is { } sides ? (sides.Left + sides.Right) / 2 : CellRuleInsetAcross(sk.cell, sk.row));
 
-        var textState = cell.DefaultCellTextState ?? row.DefaultCellTextState ?? DefaultCellTextState;
-        var defaultFontSize = ResolveCellFontSize(cell, row);
-        var cellAlign = ResolveCellAlignment(cell, row);
-        double maxLine = 0, tight = 0;
+        sk.textState = sk.cell.DefaultCellTextState ?? sk.row.DefaultCellTextState ?? DefaultCellTextState;
+        sk.defaultFontSize = ResolveCellFontSize(sk.cell, sk.row);
+        sk.cellAlign = ResolveCellAlignment(sk.cell, sk.row);
+        sk.maxLine = 0;
+        sk.tight = 0;
 
-        foreach (var paragraph in cell.Paragraphs)
+        foreach (var paragraph in sk.cell.Paragraphs)
         {
-            string? text = null;
-            double fragFontSize = defaultFontSize;
-            Color? color = null;
-            var fragBold = false;
-            var fragAlign = cellAlign;
-            // A fragment turned a quarter turn advances along the cell's HEIGHT, so the
-            // width-derived extent above describes the wrong axis for it: a tall narrow
-            // column would break such a run after every character and report each one as
-            // its own fragment. The run stays whole; its own axis is what bounds it.
-            var quarterTurned = paragraph is TextFragment qt && IsQuarterTurn(qt.TextState.Rotation);
-            if (paragraph is TextFragment tf)
-            {
-                text = tf.Text;
-                fragFontSize = ResolveCellParagraphFontSize(tf, defaultFontSize, cell, row);
-                color = tf.TextState.ForegroundColor ?? textState?.ForegroundColor;
-                fragBold = tf.TextState.IsBold || DeclaredCellBold(cell, row);
-                if (!fragBold)
-                    foreach (var fseg in tf.Segments)
-                        if (fseg.TextState.IsBold && !string.IsNullOrEmpty(fseg.Text))
-                        { fragBold = true; break; }
-            }
-            else if (paragraph is HtmlFragment html)
-            {
-                text = HtmlFragment.StripHtmlTags(html.HtmlContent ?? "");
-                color = textState?.ForegroundColor;
-                // The fragment's own stylesheet text-align overrides the
-                // spanning-cell default (a block declared left stays left in a
-                // centred span cell). Its stylesheet font-size (px) sizes the
-                // lines the same way it does in a grid cell.
-                var hAligned = (html.HtmlContent ?? "").Replace(" ", string.Empty);
-                if (hAligned.IndexOf("text-align:left", StringComparison.OrdinalIgnoreCase) >= 0)
-                    fragAlign = HorizontalAlignment.Left;
-                else if (hAligned.IndexOf("text-align:right", StringComparison.OrdinalIgnoreCase) >= 0)
-                    fragAlign = HorizontalAlignment.Right;
-                else if (hAligned.IndexOf("text-align:center", StringComparison.OrdinalIgnoreCase) >= 0)
-                    fragAlign = HorizontalAlignment.Center;
-                var hfs = Regex.Match(html.HtmlContent ?? "", @"font-size\s*:\s*([\d.]+)\s*px",
-                    RegexOptions.IgnoreCase);
-                if (hfs.Success && double.TryParse(hfs.Groups[1].Value, NumberStyles.Float,
-                        CultureInfo.InvariantCulture, out var hpx) && hpx > 0)
-                    fragFontSize = hpx * 0.75;
-            }
-            // A deliberately-kept blank paragraph (a styled &nbsp; spacer <p>) reserves
-            // its line box in the spanning cell as vertical space.
-            if (string.IsNullOrEmpty(text) && paragraph is TextFragment kb && kb.CssKeepBlank)
-            {
-                var kfs = ResolveFragmentFontSize(kb, defaultFontSize);
-                block.Lines.Add(new CellLine { Text = " ", FontSize = kfs, Align = fragAlign });
-                if (kfs > maxLine) { maxLine = kfs; tight = kfs; }
-                continue;
-            }
-            if (string.IsNullOrEmpty(text)) continue;
-            if (fragFontSize > maxLine) { maxLine = fragFontSize; tight = fragFontSize; }
-            var fragFirstLine = block.Lines.Count;
-            // A MULTI-SEGMENT fragment is how a caller mixes weight, slant, colour and
-            // underline inside one line. A spanning cell draws from these lines rather
-            // than from the inline layout, so laying the segments out as styled runs
-            // here is what keeps the emphasis a ColSpan cell already gets.
-            if (paragraph is TextFragment segTf && CountInkSegments(segTf) > 1
-                && BuildSpanSegLines(segTf, availWidth, defaultFontSize, textState,
-                       fragAlign, fragFontSize) is { Count: > 0 } segLines)
-            {
-                foreach (var sl in segLines) block.Lines.Add(sl);
-                if (ParagraphMargin(paragraph) is { Top: > 0 } segM && block.Lines.Count > fragFirstLine)
-                    block.Lines[fragFirstLine].TopGap = segM.Top;
-                continue;
-            }
-            // Opted-in band tables (HonorCellFontFaces): a spanning cell's serif
-            // fragment draws in the embedded serif face with its real kerned
-            // metrics, exactly like the grid-cell path — the Standard-14 Helvetica
-            // fallback wraps wider than the serif-measured span width.
-            if (HonorCellFontFaces && paragraph is TextFragment sbtf
-                && IsSerifCssFamily(sbtf.TextState.Font?.FontName)
-                && (fragBold ? BoldSerifTtf() : SerifTtf()) is { } spanSerifTtf)
-            {
-                if (text.IndexOf('☐') >= 0 || text.IndexOf('☒') >= 0)
-                    text = text.Replace('☐', '□').Replace('☒', '□');
-                foreach (var segment in text.Split('\n'))
-                {
-                    if (segment.Length == 0) continue;
-                    // A whitespace-only paragraph (an &nbsp; spacer <p>) keeps its
-                    // line box — the kerned wrap would swallow it entirely.
-                    if (string.IsNullOrWhiteSpace(segment.Replace(' ', ' ')))
-                    {
-                        block.Lines.Add(new CellLine
-                            { Text = segment, FontSize = fragFontSize, ForegroundColor = color, Align = fragAlign });
-                        continue;
-                    }
-                    foreach (var l in WrapKernedLines(segment, fragFontSize, spanSerifTtf, availWidth))
-                        block.Lines.Add(new CellLine
-                        {
-                            Text = l,
-                            FontSize = fragFontSize,
-                            ForegroundColor = color,
-                            Align = fragAlign,
-                            Type0Ttf = spanSerifTtf,
-                            Type0FontName = fragBold ? "Times New Roman Bold" : "Times New Roman",
-                            KernTj = true,
-                            KernedWidth = MeasureWidthKerned(l, fragFontSize, spanSerifTtf),
-                        });
-                }
-                if (ParagraphMargin(paragraph) is { Top: > 0 } sbm && block.Lines.Count > fragFirstLine)
-                    block.Lines[fragFirstLine].TopGap = sbm.Top;
-                continue;
-            }
-            foreach (var segment in text.Split('\n'))
-            {
-                if (segment.Length == 0) continue;
-                // The generator measures on the bare AFM advance; the HTML dialects keep
-                // the calibrated estimate (see the cell wrap in BuildRowPlan).
-                var spanMeas = GeneratorDialect && !XmlGeneratorModel
-                    ? new Func<string, double>(s => MeasureWidthExactAfm(s, fragFontSize))
-                    : null;
-                if (!quarterTurned
-                    && cell.IsWordWrapped
-                    && (spanMeas is null ? MeasureWidth(segment, fragFontSize) : spanMeas(segment)) > availWidth)
-                {
-                    foreach (var l in WrapText(segment, fragFontSize, availWidth, spanMeas))
-                        block.Lines.Add(new CellLine { Text = l, FontSize = fragFontSize, ForegroundColor = color, Bold = fragBold, Align = fragAlign });
-                }
-                else
-                    block.Lines.Add(new CellLine { Text = segment, FontSize = fragFontSize, ForegroundColor = color, Bold = fragBold, Align = fragAlign });
-            }
-            // The fragment's own top margin separates it from the previous
-            // fragment in the spanning cell (applied above its first line).
-            if (paragraph.Margin is { Top: > 0 } fm && block.Lines.Count > fragFirstLine)
-                block.Lines[fragFirstLine].TopGap = fm.Top;
+            if (!BuildSpanBlockParagraph(sk, paragraph)) break;
         }
-        block.LineHeight = maxLine > 0 ? maxLine : defaultFontSize;
-        block.TightLine = tight > 0 ? tight : block.LineHeight;
+        sk.block.LineHeight = sk.maxLine > 0 ? sk.maxLine : sk.defaultFontSize;
+        sk.block.TightLine = sk.tight > 0 ? sk.tight : sk.block.LineHeight;
     }
 
     /// <summary>Resolve a cell's effective horizontal text alignment by walking
@@ -550,8 +484,19 @@ public partial class Table
         static bool Set(HorizontalAlignment a) =>
             a != HorizontalAlignment.Left && a != HorizontalAlignment.None;
 
+        // An alignment the caller wrote wins at the level that wrote it, Left included:
+        // a cell handed a text state aligned Left must not fall through to a row-wide
+        // Center. States nobody touched keep the old walk, so an auto-created state's
+        // default Left still reads as "inherit" rather than as a request.
+        static HorizontalAlignment? Explicit(Aspose.Pdf.Text.TextState? s) =>
+            s is { HorizontalAlignmentTouched: true } && s.HorizontalAlignment != HorizontalAlignment.None
+                ? s.HorizontalAlignment
+                : null;
+
         if (Set(cell.Alignment)) return cell.Alignment;
+        if (Explicit(cell.DefaultCellTextState) is { } cellSet) return cellSet;
         if (cell.DefaultCellTextState is { } cts && Set(cts.HorizontalAlignment)) return cts.HorizontalAlignment;
+        if (Explicit(row.DefaultCellTextState) is { } rowSet) return rowSet;
         if (row.DefaultCellTextState is { } rts && Set(rts.HorizontalAlignment)) return rts.HorizontalAlignment;
         if (DefaultCellTextState is { } tts && tts.HorizontalAlignment != HorizontalAlignment.None)
             return tts.HorizontalAlignment;
@@ -582,6 +527,18 @@ public partial class Table
     private static HorizontalAlignment ParseHtmlAlignment(string? html)
     {
         if (string.IsNullOrEmpty(html)) return HorizontalAlignment.Left;
+        // A backslash-escaped fixture: only a style value the escaped-attribute rule keeps can
+        // align the cell (a "text-align:center" after the space that ended the value is dead).
+        if (html.Contains("\\\""))
+        {
+            foreach (Match tag in AnyTagRegex.Matches(html))
+            {
+                var css = EngineStyleValue(tag.Value)?.Replace(" ", string.Empty) ?? "";
+                if (css.IndexOf("text-align:center", StringComparison.OrdinalIgnoreCase) >= 0) return HorizontalAlignment.Center;
+                if (css.IndexOf("text-align:right", StringComparison.OrdinalIgnoreCase) >= 0) return HorizontalAlignment.Right;
+            }
+            return HorizontalAlignment.Left;
+        }
         var h = html.Replace(" ", string.Empty);
         if (h.IndexOf("text-align:center", StringComparison.OrdinalIgnoreCase) >= 0 ||
             h.IndexOf("justify-content:center", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -667,10 +624,11 @@ public partial class Table
         // exactly like borderless ones (text at the content edge,
         // row pitch = font size), so only a border that actually DRAWS keeps
         // the historical 2 pt padding.
-        static bool Draws(BorderInfo? b) => b is not null && b.Side != BorderSide.None;
-        var hasBorder = Draws(cell.Border) || Draws(row.DefaultCellBorder) || Draws(row.Border)
-            || Draws(DefaultCellBorder) || Draws(Border);
-        var hasPad = cell.Margin is not null || row.DefaultCellPadding is not null || DefaultCellPadding is not null;
-        return (!hasBorder && !hasPad) ? 0.0 : 2.0;
+        // Probed on the reference (Arial 11 cells, 0.1 pt rules): a drawn side adds only its
+        // own stroke width on that side - a Top-only or Bottom-only rule leaves the text at
+        // the column edge, an All / Box rule offsets it by the rule's width - so no side
+        // carries a default 2 pt padding; an explicit padding is read from the cell, row
+        // or table directly by the caller.
+        return 0.0;
     }
 }

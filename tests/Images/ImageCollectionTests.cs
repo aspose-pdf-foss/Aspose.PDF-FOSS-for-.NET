@@ -226,6 +226,43 @@ public class ImageCollectionTests
     }
 
     [Fact]
+    public void ImageXObject_ToPng_AnIndexedImagesSoftMaskIsItsAlpha()
+    {
+        // Two pixels of an indexed image (palette: black, red), a soft mask hiding the first: what it hides shows the page.
+        var objects = new List<string>
+        {
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>",
+            "<< /Length 32 >>\nstream\nq 100 0 0 50 50 50 cm /Im0 Do Q\n\nendstream",
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace [/Indexed /DeviceRGB 1 <000000FF0000>] "
+            + "/SMask 6 0 R /Filter /ASCIIHexDecode /Length 5 >>\nstream\n0001>\nendstream",
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length 5 >>\nstream\n00FF>\nendstream",
+        };
+        using var ms = new MemoryStream();
+        void Write(string s) => ms.Write(Compat.Latin1.GetBytes(s));
+        Write("%PDF-1.7\n");
+        var offsets = new long[objects.Count];
+        for (var i = 0; i < objects.Count; i++)
+        {
+            offsets[i] = ms.Position;
+            Write($"{i + 1} 0 obj\n{objects[i]}\nendobj\n");
+        }
+        var xref = ms.Position;
+        Write($"xref\n0 {objects.Count + 1}\n0000000000 65535 f \n");
+        foreach (var o in offsets) Write($"{o:D10} 00000 n \n");
+        Write($"trailer\n<< /Size {objects.Count + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+        using var doc = Document.Open(ms.ToArray());
+
+        var png = doc.Pages[1].Images[1].ToPng();
+        // The PNG's colour type (byte 25 of its header): 6, RGB with alpha.
+        Assert.Equal(6, png[25]);
+        var (pixels, _, _, hasAlpha) = Aspose.Pdf.Facades.PdfFileMend.DecodePng(png);
+        Assert.True(hasAlpha);
+        Assert.Equal(new byte[] { 0, 0, 0, 0, 255, 0, 0, 255 }, pixels);
+    }
+
+    [Fact]
     public void ImageXObject_GetRawData_ReturnsBytes()
     {
         var data = PdfBuilder.BuildWithUncompressedImage(2, 2);

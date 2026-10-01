@@ -32,16 +32,16 @@ public sealed class FormFieldBuilder
         fieldDict.Set("Type", new PdfName("Annot"));
         fieldDict.Set("Subtype", new PdfName("Widget"));
         fieldDict.Set("FT", new PdfName("Tx"));
-        fieldDict.Set("T", new PdfString(Encoding.Latin1.GetBytes(name)));
+        fieldDict.Set("T", new PdfString(Compat.Latin1.GetBytes(name)));
         fieldDict.Set("Rect", MakeRectArray(rect));
 
         // Default appearance: Helvetica, given font size, black
-        fieldDict.Set("DA", new PdfString(Encoding.Latin1.GetBytes($"/Helv {F(fontSize)} Tf 0 g")));
+        fieldDict.Set("DA", new PdfString(Compat.Latin1.GetBytes($"/Helv {F(fontSize)} Tf 0 g")));
 
         if (defaultValue is not null)
         {
-            fieldDict.Set("V", new PdfString(Encoding.Latin1.GetBytes(defaultValue)));
-            fieldDict.Set("DV", new PdfString(Encoding.Latin1.GetBytes(defaultValue)));
+            fieldDict.Set("V", new PdfString(Compat.Latin1.GetBytes(defaultValue)));
+            fieldDict.Set("DV", new PdfString(Compat.Latin1.GetBytes(defaultValue)));
         }
 
         // Generate a simple appearance stream
@@ -64,7 +64,7 @@ public sealed class FormFieldBuilder
         fieldDict.Set("Type", new PdfName("Annot"));
         fieldDict.Set("Subtype", new PdfName("Widget"));
         fieldDict.Set("FT", new PdfName("Btn"));
-        fieldDict.Set("T", new PdfString(Encoding.Latin1.GetBytes(name)));
+        fieldDict.Set("T", new PdfString(Compat.Latin1.GetBytes(name)));
         fieldDict.Set("Rect", MakeRectArray(rect));
 
         var value = isChecked ? "Yes" : "Off";
@@ -98,18 +98,18 @@ public sealed class FormFieldBuilder
         fieldDict.Set("Subtype", new PdfName("Widget"));
         fieldDict.Set("FT", new PdfName("Ch"));
         fieldDict.Set("Ff", new PdfInteger(1 << 17)); // Combo flag
-        fieldDict.Set("T", new PdfString(Encoding.Latin1.GetBytes(name)));
+        fieldDict.Set("T", new PdfString(Compat.Latin1.GetBytes(name)));
         fieldDict.Set("Rect", MakeRectArray(rect));
-        fieldDict.Set("DA", new PdfString(Encoding.Latin1.GetBytes($"/Helv {F(fontSize)} Tf 0 g")));
+        fieldDict.Set("DA", new PdfString(Compat.Latin1.GetBytes($"/Helv {F(fontSize)} Tf 0 g")));
 
         // Options array
         var optArr = new PdfArray();
         foreach (var opt in options)
-            optArr.Add(new PdfString(Encoding.Latin1.GetBytes(opt)));
+            optArr.Add(new PdfString(Compat.Latin1.GetBytes(opt)));
         fieldDict.Set("Opt", optArr);
 
         if (selectedValue is not null)
-            fieldDict.Set("V", new PdfString(Encoding.Latin1.GetBytes(selectedValue)));
+            fieldDict.Set("V", new PdfString(Compat.Latin1.GetBytes(selectedValue)));
 
         var apStream = BuildTextAppearance(rect, selectedValue ?? "", fontSize);
         SetAppearance(fieldDict, apStream, rect);
@@ -138,7 +138,7 @@ public sealed class FormFieldBuilder
         var parentDict = new PdfDictionary();
         parentDict.Set("FT", new PdfName("Btn"));
         parentDict.Set("Ff", new PdfInteger(1 << 15)); // Bit 16: Radio flag (PDF spec Table 226)
-        parentDict.Set("T", new PdfString(Encoding.Latin1.GetBytes(name)));
+        parentDict.Set("T", new PdfString(Compat.Latin1.GetBytes(name)));
 
         var selectedValue = (selectedIndex >= 0 && selectedIndex < optionValues.Length)
             ? optionValues[selectedIndex]
@@ -192,18 +192,18 @@ public sealed class FormFieldBuilder
         fieldDict.Set("Subtype", new PdfName("Widget"));
         fieldDict.Set("FT", new PdfName("Ch"));
         // No Combo flag — Ff = 0 means list box
-        fieldDict.Set("T", new PdfString(Encoding.Latin1.GetBytes(name)));
+        fieldDict.Set("T", new PdfString(Compat.Latin1.GetBytes(name)));
         fieldDict.Set("Rect", MakeRectArray(rect));
-        fieldDict.Set("DA", new PdfString(Encoding.Latin1.GetBytes($"/Helv {F(fontSize)} Tf 0 g")));
+        fieldDict.Set("DA", new PdfString(Compat.Latin1.GetBytes($"/Helv {F(fontSize)} Tf 0 g")));
 
         // Options array
         var optArr = new PdfArray();
         foreach (var opt in options)
-            optArr.Add(new PdfString(Encoding.Latin1.GetBytes(opt)));
+            optArr.Add(new PdfString(Compat.Latin1.GetBytes(opt)));
         fieldDict.Set("Opt", optArr);
 
         if (selectedValue is not null)
-            fieldDict.Set("V", new PdfString(Encoding.Latin1.GetBytes(selectedValue)));
+            fieldDict.Set("V", new PdfString(Compat.Latin1.GetBytes(selectedValue)));
 
         var apStream = BuildListBoxAppearance(rect, options, selectedValue, fontSize);
         SetAppearance(fieldDict, apStream, rect);
@@ -224,7 +224,7 @@ public sealed class FormFieldBuilder
         fieldDict.Set("Type", new PdfName("Annot"));
         fieldDict.Set("Subtype", new PdfName("Widget"));
         fieldDict.Set("FT", new PdfName("Sig"));
-        fieldDict.Set("T", new PdfString(Encoding.Latin1.GetBytes(name)));
+        fieldDict.Set("T", new PdfString(Compat.Latin1.GetBytes(name)));
         fieldDict.Set("Rect", MakeRectArray(rect));
 
         var apStream = BuildSignatureAppearance(rect);

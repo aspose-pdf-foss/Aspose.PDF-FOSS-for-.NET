@@ -8,7 +8,9 @@ public sealed class Color
 {
     /// <summary>RGB components in 0–255 range.</summary>
     public byte R { get; }
+    /// <summary>Gets the green component (0-255).</summary>
     public byte G { get; }
+    /// <summary>Gets the blue component (0-255).</summary>
     public byte B { get; }
 
     /// <summary>Byte-typed alpha (0–255). FOSS-internal companion to <see cref="A"/>.</summary>
@@ -109,7 +111,9 @@ public sealed class Color
 
     // ── Factory methods ────────────────────────────────────────────
 
+    /// <summary>Creates an opaque colour from red, green and blue components in the range 0-255.</summary>
     public static Color FromArgb(int r, int g, int b) => new(255, (byte)r, (byte)g, (byte)b);
+    /// <summary>Creates a colour from alpha, red, green and blue components in the range 0-255 (alpha 0 is fully transparent).</summary>
     public static Color FromArgb(int a, int r, int g, int b) => new((byte)a, (byte)r, (byte)g, (byte)b);
     /// <summary>Byte-component constructor for internal callers. NOT part of the
     /// public surface: the public API offers FromRgb only with 0..1 doubles (and a
@@ -117,20 +121,21 @@ public sealed class Color
     /// a public int overload would silently turn it into near-black.</summary>
     internal static Color FromRgbBytes(int r, int g, int b) => new(255, (byte)r, (byte)g, (byte)b);
 
+    /// <summary>Creates an opaque colour from red, green and blue components in the range 0.0-1.0; each is rounded to an 8-bit channel.</summary>
     public static Color FromRgb(double r, double g, double b) =>
         new(255, ToByte(r), ToByte(g), ToByte(b));
 
+    /// <summary>Creates a colour from a <c>System.Drawing.Color</c>, keeping its alpha, red, green and blue values.</summary>
     public static Color FromRgb(System.Drawing.Color color) =>
         new(color.A, color.R, color.G, color.B);
 
     public static Color FromCmyk(double c, double m, double y, double k)
     {
-        // Convert through the same SWOP-style CMYK→sRGB profile LUT the content
-        // operators (SetCMYKColor) and the renderer use, so a CMYK colour resolves
-        // to the same RGB regardless of which API produced it. A
-        // naive (1-c)(1-k) cutoff diverges from the colour-managed operator path.
-        var (r, g, b) = Aspose.Pdf.Devices.CmykToRgbLut.Convert(c, m, y, k);
-        return new Color(255, r, g, b) { ColorType = ColorType.Cmyk };
+        // The same answer the colour operators (SetCMYKColor.getColor) give - the
+        // reference's own profile transform, sampled - so a CMYK colour resolves to one
+        // RGB whichever API produced it (FromCmyk(...).ToRgb() equals the operator's).
+        var (r, g, b) = Operators.CmykOperatorColors.Convert(c, m, y, k);
+        return new Color(255, (byte)r, (byte)g, (byte)b) { ColorType = ColorType.Cmyk };
     }
 
     public static Color FromGray(double g) =>
@@ -145,6 +150,7 @@ public sealed class Color
         return (byte)v;
     }
 
+    /// <summary>Parses a hex colour string: <c>RRGGBB</c> (opaque) or <c>AARRGGBB</c>, with or without a leading <c>#</c>. Any other length returns black.</summary>
     public static Color Parse(string value)
     {
         var hex = value.TrimStart('#');
@@ -170,17 +176,25 @@ public sealed class Color
     // ── Named colors ──
 
     public static readonly Color Empty = new(0, 0, 0, 0);
+    /// <summary>Gets a fully transparent colour (alpha 0, RGB 255, 255, 255).</summary>
     public static Color Transparent { get; } = new(0, 255, 255, 255);
     public static Color AliceBlue { get; } = new(255, 240, 248, 255);
+    /// <summary>Gets the opaque AntiqueWhite colour (RGB 250, 235, 215).</summary>
     public static Color AntiqueWhite { get; } = new(255, 250, 235, 215);
+    /// <summary>Gets the opaque Aqua colour (RGB 0, 255, 255).</summary>
     public static Color Aqua { get; } = new(255, 0, 255, 255);
     public static Color Aquamarine { get; } = new(255, 127, 255, 212);
+    /// <summary>Gets the opaque Azure colour (RGB 240, 255, 255).</summary>
     public static Color Azure { get; } = new(255, 240, 255, 255);
+    /// <summary>Gets the opaque Beige colour (RGB 245, 245, 220).</summary>
     public static Color Beige { get; } = new(255, 245, 245, 220);
     public static Color Bisque { get; } = new(255, 255, 228, 196);
+    /// <summary>Gets the opaque Black colour (RGB 0, 0, 0).</summary>
     public static Color Black { get; } = new(255, 0, 0, 0);
     public static Color BlanchedAlmond { get; } = new(255, 255, 235, 205);
+    /// <summary>Gets the opaque Blue colour (RGB 0, 0, 255).</summary>
     public static Color Blue { get; } = new(255, 0, 0, 255);
+    /// <summary>Gets the opaque BlueViolet colour (RGB 138, 43, 226).</summary>
     public static Color BlueViolet { get; } = new(255, 138, 43, 226);
     public static Color Brown { get; } = new(255, 165, 42, 42);
     public static Color BurlyWood { get; } = new(255, 222, 184, 135);
@@ -191,21 +205,30 @@ public sealed class Color
     public static Color CornflowerBlue { get; } = new(255, 100, 149, 237);
     public static Color Cornsilk { get; } = new(255, 255, 248, 220);
     public static Color Crimson { get; } = new(255, 220, 20, 60);
+    /// <summary>Gets the opaque Cyan colour (RGB 0, 255, 255).</summary>
     public static Color Cyan { get; } = new(255, 0, 255, 255);
+    /// <summary>Gets the opaque DarkBlue colour (RGB 0, 0, 139).</summary>
     public static Color DarkBlue { get; } = new(255, 0, 0, 139);
+    /// <summary>Gets the opaque DarkCyan colour (RGB 0, 139, 139).</summary>
     public static Color DarkCyan { get; } = new(255, 0, 139, 139);
     public static Color DarkGoldenrod { get; } = new(255, 184, 134, 11);
+    /// <summary>Gets the opaque DarkGray colour (RGB 169, 169, 169).</summary>
     public static Color DarkGray { get; } = new(255, 169, 169, 169);
+    /// <summary>Gets the opaque DarkGreen colour (RGB 0, 100, 0).</summary>
     public static Color DarkGreen { get; } = new(255, 0, 100, 0);
+    /// <summary>Gets the opaque DarkKhaki colour (RGB 189, 183, 107).</summary>
     public static Color DarkKhaki { get; } = new(255, 189, 183, 107);
+    /// <summary>Gets the opaque DarkMagenta colour (RGB 139, 0, 139).</summary>
     public static Color DarkMagenta { get; } = new(255, 139, 0, 139);
     public static Color DarkOliveGreen { get; } = new(255, 85, 107, 47);
     public static Color DarkOrange { get; } = new(255, 255, 140, 0);
     public static Color DarkOrchid { get; } = new(255, 153, 50, 204);
+    /// <summary>Gets the opaque DarkRed colour (RGB 139, 0, 0).</summary>
     public static Color DarkRed { get; } = new(255, 139, 0, 0);
     public static Color DarkSalmon { get; } = new(255, 233, 150, 122);
     public static Color DarkSeaGreen { get; } = new(255, 143, 188, 143);
     public static Color DarkSlateBlue { get; } = new(255, 72, 61, 139);
+    /// <summary>Gets the opaque DarkSlateGray colour (RGB 47, 79, 79).</summary>
     public static Color DarkSlateGray { get; } = new(255, 47, 79, 79);
     public static Color DarkTurquoise { get; } = new(255, 0, 206, 209);
     public static Color DarkViolet { get; } = new(255, 148, 0, 211);
@@ -221,8 +244,11 @@ public sealed class Color
     public static Color GhostWhite { get; } = new(255, 248, 248, 255);
     public static Color Gold { get; } = new(255, 255, 215, 0);
     public static Color Goldenrod { get; } = new(255, 218, 165, 32);
+    /// <summary>Gets the opaque Gray colour (RGB 128, 128, 128).</summary>
     public static Color Gray { get; } = new(255, 128, 128, 128);
+    /// <summary>Gets the opaque Green colour (RGB 0, 128, 0).</summary>
     public static Color Green { get; } = new(255, 0, 128, 0);
+    /// <summary>Gets the opaque GreenYellow colour (RGB 173, 255, 47).</summary>
     public static Color GreenYellow { get; } = new(255, 173, 255, 47);
     public static Color Honeydew { get; } = new(255, 240, 255, 240);
     public static Color HotPink { get; } = new(255, 255, 105, 180);
@@ -234,23 +260,32 @@ public sealed class Color
     public static Color LavenderBlush { get; } = new(255, 255, 240, 245);
     public static Color LawnGreen { get; } = new(255, 124, 252, 0);
     public static Color LemonChiffon { get; } = new(255, 255, 250, 205);
+    /// <summary>Gets the opaque LightBlue colour (RGB 173, 216, 230).</summary>
     public static Color LightBlue { get; } = new(255, 173, 216, 230);
+    /// <summary>Gets the opaque LightCoral colour (RGB 240, 128, 128).</summary>
     public static Color LightCoral { get; } = new(255, 240, 128, 128);
     public static Color LightCyan { get; } = new(255, 224, 255, 255);
+    /// <summary>Gets the opaque LightGoldenrodYellow colour (RGB 250, 250, 210).</summary>
     public static Color LightGoldenrodYellow { get; } = new(255, 250, 250, 210);
+    /// <summary>Gets the opaque LightGray colour (RGB 211, 211, 211).</summary>
     public static Color LightGray { get; } = new(255, 211, 211, 211);
+    /// <summary>Gets the opaque LightGreen colour (RGB 144, 238, 144).</summary>
     public static Color LightGreen { get; } = new(255, 144, 238, 144);
     public static Color LightPink { get; } = new(255, 255, 182, 193);
     public static Color LightSalmon { get; } = new(255, 255, 160, 122);
+    /// <summary>Gets the opaque LightSeaGreen colour (RGB 32, 178, 170).</summary>
     public static Color LightSeaGreen { get; } = new(255, 32, 178, 170);
     public static Color LightSkyBlue { get; } = new(255, 135, 206, 250);
     public static Color LightSlateGray { get; } = new(255, 119, 136, 153);
     public static Color LightSteelBlue { get; } = new(255, 176, 196, 222);
+    /// <summary>Gets the opaque LightYellow colour (RGB 255, 255, 224).</summary>
     public static Color LightYellow { get; } = new(255, 255, 255, 224);
     public static Color Lime { get; } = new(255, 0, 255, 0);
     public static Color LimeGreen { get; } = new(255, 50, 205, 50);
     public static Color Linen { get; } = new(255, 250, 240, 230);
+    /// <summary>Gets the opaque Magenta colour (RGB 255, 0, 255).</summary>
     public static Color Magenta { get; } = new(255, 255, 0, 255);
+    /// <summary>Gets the opaque Maroon colour (RGB 128, 0, 0).</summary>
     public static Color Maroon { get; } = new(255, 128, 0, 0);
     public static Color MediumAquamarine { get; } = new(255, 102, 205, 170);
     public static Color MediumBlue { get; } = new(255, 0, 0, 205);
@@ -263,9 +298,11 @@ public sealed class Color
     public static Color MediumVioletRed { get; } = new(255, 199, 21, 133);
     public static Color MidnightBlue { get; } = new(255, 25, 25, 112);
     public static Color MintCream { get; } = new(255, 245, 255, 250);
+    /// <summary>Gets the opaque MistyRose colour (RGB 255, 228, 225).</summary>
     public static Color MistyRose { get; } = new(255, 255, 228, 225);
     public static Color Moccasin { get; } = new(255, 255, 228, 181);
     public static Color NavajoWhite { get; } = new(255, 255, 222, 173);
+    /// <summary>Gets the opaque Navy colour (RGB 0, 0, 128).</summary>
     public static Color Navy { get; } = new(255, 0, 0, 128);
     public static Color OldLace { get; } = new(255, 253, 245, 230);
     public static Color Olive { get; } = new(255, 128, 128, 0);
@@ -284,6 +321,7 @@ public sealed class Color
     public static Color Plum { get; } = new(255, 221, 160, 221);
     public static Color PowderBlue { get; } = new(255, 176, 224, 230);
     public static Color Purple { get; } = new(255, 128, 0, 128);
+    /// <summary>Gets the opaque Red colour (RGB 255, 0, 0).</summary>
     public static Color Red { get; } = new(255, 255, 0, 0);
     public static Color RosyBrown { get; } = new(255, 188, 143, 143);
     public static Color RoyalBlue { get; } = new(255, 65, 105, 225);
@@ -303,12 +341,17 @@ public sealed class Color
     public static Color Tan { get; } = new(255, 210, 180, 140);
     public static Color Teal { get; } = new(255, 0, 128, 128);
     public static Color Thistle { get; } = new(255, 216, 191, 216);
+    /// <summary>Gets the opaque Tomato colour (RGB 255, 99, 71).</summary>
     public static Color Tomato { get; } = new(255, 255, 99, 71);
     public static Color Turquoise { get; } = new(255, 64, 224, 208);
+    /// <summary>Gets the opaque Violet colour (RGB 238, 130, 238).</summary>
     public static Color Violet { get; } = new(255, 238, 130, 238);
     public static Color Wheat { get; } = new(255, 245, 222, 179);
+    /// <summary>Gets the opaque White colour (RGB 255, 255, 255).</summary>
     public static Color White { get; } = new(255, 255, 255, 255);
+    /// <summary>Gets the opaque WhiteSmoke colour (RGB 245, 245, 245).</summary>
     public static Color WhiteSmoke { get; } = new(255, 245, 245, 245);
+    /// <summary>Gets the opaque Yellow colour (RGB 255, 255, 0).</summary>
     public static Color Yellow { get; } = new(255, 255, 255, 0);
     public static Color YellowGreen { get; } = new(255, 154, 205, 50);
 

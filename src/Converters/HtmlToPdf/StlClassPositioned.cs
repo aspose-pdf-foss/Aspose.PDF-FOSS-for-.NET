@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -39,183 +39,53 @@ internal static partial class HtmlToPdfConverter
     /// is not it (needs the resolvable stylesheet — its geometry lives there).</summary>
     private static Document? TryRenderStlClassPositioned(string html, HtmlLoadOptions? options)
     {
-        // The geometry is ENTIRELY in the stylesheet; an auto-derived base path
-        // does not resolve it (mirrors the page_N stl_ dialect's rule).
-        var css = GatherStlCss(html, options?.BasePathAutoDerived == true ? null : options);
-        if (string.IsNullOrWhiteSpace(css)) return null;
+        var sp = new StlClassPositionedState();
+        sp.html = html;
+        sp.options = options;
+        sp.css = GatherStlCss(sp.html, sp.options?.BasePathAutoDerived == true ? null : sp.options);
+        if (string.IsNullOrWhiteSpace(sp.css)) return null;
 
-        // .name { left: Xpt; top: Ypt; position: absolute }  — pt units only (the
-        // page_N flavour positions in em via inline styles and never matches here).
-        var pos = new Dictionary<string, (double Left, double Top)>(StringComparer.Ordinal);
-        var styles = new Dictionary<string, StlClsStyle>(StringComparer.Ordinal);
-        foreach (Match rm in Regex.Matches(css, @"\.(?<name>[\w-]+)\s*\{(?<body>[^}]*)\}",
-            RegexOptions.Singleline))
-        {
-            var body = rm.Groups["body"].Value;
-            var name = rm.Groups["name"].Value;
-            if (Regex.IsMatch(body, @"position\s*:\s*absolute", RegexOptions.IgnoreCase))
-            {
-                var lm = Regex.Match(body, @"left\s*:\s*(-?[\d.]+)pt", RegexOptions.IgnoreCase);
-                var tm = Regex.Match(body, @"top\s*:\s*(-?[\d.]+)pt", RegexOptions.IgnoreCase);
-                if (lm.Success && tm.Success)
-                    pos[name] = (
-                        double.Parse(lm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture),
-                        double.Parse(tm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
-                continue;
-            }
-            if (!Regex.IsMatch(body, @"display\s*:\s*inline", RegexOptions.IgnoreCase)
-                && !Regex.IsMatch(body, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase))
-                continue;
-            var st = new StlClsStyle();
-            var fs = Regex.Match(body, @"font-size\s*:\s*([\d.]+)pt", RegexOptions.IgnoreCase);
-            if (fs.Success)
-                st.FontSize = double.Parse(fs.Groups[1].Value,
-                    System.Globalization.CultureInfo.InvariantCulture);
-            var ff = Regex.Match(body, @"font-family\s*:\s*(?<v>[^;}]+)", RegexOptions.IgnoreCase);
-            if (ff.Success)
-                st.Family = ff.Groups["v"].Value.Split(',')[0].Trim().Trim('\'', '"');
-            st.Bold = Regex.IsMatch(body, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase);
-            var col = Regex.Match(body, @"color\s*:\s*#(?<h>[0-9a-fA-F]{6})");
-            if (col.Success)
-            {
-                var h = col.Groups["h"].Value;
-                st.R = System.Convert.ToInt32(h[..2], 16) / 255.0;
-                st.G = System.Convert.ToInt32(h[2..4], 16) / 255.0;
-                st.B = System.Convert.ToInt32(h[4..], 16) / 255.0;
-            }
-            styles[name] = st;
-        }
-        if (pos.Count < 3 || styles.Count == 0) return null;
+        sp.pos = new Dictionary<string, (double Left, double Top)>(StringComparer.Ordinal);
+        sp.styles = new Dictionary<string, StlClsStyle>(StringComparer.Ordinal);
+        ParseStlClassStyles(sp);
+        if (sp.pos.Count < 3 || sp.styles.Count == 0) return null;
 
-        // The markup: class-only divs whose classes the stylesheet positions, with
-        // pure inline content (spans / text / the svg object). Any inline style=
-        // positioning or table structure means a different dialect.
-        var divs = new List<(double Left, double Top, string Inner)>();
-        var divMatches = Regex.Matches(html,
+        sp.divs = new List<(double Left, double Top, string Inner)>();
+        sp.divMatches = Regex.Matches(sp.html,
             @"<div\s+class=""(?<cls>[\w-]+)""\s*>(?<inner>(?:(?!</?div\b).)*?)</div>",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
-        foreach (Match dm in divMatches)
+        foreach (Match dm in sp.divMatches)
         {
-            if (!pos.TryGetValue(dm.Groups["cls"].Value, out var p)) continue;
-            divs.Add((p.Left, p.Top, dm.Groups["inner"].Value));
+            if (!sp.pos.TryGetValue(dm.Groups["cls"].Value, out var p)) continue;
+            sp.divs.Add((p.Left, p.Top, dm.Groups["inner"].Value));
         }
-        if (divs.Count < 3) return null;
-        // Positioned text divs must dominate the body — a page merely CONTAINING
-        // a few absolute classes keeps its own flow.
-        var totalDivs = Regex.Matches(html, @"<div\b", RegexOptions.IgnoreCase).Count;
-        if (divs.Count * 2 < totalDivs) return null;
-        if (Regex.IsMatch(html, @"<(table|p|h[1-6]|ul|ol|input|form)\b", RegexOptions.IgnoreCase))
+        if (sp.divs.Count < 3) return null;
+        sp.totalDivs = Regex.Matches(sp.html, @"<div\b", RegexOptions.IgnoreCase).Count;
+        if (sp.divs.Count * 2 < sp.totalDivs) return null;
+        if (Regex.IsMatch(sp.html, @"<(table|p|h[1-6]|ul|ol|input|form)\b", RegexOptions.IgnoreCase))
             return null;
 
-        var pageW = options?.PageInfo?.Width > 0 ? options.PageInfo.Width : 595.0;
-        var pageH = options?.PageInfo?.Height > 0 ? options.PageInfo.Height : 842.0;
+        sp.pageW = sp.options?.PageInfo?.Width > 0 ? sp.options.PageInfo.Width : 595.0;
+        sp.pageH = sp.options?.PageInfo?.Height > 0 ? sp.options.PageInfo.Height : 842.0;
 
-        var doc = new Document();
-        var page = doc.Pages.Add(pageW, pageH);
-        EnsureFonts(page);
+        sp.doc = new Document();
+        sp.page = sp.doc.Pages.Add(sp.pageW, sp.pageH);
+        EnsureFonts(sp.page);
 
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        string N(double v) => v.ToString("0.###", inv);
+        sp.inv = System.Globalization.CultureInfo.InvariantCulture;
 
-        // A face draws through Standard-14 where one matches (serif output that
-        // embeds nothing — the UA flow's rule); any other resolvable installed
-        // face rides a named Type1 dict the rasterizer resolves. An unresolvable
-        // family substitutes the UA serif (probed: Modern No. 20 → Times).
-        var extraFaces = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        (string Res, string Measure) FaceFor(string family, bool bold)
-        {
-            if (WinMetricsFor(family) is null) family = StlClsBodyFace;
-            if (family.Equals("Times New Roman", StringComparison.OrdinalIgnoreCase)
-                || family.Equals("Times", StringComparison.OrdinalIgnoreCase))
-                return (bold ? "F6" : "F5", "Times New Roman");
-            if (family.Equals("Arial", StringComparison.OrdinalIgnoreCase)
-                || family.Equals("Helvetica", StringComparison.OrdinalIgnoreCase))
-                return (bold ? "F2" : "F1", "Arial");
-            if (family.Equals("Courier New", StringComparison.OrdinalIgnoreCase)
-                || family.Equals("Courier", StringComparison.OrdinalIgnoreCase))
-                return ("F4", "Courier New");
-            var key = family + (bold ? "|b" : "");
-            if (!extraFaces.TryGetValue(key, out var res))
-            {
-                res = "FS" + (extraFaces.Count + 1).ToString(inv);
-                extraFaces[key] = res;
-                EnsureFont(page, family.Replace(' ', '-') + (bold ? "-Bold" : ""), res);
-            }
-            return (res, family);
-        }
+        sp.extraFaces = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        sp.strutDrop = StlDropOf(StlClsBodyFace, StlClsBodyFsPt);
 
-        // Baseline drop of one line box under the CSS win-metric model (the
-        // MetricLineHeight/MetricBaselineDrop pair, probed exact on the ladder).
-        double DropOf(string family, double fs)
-        {
-            var m = WinMetricsFor(family) ?? WinMetricsFor(StlClsBodyFace);
-            if (m is null) return 0.9 * fs;
-            var sum = HheaLineSumFor(family) ?? m.Value.sum;
-            var lh = MetricLineHeight(fs, sum);
-            return MetricBaselineDrop(fs, lh, m.Value);
-        }
-        var strutDrop = DropOf(StlClsBodyFace, StlClsBodyFsPt);
+        sp.runs = new StringBuilder();
+        sp.svgPaths = new StringBuilder();
+        RenderStlPositionedDivs(sp);
 
-        var runs = new StringBuilder();
-        var svgPaths = new StringBuilder();
-        foreach (var (left, top, inner) in divs)
-        {
-            // the svg background object: its stroked paths are the page's rules
-            var objM = Regex.Match(inner,
-                @"<(object|embed)\b[^>]*(?:data|src)\s*=\s*""(?<h>[^""]+\.svg)""",
-                RegexOptions.IgnoreCase);
-            if (objM.Success)
-            {
-                AppendStlSvgStrokes(svgPaths, objM.Groups["h"].Value, options,
-                    left + StlClsOriginXPt, top + StlClsOriginYPt, pageH);
-                continue;
-            }
-
-            // split the inline content into styled runs
-            var lineRuns = new List<(StlClsStyle St, string Text)>();
-            var idx = 0;
-            foreach (Match sm in Regex.Matches(inner,
-                @"<span\s+class=""(?<cls>[\w-]+)""\s*>(?<t>.*?)</span>",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline))
-            {
-                var before = inner[idx..sm.Index];
-                if (Regex.Replace(before, "<[^>]+>", "").Trim().Length > 0)
-                    lineRuns.Add((new StlClsStyle(),
-                        DecodeEntities(Regex.Replace(before, "<[^>]+>", ""))));
-                var st = styles.TryGetValue(sm.Groups["cls"].Value, out var s0) ? s0 : new StlClsStyle();
-                lineRuns.Add((st, DecodeEntities(
-                    Regex.Replace(sm.Groups["t"].Value, "<[^>]+>", ""))));
-                idx = sm.Index + sm.Length;
-            }
-            var tail = inner[idx..];
-            if (Regex.Replace(tail, "<[^>]+>", "").Trim().Length > 0)
-                lineRuns.Add((new StlClsStyle(),
-                    DecodeEntities(Regex.Replace(tail, "<[^>]+>", ""))));
-            if (lineRuns.Count == 0) continue;
-
-            var drop = strutDrop;
-            foreach (var (st, _) in lineRuns)
-                drop = Math.Max(drop, DropOf(st.Family, st.FontSize));
-
-            var x = left + StlClsOriginXPt;
-            var yPdf = pageH - (top + StlClsOriginYPt + drop);
-            foreach (var (st, text) in lineRuns)
-            {
-                if (text.Length == 0) continue;
-                var (res, measure) = FaceFor(st.Family, st.Bold);
-                runs.AppendLine($"BT {N(st.R)} {N(st.G)} {N(st.B)} rg");
-                runs.Append($"/{res} {st.FontSize.ToString("F2", inv)} Tf ");
-                runs.Append($"1 0 0 1 {N(x)} {N(yPdf)} Tm ");
-                runs.AppendLine($"({EscapePdfString(text)}) Tj ET");
-                x += MeasureFaceText(measure, text, st.FontSize);
-            }
-        }
-
-        if (runs.Length == 0) return null;
-        if (svgPaths.Length > 0)
-            page.AddContentStream(Encoding.ASCII.GetBytes(svgPaths.ToString()));
-        page.AddContentStream(Encoding.ASCII.GetBytes(runs.ToString()));
-        return doc;
+        if (sp.runs.Length == 0) return null;
+        if (sp.svgPaths.Length > 0)
+            sp.page.AddContentStream(Encoding.ASCII.GetBytes(sp.svgPaths.ToString()));
+        sp.page.AddContentStream(Encoding.ASCII.GetBytes(sp.runs.ToString()));
+        return sp.doc;
     }
 
     /// <summary>Stroke the svg background's line paths onto the sheet. The export's
